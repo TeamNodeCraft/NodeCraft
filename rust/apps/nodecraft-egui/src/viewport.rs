@@ -96,6 +96,14 @@ impl Viewport {
         }
     }
 
+    pub fn set_theme(&mut self, theme: &crate::theme::Theme) {
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_background(theme.window);
+        }
+        self.dirty = true;
+    }
+
     pub fn set_chrome_visible(&mut self, visible: bool) {
         self.chrome_visible = visible;
         #[cfg(feature = "gpu-viewport")]
@@ -341,9 +349,12 @@ impl Viewport {
             ),
             egui::Vec2::splat(SIZE),
         );
-        // The compass is click-only. Dragging on it must not orbit the camera;
-        // orbit is handled by the viewport drag gesture instead.
-        let response = ui.interact(rect, egui::Id::new("viewport-axis-gizmo"), egui::Sense::click());
+        // Click a tip to choose a standard view, or drag the compass to orbit.
+        let response = ui.interact(
+            rect,
+            egui::Id::new("viewport-axis-gizmo"),
+            egui::Sense::click_and_drag(),
+        );
         let center = rect.center();
         let (right, up, back) = self.camera.basis();
         let axes = [
@@ -371,8 +382,20 @@ impl Viewport {
         let hovered = hover.and_then(|pointer| {
             tips.iter().enumerate().rev().find(|(_, (_, tip, _))| tip.distance(pointer) <= 10.0).map(|(index, _)| index)
         });
+        if response.dragged_by(egui::PointerButton::Primary) {
+            let delta = response.drag_delta();
+            if delta != egui::Vec2::ZERO {
+                self.camera.orbit(f64::from(delta.x), f64::from(delta.y));
+                self.dirty = true;
+                ui.ctx().request_repaint();
+            }
+        }
         if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            ui.ctx().set_cursor_icon(if response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::PointingHand
+            });
         }
         if response.clicked() {
             if let Some(pointer) = response.interact_pointer_pos() {
@@ -676,7 +699,9 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
     scene.radius = display.radius;
     // Match the sharp GPU viewport background and mesh colours so the blurred
     // backdrop is the same content, only defocused.
-    scene.background = Some((Rgb(28, 28, 30), Rgb(28, 28, 30)));
+    let theme = crate::theme::get();
+    let background = Rgb(theme.window[0], theme.window[1], theme.window[2]);
+    scene.background = Some((background, background));
     let ortho_fade = if camera.fov > 0.0 {
         1.0
     } else {

@@ -5,11 +5,11 @@
 //! Application Support directory. Colours are RGBA byte arrays.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Theme {
     pub window: [u8; 4],
     pub panel: [u8; 4],
@@ -24,7 +24,18 @@ pub struct Theme {
     pub port_input: [u8; 4],
     pub card: [u8; 4],
     pub card_border: [u8; 4],
-    pub wire: [u8; 4],
+    #[serde(alias = "wire")]
+    pub cable: [u8; 4],
+    #[serde(
+        default = "default_cable_outline",
+        alias = "cable_outline_opacity",
+        deserialize_with = "deserialize_cable_outline"
+    )]
+    pub cable_outline: [u8; 4],
+    #[serde(default = "default_cable_width")]
+    pub cable_width: f32,
+    #[serde(default = "default_cable_outline_width")]
+    pub cable_outline_width: f32,
     pub panel_glass: [u8; 4],
     pub minimap_bg: [u8; 4],
     pub minimap_border: [u8; 4],
@@ -41,10 +52,104 @@ fn default_port_input() -> [u8; 4] {
     [255, 159, 10, 255]
 }
 
+fn default_cable_outline() -> [u8; 4] {
+    [0, 0, 0, 191]
+}
+
+fn default_cable_width() -> f32 {
+    5.0
+}
+
+fn default_cable_outline_width() -> f32 {
+    2.0
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CableOutlineValue {
+    Rgba([u8; 4]),
+    Opacity(f32),
+}
+
+fn deserialize_cable_outline<'de, D>(deserializer: D) -> Result<[u8; 4], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = CableOutlineValue::deserialize(deserializer)?;
+    Ok(match value {
+        CableOutlineValue::Rgba(rgba) => rgba,
+        CableOutlineValue::Opacity(opacity) => [
+            0,
+            0,
+            0,
+            (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
+        ],
+    })
+}
+
+pub const DEFAULT_THEME_NAME: &str = "NodeCraft Dark";
+pub const LIGHT_THEME_NAME: &str = "NodeCraft Light";
+pub const CUSTOM_THEME_NAME: &str = "NodeCraft Dark (custom)";
+pub const LIGHT_CUSTOM_THEME_NAME: &str = "NodeCraft Light (custom)";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThemePreset {
+    pub name: String,
+    /// `"default"` for the embedded palette, otherwise the theme file path.
+    pub id: String,
+    pub path: Option<PathBuf>,
+}
+
+fn default_preset() -> ThemePreset {
+    ThemePreset {
+        name: DEFAULT_THEME_NAME.to_owned(),
+        id: "default".to_owned(),
+        path: None,
+    }
+}
+
+fn light_preset() -> ThemePreset {
+    ThemePreset {
+        name: LIGHT_THEME_NAME.to_owned(),
+        id: "light".to_owned(),
+        path: None,
+    }
+}
+
+fn preset_from_path(path: PathBuf, name: Option<String>) -> ThemePreset {
+    let id = path.to_string_lossy().into_owned();
+    let name = name.unwrap_or_else(|| {
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("Custom Theme")
+            .replace(['-', '_'], " ")
+    });
+    ThemePreset { name, id, path: Some(path) }
+}
+
+#[derive(Clone, Debug)]
+struct ThemeState {
+    theme: Theme,
+    preset: ThemePreset,
+}
+
+impl Default for ThemeState {
+    fn default() -> Self {
+        Self { theme: Theme::default(), preset: default_preset() }
+    }
+}
+
 impl Default for Theme {
     fn default() -> Self {
         serde_json::from_str(include_str!("../assets/theme.json"))
             .expect("embedded theme.json must be valid")
+    }
+}
+
+impl Theme {
+    pub fn light() -> Self {
+        serde_json::from_str(include_str!("../assets/theme-light.json"))
+            .expect("embedded theme-light.json must be valid")
     }
 }
 
@@ -59,6 +164,47 @@ impl Theme {
 
     pub fn with_alpha(&self, rgba: [u8; 4], alpha: u8) -> egui::Color32 {
         egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], alpha)
+    }
+
+    /// Update one palette entry by its JSON key. Returns false for unknown keys.
+    pub fn set_color(&mut self, key: &str, value: [u8; 4]) -> bool {
+        match key {
+            "window" => self.window = value,
+            "panel" => self.panel = value,
+            "control" => self.control = value,
+            "border" => self.border = value,
+            "border_strong" => self.border_strong = value,
+            "text" => self.text = value,
+            "muted" => self.muted = value,
+            "accent" => self.accent = value,
+            "highlight" => self.highlight = value,
+            "port_input" => self.port_input = value,
+            "card" => self.card = value,
+            "card_border" => self.card_border = value,
+            "cable" => self.cable = value,
+            "cable_outline" => self.cable_outline = value,
+            "panel_glass" => self.panel_glass = value,
+            "minimap_bg" => self.minimap_bg = value,
+            "minimap_border" => self.minimap_border = value,
+            "minimap_node" => self.minimap_node = value,
+            "icon" => self.icon = value,
+            "icon_hover" => self.icon_hover = value,
+            "popup" => self.popup = value,
+            "axis_x" => self.axis_x = value,
+            "axis_y" => self.axis_y = value,
+            "axis_z" => self.axis_z = value,
+            _ => return false,
+        }
+        true
+    }
+
+    pub fn set_number(&mut self, key: &str, value: f32) -> bool {
+        match key {
+            "cable_width" => self.cable_width = value.clamp(1.0, 32.0),
+            "cable_outline_width" => self.cable_outline_width = value.clamp(0.0, 15.0),
+            _ => return false,
+        }
+        true
     }
 
     fn env_override_path() -> Option<PathBuf> {
@@ -84,23 +230,117 @@ impl Theme {
         Some(base.join("nodecraft").join("theme.json"))
     }
 
-    fn load() -> Self {
+    fn config_dir() -> Option<PathBuf> {
+        Self::system_theme_path()?.parent().map(PathBuf::from)
+    }
+
+    fn themes_dir() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("themes"))
+    }
+
+    fn legacy_custom_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("nodecraft-dark-user.json"))
+    }
+
+    fn light_custom_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("nodecraft-light-user.json"))
+    }
+
+    fn selection_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("theme-selection"))
+    }
+
+    fn write_theme(path: &std::path::Path, theme: &Theme) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let json = serde_json::to_string_pretty(theme).map_err(|error| error.to_string())?;
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, json).map_err(|error| error.to_string())?;
+        std::fs::rename(&temp, path).map_err(|error| {
+            let _ = std::fs::remove_file(&temp);
+            error.to_string()
+        })
+    }
+
+    fn read_selection() -> Option<String> {
+        Self::selection_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .map(|text| text.trim().to_owned())
+    }
+
+    fn write_selection(preset: &ThemePreset) {
+        if let Some(path) = Self::selection_path() {
+            let _ = std::fs::write(path, &preset.id);
+        }
+    }
+
+    fn load_state() -> ThemeState {
         // `cargo test` must not create or repair the developer's real profile.
         #[cfg(test)]
-        return Self::default();
+        return ThemeState::default();
         #[allow(unreachable_code)]
         if let Some(path) = Self::env_override_path() {
-            match Self::load_file(&path) {
-                Ok(Some(theme)) => return theme,
-                Ok(None) => eprintln!("theme: override does not exist: {}", path.display()),
-                Err(error) => eprintln!("theme: ignored invalid {}: {error}", path.display()),
+            return match Self::load_file(&path) {
+                Ok(Some(theme)) => ThemeState {
+                    preset: preset_from_path(path, None),
+                    theme,
+                },
+                Ok(None) => ThemeState::default(),
+                Err(error) => {
+                    eprintln!("theme: ignored invalid {}: {error}", path.display());
+                    ThemeState::default()
+                }
+            };
+        }
+
+        let selection = Self::read_selection();
+        if let Some(selected) = selection.as_deref() {
+            if selected == "light" {
+                return ThemeState {
+                    theme: Theme::light(),
+                    preset: light_preset(),
+                };
             }
-            return Self::default();
+            if selected != "default"
+                && let Some(path) = user_theme_files()
+                    .into_iter()
+                    .find(|preset| preset.id == selected)
+                    .and_then(|preset| preset.path)
+                && let Ok(Some(theme)) = Self::load_file(&path)
+            {
+                return ThemeState {
+                    preset: preset_from_path(path, None),
+                    theme,
+                };
+            }
+        } else if let Some(path) = Self::legacy_custom_path()
+            && path.is_file()
+            && let Ok(Some(theme)) = Self::load_file(&path)
+        {
+            return ThemeState {
+                preset: preset_from_path(path, Some(CUSTOM_THEME_NAME.to_owned())),
+                theme,
+            };
         }
-        if let Some(path) = Self::system_theme_path() {
-            return Self::load_or_initialize(&path);
+
+        // Migrate a legacy custom theme.json once.
+        if let Some(base_path) = Self::system_theme_path() {
+            let base = Self::load_or_initialize(&base_path);
+            if base != Theme::default()
+                && Self::legacy_custom_path().as_deref().is_none_or(|path| !path.is_file())
+            {
+                let preset = Self::legacy_custom_path()
+                    .map(|path| preset_from_path(path, Some(CUSTOM_THEME_NAME.to_owned())))
+                    .unwrap_or_else(default_preset);
+                if let Some(path) = &preset.path {
+                    let _ = Self::write_theme(path, &base);
+                }
+                Self::write_selection(&preset);
+                return ThemeState { theme: base, preset };
+            }
         }
-        Self::default()
+        ThemeState::default()
     }
 
     fn load_file(path: &std::path::Path) -> Result<Option<Self>, String> {
@@ -167,10 +407,243 @@ impl Theme {
     }
 }
 
-static THEME: OnceLock<Theme> = OnceLock::new();
+static THEME: OnceLock<RwLock<ThemeState>> = OnceLock::new();
 
-pub fn get() -> &'static Theme {
-    THEME.get_or_init(Theme::load)
+fn theme_cell() -> &'static RwLock<ThemeState> {
+    THEME.get_or_init(|| RwLock::new(Theme::load_state()))
+}
+
+/// Snapshot of the current runtime theme.
+///
+/// Themes are small and the UI is the only writer, so cloning the palette per
+/// frame is cheaper than threading a guard through every widget call.
+pub fn get() -> Theme {
+    theme_cell()
+        .read()
+        .map(|state| state.theme.clone())
+        .unwrap_or_else(|_| Theme::default())
+}
+
+/// Replace the runtime theme after a live edit.
+pub fn set(theme: Theme) {
+    let mut state = theme_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.theme = theme;
+}
+
+pub fn active_preset() -> ThemePreset {
+    theme_cell()
+        .read()
+        .map(|state| state.preset.clone())
+        .unwrap_or_else(|_| default_preset())
+}
+
+pub fn active_name() -> String {
+    active_preset().name
+}
+
+/// The baseline palette for the active built-in theme.
+pub fn active_defaults() -> Theme {
+    let preset = active_preset();
+    if preset.path.is_none() && preset.id == "light" {
+        Theme::light()
+    } else {
+        Theme::default()
+    }
+}
+
+/// Does the live palette differ from the active theme's embedded baseline?
+pub fn has_changes() -> bool {
+    get() != active_defaults()
+}
+
+pub fn custom_theme_exists() -> bool {
+    active_preset().path.is_some()
+}
+
+fn user_theme_files() -> Vec<ThemePreset> {
+    let mut themes = Vec::new();
+    if let Some(path) = Theme::legacy_custom_path()
+        && path.is_file()
+    {
+        themes.push(preset_from_path(path, Some(CUSTOM_THEME_NAME.to_owned())));
+    }
+    if let Some(path) = Theme::light_custom_path()
+        && path.is_file()
+    {
+        themes.push(preset_from_path(path, Some(LIGHT_CUSTOM_THEME_NAME.to_owned())));
+    }
+    if let Some(dir) = Theme::themes_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if themes.iter().any(|preset| preset.path.as_deref() == Some(&path)) {
+                continue;
+            }
+            themes.push(preset_from_path(path, None));
+        }
+    }
+    themes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    themes
+}
+
+pub fn available_themes() -> Vec<ThemePreset> {
+    let mut themes = vec![default_preset(), light_preset()];
+    themes.extend(user_theme_files());
+    let active = active_preset();
+    if !themes.iter().any(|preset| preset.id == active.id) {
+        themes.push(active);
+    }
+    themes
+}
+
+pub fn load_preset(preset: &ThemePreset) -> Result<Theme, String> {
+    let theme = match preset.path.as_deref() {
+        None => {
+            if preset.id == "light" {
+                Theme::light()
+            } else {
+                Theme::default()
+            }
+        }
+        Some(path) => Theme::load_file(path)?
+            .ok_or_else(|| format!("theme does not exist: {}", path.display()))?,
+    };
+    Theme::write_selection(preset);
+    let mut state = theme_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.theme = theme.clone();
+    state.preset = preset.clone();
+    Ok(theme)
+}
+
+/// Persist live edits to the active theme file, creating the legacy user theme
+/// when the embedded default is being edited.
+pub fn save(theme: &Theme) -> Result<(), String> {
+    let mut preset = active_preset();
+    let (path, custom_name) = match &preset.path {
+        Some(path) => (path.clone(), CUSTOM_THEME_NAME),
+        None if preset.id == "light" => (
+            Theme::light_custom_path()
+                .ok_or_else(|| "no user theme path available".to_owned())?,
+            LIGHT_CUSTOM_THEME_NAME,
+        ),
+        None => (
+            Theme::legacy_custom_path()
+                .ok_or_else(|| "no user theme path available".to_owned())?,
+            CUSTOM_THEME_NAME,
+        ),
+    };
+    Theme::write_theme(&path, theme)?;
+    if preset.path.is_none() {
+        preset = preset_from_path(path, Some(custom_name.to_owned()));
+    }
+    Theme::write_selection(&preset);
+    let mut state = theme_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.theme = theme.clone();
+    state.preset = preset;
+    Ok(())
+}
+
+/// Create a named user theme from the current live palette.
+pub fn create_theme(name: &str, theme: &Theme) -> Result<ThemePreset, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Theme name cannot be empty".to_owned());
+    }
+    let dir = Theme::themes_dir().ok_or_else(|| "no theme directory available".to_owned())?;
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let slug: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "theme" } else { slug };
+    let mut path = dir.join(format!("{slug}.json"));
+    let mut suffix = 2;
+    while path.exists() {
+        path = dir.join(format!("{slug}-{suffix}.json"));
+        suffix += 1;
+    }
+    Theme::write_theme(&path, theme)?;
+    let preset = preset_from_path(path, Some(name.to_owned()));
+    Theme::write_selection(&preset);
+    let mut state = theme_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.theme = theme.clone();
+    state.preset = preset.clone();
+    Ok(preset)
+}
+
+/// Rename a user theme file and update the active preset if it is selected.
+pub fn rename_theme(preset: &ThemePreset, name: &str) -> Result<ThemePreset, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Theme name cannot be empty".to_owned());
+    }
+    let Some(old_path) = &preset.path else {
+        return Err("The default theme cannot be renamed".to_owned());
+    };
+    let slug: String = name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let slug = if slug.is_empty() { "theme" } else { slug };
+    let mut new_path = old_path.with_file_name(format!("{slug}.json"));
+    let mut suffix = 2;
+    while new_path != *old_path && new_path.exists() {
+        new_path = old_path.with_file_name(format!("{slug}-{suffix}.json"));
+        suffix += 1;
+    }
+    if new_path != *old_path {
+        std::fs::rename(old_path, &new_path).map_err(|error| error.to_string())?;
+    }
+    let new_preset = preset_from_path(new_path, Some(name.to_owned()));
+    if active_preset().id == preset.id {
+        Theme::write_selection(&new_preset);
+        let mut state = theme_cell()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.preset = new_preset.clone();
+    }
+    Ok(new_preset)
+}
+
+/// Reset the active theme palette to the embedded defaults.
+///
+/// A custom theme keeps its name and file; only its colours are reset.
+pub fn reset_current_theme() -> Result<Theme, String> {
+    let preset = active_preset();
+    let theme = if preset.path.is_none() && preset.id == "light" {
+        Theme::light()
+    } else {
+        Theme::default()
+    };
+    if let Some(path) = &preset.path {
+        Theme::write_theme(path, &theme)?;
+    }
+    let mut state = theme_cell()
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.theme = theme.clone();
+    state.preset = preset;
+    Ok(theme)
 }
 
 /// macOS-style menu styling shared by every app menu.
@@ -326,6 +799,44 @@ mod tests {
     }
 
     #[test]
+    fn every_palette_colour_key_is_editable() {
+        for group in palette_groups(&Theme::default()) {
+            for entry in group.entries {
+                match entry.value {
+                    ThemeValue::Color(_) => {
+                        let mut theme = Theme::default();
+                        assert!(
+                            theme.set_color(entry.key, [1, 2, 3, 4]),
+                            "palette colour key {:?} cannot be set",
+                            entry.key
+                        );
+                    }
+                    ThemeValue::Number { value, .. } => {
+                        let mut theme = Theme::default();
+                        assert!(
+                            theme.set_number(entry.key, value),
+                            "palette number key {:?} cannot be set",
+                            entry.key
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_cable_outline_opacity_migrates_to_black_rgba() {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("../assets/theme.json")).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("cable_outline");
+        object.insert("cable_outline_opacity".to_owned(), serde_json::json!(0.5));
+        let theme: Theme = serde_json::from_value(value).unwrap();
+        assert_eq!(theme.cable_outline, [0, 0, 0, 128]);
+        assert_eq!(Theme::default().cable_outline, [0, 0, 0, 191]);
+    }
+
+    #[test]
     fn first_run_writes_the_default_theme() {
         let path = temp_theme_path("first-run");
         let theme = Theme::load_or_initialize(&path);
@@ -349,4 +860,227 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
+}
+
+/// A theme value exposed in the settings palette viewer.
+#[derive(Clone, Copy, Debug)]
+pub enum ThemeValue {
+    Color([u8; 4]),
+    Number {
+        value: f32,
+        min: f32,
+        max: f32,
+        step: f32,
+    },
+}
+
+/// One read-only entry in a theme palette category.
+#[derive(Clone, Copy, Debug)]
+pub struct ThemeEntry {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub value: ThemeValue,
+}
+
+/// A semantic category in the theme palette viewer.
+pub struct ThemeGroup {
+    pub title: &'static str,
+    pub description: &'static str,
+    pub entries: Vec<ThemeEntry>,
+}
+
+fn entry(
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+    value: ThemeValue,
+) -> ThemeEntry {
+    ThemeEntry { key, label, description, value }
+}
+
+fn color(key: &'static str, label: &'static str, description: &'static str, value: [u8; 4]) -> ThemeEntry {
+    entry(key, label, description, ThemeValue::Color(value))
+}
+
+fn number(
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+) -> ThemeEntry {
+    entry(
+        key,
+        label,
+        description,
+        ThemeValue::Number { value, min, max, step },
+    )
+}
+
+/// Theme data grouped by the part of the application it styles.
+///
+/// The settings UI renders this instead of dumping raw JSON: each field has a
+/// semantic label and a visible swatch, while the JSON key remains available in
+/// the tooltip for users editing `theme.json`.
+pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
+    vec![
+        ThemeGroup {
+            title: "GUI chrome",
+            description: "Window, panels, controls and popup surfaces.",
+            entries: vec![
+                color("window", "Window", "Main application background", theme.window),
+                color("panel", "Panel", "Standard panel background", theme.panel),
+                color("control", "Control", "Buttons and inset controls", theme.control),
+                color("border", "Border", "Default dividers and outlines", theme.border),
+                color("border_strong", "Strong border", "Selected and emphasized outlines", theme.border_strong),
+                color("popup", "Popup", "Menus and floating popup background", theme.popup),
+                color("panel_glass", "Panel glass", "Floating translucent panel tint", theme.panel_glass),
+            ],
+        },
+        ThemeGroup {
+            title: "Text & selection",
+            description: "Typography, accent and highlighted content.",
+            entries: vec![
+                color("text", "Text", "Primary text", theme.text),
+                color("muted", "Muted text", "Secondary labels and hints", theme.muted),
+                color("accent", "Accent", "Primary selection and action colour", theme.accent),
+                color("highlight", "Highlight", "Secondary highlight and hover wash", theme.highlight),
+            ],
+        },
+        ThemeGroup {
+            title: "Node editor",
+            description: "Cards, cables and node-canvas-specific surfaces.",
+            entries: vec![
+                color("card", "Card", "Node body background", theme.card),
+                color("card_border", "Card border", "Node outline", theme.card_border),
+                color("cable", "Cable", "Cable core colour", theme.cable),
+                color(
+                    "cable_outline",
+                    "Cable outline",
+                    "Dark cable outline",
+                    theme.cable_outline,
+                ),
+                number(
+                    "cable_width",
+                    "Cable width",
+                    "Cable core diameter",
+                    theme.cable_width,
+                    1.0,
+                    32.0,
+                    0.5,
+                ),
+                number(
+                    "cable_outline_width",
+                    "Outline width",
+                    "Added outside diameter",
+                    theme.cable_outline_width,
+                    0.0,
+                    15.0,
+                    0.5,
+                ),
+                color("port_input", "Data port", "Input port that carries data", theme.port_input),
+            ],
+        },
+        ThemeGroup {
+            title: "Minimap",
+            description: "Node-overview map in the node editor.",
+            entries: vec![
+                color("minimap_bg", "Background", "Minimap card background", theme.minimap_bg),
+                color("minimap_border", "Border", "Minimap card outline", theme.minimap_border),
+                color("minimap_node", "Unselected node", "Node mark in the overview", theme.minimap_node),
+            ],
+        },
+        ThemeGroup {
+            title: "Icons",
+            description: "Fluent icon tint states.",
+            entries: vec![
+                color("icon", "Icon", "Default icon tint", theme.icon),
+                color("icon_hover", "Icon hover", "Hover/active icon tint", theme.icon_hover),
+            ],
+        },
+        ThemeGroup {
+            title: "3D viewport",
+            description: "World-axis colours in the viewport.",
+            entries: vec![
+                color("axis_x", "X axis", "World X axis colour", theme.axis_x),
+                color("axis_y", "Y axis", "World Y axis colour", theme.axis_y),
+                color("axis_z", "Z axis", "World Z axis colour", theme.axis_z),
+            ],
+        },
+    ]
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::*;
+
+    #[test]
+    fn palette_groups_cover_every_theme_field_once() {
+        for (file, theme) in [
+            ("theme.json", Theme::default()),
+            ("theme-light.json", Theme::light()),
+        ] {
+            let json: serde_json::Value =
+                serde_json::from_str(if file == "theme-light.json" {
+                    include_str!("../assets/theme-light.json")
+                } else {
+                    include_str!("../assets/theme.json")
+                })
+                .unwrap();
+            let mut remaining: std::collections::BTreeSet<String> =
+                json.as_object().unwrap().keys().cloned().collect();
+            let mut seen = std::collections::BTreeSet::new();
+            for group in palette_groups(&theme) {
+                for entry in group.entries {
+                    assert!(seen.insert(entry.key), "{file}: duplicate palette key {}", entry.key);
+                    remaining.remove(entry.key);
+                }
+            }
+            assert!(
+                remaining.is_empty(),
+                "{file} keys missing from settings palette: {remaining:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn built_in_light_theme_is_distinct() {
+        assert_ne!(Theme::light(), Theme::default());
+        assert!(Theme::light().text[0] < Theme::default().text[0]);
+        let themes = available_themes();
+        assert!(themes.iter().any(|preset| preset.id == "light"));
+        assert!(themes.iter().any(|preset| preset.id == "default"));
+    }
+}
+
+/// Scrollbar style for general application UI.
+///
+/// Solid bars with a comfortable hit target; intentionally not applied globally
+/// because on-canvas surfaces use the thin variant.
+pub fn scroll_style_general() -> egui::style::ScrollStyle {
+    let mut style = egui::style::ScrollStyle::solid();
+    style.bar_width = 8.0;
+    style.bar_inner_margin = 6.0;
+    style.bar_outer_margin = 2.0;
+    style.handle_min_length = 28.0;
+    style
+}
+
+/// Thin floating scrollbar for inspector and node-canvas-adjacent surfaces.
+///
+/// The inspector's existing custom scrollbar remains untouched; this is the
+/// shared style for future on-canvas scroll areas.
+pub fn scroll_style_thin() -> egui::style::ScrollStyle {
+    let mut style = egui::style::ScrollStyle::floating();
+    style.bar_width = 7.0;
+    style.floating_width = 3.0;
+    style.floating_allocated_width = 0.0;
+    style.handle_min_length = 20.0;
+    style.dormant_handle_opacity = 0.0;
+    style.active_handle_opacity = 0.55;
+    style.interact_handle_opacity = 0.9;
+    style
 }

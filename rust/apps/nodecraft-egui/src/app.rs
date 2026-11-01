@@ -488,6 +488,11 @@ pub struct NodeCraftApp {
     settings_open: bool,
     settings_open_last: bool,
     settings_tab: SettingsTab,
+    theme_dirty: bool,
+    theme_save_due: Option<Instant>,
+    theme_rename_id: Option<String>,
+    theme_rename_name: String,
+    theme_rename_focus: bool,
     tool_section: Option<ToolSection>,
     sketch_gui: SketchGui,
     control_requests: Receiver<control_server::Request>,
@@ -530,7 +535,9 @@ impl NodeCraftApp {
         configure_style(&cc.egui_ctx);
         let mut viewport = Viewport::default();
         let mut node_editor = NodeEditor::default();
-        node_editor.set_theme(canvas_theme(crate::theme::get()));
+        let initial_theme = crate::theme::get();
+        node_editor.set_theme(canvas_theme(&initial_theme));
+        viewport.set_theme(&initial_theme);
         node_editor.set_left_dock_width(TOOL_DOCK_WIDTH + TOOL_DOCK_GAP);
         if let Some(render_state) = &cc.wgpu_render_state {
             viewport.install_gpu(render_state);
@@ -584,6 +591,11 @@ impl NodeCraftApp {
             settings_open: false,
             settings_open_last: false,
             settings_tab: SettingsTab::Appearance,
+            theme_dirty: false,
+            theme_save_due: None,
+            theme_rename_id: None,
+            theme_rename_name: String::new(),
+            theme_rename_focus: false,
             tool_section: None,
             sketch_gui: SketchGui::default(),
             control_requests: control_server::start(cc.egui_ctx.clone()),
@@ -1380,15 +1392,24 @@ impl NodeCraftApp {
     }
 
     fn show_app_settings(&mut self, ctx: &egui::Context) {
-        let theme = crate::theme::get();
+        let mut theme = crate::theme::get();
+        let theme_before = theme.clone();
+        let mut theme_selection_changed = false;
+        let mut theme_error: Option<String> = None;
+        let mut theme_rename_id = self.theme_rename_id.clone();
+        let mut theme_rename_name = self.theme_rename_name.clone();
+        let mut theme_rename_focus = self.theme_rename_focus;
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
         let mut close = false;
         let mut builder = egui::ViewportBuilder::default()
             .with_title("NodeCraft Settings")
-            .with_inner_size([520.0, 420.0])
-            .with_min_inner_size([420.0, 300.0])
-            .with_resizable(false)
+            .with_inner_size([760.0, 620.0])
+            .with_min_inner_size([520.0, 400.0])
+            .with_resizable(true)
+            // Keep settings above the main NodeCraft window even if the main
+            // window is clicked or activated.
+            .with_always_on_top()
             // Native OS chrome: keep close and minimize, hide maximize. The
             // platform owns the button order/side and rounded window corners.
             // macOS verified: close/minimize at left, no zoom, rounded corners.
@@ -1404,10 +1425,11 @@ impl NodeCraftApp {
         if !self.settings_open_last {
             self.settings_open_last = true;
             if let Some(parent) = parent_outer {
-                let mut pos = parent.center() - egui::vec2(260.0, 210.0);
+                let settings_size = egui::vec2(760.0, 620.0);
+                let mut pos = parent.center() - settings_size * 0.5;
                 if let Some(monitor) = monitor_size {
-                    pos.x = pos.x.clamp(0.0, (monitor.x - 520.0).max(0.0));
-                    pos.y = pos.y.clamp(0.0, (monitor.y - 420.0).max(0.0));
+                    pos.x = pos.x.clamp(0.0, (monitor.x - settings_size.x).max(0.0));
+                    pos.y = pos.y.clamp(0.0, (monitor.y - settings_size.y).max(0.0));
                 }
                 builder = builder.with_position(pos);
             }
@@ -1490,6 +1512,7 @@ impl NodeCraftApp {
                     tab_y += 36.0;
                 }
 
+                let palette_row_width = (right.width() - 64.0).max(300.0);
                 let mut content = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(right.shrink2(egui::vec2(18.0, 14.0)))
@@ -1498,12 +1521,169 @@ impl NodeCraftApp {
                 match tab {
                     SettingsTab::Appearance => {
                         content.heading("Appearance");
-                        content.label("Theme: Dark");
+                        let mut selected_theme = crate::theme::active_preset();
+                        content.horizontal(|ui| {
+                            ui.label("Theme");
+                            let combo_width = (palette_row_width
+                                - 42.0
+                                - 78.0
+                                - ui.spacing().item_spacing.x * 4.0)
+                                .max(120.0);
+                            if let Some(rename_id) = theme_rename_id.clone() {
+                                let response = ui.add_sized(
+                                    [combo_width, 24.0],
+                                    egui::TextEdit::singleline(&mut theme_rename_name)
+                                        .hint_text("Theme name"),
+                                );
+                                if theme_rename_focus {
+                                    response.request_focus();
+                                    theme_rename_focus = false;
+                                }
+                                if ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
+                                    theme_rename_id = None;
+                                } else {
+                                    let commit = response.lost_focus()
+                                        || (response.has_focus()
+                                            && ui.input(|input| {
+                                                input.key_pressed(egui::Key::Enter)
+                                            }));
+                                    if commit && !theme_rename_name.trim().is_empty() {
+                                        if let Some(preset) = crate::theme::available_themes()
+                                            .into_iter()
+                                            .find(|preset| preset.id == rename_id)
+                                        {
+                                            match crate::theme::rename_theme(
+                                                &preset,
+                                                &theme_rename_name,
+                                            ) {
+                                                Ok(renamed) => {
+                                                    selected_theme = renamed;
+                                                    theme_rename_id = None;
+                                                    theme_selection_changed = true;
+                                                }
+                                                Err(error) => theme_error = Some(error),
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                egui::ComboBox::from_id_salt("theme-preset")
+                                    .width(combo_width)
+                                    .popup_style(egui::style::StyleModifier::from(crate::theme::menu_style))
+                                    .selected_text(crate::theme::active_name())
+                                    .show_ui(ui, |ui| {
+                                        for preset in crate::theme::available_themes() {
+                                            if ui
+                                                .selectable_label(
+                                                    selected_theme.id == preset.id,
+                                                    &preset.name,
+                                                )
+                                                .clicked()
+                                                && selected_theme.id != preset.id
+                                            {
+                                                match crate::theme::load_preset(&preset) {
+                                                    Ok(loaded) => {
+                                                        theme = loaded;
+                                                        selected_theme = preset;
+                                                        theme_selection_changed = true;
+                                                    }
+                                                    Err(error) => theme_error = Some(error),
+                                                }
+                                            }
+                                        }
+                                    });
+                            }
+                            let can_reset = theme != crate::theme::active_defaults();
+                            let reset = theme_revert_button(ui, can_reset)
+                                .on_hover_text(if can_reset {
+                                    "Reset current theme to defaults"
+                                } else {
+                                    "Theme already matches defaults"
+                                });
+                            if reset.clicked() && can_reset {
+                                match crate::theme::reset_current_theme() {
+                                    Ok(loaded) => {
+                                        theme = loaded;
+                                        selected_theme = crate::theme::active_preset();
+                                        theme_selection_changed = true;
+                                    }
+                                    Err(error) => theme_error = Some(error),
+                                }
+                            }
+                            let active_preset = crate::theme::active_preset();
+                            let can_edit = active_preset.path.is_some();
+                            let edit = theme_edit_button(ui, can_edit)
+                                .on_hover_text(if can_edit {
+                                    "Edit theme name"
+                                } else {
+                                    "Built-in themes cannot be renamed"
+                                });
+                            if edit.clicked() && can_edit {
+                                theme_rename_id = Some(active_preset.id);
+                                theme_rename_name = active_preset.name;
+                                theme_rename_focus = true;
+                            }
+                            let add = theme_add_button(ui).on_hover_text("New theme");
+                            if add.clicked() {
+                                match crate::theme::create_theme("New Theme", &theme) {
+                                    Ok(preset) => {
+                                        selected_theme = preset.clone();
+                                        theme_rename_id = Some(preset.id);
+                                        theme_rename_name = preset.name;
+                                        theme_rename_focus = true;
+                                        theme_selection_changed = true;
+                                    }
+                                    Err(error) => {
+                                        eprintln!("theme: cannot create user theme: {error}");
+                                        theme_error = Some(error);
+                                    }
+                                }
+                            }
+                        });
+                        if let Some(error) = &theme_error {
+                            content.small(egui::RichText::new(error).color(theme.color(theme.text)));
+                        }
                         content.small(
-                            "NodeCraft creates theme.json on first run and restores it \
-                             if it is missing or invalid. Override with NODECRAFT_THEME or \
-                             Application Support/NodeCraft/theme.json.",
+                            "Click a colour dot to edit. Edits apply live and are saved as \
+                             NodeCraft Dark (custom).",
                         );
+                        content.add_space(6.0);
+                        content.scope(|ui| {
+                            ui.style_mut().spacing.scroll = crate::theme::scroll_style_general();
+                            ui.visuals_mut().widgets.inactive.bg_fill =
+                                theme.with_alpha(theme.muted, 70);
+                            ui.visuals_mut().widgets.hovered.bg_fill =
+                                theme.with_alpha(theme.muted, 155);
+                            ui.visuals_mut().widgets.active.bg_fill =
+                                theme.with_alpha(theme.accent, 210);
+                            ui.visuals_mut().widgets.inactive.corner_radius =
+                                egui::CornerRadius::same(4);
+                            ui.visuals_mut().widgets.hovered.corner_radius =
+                                egui::CornerRadius::same(4);
+                            ui.visuals_mut().widgets.active.corner_radius =
+                                egui::CornerRadius::same(4);
+                            egui::ScrollArea::vertical()
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    ui.set_min_width(ui.available_width());
+                                    for group in crate::theme::palette_groups(&theme) {
+                                        egui::Frame::new()
+                                            .fill(theme.color(theme.panel))
+                                            .corner_radius(egui::CornerRadius::same(7))
+                                            .inner_margin(egui::Margin::same(8))
+                                            .show(ui, |ui| {
+                                                ui.set_min_width(palette_row_width + 16.0);
+                                                ui.label(egui::RichText::new(group.title).strong());
+                                            ui.small(group.description);
+                                            ui.add_space(3.0);
+                                            for entry in &group.entries {
+                                                theme_palette_row(ui, entry, &mut theme, palette_row_width);
+                                            }
+                                        });
+                                    ui.add_space(6.0);
+                                    }
+                                });
+                        });
                     }
                     SettingsTab::Viewport => {
                         content.heading("Viewport");
@@ -1526,6 +1706,25 @@ impl NodeCraftApp {
                 hide_settings_zoom_button();
             },
         );
+        self.theme_rename_id = theme_rename_id;
+        self.theme_rename_name = theme_rename_name;
+        self.theme_rename_focus = theme_rename_focus;
+        if theme_selection_changed {
+            self.theme_dirty = false;
+            self.theme_save_due = None;
+        }
+        if theme != theme_before {
+            crate::theme::set(theme.clone());
+            configure_style(ctx);
+            self.node_editor.set_theme(canvas_theme(&theme));
+            self.viewport.set_theme(&theme);
+            if !theme_selection_changed {
+                self.theme_dirty = true;
+                self.theme_save_due =
+                    Some(Instant::now() + std::time::Duration::from_millis(350));
+            }
+            ctx.request_repaint();
+        }
         if view != self.viewport.view() {
             self.viewport.set_view(view);
         }
@@ -1835,15 +2034,41 @@ impl eframe::App for NodeCraftApp {
         self.advance_inspector_animation(ui.ctx());
         self.advance_layout_animation(ui.ctx());
         self.advance_node_position_animation(ui.ctx());
+        // Standard document shortcut: close the active tab, not the window.
+        // Keep this ahead of the tab bar so it also works while a node inspector
+        // field has focus.
+        if ui.ctx().input(|input| input.modifiers.command && input.key_pressed(egui::Key::W)) {
+            let index = self.active_tab;
+            self.close_tab(index);
+            ui.ctx().request_repaint();
+            return;
+        }
         let typing = ui.ctx().egui_wants_keyboard_input();
-        let node_editor_under_pointer = self
-            .node_editor
-            .panel_screen_rect()
-            .is_some_and(|rect| {
-                ui.ctx()
-                    .pointer_latest_pos()
-                    .is_some_and(|pointer| rect.contains(pointer))
+        // Command-A selects the whole graph only while the pointer is over the
+        // node panel. Text fields retain their normal select-all behavior.
+        let pointer_over_node_canvas = ui
+            .ctx()
+            .pointer_latest_pos()
+            .is_some_and(|pointer| {
+                self.node_editor
+                    .panel_screen_rect()
+                    .is_some_and(|rect| rect.contains(pointer))
             });
+        if !typing
+            && pointer_over_node_canvas
+            && ui.ctx().input(|input| input.modifiers.command && input.key_pressed(egui::Key::A))
+            && let Some(session) = &self.session
+        {
+            self.selected_nodes = session
+                .document()
+                .nodes
+                .iter()
+                .map(|node| node.id.clone())
+                .collect();
+            self.selected_connections.clear();
+            self.status = format!("Selected {} nodes", self.selected_nodes.len());
+            ui.ctx().request_repaint();
+        }
         let clipboard_action = ui.ctx().input(|input| clipboard_action(&input.events));
         if !typing {
             let paste_origin = ui
@@ -1867,7 +2092,6 @@ impl eframe::App for NodeCraftApp {
             self.undo();
         }
         if !typing
-            && node_editor_under_pointer
             && (!self.selected_nodes.is_empty() || !self.selected_connections.is_empty())
             && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         {
@@ -2268,7 +2492,11 @@ impl eframe::App for NodeCraftApp {
                         if settings.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                        let settings = settings.on_hover_text("App settings");
+                        let settings = settings.on_hover_text(if self.settings_open {
+                            "Close settings"
+                        } else {
+                            "Open settings"
+                        });
                         if settings.clicked() {
                             self.settings_open = !self.settings_open;
                             if !self.settings_open {
@@ -2287,6 +2515,19 @@ impl eframe::App for NodeCraftApp {
 
         if self.settings_open {
             self.show_app_settings(ui.ctx());
+        }
+        if self.theme_dirty {
+            let now = Instant::now();
+            if self.theme_save_due.is_none_or(|due| now >= due) {
+                if let Err(error) = crate::theme::save(&crate::theme::get()) {
+                    eprintln!("theme: cannot save live edit: {error}");
+                }
+                self.theme_dirty = false;
+                self.theme_save_due = None;
+            } else if let Some(due) = self.theme_save_due {
+                ui.ctx()
+                    .request_repaint_after(due.saturating_duration_since(now));
+            }
         }
 
         egui::Panel::bottom("app-status").show(ui, |ui| {
@@ -3180,7 +3421,10 @@ fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
         port_input: theme.port_input,
         card: theme.card,
         card_border: theme.card_border,
-        wire: theme.wire,
+        cable: theme.cable,
+        cable_outline: theme.cable_outline,
+        cable_width: theme.cable_width,
+        cable_outline_width: theme.cable_outline_width,
         minimap_bg: theme.minimap_bg,
         minimap_border: theme.minimap_border,
         minimap_node: theme.minimap_node,
@@ -3209,6 +3453,323 @@ fn layout_roi(
         max.y = max.y.max(y + NODE_HEIGHT);
     }
     (min.x.is_finite() && max.x.is_finite()).then(|| egui::Rect::from_min_max(min, max))
+}
+
+fn theme_color_dot(ui: &mut egui::Ui, rgba: [u8; 4]) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+    if response.hovered() || response.clicked() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let theme = crate::theme::get();
+    let center = rect.center();
+    let radius = 8.5;
+    ui.painter().circle_filled(center, radius, theme.color(theme.panel));
+    ui.painter().circle_filled(center, radius, theme.color(rgba));
+    ui.painter().circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.0, theme.color(theme.border_strong)),
+    );
+    if response.hovered() {
+        ui.painter().circle_stroke(
+            center,
+            radius + 1.5,
+            egui::Stroke::new(1.0, theme.color(theme.accent)),
+        );
+    }
+    response
+}
+
+fn theme_revert_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(26.0, 26.0),
+        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+    );
+    let theme = crate::theme::get();
+    let hot = enabled && response.hovered();
+    if hot {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(6),
+            theme.with_alpha(theme.highlight, 30),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let tint = if !enabled {
+        theme.icon
+    } else if hot {
+        theme.icon_hover
+    } else {
+        theme.icon
+    };
+    let svg = std::str::from_utf8(include_bytes!(
+        "../../../../vendor/fluent/arrow_clockwise.svg"
+    ))
+    .unwrap_or_default();
+    let svg = tint_svg(svg.as_bytes(), &crate::theme::Theme::hex(tint));
+    let image = egui::Image::from_bytes(
+        "bytes://theme-revert-defaults.svg",
+        svg.into_bytes(),
+    )
+    .fit_to_exact_size(egui::Vec2::splat(16.0));
+    ui.put(rect.shrink(5.0), image);
+    response
+}
+
+fn theme_edit_button(ui: &mut egui::Ui, enabled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(26.0, 26.0),
+        if enabled { egui::Sense::click() } else { egui::Sense::hover() },
+    );
+    let theme = crate::theme::get();
+    let hot = enabled && response.hovered();
+    if hot {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(6),
+            theme.with_alpha(theme.highlight, 30),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let tint = if !enabled {
+        theme.icon
+    } else if hot {
+        theme.icon_hover
+    } else {
+        theme.icon
+    };
+    let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/edit.svg"))
+        .unwrap_or_default();
+    let svg = tint_svg(svg.as_bytes(), &crate::theme::Theme::hex(tint));
+    let image = egui::Image::from_bytes(
+        "bytes://theme-edit-name.svg",
+        svg.into_bytes(),
+    )
+    .fit_to_exact_size(egui::Vec2::splat(15.0));
+    ui.put(rect.shrink(5.0), image);
+    if !enabled {
+        // Built-in themes cannot be renamed: show a crossed-out pencil rather
+        // than merely dimming it.
+        let slash = egui::Stroke::new(1.4, theme.color(theme.muted));
+        ui.painter().line_segment(
+            [
+                rect.left_top() + egui::vec2(6.0, 6.0),
+                rect.right_bottom() - egui::vec2(6.0, 6.0),
+            ],
+            slash,
+        );
+    }
+    response
+}
+
+fn theme_add_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), egui::Sense::click());
+    let theme = crate::theme::get();
+    if response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(6),
+            theme.with_alpha(theme.highlight, 30),
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let color = if response.hovered() {
+        theme.color(theme.icon_hover)
+    } else {
+        theme.color(theme.icon)
+    };
+    let center = rect.center();
+    let arm = 6.0;
+    let stroke = egui::Stroke::new(1.6, color);
+    ui.painter().line_segment(
+        [center + egui::vec2(-arm, 0.0), center + egui::vec2(arm, 0.0)],
+        stroke,
+    );
+    ui.painter().line_segment(
+        [center + egui::vec2(0.0, -arm), center + egui::vec2(0.0, arm)],
+        stroke,
+    );
+    response
+}
+
+fn theme_palette_row(
+    ui: &mut egui::Ui,
+    entry: &crate::theme::ThemeEntry,
+    theme: &mut crate::theme::Theme,
+    row_width: f32,
+) {
+    const DOT_WIDTH: f32 = 26.0;
+    const VALUE_WIDTH: f32 = 112.0;
+    let spacing = ui.spacing().item_spacing.x;
+    let label_width = (row_width - DOT_WIDTH - VALUE_WIDTH - spacing * 2.0).max(72.0);
+    let value = match entry.value {
+        crate::theme::ThemeValue::Color(rgba) => format!(
+            "{} · {}%",
+            crate::theme::Theme::hex(rgba),
+            (u32::from(rgba[3]) * 100 + 127) / 255
+        ),
+        crate::theme::ThemeValue::Number { value, .. } => format!("{value:.1}"),
+    };
+
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(DOT_WIDTH, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(DOT_WIDTH);
+                if let crate::theme::ThemeValue::Color(rgba) = entry.value {
+                    let dot = theme_color_dot(ui, rgba).on_hover_text(format!(
+                        "theme.json: {}\n{}\nClick to edit",
+                        entry.key, entry.description
+                    ));
+                    egui::Popup::menu(&dot)
+                        .id(egui::Id::new(("theme-color-picker", entry.key)))
+                        .style(crate::theme::menu_style)
+                        .show(|ui| {
+                            let mut color = theme.color(rgba);
+                            if theme_color_wheel(ui, &mut color) {
+                                let _ = theme.set_color(
+                                    entry.key,
+                                    [color.r(), color.g(), color.b(), color.a()],
+                                );
+                            }
+                        });
+                } else {
+                    ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                }
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(label_width, 20.0),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(label_width);
+                ui.add(egui::Label::new(entry.label).truncate())
+                    .on_hover_text(format!(
+                        "theme.json: {}\n{}",
+                        entry.key, entry.description
+                    ));
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(VALUE_WIDTH, 20.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.set_width(VALUE_WIDTH);
+                if let crate::theme::ThemeValue::Number {
+                    value: number,
+                    min,
+                    max,
+                    step,
+                } = entry.value
+                {
+                    let mut number = number;
+                    let response = ui.add(
+                        egui::DragValue::new(&mut number)
+                            .range(min..=max)
+                            .speed(step)
+                            .max_decimals(1),
+                    );
+                    if response.changed() {
+                        let _ = theme.set_number(entry.key, number);
+                    }
+                } else {
+                    ui.monospace(value);
+                }
+            },
+        );
+    });
+}
+
+fn theme_color_wheel(ui: &mut egui::Ui, color: &mut egui::Color32) -> bool {
+    use egui::ecolor::Hsva;
+
+    let size = 188.0;
+    let (wheel_rect, wheel_response) =
+        ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click_and_drag());
+    let center = wheel_rect.center();
+    let radius = size * 0.5 - 3.0;
+    let mut hsva = Hsva::from(*color);
+    let mut changed = false;
+
+    // Circular hue/saturation wheel: angle is hue, radius is saturation.
+    const SEGMENTS: usize = 96;
+    let mut mesh = egui::Mesh::default();
+    let white = egui::Color32::WHITE;
+    for step in 0..SEGMENTS {
+        let a0 = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let a1 = (step + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let p0 = center + egui::vec2(a0.cos(), a0.sin()) * radius;
+        let p1 = center + egui::vec2(a1.cos(), a1.sin()) * radius;
+        let h = step as f32 / SEGMENTS as f32;
+        let hue = egui::Color32::from(Hsva::new(h, 1.0, 1.0, 1.0));
+        mesh.colored_vertex(center, white);
+        mesh.colored_vertex(p0, hue);
+        mesh.colored_vertex(p1, hue);
+        let base = mesh.vertices.len() as u32 - 3;
+        mesh.add_triangle(base, base + 1, base + 2);
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().circle_stroke(
+        center,
+        radius,
+        egui::Stroke::new(1.0, crate::theme::get().color(crate::theme::get().border_strong)),
+    );
+
+    if let Some(pointer) = wheel_response.interact_pointer_pos() {
+        let delta = pointer - center;
+        let distance = delta.length();
+        if distance <= radius + 2.0 {
+            hsva.h = delta.y.atan2(delta.x).rem_euclid(std::f32::consts::TAU)
+                / std::f32::consts::TAU;
+            hsva.s = (distance / radius).clamp(0.0, 1.0);
+            changed = true;
+        }
+    }
+
+    let marker = center
+        + egui::vec2(
+            (hsva.h * std::f32::consts::TAU).cos(),
+            (hsva.h * std::f32::consts::TAU).sin(),
+        ) * (hsva.s * radius);
+    let marker_colour = if hsva.v > 0.55 {
+        egui::Color32::BLACK
+    } else {
+        egui::Color32::WHITE
+    };
+    ui.painter().circle_stroke(
+        marker,
+        5.0,
+        egui::Stroke::new(2.0, marker_colour),
+    );
+    ui.painter().circle_stroke(
+        marker,
+        7.0,
+        egui::Stroke::new(1.0, egui::Color32::from_white_alpha(140)),
+    );
+
+    ui.add_space(6.0);
+    ui.spacing_mut().slider_width = 150.0;
+    let mut value = hsva.v;
+    if ui
+        .add(egui::Slider::new(&mut value, 0.0..=1.0).text("Value"))
+        .changed()
+    {
+        hsva.v = value;
+        changed = true;
+    }
+    let mut alpha = hsva.a;
+    if ui
+        .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("Alpha"))
+        .changed()
+    {
+        hsva.a = alpha;
+        changed = true;
+    }
+    if changed {
+        *color = egui::Color32::from(Hsva::new(hsva.h, hsva.s, hsva.v, hsva.a));
+    }
+    changed
 }
 
 fn configure_style(ctx: &egui::Context) {

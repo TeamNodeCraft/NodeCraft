@@ -44,6 +44,20 @@ cargo test -p nodecraft-engine --lib
 Some integration tests in the private development tree use large STEP
 corpora that are not included in this public source snapshot.
 
+## Repository layout
+
+```text
+rust/apps/nodecraft-egui   desktop application
+rust/crates/               engine, node canvas, geometry, I/O crates
+vendor/fluent              icon assets
+samples/                   small runnable example documents
+agents/                    engineering notes
+docs/                      project documentation
+```
+
+Private planning, research, reports and reference code are intentionally not
+included.
+
 ## Documentation
 
 - [Architecture](agents/architecture.md)

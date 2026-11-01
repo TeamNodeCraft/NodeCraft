@@ -15,7 +15,10 @@ pub struct CanvasTheme {
     pub port_input: [u8; 4],
     pub card: [u8; 4],
     pub card_border: [u8; 4],
-    pub wire: [u8; 4],
+    pub cable: [u8; 4],
+    pub cable_outline: [u8; 4],
+    pub cable_width: f32,
+    pub cable_outline_width: f32,
     pub minimap_bg: [u8; 4],
     pub minimap_border: [u8; 4],
     pub minimap_node: [u8; 4],
@@ -38,7 +41,10 @@ impl Default for CanvasTheme {
             port_input: [255, 159, 10, 255],
             card: [60, 60, 63, 255],
             card_border: [72, 72, 74, 255],
-            wire: [142, 142, 147, 51],
+            cable: [142, 142, 147, 51],
+            cable_outline: [0, 0, 0, 191],
+            cable_width: 5.0,
+            cable_outline_width: 2.0,
             minimap_bg: [36, 36, 38, 235],
             minimap_border: [58, 58, 60, 230],
             minimap_node: [152, 152, 157, 235],
@@ -46,6 +52,37 @@ impl Default for CanvasTheme {
             icon_hover: [245, 245, 247, 255],
             popup: [30, 30, 32, 228],
         }
+    }
+}
+
+impl std::hash::Hash for CanvasTheme {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use std::hash::Hash as _;
+        for field in [
+            self.window,
+            self.panel_glass,
+            self.control,
+            self.border,
+            self.text,
+            self.muted,
+            self.accent,
+            self.highlight,
+            self.port_input,
+            self.card,
+            self.card_border,
+            self.cable,
+            self.cable_outline,
+            self.minimap_bg,
+            self.minimap_border,
+            self.minimap_node,
+            self.icon,
+            self.icon_hover,
+            self.popup,
+        ] {
+            field.hash(state);
+        }
+        self.cable_width.to_bits().hash(state);
+        self.cable_outline_width.to_bits().hash(state);
     }
 }
 

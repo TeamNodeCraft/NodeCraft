@@ -11,6 +11,7 @@ changing geometry, the node canvas, or the viewport.
 - [Current state](current-state.md) — what works today.
 - [Bugs](bugs.md) — known failures and risky areas.
 - [TODO](todo.md) — current priorities.
+- [Performance baseline](performance-baseline.md) — measured canvas bottlenecks.
 
 ## Working rules
 

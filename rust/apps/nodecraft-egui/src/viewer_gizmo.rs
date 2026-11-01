@@ -367,6 +367,8 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     let sh = shapes(proj, t, l)?;
     let state: Option<State> = ui.data(|d| d.get_temp(id));
     let pointer = ui.input(|i| i.pointer.hover_pos());
+    let primary_down = ui.input(|i| i.pointer.primary_down());
+    let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
     let hovered = if state.is_none() { pointer.filter(|_| ui.rect_contains_pointer(proj.rect)).and_then(|p| hit(&sh, p)) } else { None };
     let active = state.map(|s| s.handle).or(hovered);
     let hot = |h: Handle| active == Some(h);
@@ -385,8 +387,13 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     painter.circle(sh.ball, 6.0, bc, Stroke::new(1.5, Color32::from_gray(60)));
     let p = pointer?;
     active?;
-    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-    let r = ui.interact(Rect::from_center_size(p, vec2(24.0, 24.0)), id.with("hit"), Sense::drag());
+    // A gizmo is a direct pointer tool, not a general overlay. Use the pointer
+    // state directly instead of creating a drag-sensing widget: a widget kept
+    // alive on hover steals primary drags from the viewport, while creating it
+    // only on the press frame loses egui's drag-start transition.
+    if state.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
     let free = ui.input(|i| i.modifiers.alt || i.modifiers.command || i.modifiers.ctrl);
     let view = proj.ray(sh.ball).1;
     let plane_normal = |h: Handle| match h {
@@ -397,7 +404,7 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     let mut st = match state {
         Some(s) => s,
         None => {
-            if !r.drag_started() {
+            if !primary_pressed {
                 return None;
             }
             let h = hovered?;
@@ -443,7 +450,7 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
             Change::Translate(Vec3::new(snap(d.x, step, free), snap(d.y, step, free), snap(d.z, step, free)))
         }
     };
-    let done = r.drag_stopped() || !r.dragged() && !started;
+    let done = state.is_some() && !primary_down;
     if done {
         ui.data_mut(|d| d.remove::<State>(id));
     } else {

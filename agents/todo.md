@@ -65,3 +65,13 @@ Priority order is approximate.
 - [ ] Add platform packaging (Windows/Linux desktop launch, macOS app bundle).
 - [ ] Keep the public snapshot free of private paths, corpora and generated
       reports.
+
+## Formal verification research
+
+- [ ] Investigate using Lean 4 to check selected NodeCraft invariants in future.
+- [ ] Start with small, pure Rust modules and evaluate Rust-to-Lean extraction
+      tools such as Aeneas or hax before committing to a large proof effort.
+- [ ] Compare Lean against Rust-specific options (Kani, Prusti, Creusot) and
+      record which invariants are practical to prove.
+- [ ] Keep Lean out of the build and runtime until a concrete, bounded proof
+      target justifies the tooling cost.

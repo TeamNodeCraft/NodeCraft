@@ -51,6 +51,24 @@ pub struct CableVertex {
     pub _pad: [f32; 2],
 }
 
+/// One SDF card/port/button instance in graph space.
+///
+/// Cards use `kind == 0` (rounded box); ports and buttons use `kind == 1`
+/// (circle). The shader expands a shared quad and evaluates the signed-distance
+/// field in the fragment stage.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct ShapeInstance {
+    pub center: [f32; 2],
+    pub size: [f32; 2],
+    pub fill: [f32; 4],
+    pub stroke: [f32; 4],
+    pub radius: f32,
+    pub stroke_width: f32,
+    pub kind: f32,
+    pub _pad: f32,
+}
+
 #[derive(Clone)]
 pub struct NodeText {
     pub text: String,
@@ -64,9 +82,11 @@ pub struct NodeText {
 pub struct NodeDraw {
     pub geometry_key: u64,
     pub geometry: Option<Arc<NodeGeometry>>,
+    pub shapes: Option<Arc<Vec<ShapeInstance>>>,
     pub cables: Option<Arc<Vec<CableVertex>>>,
     pub transform: [f32; 4], // scale, offset x, offset y, unused
     pub ppp: f32,
+    pub curve_resolution: f32,
     pub texts: Vec<NodeText>,
 }
 
@@ -132,12 +152,39 @@ struct Out {
   @location(3) core_ratio: f32,
 };
 
-const SEGMENTS: f32 = 16.0;
+const BASE_SEGMENTS: f32 = 12.0;
+const MAX_SEGMENTS: f32 = 48.0;
+const ANGULAR_RESOLUTION_FACTOR: f32 = 2.0;
 
 struct Control {
   c1: vec2<f32>,
   c2: vec2<f32>,
 };
+
+// Cables that arrive almost perpendicular to their chord need more samples
+// than the straight/vertical default. Compute this per instance so only sharp
+// bends pay for the extra vertices.
+fn segment_count(a: vec2<f32>, b: vec2<f32>, control: Control) -> f32 {
+  let chord = normalize(b - a + vec2<f32>(0.00001, 0.0));
+  let start_tangent = normalize(control.c1 - a + vec2<f32>(0.00001, 0.0));
+  let end_tangent = normalize(b - control.c2 + vec2<f32>(0.00001, 0.0));
+  let start_angle = acos(clamp(dot(chord, start_tangent), -1.0, 1.0));
+  let end_angle = acos(clamp(dot(chord, end_tangent), -1.0, 1.0));
+  let angle = max(start_angle, end_angle);
+  // Continuous angular factor: a small bend gets a small increase, 45 degrees
+  // gets a moderate increase, and stronger bends keep increasing. There is no
+  // single threshold where resolution suddenly jumps.
+  let angular_factor = 1.0 + (angle / 3.14159265) * ANGULAR_RESOLUTION_FACTOR;
+
+  // The chord length is a cheap screen-space upper bound on the arc length.
+  // At far zoom the curve is small, so fewer segments are enough. At close
+  // zoom spend more of the budget on smoothness and multiply by the angular
+  // factor.
+  let screen_chord = length(b - a) * globals.screen_scale.z;
+  let length_budget = max(BASE_SEGMENTS, screen_chord / 12.0 * globals.screen_scale.w);
+  let segments = clamp(length_budget * angular_factor, BASE_SEGMENTS, MAX_SEGMENTS);
+  return round(segments);
+}
 
 fn route(a: vec2<f32>, b: vec2<f32>) -> Control {
   let dx = b.x - a.x;
@@ -173,7 +220,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   let seg = f32(vi / 6u);
   let corner = vi % 6u;
   let at_end = corner == 2u || corner == 4u || corner == 5u;
-  let t = (seg + select(0.0, 1.0, at_end)) / SEGMENTS;
+  let segments = segment_count(inst.a, inst.b, control);
+  let is_active = seg < segments;
+  var t = (seg + select(0.0, 1.0, at_end)) / segments;
+  if (!is_active) {
+    t = 1.0;
+  }
   let p = bezier(p0, p1, p2, p3, t);
   let d = tangent(p0, p1, p2, p3, t);
   var n = vec2<f32>(-d.y, d.x);
@@ -181,8 +233,15 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   n = normalize(n);
   var side = -1.0;
   if (corner == 1u || corner == 2u || corner == 4u) { side = 1.0; }
-  let base_screen = p * globals.screen_scale.z + globals.offset.xy;
-  let half_width = inst.width * 0.5 * globals.screen_scale.z;
+  var base_screen = p * globals.screen_scale.z + globals.offset.xy;
+  if (!is_active) {
+    base_screen = vec2<f32>(1.0e9, 1.0e9);
+  }
+  // Keep cables from collapsing below one physical pixel when zoomed out.
+  // MSAA smooths the edge, but a sub-pixel ribbon cannot be reconstructed by
+  // multisampling alone.
+  let screen_width = max(inst.width * globals.screen_scale.z, 1.5);
+  let half_width = screen_width * 0.5;
   let screen = base_screen + n * half_width * side;
   var out: Out;
   out.clip = vec4<f32>(
@@ -209,8 +268,90 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 "#;
 
 
+const SHAPE_SHADER: &str = r#"
+struct Globals {
+  screen_scale: vec4<f32>,
+  offset: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> globals: Globals;
+
+struct Instance {
+  @location(0) center: vec2<f32>,
+  @location(1) size: vec2<f32>,
+  @location(2) fill: vec4<f32>,
+  @location(3) stroke: vec4<f32>,
+  @location(4) radius: f32,
+  @location(5) stroke_width: f32,
+  @location(6) kind: f32,
+};
+
+struct Out {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) local: vec2<f32>,
+  @location(1) half_size: vec2<f32>,
+  @location(2) fill: vec4<f32>,
+  @location(3) stroke: vec4<f32>,
+  @location(4) radius: f32,
+  @location(5) stroke_width: f32,
+  @location(6) kind: f32,
+};
+
+fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+  let q = abs(p) - b + vec2<f32>(r);
+  return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: Instance) -> Out {
+  let corners = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+    vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0)
+  );
+  let half_size = inst.size * 0.5;
+  let pad = 2.0 / max(globals.screen_scale.z, 0.0001);
+  let local = half_size + vec2<f32>(pad);
+  let graph = inst.center + corners[vi] * local;
+  let screen = graph * globals.screen_scale.z + globals.offset.xy;
+  var out: Out;
+  out.clip = vec4<f32>(
+    screen.x / globals.screen_scale.x * 2.0 - 1.0,
+    1.0 - screen.y / globals.screen_scale.y * 2.0,
+    0.0,
+    1.0
+  );
+  out.local = corners[vi] * local;
+  out.half_size = half_size;
+  out.fill = inst.fill;
+  out.stroke = inst.stroke;
+  out.radius = inst.radius;
+  out.stroke_width = inst.stroke_width;
+  out.kind = inst.kind;
+  return out;
+}
+
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  var distance: f32;
+  if (in.kind > 0.5) {
+    distance = length(in.local) - in.half_size.x;
+  } else {
+    distance = sd_round_box(in.local, in.half_size, in.radius);
+  }
+  let aa = max(fwidth(distance), 0.0001);
+  let fill_alpha = 1.0 - smoothstep(-aa, aa, distance);
+  var stroke_alpha = 1.0 - smoothstep(-aa, aa, abs(distance) - in.stroke_width * 0.5);
+  if (in.stroke_width <= 0.0) {
+    stroke_alpha = 0.0;
+  }
+  let stroke_mix = clamp(stroke_alpha, 0.0, 1.0);
+  let alpha = max(fill_alpha * in.fill.a, stroke_alpha * in.stroke.a);
+  return vec4<f32>(mix(in.fill.rgb, in.stroke.rgb, stroke_mix), alpha);
+}
+"#;
+
 struct NodeRenderer {
     pipeline: wgpu::RenderPipeline,
+    shape_pipeline: wgpu::RenderPipeline,
     cable_pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -223,10 +364,14 @@ struct NodeRenderer {
     cable_capacity: u64,
     cable_count: u32,
     cable_key: Option<u64>,
+    shape_buffer: Option<wgpu::Buffer>,
+    shape_capacity: u64,
+    shape_count: u32,
+    shape_key: Option<u64>,
     geometry_key: Option<u64>,
 }
 
-const CABLE_SEGMENTS: u32 = 16;
+const CABLE_MAX_SEGMENTS: u32 = 48;
 
 struct GlyphonState {
     font_system: FontSystem,
@@ -322,6 +467,48 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
         cache: None,
     });
 
+    let shape_module = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("node-shape"),
+        source: wgpu::ShaderSource::Wgsl(SHAPE_SHADER.into()),
+    });
+    let shape_pipeline = rs.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("node-shape"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shape_module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ShapeInstance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                    2 => Float32x4,
+                    3 => Float32x4,
+                    4 => Float32,
+                    5 => Float32,
+                    6 => Float32
+                ],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shape_module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: rs.target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(depth_state(depth)),
+        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multiview_mask: None,
+        cache: None,
+    });
+
     let cable_module = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("node-cable"),
         source: wgpu::ShaderSource::Wgsl(CABLE_SHADER.into()),
@@ -382,6 +569,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
             cable_pipeline,
             uniform,
             bind,
+            shape_pipeline,
             vertex_buffer: None,
             index_buffer: None,
             vertex_capacity: 0,
@@ -391,6 +579,10 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
             cable_capacity: 0,
             cable_count: 0,
             cable_key: None,
+            shape_buffer: None,
+            shape_capacity: 0,
+            shape_count: 0,
+            shape_key: None,
             geometry_key: None,
         })));
         renderer.callback_resources.insert(Arc::new(Mutex::new(GlyphonState {
@@ -425,7 +617,7 @@ impl CallbackTrait for NodeCallback {
                 screen.size_in_pixels[0].max(1) as f32,
                 screen.size_in_pixels[1].max(1) as f32,
                 draw.transform[0] * draw.ppp,
-                0.0,
+                draw.curve_resolution,
                 draw.transform[1] * draw.ppp,
                 draw.transform[2] * draw.ppp,
                 0.0,
@@ -505,6 +697,31 @@ impl CallbackTrait for NodeCallback {
                         renderer.cable_count = 0;
                     }
                     renderer.cable_key = Some(draw.geometry_key);
+                }
+            }
+
+            if let Some(shapes) = &draw.shapes {
+                if renderer.shape_key != Some(draw.geometry_key) {
+                    let bytes = bytemuck::cast_slice(shapes.as_slice());
+                    if !bytes.is_empty() {
+                        if renderer.shape_buffer.is_none()
+                            || renderer.shape_capacity < bytes.len() as u64
+                        {
+                            let capacity = (bytes.len() as u64).next_power_of_two().max(4096);
+                            renderer.shape_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("node-shape-instances"),
+                                size: capacity,
+                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            }));
+                            renderer.shape_capacity = capacity;
+                        }
+                        queue.write_buffer(renderer.shape_buffer.as_ref().unwrap(), 0, bytes);
+                        renderer.shape_count = shapes.len() as u32;
+                    } else {
+                        renderer.shape_count = 0;
+                    }
+                    renderer.shape_key = Some(draw.geometry_key);
                 }
             }
         }
@@ -602,7 +819,15 @@ impl CallbackTrait for NodeCallback {
                         pass.set_pipeline(&renderer.cable_pipeline);
                         pass.set_bind_group(0, &renderer.bind, &[]);
                         pass.set_vertex_buffer(0, cb.slice(..));
-                        pass.draw(0..CABLE_SEGMENTS * 6, 0..renderer.cable_count);
+                        pass.draw(0..CABLE_MAX_SEGMENTS * 6, 0..renderer.cable_count);
+                    }
+                }
+                if let Some(sb) = &renderer.shape_buffer {
+                    if renderer.shape_count > 0 {
+                        pass.set_pipeline(&renderer.shape_pipeline);
+                        pass.set_bind_group(0, &renderer.bind, &[]);
+                        pass.set_vertex_buffer(0, sb.slice(..));
+                        pass.draw(0..6, 0..renderer.shape_count);
                     }
                 }
                 if let (Some(vb), Some(ib)) = (&renderer.vertex_buffer, &renderer.index_buffer) {

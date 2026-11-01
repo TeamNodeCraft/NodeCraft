@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt as _;
 
 use egui_wgpu::{wgpu, CallbackTrait, RenderState};
 use solidcraft_geom::{Aabb3, Mesh as CraftMesh, Vec3};
@@ -28,9 +29,28 @@ const EMPTY_GRID_RADIUS: f64 = 100.0;
 /// palette's darkest colour instead of whatever the window compositor leaves behind.
 struct ViewportClear {
     pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+}
+
+impl ViewportClear {
+    fn set_background(&self, queue: &wgpu::Queue, rgba: [u8; 4]) {
+        let color = [
+            f32::from(rgba[0]) / 255.0,
+            f32::from(rgba[1]) / 255.0,
+            f32::from(rgba[2]) / 255.0,
+            f32::from(rgba[3]) / 255.0,
+        ];
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&color));
+    }
 }
 
 const CLEAR_SHADER: &str = r#"
+struct ClearUniform {
+  color: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> clear: ClearUniform;
+
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
     var p = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
@@ -38,7 +58,7 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 @fragment
 fn fs() -> @location(0) vec4<f32> {
-    return vec4<f32>(28.0 / 255.0, 28.0 / 255.0, 30.0 / 255.0, 1.0);
+    return clear.color;
 }
 "#;
 
@@ -46,7 +66,9 @@ fn fs() -> @location(0) vec4<f32> {
 ///
 /// macOS defaults to 4x; other platforms default to 1x because the surface
 /// sample count is chosen before the adapter is queried. Set NODECRAFT_MSAA=4
-/// to opt in on a platform that supports it.
+/// to opt in on a platform that supports it. The Metal Bgra8Unorm format used
+/// by the egui pipeline advertises 1x/2x/4x here; 8x is not a valid surface
+/// sample count, so the canvas must not request it.
 pub fn msaa_samples() -> u32 {
     std::env::var("NODECRAFT_MSAA")
         .ok()
@@ -686,6 +708,7 @@ pub struct GpuViewport {
     object: Arc<Mutex<ObjectRenderer>>,
     view: ViewSettings,
     chrome_visible: bool,
+    background: [u8; 4],
 }
 
 impl GpuViewport {
@@ -715,9 +738,44 @@ impl GpuViewport {
             label: Some("viewport-clear"),
             source: wgpu::ShaderSource::Wgsl(CLEAR_SHADER.into()),
         });
+        let bind_group_layout =
+            rs.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("viewport-clear-bind-layout"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }],
+                });
+        let theme = crate::theme::get();
+        let background = [
+            f32::from(theme.window[0]) / 255.0,
+            f32::from(theme.window[1]) / 255.0,
+            f32::from(theme.window[2]) / 255.0,
+            f32::from(theme.window[3]) / 255.0,
+        ];
+        let clear_buffer = rs.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("viewport-clear-background"),
+            contents: bytemuck::cast_slice(&background),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let clear_bind_group = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport-clear-bind"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: clear_buffer.as_entire_binding(),
+            }],
+        });
         let layout = rs.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-clear-layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
         let pipeline = rs.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -752,7 +810,14 @@ impl GpuViewport {
             multiview_mask: None,
             cache: None,
         });
-        rs.renderer.write().callback_resources.insert(ViewportClear { pipeline });
+        rs.renderer
+            .write()
+            .callback_resources
+            .insert(ViewportClear {
+                pipeline,
+                bind_group: clear_bind_group,
+                buffer: clear_buffer,
+            });
         rs.renderer.write().callback_resources.insert(GridRenderer::install(
             &rs.device,
             rs.target_format,
@@ -782,6 +847,7 @@ impl GpuViewport {
             object,
             view: ViewSettings::default(),
             chrome_visible: true,
+            background: crate::theme::get().window,
         })
     }
 
@@ -791,6 +857,10 @@ impl GpuViewport {
 
     pub fn set_chrome_visible(&mut self, visible: bool) {
         self.chrome_visible = visible;
+    }
+
+    pub fn set_background(&mut self, rgba: [u8; 4]) {
+        self.background = rgba;
     }
 
     pub fn set_view(&mut self, view: ViewSettings, display: Option<&DisplayMesh>) {
@@ -1028,6 +1098,7 @@ impl GpuViewport {
         };
         GpuCallback {
             object,
+            background: self.background,
             view: self.view,
             chrome_visible: self.chrome_visible,
             frame: Frame {
@@ -1094,6 +1165,7 @@ fn crop_view_proj(vp: [[f32; 4]; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
 /// One viewport draw as an egui paint callback.
 pub struct GpuCallback {
     pub object: ObjectUniforms,
+    pub background: [u8; 4],
     pub view: ViewSettings,
     pub chrome_visible: bool,
     pub frame: Frame,
@@ -1111,6 +1183,9 @@ impl CallbackTrait for GpuCallback {
         encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(clear) = resources.get::<ViewportClear>() {
+            clear.set_background(queue, self.background);
+        }
         if let Some(grid) = resources.get::<GridRenderer>() {
             grid.prepare(queue, &self.grid);
         }
@@ -1148,6 +1223,7 @@ impl CallbackTrait for GpuCallback {
                 1.0,
             );
             pass.set_pipeline(&clear.pipeline);
+            pass.set_bind_group(0, &clear.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         if let Some(object) = resources.get::<Arc<Mutex<ObjectRenderer>>>() {
