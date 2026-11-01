@@ -1,0 +1,1 @@
+fn main(){let p=std::env::args().nth(1).unwrap();let id:u32=std::env::args().nth(2).unwrap().parse().unwrap();let t=std::fs::read_to_string(&p).unwrap();let f=nodecraft_step::StepFile::parse(&t).unwrap();println!("{:?}",f.entities.get(&id));}

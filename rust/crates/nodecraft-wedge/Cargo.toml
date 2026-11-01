@@ -1,0 +1,10 @@
+[package]
+name = "nodecraft-wedge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# solidcore has no wedge (or generic profile-extrusion) primitive, so the wedge is
+# tessellated analytically; the only dependency is the shared mesh protocol.
+[dependencies]
+nodecraft-protocol = { path = "../nodecraft-protocol" }

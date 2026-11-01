@@ -1,0 +1,8 @@
+{"evaluationMs":1099.2295000000001,"passed":true,"previousPassingMs":null,"profile":"release","test":"train_graph_execution_regression","timestampUnix":1792914921}
+{"evaluationMs":1135.608333,"passed":false,"previousPassingMs":1099.2295,"profile":"release","test":"train_graph_execution_regression","timestampUnix":1792917093}
+{"evaluationMs": 1158.114, "passed": true, "previousPassingMs": 1099.2295, "profile": "release", "test": "train_graph_execution_regression", "timestampUnix": 1792917105}
+{"evaluationMs":1121.762333,"passed":true,"previousPassingMs":1158.114,"profile":"release","test":"train_graph_execution_regression","timestampUnix":1792917109}
+{"evaluationMs":1111.586125,"gitHash":"b1c856d+","passed":true,"previousPassingMs":1121.762333,"profile":"release","solidcoreHash":"70146d6fcd9c","test":"train_graph_execution_regression","timestampUnix":1792917293}
+{"evaluationMs":1110.3329589999998,"gitHash":"9af5956+","passed":true,"previousPassingMs":1111.586125,"profile":"release","solidcoreHash":"70146d6fcd9c","test":"train_graph_execution_regression","timestampUnix":1792917301}
+{"evaluationMs":1115.2145,"gitHash":"08a5e34","passed":true,"previousPassingMs":1110.3329589999998,"profile":"release","solidcoreHash":"70146d6fcd9c","test":"train_graph_execution_regression","timestampUnix":1792917312}
+{"evaluationMs":1108.544625,"gitHash":"1748a78","passed":true,"previousPassingMs":1115.2145,"profile":"release","solidcoreHash":"70146d6fcd9c","test":"train_graph_execution_regression","timestampUnix":1792919756}

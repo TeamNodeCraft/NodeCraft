@@ -1,0 +1,9 @@
+[package]
+name = "nodecraft-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nodecraft-protocol = { path = "../nodecraft-protocol" }
+serde_json.workspace = true

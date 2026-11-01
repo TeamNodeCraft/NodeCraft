@@ -1,0 +1,17 @@
+[package]
+name = "nodecraft-node-canvas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable egui node canvas for NodeCraft"
+publish = false
+
+[dependencies]
+egui = "0.36"
+egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+nodecraft-session = { path = "../nodecraft-session", default-features = false }
+lyon = "1.0"
+egui-wgpu = "0.36"
+wgpu = "30"
+glyphon = "0.12"
+bytemuck = "1"

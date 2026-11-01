@@ -1,0 +1,32 @@
+{
+  "format": "nodecraft",
+  "version": 1,
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "stepimporter",
+      "values": {
+        "heal": true,
+        "path": "./samples/rust-export.step"
+      },
+      "x": 2400,
+      "y": 2200,
+      "cache": {
+        "key": "step-export",
+        "state": "dirty",
+        "upstream": []
+      }
+    }
+  ],
+  "connections": [],
+  "viewedNodes": {
+    "1": "n1"
+  },
+  "view": {
+    "pan": {
+      "x": 0,
+      "y": 0
+    },
+    "zoom": 0.9
+  }
+}

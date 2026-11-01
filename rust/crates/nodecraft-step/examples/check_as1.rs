@@ -1,0 +1,1 @@
+fn main(){for f in std::env::args().skip(1){println!("{}",f);match nodecraft_step::read_planar_solids(&f){Ok(b)=>println!(" bodies {} faces {:?}",b.len(),b.iter().map(|x|x.faces.len()).collect::<Vec<_>>()),Err(e)=>println!(" err {e}")}}}

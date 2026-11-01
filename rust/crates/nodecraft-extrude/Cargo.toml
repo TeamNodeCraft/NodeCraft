@@ -1,0 +1,12 @@
+[package]
+name = "nodecraft-extrude"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solidcore = { git = "https://github.com/tangency-labs/solidcore", branch = "main" }
+nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-solidcore = { path = "../nodecraft-solidcore" }
+nodecraft-step = { path = "../nodecraft-step" }
+serde_json.workspace = true

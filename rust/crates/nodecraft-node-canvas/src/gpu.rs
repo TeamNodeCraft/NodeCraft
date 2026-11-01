@@ -1,0 +1,715 @@
+//! Lyon-tessellated node geometry plus glyphon text, retained in wgpu buffers.
+//!
+//! Graph-space card, port and wire geometry is tessellated only when the graph or
+//! selection changes. Navigation updates a small transform uniform; it does not
+//! re-upload vertex data. Glyphon owns the text atlas and shapes labels.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use bytemuck::{Pod, Zeroable};
+
+
+use egui_wgpu::{wgpu, CallbackTrait, RenderState};
+use glyphon::{
+    Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+use lyon::math::point;
+use lyon::path::{Path, Winding};
+use lyon::tessellation::{
+    BuffersBuilder, FillOptions, FillTessellator, FillVertex, LineCap, LineJoin, StrokeOptions,
+    StrokeTessellator, StrokeVertex, VertexBuffers,
+};
+
+#[allow(dead_code)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Vertex {
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+}
+
+#[derive(Default)]
+pub struct NodeGeometry {
+    pub vertices: Vec<Vertex>,
+    pub indices: Vec<u32>,
+}
+
+/// One cable instance: endpoints in graph space, colours, and graph-space
+/// outline width. The vertex shader routes and expands the ribbon; no CPU
+/// tessellation is needed per cable.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct CableVertex {
+    pub a: [f32; 2],
+    pub b: [f32; 2],
+    pub core: [f32; 4],
+    pub outline: [f32; 4],
+    pub width: f32,
+    pub core_ratio: f32,
+    pub _pad: [f32; 2],
+}
+
+#[derive(Clone)]
+pub struct NodeText {
+    pub text: String,
+    pub center_x: f32,
+    pub top: f32,
+    pub size: f32,
+    pub color: [u8; 4],
+    pub bounds: TextBounds,
+}
+
+pub struct NodeDraw {
+    pub geometry_key: u64,
+    pub geometry: Option<Arc<NodeGeometry>>,
+    pub cables: Option<Arc<Vec<CableVertex>>>,
+    pub transform: [f32; 4], // scale, offset x, offset y, unused
+    pub ppp: f32,
+    pub texts: Vec<NodeText>,
+}
+
+const SHADER: &str = r#"
+struct Globals {
+  screen_scale: vec4<f32>, // screen x, screen y, scale, unused
+  offset: vec4<f32>,       // offset x, offset y, unused, unused
+};
+@group(0) @binding(0) var<uniform> globals: Globals;
+
+struct VertexIn {
+  @location(0) position: vec2<f32>,
+  @location(1) color: vec4<f32>,
+};
+struct VertexOut {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs(in: VertexIn) -> VertexOut {
+  // Keep geometry on subpixel coordinates so MSAA can antialias card edges,
+  // wire curves and ports. The pan itself is still pixel-quantized, which is
+  // enough to keep labels stable without snapping every vertex.
+  let p = in.position * globals.screen_scale.z + globals.offset.xy;
+  var out: VertexOut;
+  out.clip = vec4(
+    p.x / globals.screen_scale.x * 2.0 - 1.0,
+    1.0 - p.y / globals.screen_scale.y * 2.0,
+    0.0,
+    1.0
+  );
+  out.color = in.color;
+  return out;
+}
+
+@fragment
+fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+  return in.color;
+}
+"#;
+
+const CABLE_SHADER: &str = r#"
+struct Globals {
+  screen_scale: vec4<f32>,
+  offset: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> globals: Globals;
+
+struct Instance {
+  @location(0) a: vec2<f32>,
+  @location(1) b: vec2<f32>,
+  @location(2) core: vec4<f32>,
+  @location(3) outline: vec4<f32>,
+  @location(4) width: f32,
+  @location(5) core_ratio: f32,
+};
+struct Out {
+  @builtin(position) clip: vec4<f32>,
+  @location(0) core: vec4<f32>,
+  @location(1) outline: vec4<f32>,
+  @location(2) side: f32,
+  @location(3) core_ratio: f32,
+};
+
+const SEGMENTS: f32 = 16.0;
+
+struct Control {
+  c1: vec2<f32>,
+  c2: vec2<f32>,
+};
+
+fn route(a: vec2<f32>, b: vec2<f32>) -> Control {
+  let dx = b.x - a.x;
+  let dy = b.y - a.y;
+  let distance = max(length(vec2<f32>(dx, dy)), 0.0001);
+  let length_factor = clamp(distance / 360.0, 0.0, 1.0);
+  let rise_factor = clamp(max(a.y - b.y, 0.0) / distance, 0.0, 1.0);
+  let base = 14.0 + 126.0 * length_factor;
+  let handle = clamp(base * (1.0 + 1.4 * rise_factor), 14.0, 220.0);
+  return Control(
+    vec2<f32>(a.x, a.y + handle),
+    vec2<f32>(b.x, b.y - handle),
+  );
+}
+
+fn bezier(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -> vec2<f32> {
+  let u = 1.0 - t;
+  return p0 * (u*u*u) + p1 * (3.0*u*u*t) + p2 * (3.0*u*t*t) + p3 * (t*t*t);
+}
+
+fn tangent(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -> vec2<f32> {
+  let u = 1.0 - t;
+  return (p1 - p0) * (3.0*u*u) + (p2 - p1) * (6.0*u*t) + (p3 - p2) * (3.0*t*t);
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: Instance) -> Out {
+  let control = route(inst.a, inst.b);
+  let p0 = inst.a;
+  let p1 = control.c1;
+  let p2 = control.c2;
+  let p3 = inst.b;
+  let seg = f32(vi / 6u);
+  let corner = vi % 6u;
+  let at_end = corner == 2u || corner == 4u || corner == 5u;
+  let t = (seg + select(0.0, 1.0, at_end)) / SEGMENTS;
+  let p = bezier(p0, p1, p2, p3, t);
+  let d = tangent(p0, p1, p2, p3, t);
+  var n = vec2<f32>(-d.y, d.x);
+  if (length(n) <= 0.000001) { n = vec2<f32>(0.0, 1.0); }
+  n = normalize(n);
+  var side = -1.0;
+  if (corner == 1u || corner == 2u || corner == 4u) { side = 1.0; }
+  let base_screen = p * globals.screen_scale.z + globals.offset.xy;
+  let half_width = inst.width * 0.5 * globals.screen_scale.z;
+  let screen = base_screen + n * half_width * side;
+  var out: Out;
+  out.clip = vec4<f32>(
+    screen.x / globals.screen_scale.x * 2.0 - 1.0,
+    1.0 - screen.y / globals.screen_scale.y * 2.0,
+    0.0,
+    1.0
+  );
+  out.core = inst.core;
+  out.outline = inst.outline;
+  out.side = side;
+  out.core_ratio = inst.core_ratio;
+  return out;
+}
+
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  let d = abs(in.side);
+  let outer = 1.0 - smoothstep(0.84, 1.0, d);
+  let core_mix = smoothstep(in.core_ratio - 0.08, in.core_ratio + 0.08, d);
+  let colour = mix(in.core, in.outline, core_mix);
+  return vec4<f32>(colour.rgb, colour.a * outer);
+}
+"#;
+
+
+struct NodeRenderer {
+    pipeline: wgpu::RenderPipeline,
+    cable_pipeline: wgpu::RenderPipeline,
+    uniform: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    vertex_buffer: Option<wgpu::Buffer>,
+    index_buffer: Option<wgpu::Buffer>,
+    vertex_capacity: u64,
+    index_capacity: u64,
+    index_count: u32,
+    cable_buffer: Option<wgpu::Buffer>,
+    cable_capacity: u64,
+    cable_count: u32,
+    cable_key: Option<u64>,
+    geometry_key: Option<u64>,
+}
+
+const CABLE_SEGMENTS: u32 = 16;
+
+struct GlyphonState {
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    _cache: Cache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    renderer: TextRenderer,
+    /// Shaped label buffers retained across frames; positions are applied per frame
+    /// through TextArea, so pan/zoom does not reshape text.
+    buffers: HashMap<(String, u32), TextBuffer>,
+}
+
+fn depth_state(format: wgpu::TextureFormat) -> wgpu::DepthStencilState {
+    wgpu::DepthStencilState {
+        format,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+fn load_font_system() -> FontSystem {
+    let mut db = glyphon::cosmic_text::fontdb::Database::new();
+    db.load_font_data(include_bytes!("../assets/InterVariable.ttf").to_vec());
+    db.set_sans_serif_family("Inter");
+    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
+}
+
+pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) -> bool {
+
+    let uniform = rs.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("node-lyon-globals"),
+        size: 32,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_layout = rs.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("node-lyon-bgl"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let bind = rs.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("node-lyon-bg"),
+        layout: &bind_layout,
+        entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
+    });
+    let module = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("node-lyon"),
+        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+    });
+    let layout = rs.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("node-lyon-layout"),
+        bind_group_layouts: &[Some(&bind_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = rs.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("node-lyon"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Vertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: rs.target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(depth_state(depth)),
+        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let cable_module = rs.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("node-cable"),
+        source: wgpu::ShaderSource::Wgsl(CABLE_SHADER.into()),
+    });
+    let cable_pipeline = rs.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("node-cable"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &cable_module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<CableVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                    2 => Float32x4,
+                    3 => Float32x4,
+                    4 => Float32,
+                    5 => Float32
+                ],
+            })],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &cable_module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: rs.target_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(depth_state(depth)),
+        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multiview_mask: None,
+        cache: None,
+    });
+
+    let cache = Cache::new(&rs.device);
+    let mut atlas = TextAtlas::new(&rs.device, &rs.queue, &cache, rs.target_format);
+    let text_renderer = TextRenderer::new(
+        &mut atlas,
+        &rs.device,
+        wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        Some(depth_state(depth)),
+    );
+    let viewport = Viewport::new(&rs.device, &cache);
+    let font_system = load_font_system();
+    let swash_cache = SwashCache::new();
+
+    {
+        let mut renderer = rs.renderer.write();
+        renderer.callback_resources.insert(Arc::new(Mutex::new(NodeRenderer {
+            pipeline,
+            cable_pipeline,
+            uniform,
+            bind,
+            vertex_buffer: None,
+            index_buffer: None,
+            vertex_capacity: 0,
+            index_capacity: 0,
+            index_count: 0,
+            cable_buffer: None,
+            cable_capacity: 0,
+            cable_count: 0,
+            cable_key: None,
+            geometry_key: None,
+        })));
+        renderer.callback_resources.insert(Arc::new(Mutex::new(GlyphonState {
+            font_system,
+            swash_cache,
+            _cache: cache,
+            viewport,
+            atlas,
+            renderer: text_renderer,
+            buffers: HashMap::new(),
+        })));
+    }
+    true
+}
+
+pub struct NodeCallback(pub NodeDraw);
+
+impl CallbackTrait for NodeCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let draw = &self.0;
+        let Some(renderer) = resources.get::<Arc<Mutex<NodeRenderer>>>() else { return Vec::new() };
+        if let Ok(mut renderer) = renderer.lock() {
+            // Two vec4s avoid any vec2/struct padding ambiguity in WGSL uniforms.
+            let globals = [
+                screen.size_in_pixels[0].max(1) as f32,
+                screen.size_in_pixels[1].max(1) as f32,
+                draw.transform[0] * draw.ppp,
+                0.0,
+                draw.transform[1] * draw.ppp,
+                draw.transform[2] * draw.ppp,
+                0.0,
+                0.0,
+            ];
+            queue.write_buffer(&renderer.uniform, 0, &globals.map(f32::to_le_bytes).concat());
+            if let Some(geometry) = &draw.geometry {
+                if renderer.geometry_key != Some(draw.geometry_key) {
+                    let vertex_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            geometry.vertices.as_ptr().cast::<u8>(),
+                            std::mem::size_of_val(geometry.vertices.as_slice()),
+                        )
+                    };
+                    let index_bytes: &[u8] = unsafe {
+                        std::slice::from_raw_parts(
+                            geometry.indices.as_ptr().cast::<u8>(),
+                            std::mem::size_of_val(geometry.indices.as_slice()),
+                        )
+                    };
+                    if !vertex_bytes.is_empty() && !index_bytes.is_empty() {
+                        // Keep buffers alive across edits/drags. Grow only when the
+                        // current capacity is insufficient; otherwise update in place.
+                        if renderer.vertex_buffer.is_none()
+                            || renderer.vertex_capacity < vertex_bytes.len() as u64
+                        {
+                            let capacity = (vertex_bytes.len() as u64).next_power_of_two().max(4096);
+                            renderer.vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("node-lyon-vertices"),
+                                size: capacity,
+                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            }));
+                            renderer.vertex_capacity = capacity;
+                        }
+                        queue.write_buffer(renderer.vertex_buffer.as_ref().unwrap(), 0, vertex_bytes);
+
+                        if renderer.index_buffer.is_none()
+                            || renderer.index_capacity < index_bytes.len() as u64
+                        {
+                            let capacity = (index_bytes.len() as u64).next_power_of_two().max(4096);
+                            renderer.index_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("node-lyon-indices"),
+                                size: capacity,
+                                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            }));
+                            renderer.index_capacity = capacity;
+                        }
+                        queue.write_buffer(renderer.index_buffer.as_ref().unwrap(), 0, index_bytes);
+                        renderer.index_count = geometry.indices.len() as u32;
+                    } else {
+                        renderer.index_count = 0;
+                    }
+                    renderer.geometry_key = Some(draw.geometry_key);
+                }
+            }
+            if let Some(cables) = &draw.cables {
+                if renderer.cable_key != Some(draw.geometry_key) {
+                    let bytes = bytemuck::cast_slice(cables.as_slice());
+                    if !bytes.is_empty() {
+                        if renderer.cable_buffer.is_none()
+                            || renderer.cable_capacity < bytes.len() as u64
+                        {
+                            let capacity = (bytes.len() as u64).next_power_of_two().max(4096);
+                            renderer.cable_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("node-cable-instances"),
+                                size: capacity,
+                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            }));
+                            renderer.cable_capacity = capacity;
+                        }
+                        queue.write_buffer(renderer.cable_buffer.as_ref().unwrap(), 0, bytes);
+                        renderer.cable_count = cables.len() as u32;
+                    } else {
+                        renderer.cable_count = 0;
+                    }
+                    renderer.cable_key = Some(draw.geometry_key);
+                }
+            }
+        }
+
+        let Some(glyphon) = resources.get::<Arc<Mutex<GlyphonState>>>() else { return Vec::new() };
+        if let Ok(mut glyphon) = glyphon.lock() {
+            glyphon.viewport.update(
+                queue,
+                Resolution {
+                    width: screen.size_in_pixels[0].max(1),
+                    height: screen.size_in_pixels[1].max(1),
+                },
+            );
+            let GlyphonState {
+                font_system,
+                swash_cache,
+                viewport,
+                atlas,
+                renderer,
+                buffers,
+                ..
+            } = &mut *glyphon;
+            if buffers.len() > 4096 {
+                buffers.clear();
+            }
+            for text in &draw.texts {
+                let size = ((text.size * draw.ppp) * 4.0).round() / 4.0;
+                let key = (text.text.clone(), size.to_bits());
+                if !buffers.contains_key(&key) {
+                    let mut buffer = TextBuffer::new(
+                        font_system,
+                        Metrics::new(size, size * 1.25),
+                    );
+                    buffer.set_size(None, None);
+                    buffer.set_text(
+                        &text.text,
+                        &Attrs::new().family(Family::SansSerif),
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buffer.shape_until_scroll(font_system, false);
+                    buffers.insert(key, buffer);
+                }
+            }
+            let areas: Vec<TextArea<'_>> = draw
+                .texts
+                .iter()
+                .filter_map(|text| {
+                    let size = ((text.size * draw.ppp) * 4.0).round() / 4.0;
+                    let key = (text.text.clone(), size.to_bits());
+                    let buffer = buffers.get(&key)?;
+                    let width = buffer
+                        .layout_runs()
+                        .map(|run| run.line_w)
+                        .fold(0.0_f32, f32::max);
+                    Some(TextArea {
+                        buffer,
+                        left: (text.center_x * draw.ppp - width * 0.5).round(),
+                        top: (text.top * draw.ppp).round(),
+                        scale: 1.0,
+                        bounds: text.bounds,
+                        default_color: glyphon::Color::rgba(
+                            text.color[0],
+                            text.color[1],
+                            text.color[2],
+                            text.color[3],
+                        ),
+                        custom_glyphs: &[],
+                    })
+                })
+                .collect();
+            let _ = renderer.prepare(
+                device,
+                queue,
+                font_system,
+                atlas,
+                viewport,
+                areas,
+                swash_cache,
+            );
+        }
+        Vec::new()
+    }
+
+    fn paint(
+        &self,
+        _info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Some(renderer) = resources.get::<Arc<Mutex<NodeRenderer>>>() {
+            if let Ok(renderer) = renderer.lock() {
+                if let Some(cb) = &renderer.cable_buffer {
+                    if renderer.cable_count > 0 {
+                        pass.set_pipeline(&renderer.cable_pipeline);
+                        pass.set_bind_group(0, &renderer.bind, &[]);
+                        pass.set_vertex_buffer(0, cb.slice(..));
+                        pass.draw(0..CABLE_SEGMENTS * 6, 0..renderer.cable_count);
+                    }
+                }
+                if let (Some(vb), Some(ib)) = (&renderer.vertex_buffer, &renderer.index_buffer) {
+                    pass.set_pipeline(&renderer.pipeline);
+                    pass.set_bind_group(0, &renderer.bind, &[]);
+                    pass.set_vertex_buffer(0, vb.slice(..));
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..renderer.index_count, 0, 0..1);
+                }
+            }
+        }
+        if let Some(glyphon) = resources.get::<Arc<Mutex<GlyphonState>>>() {
+            if let Ok(glyphon) = glyphon.lock() {
+                let _ = glyphon.renderer.render(&glyphon.atlas, &glyphon.viewport, pass);
+            }
+        }
+    }
+}
+
+// --- Lyon geometry construction -------------------------------------------------
+
+pub struct GeometryBuilder {
+    buffers: VertexBuffers<Vertex, u32>,
+    fill: FillTessellator,
+    stroke: StrokeTessellator,
+}
+
+impl Default for GeometryBuilder {
+    fn default() -> Self {
+        Self {
+            buffers: VertexBuffers::new(),
+            fill: FillTessellator::new(),
+            stroke: StrokeTessellator::new(),
+        }
+    }
+}
+
+impl GeometryBuilder {
+    pub fn fill_path(&mut self, path: &Path, color: [f32; 4]) {
+        let mut builder = BuffersBuilder::new(&mut self.buffers, |v: FillVertex<'_>| {
+            let p = v.position();
+            Vertex { position: [p.x, p.y], color }
+        });
+        let _ = self.fill.tessellate_path(path, &FillOptions::default(), &mut builder);
+    }
+
+    pub fn stroke_path(&mut self, path: &Path, color: [f32; 4], width: f32) {
+        let mut builder = BuffersBuilder::new(&mut self.buffers, |v: StrokeVertex<'_, '_>| {
+            let p = v.position();
+            Vertex { position: [p.x, p.y], color }
+        });
+        let options = StrokeOptions::default()
+            .with_line_width(width)
+            .with_line_cap(LineCap::Round)
+            .with_line_join(LineJoin::Round);
+        let _ = self.stroke.tessellate_path(path, &options, &mut builder);
+    }
+
+    pub fn finish(self) -> NodeGeometry {
+        NodeGeometry { vertices: self.buffers.vertices, indices: self.buffers.indices }
+    }
+}
+
+pub fn squircle_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Path {
+    let rect = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h));
+    let points = crate::squircle::points(rect, radius);
+    let mut builder = Path::builder();
+    let Some(first) = points.first() else { return builder.build() };
+    builder.begin(point(first.x, first.y));
+    for p in &points[1..] {
+        builder.line_to(point(p.x, p.y));
+    }
+    builder.end(true);
+    builder.build()
+}
+
+
+pub fn circle_path(cx: f32, cy: f32, radius: f32) -> Path {
+    let mut builder = Path::builder();
+    builder.add_circle(point(cx, cy), radius, Winding::Positive);
+    builder.build()
+}
+
+pub fn wire_path(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
+    let route = crate::routing::route(x0, y0, x1, y1, 1.0);
+    let mut builder = Path::builder();
+    builder.begin(point(x0, y0));
+    builder.cubic_bezier_to(
+        point(route.control1.x, route.control1.y),
+        point(route.control2.x, route.control2.y),
+        point(x1, y1),
+    );
+    builder.end(false);
+    builder.build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lyon_builds_card_and_wire_geometry() {
+        let mut builder = GeometryBuilder::default();
+        builder.fill_path(&squircle_rect_path(0.0, 0.0, 232.0, 104.0, 26.0), [1.0, 1.0, 1.0, 1.0]);
+        builder.stroke_path(&wire_path(10.0, 10.0, 300.0, 300.0), [1.0, 1.0, 1.0, 1.0], 2.4);
+        let geometry = builder.finish();
+        assert!(!geometry.vertices.is_empty());
+        assert!(!geometry.indices.is_empty());
+    }
+}

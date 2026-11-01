@@ -1,0 +1,381 @@
+//! Durable graph documents.
+//!
+//! A `.nodecraft` file is the authoritative graph. Loading canonicalizes values and
+//! validates topology; saving is atomic (same-directory temp file + rename) and writes
+//! a stable JSON document. Runtime cache keys, progress, and selection are not part of
+//! the durable document.
+
+use crate::{canonicalize_node, ContentHash, GraphDocument, Session, SessionError};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Stable identity of a document's graph content.
+#[must_use]
+pub fn document_hash(document: &GraphDocument) -> Result<ContentHash, SessionError> {
+    let hashes = document.node_hashes()?;
+    let mut combined = 0u128;
+    for hash in hashes.values() {
+        combined = combined.wrapping_add(hash.0).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+    Ok(ContentHash(combined))
+}
+
+/// Reads, canonicalizes and validates a `.nodecraft` document.
+pub fn load(path: &Path) -> Result<GraphDocument, String> {
+    let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut document: GraphDocument = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    for node in &mut document.nodes { canonicalize_node(node); }
+    document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(document)
+}
+
+/// Writes a document atomically. The temp file lives beside the target so the final
+/// rename stays on one filesystem.
+pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> {
+    let mut document = document.clone();
+    for node in &mut document.nodes { canonicalize_node(node); }
+    document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
+    let value = serde_json::to_value(&document).map_err(|error| error.to_string())?;
+    save_value_atomic(path, &value)
+}
+
+/// Save an editor envelope with canonical graph values merged into it.
+pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &GraphDocument) -> Result<(), String> {
+    let mut canonical = document.clone();
+    for node in &mut canonical.nodes { canonicalize_node(node); }
+    canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
+    value["nodes"] = serde_json::to_value(&canonical.nodes).map_err(|error| error.to_string())?;
+    value["connections"] = serde_json::to_value(&canonical.connections).map_err(|error| error.to_string())?;
+    value["schemaVersion"] = serde_json::json!(canonical.schema_version);
+    save_value_atomic(path, value)
+}
+
+/// Atomic save for a document envelope that carries editor metadata (view state)
+/// beside the graph. The caller is responsible for canonical graph validation.
+pub fn save_value_atomic(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| format!("{}: invalid file name", path.display()))?;
+    let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::File::create(&temp).map_err(|error| format!("{}: {error}", temp.display()))?;
+        use std::io::Write as _;
+        file.write_all(&bytes).map_err(|error| format!("{}: {error}", temp.display()))?;
+        file.sync_all().map_err(|error| format!("{}: {error}", temp.display()))?;
+        std::fs::rename(&temp, path).map_err(|error| format!("{}: {error}", path.display()))
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result
+}
+
+/// How a linked part follows its external source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LinkMode {
+    FollowLatest,
+    Pinned,
+}
+
+/// One project's reference to an external `.nodecraft` document.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkedPart {
+    pub document_id: String,
+    pub path: PathBuf,
+    pub content_hash: ContentHash,
+    pub mode: LinkMode,
+}
+
+/// A linked file that changed on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkChange {
+    pub host_id: String,
+    pub link_id: String,
+    pub path: PathBuf,
+    pub old_hash: ContentHash,
+    pub new_hash: ContentHash,
+    pub mode: LinkMode,
+}
+
+/// In-memory registry of open/linked documents, keyed by stable document id.
+#[derive(Clone, Debug, Default)]
+pub struct DocumentStore {
+    documents: BTreeMap<String, GraphDocument>,
+    sessions: BTreeMap<String, Session>,
+    paths: BTreeMap<String, PathBuf>,
+    links: BTreeMap<String, BTreeMap<String, LinkedPart>>,
+}
+
+impl DocumentStore {
+    #[must_use]
+    pub fn new() -> Self { Self::default() }
+
+    pub fn insert(&mut self, id: impl Into<String>, mut document: GraphDocument) -> Result<(), SessionError> {
+        for node in &mut document.nodes { canonicalize_node(node); }
+        document.node_hashes()?;
+        let id = id.into();
+        self.documents.insert(id, document);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn get(&self, id: &str) -> Option<&GraphDocument> { self.documents.get(id) }
+
+    pub fn documents(&self) -> impl Iterator<Item = (&String, &GraphDocument)> {
+        self.documents.iter()
+    }
+
+    #[must_use]
+    pub fn session(&self, id: &str) -> Option<&Session> { self.sessions.get(id) }
+
+    #[must_use]
+    pub fn session_mut(&mut self, id: &str) -> Option<&mut Session> { self.sessions.get_mut(id) }
+
+    /// Update a document from its session and keep the durable graph in sync.
+    pub fn set_session(&mut self, id: impl Into<String>, session: Session) -> Result<(), SessionError> {
+        let id = id.into();
+        session.document().node_hashes()?;
+        self.documents.insert(id.clone(), session.document().clone());
+        self.sessions.insert(id, session);
+        Ok(())
+    }
+
+    pub fn set_path(&mut self, id: &str, path: impl Into<PathBuf>) {
+        self.paths.insert(id.to_string(), path.into());
+    }
+
+    pub fn clear_path(&mut self, id: &str) {
+        self.paths.remove(id);
+    }
+
+    #[must_use]
+    pub fn id_for_path(&self, path: &Path) -> Option<&str> {
+        self.paths
+            .iter()
+            .find(|(_, candidate)| candidate.as_path() == path)
+            .map(|(id, _)| id.as_str())
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        self.documents.remove(id);
+        self.sessions.remove(id);
+        self.paths.remove(id);
+        for links in self.links.values_mut() {
+            links.retain(|_, link| link.document_id != id);
+        }
+    }
+
+    #[must_use]
+    pub fn path(&self, id: &str) -> Option<&Path> { self.paths.get(id).map(PathBuf::as_path) }
+
+    pub fn load(&mut self, id: impl Into<String>, path: impl Into<PathBuf>) -> Result<&GraphDocument, String> {
+        let id = id.into();
+        let path = path.into();
+        let document = load(&path)?;
+        self.sessions.insert(id.clone(), Session::new(document.clone()));
+        self.paths.insert(id.clone(), path);
+        self.documents.insert(id.clone(), document);
+        Ok(self.documents.get(&id).expect("inserted document"))
+    }
+
+    pub fn save(&mut self, id: &str, path: impl Into<PathBuf>) -> Result<(), String> {
+        let document = self.documents.get(id).ok_or_else(|| format!("document {id} is not open"))?;
+        let path = path.into();
+        save_atomic(&path, document)?;
+        self.paths.insert(id.to_string(), path);
+        Ok(())
+    }
+
+    /// Save only if the file on disk still has the hash this document was loaded
+    /// from. A mismatch is an external edit and must be resolved by the caller.
+    pub fn save_checked(&mut self, id: &str, path: impl Into<PathBuf>, expected: ContentHash) -> Result<(), String> {
+        let path = path.into();
+        let current = load(&path)?;
+        if document_hash(&current).map_err(|error| error.to_string())? != expected {
+            return Err(format!("{} changed on disk since it was loaded", path.display()));
+        }
+        self.save(id, path)
+    }
+
+    /// Register an external `.nodecraft` document and a reference to it.
+    pub fn link(
+        &mut self,
+        host_id: &str,
+        link_id: &str,
+        document_id: &str,
+        path: impl Into<PathBuf>,
+        mode: LinkMode,
+    ) -> Result<&LinkedPart, String> {
+        let path = path.into();
+        if !self.documents.contains_key(document_id) {
+            self.load(document_id, &path)?;
+        }
+        let document = self.documents.get(document_id).ok_or_else(|| format!("linked document {document_id} is not open"))?;
+        let content_hash = document_hash(document).map_err(|error| error.to_string())?;
+        let link = LinkedPart { document_id: document_id.to_string(), path: path.clone(), content_hash, mode };
+        self.links.entry(host_id.to_string()).or_default().insert(link_id.to_string(), link);
+        Ok(self.links[host_id].get(link_id).expect("inserted link"))
+    }
+
+    #[must_use]
+    pub fn links(&self, host_id: &str) -> Option<&BTreeMap<String, LinkedPart>> { self.links.get(host_id) }
+
+    #[must_use]
+    pub fn resolve(&self, host_id: &str, link_id: &str) -> Option<&GraphDocument> {
+        let link = self.links.get(host_id)?.get(link_id)?;
+        self.documents.get(&link.document_id)
+    }
+
+    /// Re-read linked files and update follow-latest documents. Pinned links are
+    /// reported but not updated.
+    pub fn detect_link_changes(&mut self) -> Result<Vec<LinkChange>, String> {
+        let mut changes = Vec::new();
+        for (host_id, links) in &self.links {
+            for (link_id, link) in links {
+                let Ok(document) = load(&link.path) else { continue; };
+                let new_hash = document_hash(&document).map_err(|error| error.to_string())?;
+                if new_hash == link.content_hash { continue; }
+                changes.push(LinkChange {
+                    host_id: host_id.clone(), link_id: link_id.clone(), path: link.path.clone(),
+                    old_hash: link.content_hash, new_hash, mode: link.mode,
+                });
+            }
+        }
+        for change in &changes {
+            if change.mode == LinkMode::FollowLatest {
+                let document = load(&change.path)?;
+                if let Some(link) = self.links.get_mut(&change.host_id).and_then(|links| links.get_mut(&change.link_id)) {
+                    link.content_hash = change.new_hash;
+                }
+                let document_id = self.links[&change.host_id][&change.link_id].document_id.clone();
+                self.sessions.insert(document_id.clone(), Session::new(document.clone()));
+                self.documents.insert(document_id, document);
+            }
+        }
+        Ok(changes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{GraphConnection, GraphInterface, GraphNode};
+    use serde_json::json;
+
+    fn test_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!("sn-document-store-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn document() -> GraphDocument {
+        GraphDocument {
+            schema_version: 1,
+            id: "root".into(),
+            nodes: vec![
+                GraphNode { id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 10.0, y: 20.0 },
+                GraphNode { id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
+            ],
+            connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+            interface: GraphInterface::default(),
+        }
+    }
+
+    #[test]
+    fn atomic_round_trip_canonicalizes_and_preserves_topology() {
+        let dir = test_dir();
+        let path = dir.join("part.nodecraft");
+        let mut original = document();
+        for node in &mut original.nodes { canonicalize_node(node); }
+        save_atomic(&path, &original).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.nodes[0].values["primitiveType"], "box");
+        assert_eq!(loaded.nodes[1].values["space"], "world");
+        assert_eq!(loaded.connections.len(), 1);
+        assert_eq!(document_hash(&loaded).unwrap(), document_hash(&original).unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn document_store_loads_and_saves_open_documents() {
+        let dir = test_dir();
+        let path = dir.join("part.nodecraft");
+        save_atomic(&path, &document()).expect("seed");
+        let mut store = DocumentStore::new();
+        store.load("doc", &path).expect("load");
+        assert!(store.get("doc").is_some());
+        let second = dir.join("copy.nodecraft");
+        store.save("doc", &second).expect("save");
+        assert_eq!(load(&second).expect("copy").connections.len(), 1);
+        std::fs::remove_dir_all(dir).ok();
+    }
+    #[test]
+    fn follow_latest_updates_linked_document_and_pinned_does_not() {
+        let dir = test_dir();
+        let part = dir.join("bracket.nodecraft");
+        let mut source = document();
+        source.nodes[0].values["length"] = json!(10.0);
+        save_atomic(&part, &source).expect("seed part");
+
+        let mut store = DocumentStore::new();
+        store.link("host", "follow", "part-follow", &part, LinkMode::FollowLatest).expect("follow link");
+        store.link("host", "pinned", "part-pinned", &part, LinkMode::Pinned).expect("pinned link");
+        let old = store.links("host").unwrap()["follow"].content_hash;
+
+        let mut changed = source.clone();
+        changed.nodes[0].values["length"] = json!(20.0);
+        save_atomic(&part, &changed).expect("external edit");
+        let changes = store.detect_link_changes().expect("detect");
+        assert_eq!(changes.len(), 2);
+        assert_ne!(store.links("host").unwrap()["follow"].content_hash, old);
+        assert_eq!(store.links("host").unwrap()["pinned"].content_hash, old);
+        assert_eq!(store.resolve("host", "follow").unwrap().nodes[0].values["length"], 20.0);
+        assert_eq!(store.resolve("host", "pinned").unwrap().nodes[0].values["length"], 10.0);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn document_store_keeps_sessions_and_path_identity() {
+        let dir = test_dir();
+        let path = dir.join("part.nodecraft");
+        save_atomic(&path, &document()).expect("seed");
+        let mut store = DocumentStore::new();
+        let mut session = Session::new(load(&path).expect("load"));
+        session
+            .apply_commands(&[crate::Command::SetPosition {
+                node: "a".into(),
+                x: 42.0,
+                y: 7.0,
+            }])
+            .expect("edit");
+        store.set_session("doc", session).expect("session");
+        store.set_path("doc", &path);
+        assert_eq!(store.session("doc").expect("session").document().nodes[0].x, 42.0);
+        assert_eq!(store.id_for_path(&path), Some("doc"));
+        assert_eq!(store.get("doc").expect("graph").nodes[0].x, 42.0);
+        store.remove("doc");
+        assert!(store.session("doc").is_none());
+        assert!(store.get("doc").is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn checked_save_refuses_when_disk_changed() {
+        let dir = test_dir();
+        let path = dir.join("part.nodecraft");
+        save_atomic(&path, &document()).expect("seed");
+        let loaded = load(&path).expect("load");
+        let expected = document_hash(&loaded).unwrap();
+        let mut store = DocumentStore::new();
+        store.load("doc", &path).expect("open");
+
+        let mut changed = loaded;
+        changed.nodes[0].values["length"] = json!(99.0);
+        save_atomic(&path, &changed).expect("external edit");
+        let error = store.save_checked("doc", &path, expected).expect_err("conflict");
+        assert!(error.contains("changed on disk"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+}

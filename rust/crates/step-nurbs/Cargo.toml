@@ -1,0 +1,8 @@
+[package]
+name = "step-nurbs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nodecraft-step = { path = "../nodecraft-step" }

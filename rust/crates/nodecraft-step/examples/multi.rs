@@ -1,0 +1,1 @@
+fn main(){let p=std::env::args().nth(1).unwrap();for b in nodecraft_step::import_solids(&p).unwrap(){match b{nodecraft_step::StepBody::Planar(x)=>println!("planar faces {} vol {}",x.faces.len(),x.volume()),nodecraft_step::StepBody::Analytic(x)=>println!("analytic {:?}",x)}}}

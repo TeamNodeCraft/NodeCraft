@@ -1,0 +1,11 @@
+[package]
+name = "nodecraft-step"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+step-import = { workspace = true }
+step-export = { workspace = true }
+step-brep = { workspace = true }
+solidcore = { workspace = true }

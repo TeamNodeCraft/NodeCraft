@@ -1,0 +1,49 @@
+[package]
+name = "nodecraft-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NodeCraft egui front end"
+publish = false
+
+[features]
+default = ["gpu-viewport"]
+# The wgpu viewport is being ported from SolidCraft. It is kept optional until the
+# adapter lands so the first app shell can build without a GPU pipeline.
+gpu-viewport = ["dep:solidcraft-gpu"]
+
+[dependencies]
+egui = "0.36"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "__screenshot"] }
+egui-wgpu = "0.36"
+rfd = "0.17"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+bytemuck = "1"
+lyon = "1.0"
+glyphon = "0.12"
+serde = { workspace = true }
+serde_json.workspace = true
+nodecraft-engine = { path = "../../crates/nodecraft-engine", default-features = false }
+nodecraft-mesh = { path = "../../crates/nodecraft-mesh", default-features = false }
+nodecraft-protocol = { path = "../../crates/nodecraft-protocol" }
+nodecraft-session = { path = "../../crates/nodecraft-session", default-features = false }
+nodecraft-node-canvas = { path = "../../crates/nodecraft-node-canvas" }
+nodecraft-worker = { path = "../../crates/nodecraft-worker", default-features = false }
+# Upstream view math/geometry. Keep these as git dependencies so they can be
+# updated independently of the app; only our UI adapter lives in this repository.
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", branch = "develop" }
+solidcraft-render = { git = "https://github.com/tangency-labs/solidcraft", branch = "develop" }
+solidcraft-gpu = { git = "https://github.com/tangency-labs/solidcraft", branch = "develop", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
