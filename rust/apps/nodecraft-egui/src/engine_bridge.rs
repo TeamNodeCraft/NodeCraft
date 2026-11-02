@@ -137,6 +137,25 @@ mod tests {
         }
     }
 
+    /// Each hash map gets its own random seed, so any hash-order dependence in
+    /// meshing shows up across repeated evaluations in one process.
+    #[test]
+    fn repeated_evaluation_produces_an_identical_mesh() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../samples/spline-showcase.nodecraft");
+        let document: GraphDocument =
+            serde_json::from_str(&std::fs::read_to_string(path).expect("sample")).expect("document");
+        let mesh = || {
+            let (evaluation, _) = evaluate(&document, EngineCache::new(), None);
+            evaluation.and_then(|evaluation| evaluation.mesh).expect("mesh")
+        };
+        let first = mesh();
+        for _ in 0..8 {
+            let next = mesh();
+            assert_eq!(next.vertices, first.vertices);
+            assert_eq!(next.faces, first.faces);
+        }
+    }
+
     #[test]
     fn linked_part_can_use_an_unsaved_open_document() {
         let linked_path = std::env::temp_dir().join(format!(
