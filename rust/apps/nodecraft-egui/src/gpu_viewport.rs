@@ -78,6 +78,13 @@ pub fn msaa_samples() -> u32 {
         .unwrap_or(if cfg!(target_os = "macos") { 4 } else { 1 })
 }
 
+/// The scene pass's color attachment and resolve target. wgpu rejects a resolve
+/// from a single-sampled attachment, so without MSAA the pass draws directly into
+/// the texture the viewport later blits from.
+fn scene_color_attachment<'a, T>(samples: u32, color: &'a T, resolve: &'a T) -> (&'a T, Option<&'a T>) {
+    if samples > 1 { (color, Some(resolve)) } else { (resolve, None) }
+}
+
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -1513,12 +1520,14 @@ impl CallbackTrait for GpuCallback {
                 }
                 if let Some(target) = scene.as_ref() {
                     external_view = Some(target.resolve_view.clone());
+                    let (view, resolve_target) =
+                        scene_color_attachment(samples, &target.color_view, &target.resolve_view);
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("viewport-scene-offscreen"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &target.color_view,
+                            view,
                             depth_slice: None,
-                            resolve_target: Some(&target.resolve_view),
+                            resolve_target,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                                 store: wgpu::StoreOp::Store,
@@ -1589,5 +1598,17 @@ impl CallbackTrait for GpuCallback {
         pass.set_pipeline(&scene.blit.pipeline);
         pass.set_bind_group(0, &scene.blit.bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scene_pass_only_resolves_when_multisampled() {
+        let (color, resolve) = ("color", "resolve");
+        assert_eq!(scene_color_attachment(4, &color, &resolve), (&color, Some(&resolve)));
+        assert_eq!(scene_color_attachment(1, &color, &resolve), (&resolve, None));
     }
 }
