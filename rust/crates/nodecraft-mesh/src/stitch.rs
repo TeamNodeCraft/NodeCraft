@@ -217,7 +217,8 @@ fn split_one_pass(
 ) -> bool {
     // Directed-edge census: balance is the number of forward traversals minus the
     // backward ones. A closed display edge has balance zero; a boundary edge +-1.
-    let mut census: HashMap<(u32, u32), (i32, usize)> = HashMap::new();
+    // Ordered, because repairs are applied in iteration order and interact.
+    let mut census: BTreeMap<(u32, u32), (i32, usize)> = BTreeMap::new();
     for (index, face) in faces.iter().enumerate() {
         for (from, to) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
             let (lo, hi) = (from.min(to), from.max(to));
@@ -446,7 +447,8 @@ fn fill_small_holes(
     for _ in 0..4 {
         deduplicate_faces(faces, groups);
         // Directed open edges: `balance == 1` means the lo -> hi direction is present.
-        let mut census: HashMap<(u32, u32), i32> = HashMap::new();
+        // Ordered, because the loop walk below depends on the edge order.
+        let mut census: BTreeMap<(u32, u32), i32> = BTreeMap::new();
         for face in faces.iter() {
             for (from, to) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
                 let (lo, hi) = (from.min(to), from.max(to));
