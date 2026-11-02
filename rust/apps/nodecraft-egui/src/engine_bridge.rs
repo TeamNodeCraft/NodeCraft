@@ -28,7 +28,16 @@ pub fn target_for(document: &GraphDocument, selected: Option<&str>) -> Option<St
             return Some(output.clone());
         }
     }
-    document.nodes.last().map(|node| node.id.clone())
+    document
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| {
+            node.node_type != "exporter"
+                && !document.connections.iter().any(|link| link.from == node.id)
+        })
+        .or_else(|| document.nodes.last())
+        .map(|node| node.id.clone())
 }
 
 pub fn evaluate(
@@ -44,6 +53,16 @@ pub fn evaluate_with_linked(
     cache: EngineCache,
     selected: Option<&str>,
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
+) -> (Option<Evaluation>, EngineCache) {
+    evaluate_with_linked_progress(document, cache, selected, linked_documents, None)
+}
+
+pub fn evaluate_with_linked_progress(
+    document: &GraphDocument,
+    cache: EngineCache,
+    selected: Option<&str>,
+    linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
 ) -> (Option<Evaluation>, EngineCache) {
     let Some(target) = target_for(document, selected) else {
         return (None, cache);
@@ -99,10 +118,10 @@ pub fn evaluate_with_linked(
             .collect(),
         binary_mesh: false,
         project_directory: None,
-        progress: false,
+        progress: progress.is_some(),
         mesh_tolerance: None,
     };
-    let output = nodecraft_engine::evaluate(request, cache, None);
+    let output = nodecraft_engine::evaluate(request, cache, progress);
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let cache_stats = output.response.cache_stats;
@@ -226,5 +245,25 @@ mod tests {
         document.interface.outputs = vec!["b".into()];
         assert_eq!(target_for(&document, Some("a")).as_deref(), Some("a"));
         assert_eq!(target_for(&document, None).as_deref(), Some("b"));
+
+        // The last node may be an upstream branch. The unnamed target must be
+        // the terminal sink, not whichever node happens to be last in the array.
+        let mut branching = GraphDocument::new("branching-target");
+        branching.nodes = vec![node("a"), node("b"), node("c")];
+        branching.connections = vec![
+            nodecraft_session::GraphConnection {
+                from: "a".into(),
+                to: "b".into(),
+                input: "a".into(),
+                out: "shape".into(),
+            },
+            nodecraft_session::GraphConnection {
+                from: "c".into(),
+                to: "b".into(),
+                input: "b".into(),
+                out: "shape".into(),
+            },
+        ];
+        assert_eq!(target_for(&branching, None).as_deref(), Some("b"));
     }
 }

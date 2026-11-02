@@ -151,6 +151,12 @@ impl Kernel for ProceduralKernel {
             (x, y) = (x * cz - y * sz, x * sz + y * cz);
             [x, y, z]
         };
+        let (x, y, z) = if values.get("space").and_then(serde_json::Value::as_str) == Some("local") {
+            let offset = rotate([x, y, z]);
+            (offset[0], offset[1], offset[2])
+        } else {
+            (x, y, z)
+        };
         let mut transformed = mesh.clone();
         for vertex in &mut transformed.vertices {
             let point = rotate([vertex[0] as f64, vertex[1] as f64, vertex[2] as f64]);
@@ -204,6 +210,17 @@ mod tests {
         assert_eq!(min[1], -20.0 - 2.0);
         assert_eq!(min[2], -20.0 + 3.0);
     }
+    #[test]
+    fn local_translation_uses_rotated_axes() {
+        let mesh = ProceduralKernel.primitive("box", &serde_json::json!({"length": 2, "width": 2, "height": 2})).unwrap();
+        let moved = ProceduralKernel
+            .translate(&mesh, &serde_json::json!({"space": "local", "x": 10, "y": 0, "z": 0, "rz": 90}))
+            .unwrap();
+        let (min, max) = bounds(&moved).unwrap();
+        assert!((min[0] + 1.0).abs() < 1e-4 && (max[0] - 1.0).abs() < 1e-4, "{min:?} {max:?}");
+        assert!((min[1] - 9.0).abs() < 1e-4 && (max[1] - 11.0).abs() < 1e-4, "{min:?} {max:?}");
+    }
+
     #[test]
     fn transform_rotates_then_translates() {
         let mesh = ProceduralKernel.primitive("box", &serde_json::json!({"length": 10, "width": 4, "height": 20})).unwrap();

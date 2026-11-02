@@ -83,12 +83,14 @@ pub struct NodeDraw {
     pub geometry_key: u64,
     pub geometry: Option<Arc<NodeGeometry>>,
     pub shapes: Option<Arc<Vec<ShapeInstance>>>,
+    pub glows: Vec<ShapeInstance>,
     pub cables: Option<Arc<Vec<CableVertex>>>,
     pub transform: [f32; 4], // scale, offset x, offset y, unused
     pub clip: [f32; 4],
     pub clip_radius: f32,
     pub ppp: f32,
     pub curve_resolution: f32,
+    pub glow: [f32; 4],
     pub texts: Vec<NodeText>,
 }
 
@@ -98,6 +100,7 @@ struct Globals {
   offset: vec4<f32>,
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
+  glow: vec4<f32>,
 };
 
 fn inside_rounded(p: vec2<f32>) -> bool {
@@ -153,6 +156,7 @@ struct Globals {
   offset: vec4<f32>,
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
+  glow: vec4<f32>,
 };
 
 fn inside_rounded(p: vec2<f32>) -> bool {
@@ -308,6 +312,7 @@ struct Globals {
   offset: vec4<f32>,
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
+  glow: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -360,7 +365,10 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   // in graph units, so convert its half-width to screen pixels before adding
   // the constant AA fringe, then convert the total back to graph units.
   let scale = max(globals.screen_scale.z, 0.0001);
-  let pad = 2.5 / scale + inst.stroke_width * 0.5;
+  // Glow falls off over its full radius, not half of a stroke; otherwise the
+  // quad ends while alpha is still non-zero and the glow has a square edge.
+  let stroke_pad = select(inst.stroke_width * 0.5, inst.stroke_width, inst.kind > 1.5);
+  let pad = 2.5 / scale + stroke_pad;
   let local = half_size + vec2<f32>(pad);
   let graph = inst.center + corners[vi] * local;
   let screen = graph * globals.screen_scale.z + globals.offset.xy;
@@ -385,6 +393,19 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   if (!inside_rounded(in.screen)) { discard; }
+  // kind == 2: analytic glow behind a card. The instance is the card rect
+  // expanded by the glow radius; stroke_width carries that radius.
+  if (in.kind > 1.5) {
+    let glow = max(in.stroke_width, 0.001);
+    let inner_half = max(in.half_size - vec2<f32>(glow), vec2<f32>(0.5));
+    let inner_radius = max(in.radius - glow, 0.0);
+    let d = sd_round_box(in.local, inner_half, inner_radius);
+    let t = clamp(1.0 - d / glow, 0.0, 1.0);
+    // kind 2 is the selection pulse and follows the global envelope.
+    // kind 3 is per-node activity; its strength is in stroke.a.
+    let intensity = select(globals.glow.x, in.stroke.a, in.kind > 2.5);
+    return vec4<f32>(in.fill.rgb, in.fill.a * t * t * intensity);
+  }
   var distance: f32;
   if (in.kind > 0.5) {
     distance = length(in.local) - in.half_size.x;
@@ -422,6 +443,9 @@ struct NodeRenderer {
     shape_capacity: u64,
     shape_count: u32,
     shape_key: Option<u64>,
+    glow_buffer: Option<wgpu::Buffer>,
+    glow_capacity: u64,
+    glow_count: u32,
     geometry_key: Option<u64>,
 }
 
@@ -460,7 +484,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
 
     let uniform = rs.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("node-lyon-globals"),
-        size: 64,
+        size: 80,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -637,6 +661,9 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
             shape_capacity: 0,
             shape_count: 0,
             shape_key: None,
+            glow_buffer: None,
+            glow_capacity: 0,
+            glow_count: 0,
             geometry_key: None,
         })));
         renderer.callback_resources.insert(Arc::new(Mutex::new(GlyphonState {
@@ -684,6 +711,10 @@ impl CallbackTrait for NodeCallback {
                 0.0,
                 0.0,
                 0.0,
+                draw.glow[0],
+                draw.glow[1],
+                draw.glow[2],
+                draw.glow[3],
             ];
             queue.write_buffer(&renderer.uniform, 0, &globals.map(f32::to_le_bytes).concat());
             if let Some(geometry) = &draw.geometry {
@@ -736,6 +767,25 @@ impl CallbackTrait for NodeCallback {
                     }
                     renderer.geometry_key = Some(draw.geometry_key);
                 }
+            }
+            let glow_bytes = bytemuck::cast_slice(draw.glows.as_slice());
+            if !glow_bytes.is_empty() {
+                if renderer.glow_buffer.is_none()
+                    || renderer.glow_capacity < glow_bytes.len() as u64
+                {
+                    let capacity = (glow_bytes.len() as u64).next_power_of_two().max(4096);
+                    renderer.glow_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("node-activity-glows"),
+                        size: capacity,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    renderer.glow_capacity = capacity;
+                }
+                queue.write_buffer(renderer.glow_buffer.as_ref().unwrap(), 0, glow_bytes);
+                renderer.glow_count = draw.glows.len() as u32;
+            } else {
+                renderer.glow_count = 0;
             }
             if let Some(cables) = &draw.cables {
                 if renderer.cable_key != Some(draw.geometry_key) {
@@ -888,6 +938,14 @@ impl CallbackTrait for NodeCallback {
         );
         if let Some(renderer) = resources.get::<Arc<Mutex<NodeRenderer>>>() {
             if let Ok(renderer) = renderer.lock() {
+                if let Some(gb) = &renderer.glow_buffer {
+                    if renderer.glow_count > 0 {
+                        pass.set_pipeline(&renderer.shape_pipeline);
+                        pass.set_bind_group(0, &renderer.bind, &[]);
+                        pass.set_vertex_buffer(0, gb.slice(..));
+                        pass.draw(0..6, 0..renderer.glow_count);
+                    }
+                }
                 if let Some(cb) = &renderer.cable_buffer {
                     if renderer.cable_count > 0 {
                         pass.set_pipeline(&renderer.cable_pipeline);

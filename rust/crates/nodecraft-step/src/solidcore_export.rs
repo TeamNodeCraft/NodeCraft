@@ -220,7 +220,52 @@ mod tests {
 /// Write an exact SolidCore B-rep through the neutral model and the analytic/NURBS
 /// `step-export` writer.
 pub fn write_brep_exact(path: &str, brep: &solidcore::topology::Brep) -> Result<(), String> {
-    let model = step_brep::brep_to_model(brep).map_err(|error| error.to_string())?;
+    write_breps_exact(path, std::slice::from_ref(brep))
+}
+
+/// Write several exact SolidCore solids as one STEP Part.
+///
+/// The writer emits one `MANIFOLD_SOLID_BREP` per body. Each body keeps its own
+/// local topology arrays; `step-brep` maps each body independently and the
+/// exporter allocates fresh entity IDs while writing.
+pub fn write_breps_exact(path: &str, breps: &[solidcore::topology::Brep]) -> Result<(), String> {
+    let (first, rest) = breps.split_first().ok_or("Part has no solids")?;
+    let mut model = step_brep::brep_to_model(first).map_err(|error| error.to_string())?;
+    for brep in rest {
+        let mut body = step_brep::brep_to_model(brep).map_err(|error| error.to_string())?;
+        model.bodies.append(&mut body.bodies);
+        model.skipped.append(&mut body.skipped);
+        model.diagnostics.append(&mut body.diagnostics);
+    }
+    if model.bodies.is_empty() {
+        return Err("Part has no STEP bodies".into());
+    }
     let text = step_export::write(&model).map_err(|error| error.to_string())?;
     std::fs::write(path, text).map_err(|error| format!("{path}: {error}"))
+}
+
+
+#[cfg(test)]
+mod part_export_tests {
+    use super::*;
+
+    #[test]
+    fn writes_multiple_solids_as_one_part() {
+        use solidcore::kernel::Kernel;
+        use solidcore::math::{Point3, Vec3};
+        use solidcore::primitive::api_primitives as api;
+
+        let mut kernel = Kernel::default();
+        let a = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).unwrap();
+        let b = api::create_box(&mut kernel, Point3::new(20.0, 0.0, 0.0), 10.0, 10.0, 10.0).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "nodecraft-part-{}-{}.step",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        write_breps_exact(path.to_str().unwrap(), &[a, b]).expect("write part");
+        let text = std::fs::read_to_string(&path).expect("read part");
+        assert_eq!(text.matches("MANIFOLD_SOLID_BREP").count(), 2);
+        let _ = std::fs::remove_file(path);
+    }
 }

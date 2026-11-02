@@ -163,6 +163,12 @@ impl InsertPreview {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ActivityGlow {
+    started: Instant,
+    ended: Option<Instant>,
+}
+
 pub struct NodeEditor {
     pan: Vec2,
     zoom: f32,
@@ -172,6 +178,7 @@ pub struct NodeEditor {
     left_dock: f32,
     resize_start: Option<(f32, f32)>,
     geometry_key: Option<u64>,
+    shape_zoom: f32,
     occlusion_key: Option<u64>,
     occlusion: Option<HashMap<String, Vec<Rect>>>,
     geometry: Option<Arc<NodeGeometry>>,
@@ -194,6 +201,12 @@ pub struct NodeEditor {
     theme: crate::theme::CanvasTheme,
     last_viewport: Option<Rect>,
     view_animation: Option<ViewAnimation>,
+    glow_pulse: Option<Instant>,
+    last_selected: HashSet<String>,
+    activity: HashMap<String, ActivityGlow>,
+    activity_fade_in: Duration,
+    activity_hold: Duration,
+    activity_fade_out: Duration,
 }
 
 impl Default for NodeEditor {
@@ -207,6 +220,7 @@ impl Default for NodeEditor {
             left_dock: 0.0,
             resize_start: None,
             geometry_key: None,
+            shape_zoom: -1.0,
             occlusion_key: None,
             occlusion: None,
             geometry: None,
@@ -229,7 +243,56 @@ impl Default for NodeEditor {
             theme: crate::theme::CanvasTheme::default(),
             last_viewport: None,
             view_animation: None,
+            glow_pulse: None,
+            last_selected: HashSet::new(),
+            activity: HashMap::new(),
+            activity_fade_in: Duration::from_millis(40),
+            // Activity must remain visible after a very fast node completes.
+            activity_hold: Duration::from_millis(500),
+            activity_fade_out: Duration::from_millis(40),
         }
+    }
+}
+
+/// Selection-pulse envelope: 40 ms fade up, 500 ms hold, 40 ms fade down.
+fn glow_strength(elapsed: Duration) -> f32 {
+    const UP: f32 = 0.040;
+    const HOLD: f32 = 0.500;
+    const DOWN: f32 = 0.040;
+    let t = elapsed.as_secs_f32();
+    if t < UP {
+        t / UP
+    } else if t < UP + HOLD {
+        1.0
+    } else if t < UP + HOLD + DOWN {
+        1.0 - (t - UP - HOLD) / DOWN
+    } else {
+        0.0
+    }
+}
+
+fn activity_strength(
+    started: Instant,
+    ended: Option<Instant>,
+    now: Instant,
+    fade_in: Duration,
+    hold: Duration,
+    fade_out: Duration,
+) -> f32 {
+    let Some(ended) = ended else {
+        return if fade_in.is_zero() {
+            1.0
+        } else {
+            (now.duration_since(started).as_secs_f32() / fade_in.as_secs_f32()).clamp(0.0, 1.0)
+        };
+    };
+    let fade_start = ended.max(started + hold);
+    if now < fade_start {
+        1.0
+    } else if fade_out.is_zero() {
+        0.0
+    } else {
+        (1.0 - now.duration_since(fade_start).as_secs_f32() / fade_out.as_secs_f32()).clamp(0.0, 1.0)
     }
 }
 
@@ -517,6 +580,37 @@ impl NodeEditor {
         Some(preview_document)
     }
 
+    /// Restart the selected-node glow envelope. Called when evaluation
+    /// completes so the pulse follows the result rather than the click.
+    pub fn pulse_glow(&mut self) {
+        self.glow_pulse = Some(Instant::now());
+    }
+
+    pub fn set_activity_timings(&mut self, fade_in_ms: u64, hold_ms: u64, fade_out_ms: u64) {
+        self.activity_fade_in = Duration::from_millis(fade_in_ms);
+        self.activity_hold = Duration::from_millis(hold_ms.max(500));
+        self.activity_fade_out = Duration::from_millis(fade_out_ms);
+    }
+
+    pub fn clear_activity(&mut self) {
+        self.activity.clear();
+    }
+
+    pub fn activity_started(&mut self, node_id: &str) {
+        self.activity.insert(
+            node_id.to_owned(),
+            ActivityGlow { started: Instant::now(), ended: None },
+        );
+    }
+
+    pub fn activity_finished(&mut self, node_id: &str) {
+        if let Some(activity) = self.activity.get_mut(node_id)
+            && activity.ended.is_none()
+        {
+            activity.ended = Some(Instant::now());
+        }
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
@@ -528,6 +622,18 @@ impl NodeEditor {
         backdrop: Option<(egui::TextureId, egui::Rect)>,
     ) -> Vec<NodeEditorAction> {
         self.last_viewport = Some(viewport);
+        if self.last_selected != *selected_nodes {
+            self.last_selected = selected_nodes.clone();
+            if !selected_nodes.is_empty() {
+                self.glow_pulse = Some(Instant::now());
+            }
+        }
+        let glow = self.glow_pulse.map_or(0.0, |started| glow_strength(started.elapsed()));
+        if glow > 0.0 {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if self.glow_pulse.is_some() {
+            self.glow_pulse = None;
+        }
         let panel = self.panel_rect(viewport);
         if self.width <= 0.0 {
             self.width = panel.width();
@@ -547,6 +653,37 @@ impl NodeEditor {
         self.update_insert_preview(ctx, document, panel);
         let preview_document = self.preview_document(document);
         let document = preview_document.as_ref().unwrap_or(document);
+        let now = Instant::now();
+        self.activity.retain(|_, activity| {
+            activity.ended.is_none_or(|ended| {
+                now < ended.max(activity.started + self.activity_hold) + self.activity_fade_out
+            })
+        });
+        if !self.activity.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        let mut activity_glows = Vec::new();
+        for (id, activity) in &self.activity {
+            let Some(node) = document.nodes.iter().find(|node| &node.id == id) else { continue };
+            let strength = activity_strength(
+                activity.started,
+                activity.ended,
+                now,
+                self.activity_fade_in,
+                self.activity_hold,
+                self.activity_fade_out,
+            );
+            if strength > 0.0 {
+                shape_glow(
+                &mut activity_glows,
+                graph_rect(node),
+                self.theme.f32(self.theme.accent),
+                3.0,
+                strength,
+                glow_radius(self.zoom),
+            );
+            }
+        }
 
         self.sync_z_order(document);
         let mut clicked = None;
@@ -556,7 +693,9 @@ impl NodeEditor {
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>)> = Vec::new();
         let key = geometry_key(document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
-        if self.geometry_key != Some(key) {
+        let rekey = self.geometry_key != Some(key);
+        let reshape = rekey || (self.shape_zoom - self.zoom).abs() > 1.0e-6;
+        if reshape {
             if self.gpu_ready {
                 self.shapes = Some(Arc::new(build_shape_instances(
                     document,
@@ -564,15 +703,19 @@ impl NodeEditor {
                     &self.z_order,
                     viewer_breakpoint,
                     &self.theme,
+                    self.zoom,
                 )));
                 self.geometry = None;
-            } else {
+            } else if rekey {
                 self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme)));
                 self.shapes = None;
             }
+        }
+        if rekey {
             self.cables = Some(Arc::new(build_cables(document, selected_nodes, selected_connections, &self.theme)));
             self.geometry_key = Some(key);
         }
+        self.shape_zoom = self.zoom;
         // Always carry the cached geometry into the callback. egui may prepare a
         // second pass in the same frame, and a None here would prevent the upload
         // from ever reaching the renderer even though the geometry exists.
@@ -584,6 +727,7 @@ impl NodeEditor {
             geometry_key: key,
             geometry,
             shapes,
+            glows: activity_glows,
             cables,
             transform: [self.zoom, panel.min.x + self.pan.x, panel.min.y + CANVAS_TOP + self.pan.y, 0.0],
             clip: [
@@ -597,6 +741,7 @@ impl NodeEditor {
             // Multiplier for cable subdivision; one place to tune the visual
             // smoothness/vertex-cost tradeoff.
             curve_resolution: 1.5,
+            glow: [glow, 0.0, 0.0, 0.0],
             texts: Vec::new(),
         };
         
@@ -2381,12 +2526,40 @@ fn shape_circle(
     });
 }
 
+/// Glow radius in graph units, with a screen-space floor so distant/zoomed-out
+/// nodes still show a readable activity halo.
+fn glow_radius(zoom: f32) -> f32 {
+    (18.0 / zoom.max(0.01)).max(24.0)
+}
+
+fn shape_glow(
+    out: &mut Vec<ShapeInstance>,
+    rect: Rect,
+    color: [f32; 4],
+    kind: f32,
+    intensity: f32,
+    radius: f32,
+) {
+    let glow = radius;
+    out.push(ShapeInstance {
+        center: [rect.center().x, rect.center().y],
+        size: [rect.width() + glow * 2.0, rect.height() + glow * 2.0],
+        fill: [color[0], color[1], color[2], 0.55],
+        stroke: [0.0, 0.0, 0.0, intensity],
+        radius: 26.0 + glow,
+        stroke_width: glow,
+        kind,
+        _pad: 0.0,
+    });
+}
+
 fn build_shape_instances(
     document: &GraphDocument,
     selected: &HashSet<String>,
     z_order: &[String],
     viewer_breakpoint: Option<&str>,
     theme: &crate::theme::CanvasTheme,
+    zoom: f32,
 ) -> Vec<ShapeInstance> {
     let ranks: HashMap<&str, usize> = z_order
         .iter()
@@ -2410,6 +2583,11 @@ fn build_shape_instances(
         let rect = graph_rect(node);
         let selected_here = selected.contains(node.id.as_str());
         let viewer_here = viewer_breakpoint == Some(node.id.as_str());
+        // One extra SDF quad gives a cheap analytic glow. It is drawn before
+        // the card and follows the same shape/transform as the card itself.
+        if selected_here {
+            shape_glow(&mut out, rect, accent, 2.0, 0.0, glow_radius(zoom));
+        }
         out.push(ShapeInstance {
             center: [rect.center().x, rect.center().y],
             size: [rect.width(), rect.height()],
@@ -3151,7 +3329,7 @@ mod tests {
             let geometry_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme);
+            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, 1.0);
             let shapes_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
@@ -3177,6 +3355,69 @@ mod tests {
                 cables.len(),
             );
         }
+    }
+
+    #[test]
+    fn glow_envelope_fades_up_holds_and_fades_down() {
+        assert!((glow_strength(Duration::ZERO) - 0.0).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(20)) - 0.5).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(40)) - 1.0).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(300)) - 1.0).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(540)) - 1.0).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(560)) - 0.5).abs() < 1e-6);
+        assert!((glow_strength(Duration::from_millis(580)) - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn activity_glow_only_fades_down_after_the_end_signal() {
+        let started = Instant::now();
+        let fade_in = Duration::from_millis(40);
+        let hold = Duration::from_millis(500);
+        let fade_out = Duration::from_millis(40);
+        let strength = |ended, now| activity_strength(started, ended, now, fade_in, hold, fade_out);
+        assert!(strength(None, started) < 0.01);
+        assert!((strength(None, started + Duration::from_millis(40)) - 1.0).abs() < 1e-6);
+        assert!((strength(None, started + Duration::from_secs(5)) - 1.0).abs() < 1e-6);
+
+        // A fast node still holds for 500 ms after start before fading.
+        let ended = started + Duration::from_millis(5);
+        assert!((strength(Some(ended), ended) - 1.0).abs() < 1e-6);
+        assert!((strength(Some(ended), started + Duration::from_millis(499)) - 1.0).abs() < 1e-6);
+        assert!((strength(Some(ended), started + Duration::from_millis(520)) - 0.5).abs() < 1e-6);
+        assert!(strength(Some(ended), started + Duration::from_millis(540)) < 0.01);
+
+        // A slow node starts fading when its end signal arrives.
+        let ended = started + Duration::from_secs(2);
+        assert!((strength(Some(ended), ended) - 1.0).abs() < 1e-6);
+        assert!((strength(Some(ended), ended + Duration::from_millis(20)) - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn glow_keeps_a_minimum_screen_size_when_zoomed_out() {
+        assert!((glow_radius(1.0) - 24.0).abs() < 1e-6);
+        let far = glow_radius(0.02);
+        assert!(far * 0.02 >= 18.0 - 1e-6, "screen radius {}", far * 0.02);
+        assert!(glow_radius(0.02) > glow_radius(1.0));
+    }
+
+    #[test]
+    fn selected_nodes_get_one_glow_instance_behind_the_card() {
+        let mut document = GraphDocument::new("glow");
+        document.nodes = vec![node_at(0.0, 0.0), {
+            let mut node = node_at(300.0, 0.0);
+            node.id = "other".into();
+            node
+        }];
+        let selected: HashSet<String> = ["n".to_string()].into_iter().collect();
+        let z_order: Vec<String> = document.nodes.iter().map(|node| node.id.clone()).collect();
+        let theme = crate::theme::CanvasTheme::default();
+        let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, 1.0);
+        assert_eq!(shapes.iter().filter(|shape| shape.kind == 2.0).count(), 1);
+        let glow = shapes.iter().find(|shape| shape.kind == 2.0).expect("glow");
+        let card = shapes.iter().find(|shape| shape.kind == 0.0).expect("card");
+        assert!(glow.size[0] > card.size[0] && glow.size[1] > card.size[1]);
+        assert!((glow.center[0] - card.center[0]).abs() < 1e-6);
+        assert!((glow.center[1] - card.center[1]).abs() < 1e-6);
     }
 
     #[test]

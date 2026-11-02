@@ -181,7 +181,21 @@ pub fn brep_faces(brep: &Brep) -> Result<Vec<FaceId>, String> {
 /// [`UNPORTED_PREFIX`]; see [`is_unported_error`].
 pub fn boolean_breps(op: BooleanOp, a: Brep, b: Brep) -> Result<Brep, String> {
     let mut kernel = Kernel::default();
-    boolean_with_kernel(&mut kernel, op, a, b)
+    boolean_breps_with_kernel(&mut kernel, op, a, b)
+}
+
+/// Boolean B-rep operation using the caller's kernel.
+///
+/// Display tessellation of the result must use the same kernel that built it:
+/// SolidCore surfaces/topology can retain kernel-owned state, and a fresh
+/// kernel can display the pre-Boolean surfaces.
+pub fn boolean_breps_with_kernel(
+    kernel: &mut Kernel,
+    op: BooleanOp,
+    a: Brep,
+    b: Brep,
+) -> Result<Brep, String> {
+    boolean_with_kernel(kernel, op, a, b)
 }
 
 fn boolean_with_kernel(

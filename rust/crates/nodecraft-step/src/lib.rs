@@ -29,7 +29,7 @@ use std::fs;
 
 pub mod solidcore_export;
 pub use step_brep::brep_to_model;
-pub use solidcore_export::write_brep_exact;
+pub use solidcore_export::{write_brep_exact, write_breps_exact};
 mod analytic;
 pub mod units;
 pub mod style;

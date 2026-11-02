@@ -2214,7 +2214,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#23ea17c1c21a587e5bd50653e7c73c490f34bbbe"
 
 [[package]]
 name = "objc-sys"
@@ -3393,7 +3393,7 @@ checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#23ea17c1c21a587e5bd50653e7c73c490f34bbbe"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -3494,7 +3494,7 @@ dependencies = [
 [[package]]
 name = "step-brep"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#23ea17c1c21a587e5bd50653e7c73c490f34bbbe"
 dependencies = [
  "solidcore",
  "step-import",
@@ -3510,7 +3510,7 @@ dependencies = [
 [[package]]
 name = "step-export"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#23ea17c1c21a587e5bd50653e7c73c490f34bbbe"
 dependencies = [
  "step-import",
 ]
@@ -3518,7 +3518,7 @@ dependencies = [
 [[package]]
 name = "step-import"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#23ea17c1c21a587e5bd50653e7c73c490f34bbbe"
 
 [[package]]
 name = "step-nurbs"

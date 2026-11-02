@@ -374,29 +374,6 @@ fn moved_positions(
     (start, end)
 }
 
-fn document_path(document: &GraphDocument, from: &str, to: &str) -> Option<Vec<String>> {
-    if from == to {
-        return Some(vec![from.to_owned()]);
-    }
-    let mut queue = std::collections::VecDeque::from([vec![from.to_owned()]]);
-    let mut seen = HashSet::from([from.to_owned()]);
-    while let Some(path) = queue.pop_front() {
-        let Some(last) = path.last() else { continue };
-        for connection in document.connections.iter().filter(|link| &link.from == last) {
-            if !seen.insert(connection.to.clone()) {
-                continue;
-            }
-            let mut next = path.clone();
-            next.push(connection.to.clone());
-            if connection.to == to {
-                return Some(next);
-            }
-            queue.push_back(next);
-        }
-    }
-    None
-}
-
 fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet<String> {
     let mut result = HashSet::new();
     let mut queue = std::collections::VecDeque::from([start.to_owned()]);
@@ -411,16 +388,6 @@ fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet<String> {
     result
 }
 
-fn rotate_gizmo_point(point: [f64; 3], rx: f64, ry: f64, rz: f64) -> [f64; 3] {
-    let (cx, sx) = rx.to_radians().sin_cos();
-    let (cy, sy) = ry.to_radians().sin_cos();
-    let (cz, sz) = rz.to_radians().sin_cos();
-    let [mut x, mut y, mut z] = point;
-    (y, z) = (y * cx - z * sx, y * sx + z * cx);
-    (x, z) = (x * cy + z * sy, -x * sy + z * cy);
-    (x, y) = (x * cz - y * sz, x * sz + y * cz);
-    [x, y, z]
-}
 
 #[derive(Clone)]
 struct DocumentTab {
@@ -456,6 +423,41 @@ impl SettingsTab {
     }
 }
 
+fn target_closure(document: &GraphDocument, target: &str) -> HashSet<String> {
+    let mut closure = HashSet::new();
+    let mut stack = vec![target.to_owned()];
+    while let Some(id) = stack.pop() {
+        if !closure.insert(id.clone()) { continue; }
+        for link in document.connections.iter().filter(|link| link.to == id) {
+            stack.push(link.from.clone());
+        }
+    }
+    closure
+}
+
+/// The node the viewer should show when a document is opened. Prefer an
+/// interface output, then the last terminal sink (a node with no consumers).
+/// Falling back to `nodes.last()` is wrong when the final node is an upstream
+/// primitive; it displays that primitive at its local origin instead of the
+/// evaluated root.
+fn initial_viewer_target(document: &GraphDocument) -> Option<String> {
+    if let Some(output) = document.interface.outputs.last()
+        && document.nodes.iter().any(|node| &node.id == output)
+    {
+        return Some(output.clone());
+    }
+    document
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| {
+            node.node_type != "exporter"
+                && !document.connections.iter().any(|link| link.from == node.id)
+        })
+        .or_else(|| document.nodes.last())
+        .map(|node| node.id.clone())
+}
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     path: Option<PathBuf>,
@@ -483,10 +485,12 @@ pub struct NodeCraftApp {
     camera_initialized: bool,
     last_saved_view: crate::viewport::ViewSettings,
     last_saved_theme: Option<String>,
+    activity: ActivitySettings,
     recent_files: Vec<PathBuf>,
     last_saved_recent: Vec<PathBuf>,
     view_save_due: Option<Instant>,
     auto_eval_due: Option<Instant>,
+    pending_dirty: HashSet<String>,
     layout_animation: Option<LayoutAnimation>,
     node_position_animation: Option<NodePositionAnimation>,
     tabs: Vec<DocumentTab>,
@@ -568,6 +572,12 @@ impl NodeCraftApp {
             viewport.set_chrome_visible(false);
         }
         let persisted_view = settings.view;
+        let activity = settings.activity;
+        node_editor.set_activity_timings(
+            u64::from(activity.fade_in_ms),
+            u64::from(activity.hold_ms),
+            u64::from(activity.fade_out_ms),
+        );
         let initial_theme_id = Some(crate::theme::active_preset().id);
         let mut recent_files: Vec<PathBuf> = settings
             .recent_files
@@ -607,10 +617,12 @@ impl NodeCraftApp {
             camera_initialized: false,
             last_saved_view: persisted_view,
             last_saved_theme: initial_theme_id,
+            activity,
             recent_files,
             last_saved_recent: persisted_recent,
             view_save_due: None,
             auto_eval_due: None,
+            pending_dirty: HashSet::new(),
             layout_animation: None,
             node_position_animation: None,
             tabs: Vec::new(),
@@ -743,12 +755,14 @@ impl NodeCraftApp {
     }
 
     fn restore_active_tab(&mut self) {
+        self.pending_dirty.clear();
         let Some(tab) = self.tabs.get(self.active_tab).cloned() else { return };
         let Some(session) = self.documents.session(&tab.document_id).cloned() else {
             self.session = None;
             return;
         };
         self.session = Some(session);
+        self.pending_dirty.clear();
         self.path = tab.path;
         self.selected_nodes = tab.selected_nodes;
         self.selected_connections = tab.selected_connections;
@@ -806,15 +820,12 @@ impl NodeCraftApp {
 
     /// Replace the graph in the active tab without opening another tab.
     fn replace_active_session(&mut self, session: Session, status: String) {
-        let selected_nodes: HashSet<String> = session
-            .document()
-            .nodes
-            .last()
-            .map(|node| node.id.clone())
+        let selected_nodes: HashSet<String> = initial_viewer_target(session.document())
             .into_iter()
             .collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
         self.session = Some(session.clone());
+        self.pending_dirty.clear();
         self.path = None;
         self.selected_nodes = selected_nodes.clone();
         self.selected_connections.clear();
@@ -865,11 +876,7 @@ impl NodeCraftApp {
         if let Some(path) = &path {
             self.documents.set_path(&document_id, path);
         }
-        let selected_nodes: HashSet<String> = session
-            .document()
-            .nodes
-            .last()
-            .map(|node| node.id.clone())
+        let selected_nodes: HashSet<String> = initial_viewer_target(session.document())
             .into_iter()
             .collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
@@ -891,6 +898,7 @@ impl NodeCraftApp {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.session = Some(session);
+        self.pending_dirty.clear();
         self.path = path;
         self.selected_nodes = selected_nodes;
         self.selected_connections.clear();
@@ -1285,38 +1293,40 @@ impl NodeCraftApp {
         let x = value("x");
         let y = value("y");
         let z = value("z");
-        let mut pivot = [x, y, z];
-        if let Some(target) = self.viewer_breakpoint.as_deref() {
-            if target != selected_id {
-                if let Some(path) = document_path(document, &selected_id, target) {
-                    for id in path.iter().skip(1) {
-                        let Some(next) = document.nodes.iter().find(|node| &node.id == id) else { continue };
-                        if next.node_type != "translate" {
-                            continue;
-                        }
-                        let transform = |key: &str| {
-                            next.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0)
-                        };
-                        let rotated = rotate_gizmo_point(pivot, transform("rx"), transform("ry"), transform("rz"));
-                        pivot = [
-                            rotated[0] + transform("x"),
-                            rotated[1] + transform("y"),
-                            rotated[2] + transform("z"),
-                        ];
-                    }
-                }
-            }
-        }
+        let chain = self
+            .viewer_breakpoint
+            .as_deref()
+            .filter(|target| *target != selected_id)
+            .and_then(|target| {
+                nodecraft_session::placement::transform_chain(document, &selected_id, target)
+            })
+            .unwrap_or_else(nodecraft_session::placement::Affine3::identity);
+        let local = node.values.get("space").and_then(serde_json::Value::as_str) == Some("local");
+        // In local mode x/y/z are along the node's rotated axes. Compose that
+        // rotation with the downstream chain once and use it everywhere: pivot,
+        // triad orientation, and inverse drag mapping.
+        let basis = if local {
+            chain.compose(nodecraft_session::placement::Affine3::rotation(&node.values))
+        } else {
+            chain
+        };
+        let axes = [
+            basis.apply_vector([1.0, 0.0, 0.0]),
+            basis.apply_vector([0.0, 1.0, 0.0]),
+            basis.apply_vector([0.0, 0.0, 1.0]),
+        ];
         Some(Gizmo {
             node_id: selected_id,
-            pivot,
+            pivot: basis.apply_point([x, y, z]),
             x,
             y,
             z,
             rx: value("rx"),
             ry: value("ry"),
             rz: value("rz"),
-            local: node.values.get("space").and_then(serde_json::Value::as_str) == Some("local"),
+            local,
+            world_to_local: basis.inverse_linear(),
+            axes,
         })
     }
 
@@ -1329,6 +1339,7 @@ impl NodeCraftApp {
         ) {
             Ok(change) => {
                 if change.changed && !change.dirty_nodes.is_empty() {
+                    self.pending_dirty.extend(change.dirty_nodes);
                     self.auto_eval_due = Some(Instant::now());
                 }
                 change.changed
@@ -1395,9 +1406,22 @@ impl NodeCraftApp {
             self.eval_pending = None;
             return;
         }
+        if !self.pending_dirty.is_empty() {
+            let target = engine_bridge::target_for(session.document(), self.viewer_breakpoint.as_deref());
+            let affected = target.as_deref().is_some_and(|target| {
+                let closure = target_closure(session.document(), target);
+                self.pending_dirty.iter().any(|id| closure.contains(id))
+            });
+            self.pending_dirty.clear();
+            if !affected {
+                self.status = "Graph updated; view is unchanged".to_owned();
+                return;
+            }
+        }
         self.eval_next = self.eval_next.wrapping_add(1);
         let id = self.eval_next;
         self.eval_pending = Some(id);
+        self.node_editor.clear_activity();
         self.status = "Evaluating…".to_owned();
         let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
         let mut linked_documents = std::collections::BTreeMap::new();
@@ -1451,6 +1475,7 @@ impl NodeCraftApp {
         let mut theme_rename_focus = self.theme_rename_focus;
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
+        let mut activity = self.activity;
         let mut close = false;
         let mut builder = egui::ViewportBuilder::default()
             .with_title("NodeCraft Settings")
@@ -1761,6 +1786,24 @@ impl NodeCraftApp {
                         content.monospace(format!("GIT: {BUILD_GIT_HASH}"));
                         #[cfg(feature = "gpu-viewport")]
                         content.monospace(format!("MSAA: {}x", crate::gpu_viewport::msaa_samples()));
+                        content.add_space(8.0);
+                        content.heading("Node activity glow");
+                        content.small(
+                            "Diagnostic pulse shown while each node is processing. \n\
+                             Hold is applied from node start and is at least 500 ms.",
+                        );
+                        content.add(
+                            egui::Slider::new(&mut activity.fade_in_ms, 0..=500)
+                                .text("Fade in (ms)"),
+                        );
+                        content.add(
+                            egui::Slider::new(&mut activity.hold_ms, 500..=5000)
+                                .text("Hold (ms, min 500)"),
+                        );
+                        content.add(
+                            egui::Slider::new(&mut activity.fade_out_ms, 0..=500)
+                                .text("Fade out (ms)"),
+                        );
                     }
                 }
                 #[cfg(target_os = "macos")]
@@ -1788,6 +1831,16 @@ impl NodeCraftApp {
         }
         if view != self.viewport.view() {
             self.viewport.set_view(view);
+        }
+        if activity != self.activity {
+            self.activity = activity;
+            self.node_editor.set_activity_timings(
+                u64::from(activity.fade_in_ms),
+                u64::from(activity.hold_ms),
+                u64::from(activity.fade_out_ms),
+            );
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
         }
         if close {
             self.settings_open = false;
@@ -1833,6 +1886,23 @@ impl NodeCraftApp {
     }
 
     fn poll_evaluation(&mut self) {
+        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
+        let latest_id = self.eval_next;
+        while let Some((id, tab_id, event)) = self.eval_worker.try_recv_progress() {
+            if id != latest_id || tab_id != active_tab_id {
+                continue;
+            }
+            match event.phase {
+                nodecraft_engine::ProgressPhase::Start => {
+                    self.node_editor.activity_started(&event.node_id);
+                }
+                nodecraft_engine::ProgressPhase::Complete => {
+                    self.node_editor.activity_finished(&event.node_id);
+                }
+                nodecraft_engine::ProgressPhase::BrepStart
+                | nodecraft_engine::ProgressPhase::BrepComplete => {}
+            }
+        }
         let Some(pending) = self.eval_pending else { return };
         while let Some((id, tab_id, evaluation)) = self.eval_worker.try_recv() {
             let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
@@ -1854,6 +1924,7 @@ impl NodeCraftApp {
                 self.viewport.set_mesh(self.mesh.as_ref());
                 self.camera_initialized = true;
             }
+            self.node_editor.pulse_glow();
             self.warmup_until = self
                 .warmup_until
                 .max(Instant::now() + std::time::Duration::from_millis(500));
@@ -2052,6 +2123,7 @@ impl eframe::App for NodeCraftApp {
             if save_app_settings(
                 self.last_saved_view,
                 self.last_saved_theme.clone(),
+                self.activity,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -3175,10 +3247,18 @@ impl eframe::App for NodeCraftApp {
                 }
                 NodeEditorAction::Connect { from, to, input, out } => {
                     let command = Command::Connect { from, to, input, out };
-                    if self.apply_commands(&[command], Some("connect-nodes")) {
-                        self.evaluate();
+                    let changed = self.apply_commands(&[command], Some("connect-nodes"));
+                    if changed {
                         self.status = "Connected nodes".to_owned();
+                    } else if self.error.is_none() {
+                        // A duplicate connection is a session no-op, but the UI
+                        // still asked to view the connected target. Refresh so a
+                        // stale/empty viewport cannot survive the reconnect.
+                        self.status = "Connection unchanged".to_owned();
+                        self.evaluate();
+                        continue;
                     }
+                    self.evaluate();
                 }
                 NodeEditorAction::InsertNodeOnCable { node, connection, input, out } => {
                     if let Some(session) = &self.session {
@@ -3343,12 +3423,14 @@ struct EvalJob {
 struct EvalWorker {
     tx: Sender<EvalJob>,
     rx: Receiver<(u64, u64, engine_bridge::Evaluation)>,
+    progress_rx: Receiver<(u64, u64, nodecraft_engine::ProgressEvent)>,
 }
 
 impl EvalWorker {
     fn new() -> Self {
         let (job_tx, job_rx) = channel::<EvalJob>();
         let (result_tx, result_rx) = channel();
+        let (progress_tx, progress_rx) = channel();
         std::thread::spawn(move || {
             let mut cache = EngineCache::new();
             while let Ok(mut job) = job_rx.recv() {
@@ -3362,12 +3444,17 @@ impl EvalWorker {
                     cache = EngineCache::new();
                 }
                 let target = engine_bridge::target_for(&job.document, job.selected.as_deref());
+                let progress_tx = progress_tx.clone();
+                let mut on_progress = |event: nodecraft_engine::ProgressEvent| {
+                    let _ = progress_tx.send((job.id, job.tab_id, event));
+                };
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    engine_bridge::evaluate_with_linked(
+                    engine_bridge::evaluate_with_linked_progress(
                         &job.document,
                         cache,
                         job.selected.as_deref(),
                         &job.linked_documents,
+                        Some(&mut on_progress),
                     )
                 }));
                 let evaluation = match outcome {
@@ -3396,7 +3483,7 @@ impl EvalWorker {
                 }
             }
         });
-        Self { tx: job_tx, rx: result_rx }
+        Self { tx: job_tx, rx: result_rx, progress_rx }
     }
 
     fn send(&self, job: EvalJob) {
@@ -3405,6 +3492,10 @@ impl EvalWorker {
 
     fn try_recv(&self) -> Option<(u64, u64, engine_bridge::Evaluation)> {
         self.rx.try_recv().ok()
+    }
+
+    fn try_recv_progress(&self) -> Option<(u64, u64, nodecraft_engine::ProgressEvent)> {
+        self.progress_rx.try_recv().ok()
     }
 }
 
@@ -3486,12 +3577,27 @@ fn settings_file() -> Option<PathBuf> {
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct ActivitySettings {
+    fade_in_ms: u32,
+    hold_ms: u32,
+    fade_out_ms: u32,
+}
+
+impl Default for ActivitySettings {
+    fn default() -> Self {
+        Self { fade_in_ms: 40, hold_ms: 500, fade_out_ms: 40 }
+    }
+}
+
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct AppSettings {
     #[serde(flatten)]
     view: crate::viewport::ViewSettings,
     #[serde(default)]
     theme: Option<String>,
+    #[serde(default)]
+    activity: ActivitySettings,
     #[serde(default)]
     recent_files: Vec<String>,
 }
@@ -3504,6 +3610,7 @@ fn load_app_settings() -> Option<AppSettings> {
 fn save_app_settings(
     view: crate::viewport::ViewSettings,
     theme: Option<String>,
+    activity: ActivitySettings,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -3513,6 +3620,7 @@ fn save_app_settings(
     let settings = AppSettings {
         view,
         theme,
+        activity,
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -4380,6 +4488,7 @@ mod tests {
         let settings = AppSettings {
             view: crate::viewport::ViewSettings::default(),
             theme: Some("punk".to_owned()),
+            activity: ActivitySettings::default(),
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");
@@ -4390,6 +4499,7 @@ mod tests {
             vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()]
         );
         assert_eq!(parsed.view, crate::viewport::ViewSettings::default());
+        assert_eq!(parsed.activity, ActivitySettings::default());
     }
 
     #[test]

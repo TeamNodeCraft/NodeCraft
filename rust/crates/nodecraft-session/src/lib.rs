@@ -11,6 +11,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 mod defaults;
+pub mod placement;
 mod runtime;
 pub mod store;
 pub use runtime::{GraphRuntime, RuntimeEvaluation};
@@ -867,4 +868,52 @@ mod transaction_tests {
         assert_eq!(graph.nodes[4].values["points"].as_array().unwrap().len(), 4);
     }
 
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::*;
+
+    fn node(id: &str, node_type: &str) -> GraphNode {
+        GraphNode { id: id.into(), node_type: node_type.into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }
+    }
+
+    fn connect(from: &str, to: &str) -> Command {
+        Command::Connect { from: from.into(), to: to.into(), input: "shape".into(), out: "shape".into() }
+    }
+
+    #[test]
+    fn reconnect_after_disconnect_reports_dirty_target() {
+        let mut document = GraphDocument::new("reconnect");
+        document.nodes = vec![node("p", "primitive"), node("t", "translate")];
+        let mut session = Session::new(document);
+        let first = session.apply_commands(&[connect("p", "t")]).unwrap();
+        assert!(first.dirty_nodes.contains(&"t".to_string()));
+        session.apply_commands(&[Command::Disconnect { from: "p".into(), to: "t".into(), input: "shape".into() }]).unwrap();
+        let reconnect = session.apply_commands(&[connect("p", "t")]).unwrap();
+        assert!(reconnect.changed);
+        assert!(reconnect.dirty_nodes.contains(&"t".to_string()), "{:?}", reconnect.dirty_nodes);
+    }
+
+    #[test]
+    fn replacing_an_existing_input_reports_dirty_target() {
+        let mut document = GraphDocument::new("replace");
+        document.nodes = vec![node("p1", "primitive"), node("p2", "primitive"), node("t", "translate")];
+        let mut session = Session::new(document);
+        session.apply_commands(&[connect("p1", "t")]).unwrap();
+        let replaced = session.apply_commands(&[connect("p2", "t")]).unwrap();
+        assert!(replaced.changed);
+        assert!(replaced.dirty_nodes.contains(&"t".to_string()), "{:?}", replaced.dirty_nodes);
+    }
+
+    #[test]
+    fn duplicate_connection_is_a_noop() {
+        let mut document = GraphDocument::new("duplicate");
+        document.nodes = vec![node("p", "primitive"), node("t", "translate")];
+        let mut session = Session::new(document);
+        session.apply_commands(&[connect("p", "t")]).unwrap();
+        let duplicate = session.apply_commands(&[connect("p", "t")]).unwrap();
+        assert!(!duplicate.changed);
+        assert!(duplicate.dirty_nodes.is_empty());
+    }
 }

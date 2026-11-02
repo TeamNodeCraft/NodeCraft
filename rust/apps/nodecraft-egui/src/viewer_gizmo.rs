@@ -72,6 +72,11 @@ pub struct Gizmo {
     pub ry: f64,
     pub rz: f64,
     pub local: bool,
+    /// Linear inverse of the downstream chain, mapping world deltas back to
+    /// this node's parent frame.
+    pub world_to_local: [[f64; 3]; 3],
+    /// World directions of the node's local X/Y/Z axes.
+    pub axes: [[f64; 3]; 3],
 }
 
 /// Persistent drag snapshot for the wrapper.
@@ -117,6 +122,13 @@ pub fn show(
         center: Vec3::new(gizmo.pivot[0], gizmo.pivot[1], gizmo.pivot[2]),
         translate: true,
         rotate: true,
+        axes: gizmo
+            .axes
+            .iter()
+            .map(|axis| Vec3::new(axis[0], axis[1], axis[2]))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("three axes"),
     };
     let id = egui::Id::new(("solidcraft-transform-gizmo", gizmo.node_id.as_str()));
     let painter = ui.painter().with_clip_rect(rect);
@@ -135,13 +147,14 @@ pub fn show(
     if !drag.started {
         match drag.change {
             Change::Translate(delta) => {
+                let world = [delta.x, delta.y, delta.z];
+                let local = gizmo
+                    .world_to_local
+                    .iter()
+                    .map(|row| row[0] * world[0] + row[1] * world[1] + row[2] * world[2])
+                    .collect::<Vec<_>>();
                 for (index, field) in ["x", "y", "z"].iter().enumerate() {
-                    let value = values[index]
-                        + match index {
-                            0 => delta.x,
-                            1 => delta.y,
-                            _ => delta.z,
-                        };
+                    let value = values[index] + local[index];
                     match index {
                         0 => gizmo.x = value,
                         1 => gizmo.y = value,
@@ -211,12 +224,14 @@ pub struct Triad {
     pub center: Vec3,
     pub translate: bool,
     pub rotate: bool,
+    pub axes: [Vec3; 3],
 }
 
 #[derive(Clone, Copy, Debug)]
 struct State {
     handle: Handle,
     center: Vec3,
+    axes: [Vec3; 3],
     /// Grab point on the plane (planes, ball) or parameter along the axis.
     grab: Vec3,
     t0: f64,
@@ -236,12 +251,8 @@ pub const HIT_TOLERANCE: f32 = 9.0;
 const RING: f64 = 0.62;
 
 /// In-plane directions of the ring about an axis (right-handed: e1 × e2 = axis).
-fn ring_basis(i: usize) -> (Vec3, Vec3) {
-    match i {
-        0 => (Vec3::Y, Vec3::Z),
-        1 => (Vec3::Z, Vec3::X),
-        _ => (Vec3::X, Vec3::Y),
-    }
+fn ring_basis(axes: &[Vec3; 3], i: usize) -> (Vec3, Vec3) {
+    (axes[(i + 1) % 3], axes[(i + 2) % 3])
 }
 
 /// Distance from `p` to the screen segment a–b.
@@ -305,13 +316,13 @@ fn shapes(proj: &Proj, t: &Triad, l: f64) -> Option<Shapes> {
     let ball = proj.to_screen(c)?;
     let mut s = Shapes { arrows: Vec::new(), planes: Vec::new(), rings: Vec::new(), ball };
     if t.translate {
-        for (i, d) in DIRS.iter().enumerate() {
+        for (i, d) in t.axes.iter().enumerate() {
             if let (Some(a), Some(b)) = (proj.to_screen(c + *d * (0.18 * l)), proj.to_screen(c + *d * l)) {
                 s.arrows.push((i, a, b));
             }
         }
         for i in 0..3 {
-            let (e1, e2) = ring_basis(i);
+            let (e1, e2) = ring_basis(&t.axes, i);
             let q: Ring<Pos2> = [(0.25, 0.25), (0.45, 0.25), (0.45, 0.45), (0.25, 0.45)]
                 .iter()
                 .filter_map(|(a, b)| proj.to_screen(c + e1 * (a * l) + e2 * (b * l)))
@@ -323,7 +334,7 @@ fn shapes(proj: &Proj, t: &Triad, l: f64) -> Option<Shapes> {
     }
     if t.rotate {
         for i in 0..3 {
-            let (e1, e2) = ring_basis(i);
+            let (e1, e2) = ring_basis(&t.axes, i);
             let pts: Vec<Pos2> = (0..=64)
                 .map(|k| k as f64 / 64.0 * std::f64::consts::TAU)
                 .filter_map(|th| proj.to_screen(c + (e1 * th.cos() + e2 * th.sin()) * (RING * l)))
@@ -404,8 +415,8 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     }
     let free = ui.input(|i| i.modifiers.alt || i.modifiers.command || i.modifiers.ctrl);
     let view = proj.ray(sh.ball).1;
-    let plane_normal = |h: Handle| match h {
-        Handle::Plane(i) | Handle::Ring(i) => DIRS[i],
+    let plane_normal = |axes: &[Vec3; 3], h: Handle| match h {
+        Handle::Plane(i) | Handle::Ring(i) => axes[i],
         _ => view,
     };
     let mut started = false;
@@ -418,15 +429,15 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
             let h = hovered?;
             let from = ui.input(|i| i.pointer.press_origin()).unwrap_or(p);
             let c = t.center;
-            let mut s = State { handle: h, center: c, grab: c, t0: 0.0, last: 0.0, turned: 0.0 };
+            let mut s = State { handle: h, center: c, axes: t.axes, grab: c, t0: 0.0, last: 0.0, turned: 0.0 };
             match h {
-                Handle::Axis(i) => s.t0 = along(proj, from, c, DIRS[i])?,
+                Handle::Axis(i) => s.t0 = along(proj, from, c, s.axes[i])?,
                 Handle::Ring(i) => {
-                    let q = on_plane(proj, from, c, DIRS[i])? - c;
-                    let (e1, e2) = ring_basis(i);
+                    let q = on_plane(proj, from, c, s.axes[i])? - c;
+                    let (e1, e2) = ring_basis(&s.axes, i);
                     s.last = q.dot(e2).atan2(q.dot(e1));
                 }
-                _ => s.grab = on_plane(proj, from, c, plane_normal(h))?,
+                _ => s.grab = on_plane(proj, from, c, plane_normal(&s.axes, h))?,
             }
             started = true;
             s
@@ -434,12 +445,12 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     };
     let change = match st.handle {
         Handle::Axis(i) => {
-            let v = along(proj, p, st.center, DIRS[i]).map(|v| v - st.t0).unwrap_or(0.0);
-            Change::Translate(DIRS[i] * snap(v, step, free))
+            let v = along(proj, p, st.center, st.axes[i]).map(|v| v - st.t0).unwrap_or(0.0);
+            Change::Translate(st.axes[i] * snap(v, step, free))
         }
         Handle::Ring(i) => {
-            if let Some(q) = on_plane(proj, p, st.center, DIRS[i]).map(|q| q - st.center) {
-                let (e1, e2) = ring_basis(i);
+            if let Some(q) = on_plane(proj, p, st.center, st.axes[i]).map(|q| q - st.center) {
+                let (e1, e2) = ring_basis(&st.axes, i);
                 let th = q.dot(e2).atan2(q.dot(e1));
                 let mut d = th - st.last;
                 while d > std::f64::consts::PI {
@@ -454,7 +465,7 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
             Change::Rotate { axis: i, angle: snap(st.turned, 5f64.to_radians(), free) }
         }
         h => {
-            let d = on_plane(proj, p, st.center, plane_normal(h)).map(|q| q - st.grab).unwrap_or(Vec3::ZERO);
+            let d = on_plane(proj, p, st.center, plane_normal(&st.axes, h)).map(|q| q - st.grab).unwrap_or(Vec3::ZERO);
             Change::Translate(Vec3::new(snap(d.x, step, free), snap(d.y, step, free), snap(d.z, step, free)))
         }
     };
