@@ -1305,19 +1305,22 @@ impl NodeCraftApp {
         // In local mode x/y/z are along the node's rotated axes. Compose that
         // rotation with the downstream chain once and use it everywhere: pivot,
         // triad orientation, and inverse drag mapping.
-        let basis = if local {
+        let axes_basis = if local {
             chain.compose(nodecraft_session::placement::Affine3::rotation(&node.values))
         } else {
             chain
         };
         let axes = [
-            basis.apply_vector([1.0, 0.0, 0.0]),
-            basis.apply_vector([0.0, 1.0, 0.0]),
-            basis.apply_vector([0.0, 0.0, 1.0]),
+            axes_basis.apply_vector([1.0, 0.0, 0.0]),
+            axes_basis.apply_vector([0.0, 1.0, 0.0]),
+            axes_basis.apply_vector([0.0, 0.0, 1.0]),
         ];
         Some(Gizmo {
             node_id: selected_id,
-            pivot: basis.apply_point([x, y, z]),
+            // Space changes only the manipulator axes. Values stay in the
+            // parent/world frame, so the pivot and drag mapping never include
+            // the node's own rotation.
+            pivot: chain.apply_point([x, y, z]),
             x,
             y,
             z,
@@ -1325,7 +1328,7 @@ impl NodeCraftApp {
             ry: value("ry"),
             rz: value("rz"),
             local,
-            world_to_local: basis.inverse_linear(),
+            world_to_local: chain.inverse_linear(),
             axes,
         })
     }

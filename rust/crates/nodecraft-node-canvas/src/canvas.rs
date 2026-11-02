@@ -178,7 +178,6 @@ pub struct NodeEditor {
     left_dock: f32,
     resize_start: Option<(f32, f32)>,
     geometry_key: Option<u64>,
-    shape_zoom: f32,
     occlusion_key: Option<u64>,
     occlusion: Option<HashMap<String, Vec<Rect>>>,
     geometry: Option<Arc<NodeGeometry>>,
@@ -220,7 +219,6 @@ impl Default for NodeEditor {
             left_dock: 0.0,
             resize_start: None,
             geometry_key: None,
-            shape_zoom: -1.0,
             occlusion_key: None,
             occlusion: None,
             geometry: None,
@@ -663,25 +661,34 @@ impl NodeEditor {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         let mut activity_glows = Vec::new();
-        for (id, activity) in &self.activity {
-            let Some(node) = document.nodes.iter().find(|node| &node.id == id) else { continue };
-            let strength = activity_strength(
-                activity.started,
-                activity.ended,
-                now,
-                self.activity_fade_in,
-                self.activity_hold,
-                self.activity_fade_out,
-            );
-            if strength > 0.0 {
-                shape_glow(
-                &mut activity_glows,
-                graph_rect(node),
-                self.theme.f32(self.theme.accent),
-                3.0,
-                strength,
-                glow_radius(self.zoom),
-            );
+        if !self.activity.is_empty() || !selected_nodes.is_empty() {
+            let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node))
+                .collect();
+            let radius = glow_radius(self.zoom);
+            let accent = self.theme.f32(self.theme.accent);
+            for (id, activity) in &self.activity {
+                let Some(node) = nodes.get(id.as_str()) else { continue };
+                let strength = activity_strength(
+                    activity.started,
+                    activity.ended,
+                    now,
+                    self.activity_fade_in,
+                    self.activity_hold,
+                    self.activity_fade_out,
+                );
+                if strength > 0.0 {
+                    shape_glow(&mut activity_glows, graph_rect(node), accent, 3.0, strength, radius);
+                }
+            }
+            // Selection glow is dynamic too: zooming changes its screen-space
+            // radius but must not rebuild every card's shape instances.
+            for id in selected_nodes {
+                if let Some(node) = nodes.get(id.as_str()) {
+                    shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, radius);
+                }
             }
         }
 
@@ -693,9 +700,7 @@ impl NodeEditor {
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>)> = Vec::new();
         let key = geometry_key(document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
-        let rekey = self.geometry_key != Some(key);
-        let reshape = rekey || (self.shape_zoom - self.zoom).abs() > 1.0e-6;
-        if reshape {
+        if self.geometry_key != Some(key) {
             if self.gpu_ready {
                 self.shapes = Some(Arc::new(build_shape_instances(
                     document,
@@ -703,19 +708,15 @@ impl NodeEditor {
                     &self.z_order,
                     viewer_breakpoint,
                     &self.theme,
-                    self.zoom,
                 )));
                 self.geometry = None;
-            } else if rekey {
+            } else {
                 self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme)));
                 self.shapes = None;
             }
-        }
-        if rekey {
             self.cables = Some(Arc::new(build_cables(document, selected_nodes, selected_connections, &self.theme)));
             self.geometry_key = Some(key);
         }
-        self.shape_zoom = self.zoom;
         // Always carry the cached geometry into the callback. egui may prepare a
         // second pass in the same frame, and a None here would prevent the upload
         // from ever reaching the renderer even though the geometry exists.
@@ -2559,7 +2560,6 @@ fn build_shape_instances(
     z_order: &[String],
     viewer_breakpoint: Option<&str>,
     theme: &crate::theme::CanvasTheme,
-    zoom: f32,
 ) -> Vec<ShapeInstance> {
     let ranks: HashMap<&str, usize> = z_order
         .iter()
@@ -2583,11 +2583,6 @@ fn build_shape_instances(
         let rect = graph_rect(node);
         let selected_here = selected.contains(node.id.as_str());
         let viewer_here = viewer_breakpoint == Some(node.id.as_str());
-        // One extra SDF quad gives a cheap analytic glow. It is drawn before
-        // the card and follows the same shape/transform as the card itself.
-        if selected_here {
-            shape_glow(&mut out, rect, accent, 2.0, 0.0, glow_radius(zoom));
-        }
         out.push(ShapeInstance {
             center: [rect.center().x, rect.center().y],
             size: [rect.width(), rect.height()],
@@ -3203,6 +3198,68 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "performance baseline; run with --ignored --nocapture"]
+    fn baseline_activity_glow_scaling() {
+        use std::time::Instant;
+        fn document(n: usize) -> GraphDocument {
+            let mut document = GraphDocument::new("activity-baseline");
+            let columns = (n as f64).sqrt().ceil() as usize;
+            for index in 0..n {
+                document.nodes.push(nodecraft_session::GraphNode {
+                    id: format!("n{index}"),
+                    node_type: "translate".into(),
+                    values: Default::default(),
+                    suppressed: false,
+                    x: (index % columns) as f64 * 220.0,
+                    y: (index / columns) as f64 * 150.0,
+                });
+            }
+            document
+        }
+        let document = document(5_000);
+        let context = egui::Context::default();
+        let mut editor = NodeEditor::default();
+        editor.set_gpu_ready_for_test(true);
+        editor.set_theme(crate::theme::CanvasTheme::default());
+        for node in &document.nodes {
+            editor.activity_started(&node.id);
+        }
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0)));
+        let selected = HashSet::new();
+        let selected_connections = HashSet::new();
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+        for _ in 0..2 {
+            let mut output = context.run_ui(input.clone(), |ui| {
+                editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+            });
+            output.textures_delta.clear();
+        }
+        let start = Instant::now();
+        let mut output = context.run_ui(input.clone(), |ui| {
+            editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+        });
+        output.textures_delta.clear();
+        let with_activity = start.elapsed().as_secs_f64() * 1000.0;
+        editor.clear_activity();
+        for _ in 0..2 {
+            let mut output = context.run_ui(input.clone(), |ui| {
+                editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+            });
+            output.textures_delta.clear();
+        }
+        let start = Instant::now();
+        let mut output = context.run_ui(input.clone(), |ui| {
+            editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+        });
+        output.textures_delta.clear();
+        println!(
+            "activity glow nodes=5000 with={with_activity:.2}ms without={:.2}ms",
+            start.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    #[test]
     fn cable_geometry_key_includes_port_names() {
         let mut document = GraphDocument::new("key-ports");
         document.nodes.push(nodecraft_session::GraphNode {
@@ -3329,7 +3386,7 @@ mod tests {
             let geometry_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, 1.0);
+            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme);
             let shapes_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
@@ -3401,23 +3458,17 @@ mod tests {
     }
 
     #[test]
-    fn selected_nodes_get_one_glow_instance_behind_the_card() {
-        let mut document = GraphDocument::new("glow");
-        document.nodes = vec![node_at(0.0, 0.0), {
-            let mut node = node_at(300.0, 0.0);
-            node.id = "other".into();
-            node
-        }];
-        let selected: HashSet<String> = ["n".to_string()].into_iter().collect();
-        let z_order: Vec<String> = document.nodes.iter().map(|node| node.id.clone()).collect();
-        let theme = crate::theme::CanvasTheme::default();
-        let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, 1.0);
-        assert_eq!(shapes.iter().filter(|shape| shape.kind == 2.0).count(), 1);
-        let glow = shapes.iter().find(|shape| shape.kind == 2.0).expect("glow");
-        let card = shapes.iter().find(|shape| shape.kind == 0.0).expect("card");
-        assert!(glow.size[0] > card.size[0] && glow.size[1] > card.size[1]);
-        assert!((glow.center[0] - card.center[0]).abs() < 1e-6);
-        assert!((glow.center[1] - card.center[1]).abs() < 1e-6);
+    fn glow_instances_are_larger_and_centered_on_the_card() {
+        let rect = Rect::from_min_size(Pos2::new(40.0, 60.0), Vec2::new(220.0, 104.0));
+        let mut glows = Vec::new();
+        shape_glow(&mut glows, rect, [0.2, 0.4, 0.9, 1.0], 2.0, 0.5, glow_radius(1.0));
+        assert_eq!(glows.len(), 1);
+        let glow = &glows[0];
+        assert_eq!(glow.kind, 2.0);
+        assert!(glow.size[0] > rect.width() && glow.size[1] > rect.height());
+        assert!((glow.center[0] - rect.center().x).abs() < 1e-6);
+        assert!((glow.center[1] - rect.center().y).abs() < 1e-6);
+        assert!((glow.stroke[3] - 0.5).abs() < 1e-6);
     }
 
     #[test]

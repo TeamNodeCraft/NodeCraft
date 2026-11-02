@@ -49,20 +49,13 @@ impl Affine3 {
     }
 
     /// Translation after X/Y/Z rotation, matching the mesh and BRep transform paths.
-    /// In local mode the translation values are along the rotated body axes.
+    /// `space` only changes the manipulator frame; it never changes geometry.
     pub fn from_translate(values: &serde_json::Value) -> Self {
         let value = |key: &str| values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        let rotation = Self::rotation(values);
-        let raw = [value("x"), value("y"), value("z")];
-        let offset = if values.get("space").and_then(serde_json::Value::as_str) == Some("local") {
-            rotation.apply_vector(raw)
-        } else {
-            raw
-        };
-        let mut result = rotation;
-        result.m[0][3] = offset[0];
-        result.m[1][3] = offset[1];
-        result.m[2][3] = offset[2];
+        let mut result = Self::rotation(values);
+        result.m[0][3] = value("x");
+        result.m[1][3] = value("y");
+        result.m[2][3] = value("z");
         result
     }
 
@@ -245,12 +238,14 @@ mod tests {
     }
 
     #[test]
-    fn local_translation_uses_rotated_axes() {
+    fn space_does_not_change_translation() {
+        let world = Affine3::from_translate(&serde_json::json!({
+            "space": "world", "x": 10.0, "y": 0.0, "z": 0.0, "rz": 90.0
+        }));
         let local = Affine3::from_translate(&serde_json::json!({
             "space": "local", "x": 10.0, "y": 0.0, "z": 0.0, "rz": 90.0
         }));
-        let placed = local.apply_point([0.0, 0.0, 0.0]);
-        assert!(placed[0].abs() < 1e-9, "{placed:?}");
-        assert!((placed[1] - 10.0).abs() < 1e-9, "{placed:?}");
+        assert_eq!(world.apply_point([0.0, 0.0, 0.0]), local.apply_point([0.0, 0.0, 0.0]));
+        assert!((local.apply_point([0.0, 0.0, 0.0])[0] - 10.0).abs() < 1e-9);
     }
 }

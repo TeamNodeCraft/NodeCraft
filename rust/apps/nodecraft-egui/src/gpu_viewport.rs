@@ -109,8 +109,13 @@ struct GridUniforms {
 
 /// Offset the projected scene in NDC while leaving the camera pivot unchanged.
 fn shift_view_proj(mut vp: [[f32; 4]; 4], shift: [f32; 2]) -> [[f32; 4]; 4] {
-    vp[3][0] += shift[0];
-    vp[3][1] += shift[1];
+    // `shift` is an NDC offset. Add it multiplied by clip-space w so the
+    // perspective divide leaves a constant screen-space shift. A constant clip
+    // offset would scale with 1/w and move the pivot when projection changes.
+    for column in &mut vp {
+        column[0] += shift[0] * column[3];
+        column[1] += shift[1] * column[3];
+    }
     vp
 }
 
@@ -1604,6 +1609,25 @@ impl CallbackTrait for GpuCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lens_shift_is_constant_after_perspective_divide() {
+        // clip.x = x, clip.w = z; after divide ndc.x = x/z.
+        let vp = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
+        let shifted = shift_view_proj(vp, [0.25, -0.5]);
+        let apply = |m: [[f32; 4]; 4], x: f32, z: f32| {
+            let mut out = [0.0f32; 4];
+            for row in 0..4 {
+                out[row] = m[0][row] * x + m[2][row] * z + m[3][row];
+            }
+            out
+        };
+        for (x, z) in [(0.0, 1.0), (2.0, 4.0), (-3.0, 7.0)] {
+            let clip = apply(shifted, x, z);
+            let ndc_x = clip[0] / clip[3];
+            assert!((ndc_x - (x / z + 0.25)).abs() < 1e-6, "{x} {z} {ndc_x}");
+        }
+    }
 
     #[test]
     fn scene_pass_only_resolves_when_multisampled() {

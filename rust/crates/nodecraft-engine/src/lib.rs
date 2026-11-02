@@ -64,17 +64,9 @@ impl SketchTransform {
             [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
             [-sy, cy * sx, cy * cx],
         ];
-        let raw = [number("x"), number("y"), number("z")];
-        let translation = if values.get("space").and_then(serde_json::Value::as_str) == Some("local") {
-            (0..3)
-                .map(|row| (0..3).map(|column| rotation[row][column] * raw[column]).sum())
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap_or([0.0; 3])
-        } else {
-            raw
-        };
-        Self { rotation, translation }
+        // `space` rotates the manipulator frame only. Geometry values remain
+        // in the parent frame so switching world/local cannot move the object.
+        Self { rotation, translation: [number("x"), number("y"), number("z")] }
     }
 
     /// Return the transform that applies `self` first, then `next`.
@@ -784,10 +776,6 @@ fn export_combine_assembly(request: &Request, combine_id: &str, path: &str) -> R
 
 
 
-fn local_space(node: &Node) -> bool {
-    node.values.get("space").and_then(serde_json::Value::as_str) == Some("local")
-}
-
 fn rotate_values(offset: [f64; 3], rotation: [f64; 3]) -> [f64; 3] {
     let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
     let (sx, cx) = rx.sin_cos();
@@ -804,7 +792,6 @@ fn apply_brep_placement(
     brep: &mut nodecraft_solidcore::solidcore::topology::Brep,
     offset: [f64; 3],
     rotation: [f64; 3],
-    local: bool,
 ) -> Result<(), String> {
     use nodecraft_solidcore::solidcore::geom::axis2_placement::Axis2Placement;
     use nodecraft_solidcore::solidcore::math::{Point3, Vec3};
@@ -814,7 +801,6 @@ fn apply_brep_placement(
     let (sz, cz) = rz.sin_cos();
     let x_axis = Vec3::new(cy * cz, cy * sz, -sy);
     let y_axis = Vec3::new(sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy);
-    let offset = if local { rotate_values(offset, rotation) } else { offset };
     let placement = Axis2Placement::new(Point3::new(offset[0], offset[1], offset[2]), x_axis, y_axis);
     let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
     nodecraft_solidcore::solidcore::topology::brep::p5::transform(&mut kernel, brep, &placement, None, true)
@@ -895,7 +881,7 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
         let mut inputs = exact_operand_breps(request, &link.from)?;
         let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
         let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-        for brep in &mut inputs { apply_brep_placement(brep, offset, rotation, local_space(&node))?; }
+        for brep in &mut inputs { apply_brep_placement(brep, offset, rotation)?; }
         Ok(inputs)
     } else if node.node_type == "combine" {
         // A Part is a collection of solids. Keep every connected operand rather than
@@ -918,7 +904,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
         let mut brep = exact_operand_brep(request, &link.from)?;
         let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
         let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-        apply_brep_placement(&mut brep, offset, rotation, local_space(&node))?;
+        apply_brep_placement(&mut brep, offset, rotation)?;
         return Ok(brep);
     }
     if node.node_type == "primitive" {
@@ -1551,7 +1537,7 @@ struct BodyInstance {
 
 #[derive(Clone, Debug)]
 enum BodyTransform {
-    Place { offset: [f64; 3], rotation: [f64; 3], local: bool },
+    Place { offset: [f64; 3], rotation: [f64; 3] },
     Mirror { plane: &'static str, offset: f64 },
 }
 
@@ -1578,7 +1564,7 @@ impl Part {
             let mut brep = body.body.clone_standing_for_self().map_err(|error| error.to_string())?;
             for transform in &body.transforms {
                 match transform {
-                    BodyTransform::Place { offset, rotation, local } => apply_brep_placement(&mut brep, *offset, *rotation, *local)?,
+                    BodyTransform::Place { offset, rotation } => apply_brep_placement(&mut brep, *offset, *rotation)?,
                     BodyTransform::Mirror { plane, offset } => {
                         let values = serde_json::json!({"plane": plane, "offset": offset});
                         mirror_brep(&mut brep, &values)?;
@@ -1591,8 +1577,7 @@ impl Part {
     }
 }
 
-fn mesh_placement(mesh: &Mesh, offset: [f64; 3], rotation: [f64; 3], local: bool) -> Mesh {
-    let offset = if local { rotate_values(offset, rotation) } else { offset };
+fn mesh_placement(mesh: &Mesh, offset: [f64; 3], rotation: [f64; 3]) -> Mesh {
     let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
     let rotate = |point: [f64; 3]| -> [f64; 3] {
         let (mut x, mut y, mut z) = (point[0], point[1], point[2]);
@@ -1774,14 +1759,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
                     node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
                 ];
-                placements.push((offset, rotation, local_space(node)));
+                placements.push((offset, rotation));
                 let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape")?;
                 current = link.from.clone();
                 continue;
             }
             let mut brep = self.breps.get(&current)?.as_ref().clone();
-            for (offset, rotation, local) in placements.iter().rev() {
-                apply_brep_placement(&mut brep, *offset, *rotation, *local).ok()?;
+            for (offset, rotation) in placements.iter().rev() {
+                apply_brep_placement(&mut brep, *offset, *rotation).ok()?;
             }
             return Some(brep);
         }
@@ -1807,7 +1792,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.emit_progress(start, ProgressPhase::BrepStart);
             let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
             let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-            for brep in &mut inputs { apply_brep_placement(brep, offset, rotation, local_space(&node))?; }
+            for brep in &mut inputs { apply_brep_placement(brep, offset, rotation)?; }
             self.emit_progress(start, ProgressPhase::BrepComplete);
             Ok(inputs)
         } else {
@@ -1847,7 +1832,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let mut brep = self.operand_brep(&link)?;
             let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
             let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-            apply_brep_placement(&mut brep, offset, rotation, local_space(&node))?;
+            apply_brep_placement(&mut brep, offset, rotation)?;
             Ok(brep)
         } else if node.node_type == "primitive" {
             self.cached_primitive_brep(&node)
@@ -1914,8 +1899,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
                     let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
                     let mut bodies = source.bodies.clone();
-                    let local = local_space(&node);
-                    for body in &mut bodies { body.transforms.push(BodyTransform::Place { offset, rotation, local }); }
+                    for body in &mut bodies { body.transforms.push(BodyTransform::Place { offset, rotation }); }
                     Ok(Part { bodies })
                 }
                 "mirror" => {
@@ -2021,7 +2005,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let mut mesh = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &body.body, &options)?;
             for transform in &body.transforms {
                 mesh = match transform {
-                    BodyTransform::Place { offset, rotation, local } => mesh_placement(&mesh, *offset, *rotation, *local),
+                    BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
                     BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
                 };
             }
@@ -2927,6 +2911,18 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    #[test]
+    fn sketch_transform_space_does_not_change_geometry() {
+        let world = SketchTransform::from_values(&serde_json::json!({
+            "space": "world", "x": 10.0, "y": 2.0, "z": 3.0, "rz": 90.0
+        }));
+        let local = SketchTransform::from_values(&serde_json::json!({
+            "space": "local", "x": 10.0, "y": 2.0, "z": 3.0, "rz": 90.0
+        }));
+        assert_eq!(world.apply([1.0, 0.0, 0.0]), local.apply([1.0, 0.0, 0.0]));
+        assert_eq!(world.apply([0.0, 0.0, 0.0]), [10.0, 2.0, 3.0]);
+    }
+
     const BLOCK: &str = "tests/Sample AP203 Data Files/block.stp";
     const DOGHOUSE: &str = "tests/Sample AP203 Data Files/doghouse.stp";
 
@@ -3589,7 +3585,7 @@ mod tests {
     }
 
     #[test]
-    fn local_translate_moves_along_rotated_axes() {
+    fn space_does_not_change_translation_geometry() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1, "targets": ["t"], "meshTargets": ["t"],
             "nodes": [
@@ -3602,8 +3598,8 @@ mod tests {
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let mesh = &response.meshes["t"].mesh;
         let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
-        assert!((min[0] + 5.0).abs() < 1e-4 && (max[0] - 5.0).abs() < 1e-4, "{min:?} {max:?}");
-        assert!((min[1] - 20.0).abs() < 1e-4 && (max[1] - 40.0).abs() < 1e-4, "{min:?} {max:?}");
+        assert!((min[0] - 25.0).abs() < 1e-4 && (max[0] - 35.0).abs() < 1e-4, "{min:?} {max:?}");
+        assert!((min[1] + 10.0).abs() < 1e-4 && (max[1] - 10.0).abs() < 1e-4, "{min:?} {max:?}");
     }
 
     #[test]

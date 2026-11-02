@@ -237,6 +237,24 @@ impl Viewport {
         self.dirty = true;
     }
 
+    /// Switch projection while keeping the pivot, orientation and apparent
+    /// half-height at the target fixed. Industrial CAD toggles projection
+    /// without recomposing the view.
+    pub fn toggle_projection(&mut self) {
+        const FOV: f64 = std::f64::consts::PI * 32.0 / 180.0;
+        const ORTHO_HALF_HEIGHT: f64 = 0.4;
+        if self.camera.fov > 0.0 {
+            let perspective_half = self.camera.distance * (self.camera.fov * 0.5).tan();
+            self.camera.distance = perspective_half / ORTHO_HALF_HEIGHT;
+            self.camera.fov = 0.0;
+        } else {
+            let ortho_half = self.camera.distance * ORTHO_HALF_HEIGHT;
+            self.camera.distance = ortho_half / (FOV * 0.5).tan();
+            self.camera.fov = FOV;
+        }
+        self.dirty = true;
+    }
+
     pub fn set_transform_gizmo(&mut self, gizmo: Option<Gizmo>) {
         if self
             .transform_gizmo
@@ -609,12 +627,7 @@ impl Viewport {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if perspective.clicked() {
-            self.camera.fov = if self.camera.fov > 0.0 {
-                0.0
-            } else {
-                std::f64::consts::PI * 32.0 / 180.0
-            };
-            self.dirty = true;
+            self.toggle_projection();
             ui.ctx().request_repaint();
         }
         let perspective_colour = if self.camera.fov > 0.0 {
@@ -855,6 +868,33 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_toggle_preserves_target_rotation_and_half_height() {
+        let mut viewport = Viewport::default();
+        viewport.camera.target = solidcraft_geom::Vec3::new(12.0, -4.0, 7.0);
+        viewport.camera.yaw = 0.4;
+        viewport.camera.pitch = 0.3;
+        viewport.camera.roll = 0.2;
+        viewport.camera.distance = 100.0;
+        viewport.camera.fov = 0.0;
+        let target = viewport.camera.target;
+        let before = viewport.camera.half_height();
+        viewport.toggle_projection();
+        assert!(viewport.camera.fov > 0.0);
+        assert_eq!(viewport.camera.target, target);
+        assert_eq!(viewport.camera.yaw, 0.4);
+        assert_eq!(viewport.camera.pitch, 0.3);
+        assert_eq!(viewport.camera.roll, 0.2);
+        assert!((viewport.camera.half_height() - before).abs() < 1e-9);
+
+        let perspective_half = viewport.camera.half_height();
+        viewport.toggle_projection();
+        assert_eq!(viewport.camera.fov, 0.0);
+        assert_eq!(viewport.camera.target, target);
+        assert!((viewport.camera.half_height() - perspective_half).abs() < 1e-9);
+    }
     use super::*;
 
     #[test]
