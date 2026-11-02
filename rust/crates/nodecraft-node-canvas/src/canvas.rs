@@ -1924,7 +1924,7 @@ fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
         "chamfer" => &["shape", "length"],
         "shell" => &["shape", "thickness"],
         "translate" => &["shape", "x", "y", "z", "rx", "ry", "rz"],
-        "scatter" => &["shape", "count", "spanX", "spanY", "seed", "minScale", "maxScale"],
+        "scatter" => &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"],
         "combine" => &["shape"],
         "boolean" | "fuse" => &["a", "b"],
         "loft" => &["bottom", "top", "ruled"],

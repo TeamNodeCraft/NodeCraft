@@ -131,6 +131,7 @@ fn model(body: &PlanarBody) -> Result<Model, String> {
     }
     Ok(Model {
         pcurves: std::collections::BTreeMap::new(),
+        file_pcurves: step_import::model::FilePcurves::default(),
         header: step_import::part21::Header::default(),
         diagnostics: Vec::new(),
         schemas: vec!["CONFIG_CONTROL_DESIGN".into()],

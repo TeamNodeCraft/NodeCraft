@@ -998,7 +998,7 @@ impl NodeCraftApp {
         self.viewer_breakpoint = Some(target.clone());
         self.error = None;
         self.status = format!("Re-evaluating {target}…");
-        self.evaluate();
+        self.evaluate_with_cache_policy(true);
     }
 
     fn add_tool_node(&mut self, tool: ToolItem, workspace: egui::Rect) {
@@ -1381,6 +1381,10 @@ impl NodeCraftApp {
     }
 
     fn evaluate(&mut self) {
+        self.evaluate_with_cache_policy(false);
+    }
+
+    fn evaluate_with_cache_policy(&mut self, clear_cache: bool) {
         self.auto_eval_due = None;
         let Some(session) = &self.session else {
             self.status = "No document".to_owned();
@@ -1408,6 +1412,7 @@ impl NodeCraftApp {
             linked_documents,
             document: session.document().clone(),
             selected: self.viewer_breakpoint.clone(),
+            clear_cache,
         });
         self.egui_ctx.request_repaint();
     }
@@ -3332,6 +3337,7 @@ struct EvalJob {
     linked_documents: std::collections::BTreeMap<PathBuf, GraphDocument>,
     document: GraphDocument,
     selected: Option<String>,
+    clear_cache: bool,
 }
 
 struct EvalWorker {
@@ -3349,6 +3355,11 @@ impl EvalWorker {
                 // Only the newest request matters; discard queued stale work.
                 while let Ok(next) = job_rx.try_recv() {
                     job = next;
+                }
+                if job.clear_cache {
+                    // Re-evaluate is an explicit request for a fresh result: do
+                    // not let mesh/BRep/failure/import entries answer it.
+                    cache = EngineCache::new();
                 }
                 let target = engine_bridge::target_for(&job.document, job.selected.as_deref());
                 let outcome = catch_unwind(AssertUnwindSafe(|| {

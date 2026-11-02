@@ -336,6 +336,7 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
             number("spanX", "Span X", 240.0),
             number("spanY", "Span Y", 160.0),
             number("seed", "Seed", 1.0),
+            choice("distribution", "Distribution", "random", &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")]),
             number("minScale", "Min scale", 0.75),
             number("maxScale", "Max scale", 1.25),
         ],

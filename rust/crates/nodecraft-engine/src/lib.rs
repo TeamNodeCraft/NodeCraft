@@ -2139,24 +2139,63 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let link = source(self.request, node_id).ok_or("Scatter has no source")?;
                 let base = self.evaluate(&link.from).ok_or("Scatter source did not evaluate")?;
                 if base.vertices.is_empty() { return Err("Scatter source has no geometry".into()); }
-                let count = node.values.get("count").and_then(serde_json::Value::as_u64).unwrap_or(100).clamp(1, 5000) as usize;
+                // UI values are frequently serialized as JSON floats even when
+                // integral; as_u64() silently rejected 1000.0/39393.0 and forced
+                // the defaults. Parse through f64 for both.
+                let count = node
+                    .values
+                    .get("count")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(100.0)
+                    .round()
+                    .clamp(1.0, 5000.0) as usize;
                 let span_x = node.values.get("spanX").and_then(serde_json::Value::as_f64).unwrap_or(200.0).max(1.0);
                 let span_y = node.values.get("spanY").and_then(serde_json::Value::as_f64).unwrap_or(200.0).max(1.0);
-                let seed = node.values.get("seed").and_then(serde_json::Value::as_u64).unwrap_or(1);
+                let seed = node.values.get("seed").and_then(serde_json::Value::as_f64).unwrap_or(1.0).to_bits();
                 let min_scale = node.values.get("minScale").and_then(serde_json::Value::as_f64).unwrap_or(0.75).max(0.05);
                 let max_scale = node.values.get("maxScale").and_then(serde_json::Value::as_f64).unwrap_or(1.25).max(min_scale);
+                let distribution = node
+                    .values
+                    .get("distribution")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("random");
                 let columns = (count as f64).sqrt().ceil() as usize;
                 let rows = (count + columns - 1) / columns;
+                let cell_x = span_x / columns as f64;
+                let cell_y = span_y / rows as f64;
+                let mut rng = ScatterRng::new(seed);
                 let mut meshes = Vec::with_capacity(count);
                 for index in 0..count {
-                    let col = index % columns; let row = index / columns;
-                    let jitter = ((index as u64).wrapping_mul(6364136223846793005).wrapping_add(seed) >> 33) as f64 / 2147483648.0;
-                    let jitter2 = ((index as u64).wrapping_mul(1442695040888963407).wrapping_add(seed * 7) >> 33) as f64 / 2147483648.0;
-                    let x = if columns > 1 { -span_x / 2.0 + span_x * col as f64 / (columns - 1) as f64 } else { 0.0 } + (jitter - 0.5) * 6.0;
-                    let y = if rows > 1 { -span_y / 2.0 + span_y * row as f64 / (rows - 1) as f64 } else { 0.0 } + (jitter2 - 0.5) * 6.0;
-                    let scale = min_scale + (max_scale - min_scale) * jitter2;
+                    let col = index % columns;
+                    let row = index / columns;
+                    let grid_x = if columns > 1 {
+                        -span_x / 2.0 + span_x * col as f64 / (columns - 1) as f64
+                    } else {
+                        0.0
+                    };
+                    let grid_y = if rows > 1 {
+                        -span_y / 2.0 + span_y * row as f64 / (rows - 1) as f64
+                    } else {
+                        0.0
+                    };
+                    let (x, y) = match distribution {
+                        "grid" => (grid_x, grid_y),
+                        "stratified" => (
+                            -span_x / 2.0 + (col as f64 + rng.unit()) * cell_x,
+                            -span_y / 2.0 + (row as f64 + rng.unit()) * cell_y,
+                        ),
+                        _ => (
+                            (rng.unit() - 0.5) * span_x,
+                            (rng.unit() - 0.5) * span_y,
+                        ),
+                    };
+                    let scale = min_scale + (max_scale - min_scale) * rng.unit();
                     let mut copy = base.clone();
-                    for vertex in &mut copy.vertices { vertex[0] = vertex[0] * scale as f32 + x as f32; vertex[1] = vertex[1] * scale as f32 + y as f32; vertex[2] *= scale as f32; }
+                    for vertex in &mut copy.vertices {
+                        vertex[0] = vertex[0] * scale as f32 + x as f32;
+                        vertex[1] = vertex[1] * scale as f32 + y as f32;
+                        vertex[2] *= scale as f32;
+                    }
                     meshes.push(copy);
                 }
                 Ok(merge_meshes(meshes))
@@ -2339,6 +2378,28 @@ fn diagnostics_requested(request: &Request) -> bool {
             node.node_type == "stepimporter"
                 && node.values.get("diagnostics").and_then(serde_json::Value::as_bool) == Some(true)
         })
+}
+
+/// Small deterministic SplitMix64 generator for scatter placement. Keeping
+/// this local avoids tying geometry layout to a library's PRNG implementation.
+struct ScatterRng(u64);
+
+impl ScatterRng {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.0;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / ((1_u64 << 53) as f64)
+    }
 }
 
 fn evaluation_order_for_targets(request: &Request) -> Vec<String> {
@@ -2633,6 +2694,35 @@ mod tests {
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let mesh = &output.response.meshes.get("time").expect("time mesh").mesh;
         assert!(mesh.faces.is_empty());
+    }
+
+    #[test]
+    fn scatter_uses_float_values_and_seeded_random_positions() {
+        fn request(seed: f64) -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 407,
+                "targets": ["scatter"],
+                "meshTargets": ["scatter"],
+                "binaryMesh": false,
+                "nodes": [
+                    {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 2, "width": 2, "height": 2}},
+                    {"id": "scatter", "type": "scatter", "values": {
+                        "count": 16.0, "spanX": 200.0, "spanY": 200.0,
+                        "seed": seed, "distribution": "random",
+                        "minScale": 0.5, "maxScale": 1.5
+                    }}
+                ],
+                "connections": [{"from": "box", "to": "scatter", "in": "shape", "out": "shape"}]
+            })).expect("scatter request json")
+        }
+        let first = evaluate(request(7.0), EngineCache::new(), None);
+        let second = evaluate(request(8.0), EngineCache::new(), None);
+        assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
+        assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
+        let first = &first.response.meshes.get("scatter").expect("scatter mesh").mesh;
+        let second = &second.response.meshes.get("scatter").expect("scatter mesh").mesh;
+        assert!(!first.vertices.is_empty());
+        assert_ne!(first.vertices[0], second.vertices[0], "seed must change scatter positions");
     }
 
     #[test]

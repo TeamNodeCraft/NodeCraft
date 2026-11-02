@@ -1741,6 +1741,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1871,6 +1880,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -2011,6 +2029,7 @@ dependencies = [
  "glyphon",
  "image",
  "lyon",
+ "mimalloc",
  "nodecraft-engine",
  "nodecraft-mesh",
  "nodecraft-node-canvas",
@@ -2195,7 +2214,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#4571a5a663c0b177dfa8d60306068d46a3a89e1f"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
 
 [[package]]
 name = "objc-sys"
@@ -3374,7 +3393,7 @@ checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#4571a5a663c0b177dfa8d60306068d46a3a89e1f"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -3475,7 +3494,7 @@ dependencies = [
 [[package]]
 name = "step-brep"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#4571a5a663c0b177dfa8d60306068d46a3a89e1f"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
 dependencies = [
  "solidcore",
  "step-import",
@@ -3491,7 +3510,7 @@ dependencies = [
 [[package]]
 name = "step-export"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#4571a5a663c0b177dfa8d60306068d46a3a89e1f"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
 dependencies = [
  "step-import",
 ]
@@ -3499,7 +3518,7 @@ dependencies = [
 [[package]]
 name = "step-import"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#4571a5a663c0b177dfa8d60306068d46a3a89e1f"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#b0e925d6c9820e3d440d13c576c67771d18a82a4"
 
 [[package]]
 name = "step-nurbs"

@@ -326,10 +326,10 @@ fn extrude_planar_face_prefers_the_exact_route() {
     assert_close(volume, 200.0, 1.0e-9);
 }
 
-/// The legacy curve-sweep routes are still exposed for comparison: their geometry is
-/// exact but their B-rep keeps one live face record without a face use per cap.
+/// The legacy curve-sweep route is still exposed for comparison. Solidcore now
+/// closes its B-rep, so it should be a connected solid as well as geometrically exact.
 #[test]
-fn legacy_linear_sweep_measures_exactly_but_is_not_connected() {
+fn legacy_linear_sweep_measures_exactly_and_is_connected() {
     let mut k = Kernel::default();
     let brep = box_brep(&mut k);
     let top = face_with_normal(&k, &brep, Vec3::new(0.0, 0.0, 1.0));
@@ -339,6 +339,6 @@ fn legacy_linear_sweep_measures_exactly_but_is_not_connected() {
     let (area, volume) = measure(&k, &legacy);
     assert_close(area, 220.0, 1.0e-9);
     assert_close(volume, 200.0, 1.0e-9);
-    assert!(!brep_is_connected_solid(&legacy));
-    assert!(legacy.faces().len() > legacy.face_list().len());
+    assert!(brep_is_connected_solid(&legacy));
+    assert_eq!(legacy.faces().len(), legacy.face_list().len());
 }

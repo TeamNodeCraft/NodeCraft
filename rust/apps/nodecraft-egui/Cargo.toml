@@ -21,6 +21,7 @@ arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 bytemuck = "1"
+mimalloc = { version = "0.1", default-features = false }
 lyon = "1.0"
 glyphon = "0.12"
 serde = { workspace = true }
