@@ -389,6 +389,19 @@ fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet<String> {
 }
 
 
+#[derive(Clone, Debug)]
+struct EvalProgress {
+    total: usize,
+    done: usize,
+}
+
+fn progress_fraction(progress: &EvalProgress) -> f32 {
+    if progress.total == 0 {
+        return 0.0;
+    }
+    (progress.done.min(progress.total) as f32 / progress.total as f32).clamp(0.0, 1.0)
+}
+
 #[derive(Clone)]
 struct DocumentTab {
     id: u64,
@@ -469,6 +482,7 @@ pub struct NodeCraftApp {
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
+    eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
     viewport: Viewport,
@@ -600,6 +614,7 @@ impl NodeCraftApp {
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
+            eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
             mesh: None,
             viewport,
@@ -756,6 +771,7 @@ impl NodeCraftApp {
 
     fn restore_active_tab(&mut self) {
         self.pending_dirty.clear();
+        self.eval_progress = None;
         let Some(tab) = self.tabs.get(self.active_tab).cloned() else { return };
         let Some(session) = self.documents.session(&tab.document_id).cloned() else {
             self.session = None;
@@ -763,6 +779,7 @@ impl NodeCraftApp {
         };
         self.session = Some(session);
         self.pending_dirty.clear();
+        self.eval_progress = None;
         self.path = tab.path;
         self.selected_nodes = tab.selected_nodes;
         self.selected_connections = tab.selected_connections;
@@ -826,6 +843,7 @@ impl NodeCraftApp {
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
         self.session = Some(session.clone());
         self.pending_dirty.clear();
+        self.eval_progress = None;
         self.path = None;
         self.selected_nodes = selected_nodes.clone();
         self.selected_connections.clear();
@@ -899,6 +917,7 @@ impl NodeCraftApp {
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.session = Some(session);
         self.pending_dirty.clear();
+        self.eval_progress = None;
         self.path = path;
         self.selected_nodes = selected_nodes;
         self.selected_connections.clear();
@@ -1418,12 +1437,17 @@ impl NodeCraftApp {
             self.pending_dirty.clear();
             if !affected {
                 self.status = "Graph updated; view is unchanged".to_owned();
+                self.eval_progress = None;
                 return;
             }
         }
         self.eval_next = self.eval_next.wrapping_add(1);
         let id = self.eval_next;
         self.eval_pending = Some(id);
+        let total = engine_bridge::target_for(session.document(), self.viewer_breakpoint.as_deref())
+            .map(|target| target_closure(session.document(), &target).len())
+            .unwrap_or(0);
+        self.eval_progress = (total > 0).then_some(EvalProgress { total, done: 0 });
         self.node_editor.clear_activity();
         self.status = "Evaluating…".to_owned();
         let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
@@ -1901,6 +1925,9 @@ impl NodeCraftApp {
                 }
                 nodecraft_engine::ProgressPhase::Complete => {
                     self.node_editor.activity_finished(&event.node_id);
+                    if let Some(progress) = self.eval_progress.as_mut() {
+                        progress.done = (progress.done + 1).min(progress.total);
+                    }
                 }
                 nodecraft_engine::ProgressPhase::BrepStart
                 | nodecraft_engine::ProgressPhase::BrepComplete => {}
@@ -1913,6 +1940,7 @@ impl NodeCraftApp {
                 continue;
             }
             self.eval_pending = None;
+            self.eval_progress = None;
             self.evaluation_ms = evaluation.elapsed_ms;
             self.cache_hits = evaluation.cache_hits;
             self.cache_misses = evaluation.cache_misses;
@@ -2717,8 +2745,39 @@ impl eframe::App for NodeCraftApp {
         }
 
         egui::Panel::bottom("app-status").show(ui, |ui| {
+            let row_height = ui.spacing().interact_size.y.max(18.0);
+            let spacing = ui.spacing().item_spacing.x;
             ui.horizontal(|ui| {
-                ui.label(&self.status);
+                let progress_reserved = if self.eval_progress.is_some() {
+                    150.0 + 70.0 + spacing * 4.0
+                } else {
+                    0.0
+                };
+                let status_width = (ui.available_width() - progress_reserved).max(120.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(status_width, row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.add(egui::Label::new(&self.status).truncate());
+                    },
+                );
+                if let Some(progress) = &self.eval_progress {
+                    ui.separator();
+                    let fraction = progress_fraction(progress);
+                    let percent = (fraction * 100.0).round() as u32;
+                    // Fixed cells keep the bar anchored while the node name and
+                    // completed count change every frame.
+                    ui.add_sized(
+                        [150.0, row_height],
+                        egui::ProgressBar::new(fraction)
+                            .desired_width(150.0)
+                            .text(format!("{percent}%")),
+                    );
+                    ui.add_sized(
+                        [70.0, row_height],
+                        egui::Label::new(format!("{}/{}", progress.done, progress.total)),
+                    );
+                }
                 if let Some(error) = &self.error {
                     ui.separator();
                     let error_color = ui.visuals().error_fg_color;
@@ -4484,6 +4543,14 @@ mod tests {
         assert_eq!(choose_startup_document(None, last.clone(), fallback.clone()), last);
         assert_eq!(choose_startup_document(None, None, fallback.clone()), fallback);
         assert_eq!(choose_startup_document(None, None, None), None);
+    }
+
+    #[test]
+    fn evaluation_progress_fraction_is_bounded() {
+        assert_eq!(progress_fraction(&EvalProgress { total: 10, done: 0 }), 0.0);
+        assert!((progress_fraction(&EvalProgress { total: 10, done: 5 }) - 0.5).abs() < 1e-6);
+        assert_eq!(progress_fraction(&EvalProgress { total: 10, done: 20 }), 1.0);
+        assert_eq!(progress_fraction(&EvalProgress { total: 0, done: 0 }), 0.0);
     }
 
     #[test]

@@ -115,6 +115,7 @@ impl SketchTransform {
     }
 }
 
+#[derive(Debug)]
 struct SketchOutput {
     sketch: crate::sketch::Sketch,
     profiles: Vec<crate::sketch::Profile>,
@@ -1381,7 +1382,7 @@ impl EngineCache {
     }
 
     pub fn insert_part(&mut self, key: (String, String), part: Arc<Part>) {
-        const PART_CACHE_ENTRIES: usize = 256;
+        const PART_CACHE_ENTRIES: usize = 8192;
         if self.parts.insert(key.clone(), part).is_none() {
             self.part_order.push_back(key);
         }
@@ -1390,6 +1391,9 @@ impl EngineCache {
             self.parts.remove(&oldest);
         }
     }
+
+    #[must_use]
+    pub fn part_entries(&self) -> usize { self.parts.len() }
 
     #[must_use]
     pub fn part_hits(&self) -> u64 { self.parts_hits }
@@ -1539,21 +1543,39 @@ struct BodyInstance {
 enum BodyTransform {
     Place { offset: [f64; 3], rotation: [f64; 3] },
     Mirror { plane: &'static str, offset: f64 },
+    Scale { factor: f64 },
 }
 
-/// Immutable exact graph value. A Part is one or more placed closed BRep bodies.
+#[derive(Clone, Debug)]
+struct SketchInstance {
+    output: Arc<SketchOutput>,
+    transforms: Vec<BodyTransform>,
+}
+
+/// Immutable graph value: placed solids plus placed sketch profiles/curves.
 #[derive(Clone, Debug)]
 struct Part {
     bodies: Vec<BodyInstance>,
+    sketches: Vec<SketchInstance>,
 }
 
 impl Part {
     fn from_brep(brep: nodecraft_solidcore::solidcore::topology::Brep) -> Self {
-        Self { bodies: vec![BodyInstance { body: Arc::new(brep), transforms: Vec::new() }] }
+        Self {
+            bodies: vec![BodyInstance { body: Arc::new(brep), transforms: Vec::new() }],
+            sketches: Vec::new(),
+        }
+    }
+
+    fn from_sketch(output: Arc<SketchOutput>) -> Self {
+        Self {
+            bodies: Vec::new(),
+            sketches: vec![SketchInstance { output, transforms: Vec::new() }],
+        }
     }
 
     fn empty() -> Self {
-        Self { bodies: Vec::new() }
+        Self { bodies: Vec::new(), sketches: Vec::new() }
     }
 
     /// Bake placements into standalone BReps for operations that need actual
@@ -1569,12 +1591,41 @@ impl Part {
                         let values = serde_json::json!({"plane": plane, "offset": offset});
                         mirror_brep(&mut brep, &values)?;
                     }
+                    BodyTransform::Scale { factor } => scale_brep(&mut brep, *factor)?,
                 }
             }
             solids.push(brep);
         }
         Ok(solids)
     }
+}
+
+fn scale_brep(
+    brep: &mut nodecraft_solidcore::solidcore::topology::Brep,
+    factor: f64,
+) -> Result<(), String> {
+    use nodecraft_solidcore::solidcore::geom::axis2_placement::Axis2Placement;
+    use nodecraft_solidcore::solidcore::math::{Point3, Vec3};
+    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let placement = Axis2Placement::new(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    nodecraft_solidcore::solidcore::topology::brep::p5::transform(
+        &mut kernel,
+        brep,
+        &placement,
+        Some(Vec3::new(factor, factor, factor)),
+        true,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn mesh_scale(mesh: &Mesh, factor: f64) -> Mesh {
+    let mut scaled = mesh.clone();
+    for vertex in &mut scaled.vertices {
+        vertex[0] = (vertex[0] as f64 * factor) as f32;
+        vertex[1] = (vertex[1] as f64 * factor) as f32;
+        vertex[2] = (vertex[2] as f64 * factor) as f32;
+    }
+    scaled
 }
 
 fn mesh_placement(mesh: &Mesh, offset: [f64; 3], rotation: [f64; 3]) -> Mesh {
@@ -1731,6 +1782,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let cache_key = (node.id.clone(), node_key);
         if let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.brep_hits += 1;
+            self.cache_hits += 1;
             self.breps.insert(node.id.clone(), brep.clone());
             return snapshot_brep(&brep);
         }
@@ -1820,6 +1872,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let cache_key = (start.to_string(), node_key);
         if let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.brep_hits += 1;
+            self.cache_hits += 1;
             self.breps.insert(start.to_string(), brep.clone());
             self.emit_progress(start, ProgressPhase::BrepStart);
             let out = snapshot_brep(&brep)?;
@@ -1886,6 +1939,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let cache_key = (start.to_owned(), node_key);
         if let Some(part) = self.cache.part(&cache_key) {
             self.cache.parts_hits += 1;
+            self.cache_hits += 1;
             self.parts.insert(start.to_owned(), part.clone());
             return Ok(part);
         }
@@ -1900,7 +1954,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
                     let mut bodies = source.bodies.clone();
                     for body in &mut bodies { body.transforms.push(BodyTransform::Place { offset, rotation }); }
-                    Ok(Part { bodies })
+                    let mut sketches = source.sketches.clone();
+                    for sketch in &mut sketches { sketch.transforms.push(BodyTransform::Place { offset, rotation }); }
+                    Ok(Part { bodies, sketches })
                 }
                 "mirror" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Part mirror has no input")?;
@@ -1908,44 +1964,222 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let (plane, offset) = mirror_plane(&node.values);
                     let mut mirrored = source.bodies.clone();
                     for body in &mut mirrored { body.transforms.push(BodyTransform::Mirror { plane, offset }); }
+                    let mut mirrored_sketches = source.sketches.clone();
+                    for sketch in &mut mirrored_sketches { sketch.transforms.push(BodyTransform::Mirror { plane, offset }); }
                     if mirror_combine(&node.values) {
                         let mut bodies = source.bodies.clone();
                         bodies.extend(mirrored);
-                        Ok(Part { bodies })
+                        let mut sketches = source.sketches.clone();
+                        sketches.extend(mirrored_sketches);
+                        Ok(Part { bodies, sketches })
                     } else {
-                        Ok(Part { bodies: mirrored })
+                        Ok(Part { bodies: mirrored, sketches: mirrored_sketches })
                     }
                 }
                 "combine" => {
                     let mut bodies = Vec::new();
+                    let mut sketches = Vec::new();
                     for link in self.request.connections.iter().filter(|link| link.to == node.id && link.input == "shape") {
-                        bodies.extend(self.evaluate_part(&link.from)?.bodies.clone());
+                        let part = self.evaluate_part(&link.from)?;
+                        bodies.extend(part.bodies.clone());
+                        sketches.extend(part.sketches.clone());
                     }
-                    if bodies.is_empty() { return Err("Combine Part has no inputs".into()); }
-                    Ok(Part { bodies })
+                    if bodies.is_empty() && sketches.is_empty() { return Err("Combine Part has no inputs".into()); }
+                    Ok(Part { bodies, sketches })
                 }
                 "boolean" | "fuse" => {
-                    let a = self.request.connections.iter().find(|link| link.to == node.id && link.input == "a").ok_or("Part Boolean missing A")?.from.clone();
-                    let b = self.request.connections.iter().find(|link| link.to == node.id && link.input == "b").ok_or("Part Boolean missing B")?.from.clone();
-                    let (op, reverse) = boolean_mode(&node.values)?;
-                    let (a, b) = if reverse { (b, a) } else { (a, b) };
-                    let a_parts = self.evaluate_part(&a)?
-                        .realized_solids()?;
-                    let b_parts = self.evaluate_part(&b)?
-                        .realized_solids()?;
-                    let mut iter = a_parts.into_iter();
-                    let mut result = iter.next().ok_or("Part Boolean A is empty")?;
-                    for brep in iter {
-                        result = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, result, brep)?;
+                    let a_link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "a");
+                    let b_link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "b");
+                    let a_suppressed = a_link.is_some_and(|link| effective_output_suppressed(self.request, &link.from));
+                    let b_suppressed = b_link.is_some_and(|link| effective_output_suppressed(self.request, &link.from));
+                    match (a_link, b_link) {
+                        (Some(a), None) => return self.evaluate_part(&a.from).map(|part| part.as_ref().clone()),
+                        (None, Some(b)) => return self.evaluate_part(&b.from).map(|part| part.as_ref().clone()),
+                        (None, None) => return Err("Part Boolean has no connected operand".into()),
+                        (Some(_), Some(_)) if a_suppressed && b_suppressed => {
+                            return Err("Part Boolean has no active operand".into())
+                        }
+                        (Some(_), Some(b)) if a_suppressed => return self.evaluate_part(&b.from).map(|part| part.as_ref().clone()),
+                        (Some(a), Some(_)) if b_suppressed => return self.evaluate_part(&a.from).map(|part| part.as_ref().clone()),
+                        (Some(a), Some(b)) => {
+                            let (op, reverse) = boolean_mode(&node.values)?;
+                            let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
+                            let a_parts = self.evaluate_part(&a)?.realized_solids()?;
+                            let b_parts = self.evaluate_part(&b)?.realized_solids()?;
+                            let mut iter = a_parts.into_iter();
+                            let mut result = iter.next().ok_or("Part Boolean A is empty")?;
+                            for brep in iter {
+                                result = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, result, brep)?;
+                            }
+                            for brep in b_parts {
+                                result = nodecraft_bool::boolean_breps(op.clone(), result, brep)?;
+                            }
+                            Ok(Part::from_brep(result))
+                        }
                     }
-                    for brep in b_parts {
-                        result = nodecraft_bool::boolean_breps(op.clone(), result, brep)?;
+                }
+                "extrude" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("Part extrude has no profile input")?;
+                    let source = self.evaluate_part(&link.from)?;
+                    let faces = node.values.get("faces").and_then(serde_json::Value::as_array);
+                    if faces.is_none_or(|items| items.is_empty()) {
+                        return Ok(source.as_ref().clone());
                     }
+                    let reference = faces.and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
+                    let index: usize = face_reference_index(reference).ok_or("Extrude needs a selected face reference (face:N).")?;
+                    let source_solids = source.realized_solids()?;
+                    let profile = source_solids.first().ok_or("Extrude source Part is empty")?;
+                    let face = profile.faces().ids().nth(index).ok_or_else(|| format!("Extrude face {index} does not exist"))?;
+                    let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
+                    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let tool = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, profile, face, amount)
+                        .map_err(|error| format!("extrude: {error}"))?;
+                    let operation = node.values.get("operation").and_then(serde_json::Value::as_str).unwrap_or("new");
+                    if operation == "new" {
+                        return Ok(Part::from_brep(tool));
+                    }
+                    let mut base = source_solids.into_iter().next().ok_or("Extrude source Part is empty")?;
+                    for brep in source.realized_solids()?.into_iter().skip(1) {
+                        base = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, base, brep)?;
+                    }
+                    let result = match operation {
+                        "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, base, tool)?,
+                        "intersect" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Intersection, base, tool)?,
+                        _ => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, base, tool)?,
+                    };
                     Ok(Part::from_brep(result))
+                }
+                "sketch" => {
+                    let sketch: crate::sketch::Sketch = serde_json::from_value(
+                        node.values.get("sketch").cloned().unwrap_or(serde_json::Value::Null),
+                    )
+                    .map_err(|error| format!("Sketch values: {error}"))?;
+                    let output = Arc::new(SketchOutput::new(sketch));
+                    self.sketches.insert(node.id.clone(), output.clone());
+                    Ok(Part::from_sketch(output))
+                }
+                "spline" => {
+                    let sketch = spline_sketch_from_values(&node.values)?;
+                    let output = Arc::new(SketchOutput::new(sketch));
+                    self.sketches.insert(node.id.clone(), output.clone());
+                    Ok(Part::from_sketch(output))
+                }
+                "loft" => {
+                    let bottom = input_source(self.request, node.id.as_str(), "bottom").ok_or("Loft has no bottom section")?.from.clone();
+                    let top = input_source(self.request, node.id.as_str(), "top").ok_or("Loft has no top section")?.from.clone();
+                    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
+                    let bottom_output = self.sketch_output_for(&bottom);
+                    let top_output = self.sketch_output_for(&top);
+                    let brep = if let (Some(bottom_output), Some(top_output)) = (bottom_output, top_output) {
+                        loft_sketch(&mut kernel, &bottom_output, &top_output, ruled, true)?
+                    } else {
+                        loft_exact(self.request, &mut kernel, &bottom, &top, ruled, true)?
+                    };
+                    Ok(Part::from_brep(brep))
+                }
+                "surfaceloft" => {
+                    let section_ids: Vec<String> = self.request.connections.iter()
+                        .filter(|link| link.to == node.id && link.input == "sections")
+                        .map(|link| link.from.clone())
+                        .collect();
+                    if section_ids.len() < 2 {
+                        return Err("Surface Loft needs at least two section connections".into());
+                    }
+                    let mut sections = Vec::with_capacity(section_ids.len());
+                    for section_id in &section_ids {
+                        sections.push(self.sketch_output_for(section_id)
+                            .ok_or_else(|| format!("Surface Loft section {section_id} must be a sketch or spline curve"))?);
+                    }
+                    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
+                    Ok(Part::from_brep(multi_section_surface_loft(&mut kernel, &sections, ruled, false)?))
+                }
+                "shell" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
+                    let source = self.evaluate_part(&link.from)?;
+                    let solids = source.realized_solids()?;
+                    if solids.is_empty() { return Err("Shell source Part is empty".into()); }
+                    let thickness = node.values.get("thickness").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
+                    if !(thickness.is_finite() && thickness > 0.0) { return Err("Shell thickness must be positive".into()); }
+                    let inward = node.values.get("direction").and_then(serde_json::Value::as_str).unwrap_or("inward") == "inward";
+                    let signed = if inward { -thickness } else { thickness };
+                    let references: Vec<&str> = node.values.get("faces").and_then(serde_json::Value::as_array).map(|faces| {
+                        faces.iter().filter_map(|face| face.get("id").and_then(serde_json::Value::as_str)).collect()
+                    }).unwrap_or_default();
+                    let mut bodies = Vec::with_capacity(solids.len());
+                    for brep in solids {
+                        let mut openings = Vec::new();
+                        for reference in &references {
+                            if let Some(index) = face_reference_index(reference) {
+                                if let Some(face) = brep.faces().ids().nth(index) { openings.push(face); }
+                            }
+                        }
+                        let shelled = nodecraft_bool::shell_brep(brep, signed, &openings)?;
+                        bodies.push(BodyInstance { body: Arc::new(shelled), transforms: Vec::new() });
+                    }
+                    Ok(Part { bodies, ..Part::empty() })
+                }
+                "scatter" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Scatter has no source")?;
+                    let source = self.evaluate_part(&link.from)?;
+                    if source.bodies.is_empty() && source.sketches.is_empty() {
+                        return Err("Scatter source Part is empty".into());
+                    }
+                    let count = node.values.get("count").and_then(serde_json::Value::as_f64).unwrap_or(100.0).round().clamp(1.0, 5000.0) as usize;
+                    let span_x = node.values.get("spanX").and_then(serde_json::Value::as_f64).unwrap_or(200.0).max(1.0);
+                    let span_y = node.values.get("spanY").and_then(serde_json::Value::as_f64).unwrap_or(200.0).max(1.0);
+                    let seed = node.values.get("seed").and_then(serde_json::Value::as_f64).unwrap_or(1.0).to_bits();
+                    let min_scale = node.values.get("minScale").and_then(serde_json::Value::as_f64).unwrap_or(0.75).max(0.05);
+                    let max_scale = node.values.get("maxScale").and_then(serde_json::Value::as_f64).unwrap_or(1.25).max(min_scale);
+                    let distribution = node.values.get("distribution").and_then(serde_json::Value::as_str).unwrap_or("random");
+                    let columns = (count as f64).sqrt().ceil() as usize;
+                    let rows = (count + columns - 1) / columns;
+                    let cell_x = span_x / columns as f64;
+                    let cell_y = span_y / rows as f64;
+                    let mut rng = ScatterRng::new(seed);
+                    let mut bodies = Vec::new();
+                    let mut sketches = Vec::new();
+                    for index in 0..count {
+                        let col = index % columns;
+                        let row = index / columns;
+                        let grid_x = if columns > 1 { -span_x / 2.0 + span_x * col as f64 / (columns - 1) as f64 } else { 0.0 };
+                        let grid_y = if rows > 1 { -span_y / 2.0 + span_y * row as f64 / (rows - 1) as f64 } else { 0.0 };
+                        let (x, y) = match distribution {
+                            "grid" => (grid_x, grid_y),
+                            "stratified" => (-span_x / 2.0 + (col as f64 + rng.unit()) * cell_x, -span_y / 2.0 + (row as f64 + rng.unit()) * cell_y),
+                            _ => ((rng.unit() - 0.5) * span_x, (rng.unit() - 0.5) * span_y),
+                        };
+                        let factor = min_scale + (max_scale - min_scale) * rng.unit();
+                        let mut instance_bodies = source.bodies.clone();
+                        for body in &mut instance_bodies {
+                            body.transforms.push(BodyTransform::Scale { factor });
+                            body.transforms.push(BodyTransform::Place { offset: [x, y, 0.0], rotation: [0.0; 3] });
+                        }
+                        bodies.extend(instance_bodies);
+                        let mut instance_sketches = source.sketches.clone();
+                        for sketch in &mut instance_sketches {
+                            sketch.transforms.push(BodyTransform::Scale { factor });
+                            sketch.transforms.push(BodyTransform::Place { offset: [x, y, 0.0], rotation: [0.0; 3] });
+                        }
+                        sketches.extend(instance_sketches);
+                    }
+                    Ok(Part { bodies, sketches })
                 }
                 "stepimporter" => {
                     let path = node.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
                     if path.is_empty() { return Err("STEP Part has no path".into()); }
+                    let key = import_cache_key(path);
+                    let default_quality = (nodecraft_mesh::display_tolerance()
+                        - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs() < 1.0e-9;
+                    if default_quality && let Some(import) = self.cache.import(&key) {
+                        self.cache.import_hits += 1;
+                        self.step_diagnostics.insert(node.id.clone(), import.diagnostics.clone());
+                    } else {
+                        let import = import_step(path)?;
+                        self.step_diagnostics.insert(node.id.clone(), import.diagnostics.clone());
+                        if default_quality { self.cache.insert_import(key, Arc::new(import)); }
+                    }
                     Ok(Part::from_brep(nodecraft_mesh::import_step_brep(path)?))
                 }
                 other => Err(format!("exact Part evaluation does not support {other:?}")),
@@ -1969,12 +2203,22 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let mesh_quality = nodecraft_mesh::display_tolerance();
         let cache_key = (format!("{node_id}@q{mesh_quality:.6}"), node_key);
+        if let Some(mesh) = self.cache.mesh(&cache_key) {
+            self.cache_hits += 1;
+            self.objects.insert(node_id.into(), mesh.clone());
+            self.order.push(node_id.into());
+            return Some(mesh);
+        }
         let started = Instant::now();
         self.cache_misses += 1;
         self.emit_progress(node_id, ProgressPhase::Start);
+        let part_started = Instant::now();
         let result = self
             .evaluate_part(node_id)
-            .and_then(|part| self.part_display_mesh(&part));
+            .and_then(|part| {
+                self.brep_timings.insert(node_id.into(), part_started.elapsed().as_secs_f64() * 1000.0);
+                self.part_display_mesh(&part)
+            });
         match result {
             Ok(mesh) => {
                 self.objects.insert(node_id.into(), mesh.clone());
@@ -1993,13 +2237,40 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
     }
 
+    /// Evaluate a Part target without producing a mesh (batch/multi-target use).
+    fn evaluate_part_only(&mut self, node_id: &str) {
+        let node = self.request.nodes.iter().find(|node| node.id == node_id);
+        let key = node.and_then(|node| node.cache.as_ref()?.key.clone()).unwrap_or_default();
+        if self.cache.part(&(node_id.to_owned(), key)).is_some() {
+            self.cache.parts_hits += 1;
+            self.cache_hits += 1;
+            return;
+        }
+        let started = Instant::now();
+        self.emit_progress(node_id, ProgressPhase::Start);
+        match self.evaluate_part(node_id) {
+            Ok(_) => {
+                self.order.push(node_id.into());
+                self.brep_timings.insert(
+                    node_id.into(),
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+            Err(error) => {
+                self.errors.insert(node_id.into(), error);
+            }
+        }
+        self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+        self.emit_progress(node_id, ProgressPhase::Complete);
+    }
+
     /// Tessellate the final exact Part once, using standard display density.
     fn part_display_mesh(&self, part: &Part) -> Result<Mesh, String> {
-        if part.bodies.is_empty() {
-            return Err("Part has no solids to display".into());
+        if part.bodies.is_empty() && part.sketches.is_empty() {
+            return Err("Part has no geometry to display".into());
         }
         let options = nodecraft_solidcore::curved::CurvedTessOptions::default();
-        let mut meshes = Vec::with_capacity(part.bodies.len());
+        let mut meshes = Vec::with_capacity(part.bodies.len() + part.sketches.len());
         for body in &part.bodies {
             let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
             let mut mesh = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &body.body, &options)?;
@@ -2007,6 +2278,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 mesh = match transform {
                     BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
                     BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
+                    BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
+                };
+            }
+            meshes.push(mesh);
+        }
+        for sketch in &part.sketches {
+            // Sketch and spline profiles display as their boundary curves.
+            let mut mesh = spline_display_mesh(&sketch.output.sketch);
+            mesh = mesh_placement(&mesh, sketch.output.offset, [0.0; 3]);
+            for transform in &sketch.transforms {
+                mesh = match transform {
+                    BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
+                    BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
+                    BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
                 };
             }
             meshes.push(mesh);
@@ -2087,6 +2372,24 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             return None;
         }
         self.cache_misses += 1;
+        // Supported modeling nodes have exactly one semantic implementation:
+        // evaluate_part. The mesh path is now only an adapter for legacy/preview
+        // nodes, so a supported node reached from a mesh-only consumer still uses
+        // the same Geometry evaluator.
+        if !self.request.mesh_targets.as_ref().is_some_and(Vec::is_empty)
+            && part_supported(&node.node_type)
+            && let Ok(part) = self.evaluate_part(node_id)
+            && let Ok(mesh) = self.part_display_mesh(&part)
+        {
+            self.emit_progress(node_id, ProgressPhase::Start);
+            self.objects.insert(node_id.into(), mesh.clone());
+            self.cache.insert_mesh(cache_key, mesh.clone());
+            self.order.push(node_id.into());
+            self.emit_progress(node_id, ProgressPhase::Complete);
+            self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+            self.visiting.pop();
+            return Some(mesh);
+        }
         // Evaluate inputs first so progress starts in upstream-to-downstream order.
         let input_sources: Vec<String> = self.request.connections.iter().filter(|link| link.to == node_id).map(|link| link.from.clone()).collect();
         for source in input_sources { self.evaluate(&source); }
@@ -2741,34 +3044,45 @@ fn ancestors_of(request: &Request, target: &str) -> HashSet<String> {
     seen
 }
 
+fn part_supported(node_type: &str) -> bool {
+    matches!(
+        node_type,
+        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter"
+    )
+}
+
 fn part_display_targets(request: &Request) -> HashSet<String> {
-    // Experimental Part-native display is disabled until Part carries the
-    // SolidCore kernel context. BReps transformed through a local kernel lose
-    // their placement when a later display kernel tessellates them.
-    if std::env::var_os("NODECRAFT_PART_DISPLAY").is_none() {
+    // Explicitly empty mesh targets are a batch/exact request, not a viewport
+    // request. Preserve the established progress/cache behavior for them.
+    if request.mesh_targets.as_ref().is_some_and(Vec::is_empty) {
         return HashSet::new();
     }
-    request
-        .mesh_targets
-        .as_deref()
-        .unwrap_or(&request.targets)
+    let requested: HashSet<String> = request
+        .targets
         .iter()
         .filter(|id| {
             request
                 .nodes
                 .iter()
                 .find(|node| node.id == **id)
-                .is_some_and(|node| node.node_type == "combine")
-                && !ancestors_of(request, id).iter().any(|ancestor| {
+                .is_some_and(|node| part_supported(&node.node_type))
+                && ancestors_of(request, id).iter().all(|ancestor| {
                     request
                         .nodes
                         .iter()
                         .find(|node| node.id == *ancestor)
-                        .is_some_and(|node| node.node_type == "mirror")
+                        .is_some_and(|node| part_supported(&node.node_type))
                 })
         })
         .cloned()
-        .collect()
+        .collect();
+    // Include the ancestors so they still emit progress/timings even though
+    // only the display target is tessellated.
+    let mut targets = requested.clone();
+    for target in &requested {
+        targets.extend(ancestors_of(request, target));
+    }
+    targets
 }
 
 fn evaluation_order_for_targets(request: &Request) -> Vec<String> {
@@ -2828,14 +3142,32 @@ pub fn evaluate(
     // Evaluate the target closure once in topological order. Downstream nodes only
     // consume already-computed outputs; no branch/target can re-enter a node.
     let part_targets = part_display_targets(&request);
-    let mut part_ancestors = HashSet::new();
-    for target in &part_targets {
-        part_ancestors.extend(ancestors_of(&request, target));
+    let mesh_targets: HashSet<String> = request
+        .mesh_targets
+        .as_deref()
+        .unwrap_or(&request.targets)
+        .iter()
+        .cloned()
+        .collect();
+    // Nodes needed by a mesh-only target must still produce a Mesh even when
+    // they are also ancestors of a Part target.
+    let mut mesh_required = HashSet::new();
+    for target in &request.targets {
+        if part_targets.contains(target) {
+            continue;
+        }
+        mesh_required.extend(ancestors_of(&request, target));
     }
     for node_id in evaluation_order_for_targets(&request) {
-        if part_targets.contains(&node_id) {
-            eval.evaluate_part_display(&node_id);
-        } else if !part_ancestors.contains(&node_id) {
+        if mesh_required.contains(&node_id) {
+            eval.evaluate(&node_id);
+        } else if part_targets.contains(&node_id) {
+            if mesh_targets.contains(&node_id) {
+                eval.evaluate_part_display(&node_id);
+            } else {
+                eval.evaluate_part_only(&node_id);
+            }
+        } else {
             eval.evaluate(&node_id);
         }
     }
@@ -4069,6 +4401,95 @@ mod tests {
     }
 
     #[test]
+    fn part_target_reuses_unchanged_operands_after_target_key_change() {
+        let make = |request_id: u64, boolean_key: &str| -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": request_id, "targets": ["u"], "meshTargets": ["u"],
+                "nodes": [
+                    {"id": "a", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "a"}},
+                    {"id": "b", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "b"}},
+                    {"id": "t", "type": "translate", "values": {"x": 10.0}, "cache": {"key": "t"}},
+                    {"id": "u", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": boolean_key}}
+                ],
+                "connections": [
+                    {"from": "a", "to": "u", "in": "a", "out": "shape"},
+                    {"from": "b", "to": "t", "in": "shape", "out": "shape"},
+                    {"from": "t", "to": "u", "in": "b", "out": "shape"}
+                ]
+            })).expect("request")
+        };
+        let first = evaluate(make(1, "u1"), EngineCache::new(), None);
+        assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
+        let second = evaluate(make(2, "u2"), first.cache, None);
+        assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
+        assert!(second.cache.part_hits() > 0, "unchanged operand Parts were rebuilt");
+        assert!(second.response.cache_stats.expect("cache stats").hits > 0, "report must include Part/BRep cache hits");
+    }
+
+    #[test]
+    fn part_cache_retains_a_large_evaluated_graph() {
+        let mut cache = EngineCache::new();
+        for index in 0..5_000 {
+            cache.insert_part((format!("node{index}"), String::new()), Arc::new(Part::empty()));
+        }
+        assert!(cache.part(&("node0".into(), String::new())).is_some(), "early Part entry was evicted");
+    }
+
+    #[test]
+    fn part_target_reuses_primitive_brep_after_part_eviction() {
+        let make = || -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1, "targets": ["c"], "meshTargets": ["c"],
+                "nodes": [
+                    {"id": "p", "type": "primitive", "values": {"primitiveType": "sphere", "radius": 10.0}, "cache": {"key": "p"}},
+                    {"id": "t", "type": "translate", "values": {"x": 10.0}, "cache": {"key": "t"}},
+                    {"id": "c", "type": "combine", "values": {}, "cache": {"key": "c"}}
+                ],
+                "connections": [
+                    {"from": "p", "to": "t", "in": "shape", "out": "shape"},
+                    {"from": "t", "to": "c", "in": "shape", "out": "shape"}
+                ]
+            })).expect("request")
+        };
+        let first = evaluate(make(), EngineCache::new(), None);
+        assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
+        let mut cache = first.cache;
+        assert!(cache.brep_entries() > 0);
+        // Force the small Part cache to evict its entries while retaining BReps.
+        for index in 0..8_300 {
+            cache.insert_part((format!("evict{index}"), String::new()), Arc::new(Part::empty()));
+        }
+        let second = evaluate(make(), cache, None);
+        assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
+        assert!(second.cache.brep_hits() > 0, "primitive BRep cache did not survive Part eviction");
+    }
+
+    #[test]
+    fn part_target_reuses_cached_parts_and_display_mesh() {
+        let make = || -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1, "targets": ["c"], "meshTargets": ["c"],
+                "nodes": [
+                    {"id": "p", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "p"}},
+                    {"id": "t", "type": "translate", "values": {"x": 10.0}, "cache": {"key": "t"}},
+                    {"id": "c", "type": "combine", "values": {}, "cache": {"key": "c"}}
+                ],
+                "connections": [
+                    {"from": "p", "to": "t", "in": "shape", "out": "shape"},
+                    {"from": "t", "to": "c", "in": "shape", "out": "shape"}
+                ]
+            })).expect("request")
+        };
+        let first = evaluate(make(), EngineCache::new(), None);
+        assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
+        let second = evaluate(make(), first.cache, None);
+        assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
+        assert!(second.cache.mesh_entries() > 0);
+        assert!(second.response.cache_stats.expect("cache stats").hits > 0, "display mesh was not reused");
+        assert!(second.cache.part_hits() > 0, "Part was not reused");
+    }
+
+    #[test]
     fn downstream_change_reuses_cached_operand_breps() {
         let make_request = |request_id: u64, boolean_key: &str| -> Request {
             serde_json::from_value(serde_json::json!({
@@ -4343,6 +4764,105 @@ mod tests {
         assert!((body.volume() - 60.0).abs() < 1e-6, "volume {}", body.volume());
         let (min, max) = body.bounds().unwrap();
         assert!((min[2] - 2.5).abs() < 1e-6 && (max[2] - 7.5).abs() < 1e-6, "{min:?} {max:?}");
+    }
+
+    #[test]
+    fn part_shell_target_uses_exact_brep() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["s"], "meshTargets": ["s"],
+            "nodes": [
+                {"id": "p", "type": "primitive", "values": {"primitiveType": "box", "length": 20, "width": 20, "height": 20}, "cache": {"key": "p"}},
+                {"id": "s", "type": "shell", "values": {"thickness": 2.0, "direction": "inward"}, "cache": {"key": "s"}}
+            ],
+            "connections": [{"from": "p", "to": "s", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        let (response, cache, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        assert!(!response.meshes["s"].mesh.faces.is_empty());
+        assert!(cache.part_entries() > 0);
+    }
+
+    #[test]
+    fn part_scatter_target_uses_placed_geometry_instances() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["s"], "meshTargets": ["s"],
+            "nodes": [
+                {"id": "p", "type": "primitive", "values": {"primitiveType": "box", "length": 4, "width": 4, "height": 4}, "cache": {"key": "p"}},
+                {"id": "s", "type": "scatter", "values": {"count": 4.0, "distribution": "grid", "spanX": 20.0, "spanY": 20.0, "minScale": 0.5, "maxScale": 1.0}, "cache": {"key": "s"}}
+            ],
+            "connections": [{"from": "p", "to": "s", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        let (response, cache, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        assert!(!response.meshes["s"].mesh.faces.is_empty());
+        assert!(cache.part_entries() > 0);
+    }
+
+    #[test]
+    fn part_sketch_target_uses_geometry_container() {
+        let mut sketch = crate::sketch::Sketch::new();
+        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        sketch.add_line_pts(a, b, None).unwrap();
+        sketch.add_line_pts(b, c, None).unwrap();
+        sketch.add_line_pts(c, d, None).unwrap();
+        sketch.add_line_pts(d, a, None).unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["t"], "meshTargets": ["t"],
+            "nodes": [
+                {"id": "s", "type": "sketch", "values": {"sketch": serde_json::to_value(&sketch).unwrap()}, "cache": {"key": "s"}},
+                {"id": "t", "type": "translate", "values": {"x": 10.0}, "cache": {"key": "t"}}
+            ],
+            "connections": [{"from": "s", "to": "t", "in": "shape", "out": "sketch"}]
+        })).expect("request");
+        let (response, cache, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        let mesh = &response.meshes["t"].mesh;
+        assert!(!mesh.faces.is_empty(), "sketch geometry did not render");
+        let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
+        assert!(min[0] >= -0.1 && max[0] >= 19.9, "sketch translation missing: {min:?}..{max:?}");
+        assert!(cache.part_entries() > 0, "sketch was not represented as a Geometry Part");
+    }
+
+    #[test]
+    fn part_extrude_target_uses_exact_brep() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["x"],
+            "meshTargets": ["x"],
+            "nodes": [
+                {"id": "i", "type": "stepimporter", "values": {"path": fixture(BLOCK)}, "cache": {"key": "i"}},
+                {"id": "x", "type": "extrude", "values": {"faces": [{"id": "face:0"}], "amount": 5.0}, "cache": {"key": "x"}}
+            ],
+            "connections": [{"from": "i", "out": "shape", "to": "x", "in": "profile"}]
+        })).expect("request");
+        let (response, _, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        let mesh = &response.meshes["x"].mesh;
+        assert!(!mesh.faces.is_empty());
+        let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
+        assert!((min[2] - 2.5).abs() < 1e-3 && (max[2] - 7.5).abs() < 1e-3, "{min:?} {max:?}");
+    }
+
+    #[test]
+    fn part_extrude_join_uses_the_source_part() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["x"],
+            "meshTargets": ["x"],
+            "nodes": [
+                {"id": "i", "type": "stepimporter", "values": {"path": fixture(BLOCK)}, "cache": {"key": "i"}},
+                {"id": "x", "type": "extrude", "values": {"operation": "join", "faces": [{"id": "face:0"}], "amount": 5.0}, "cache": {"key": "x"}}
+            ],
+            "connections": [{"from": "i", "out": "shape", "to": "x", "in": "profile"}]
+        })).expect("request");
+        let (response, _, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        let mesh = &response.meshes["x"].mesh;
+        let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
+        assert!((min[2] + 2.5).abs() < 1e-3 && (max[2] - 7.5).abs() < 1e-3, "{min:?} {max:?}");
     }
 
     /// A curved (non-planar) B-spline sheet imports through the sheet reader branch of
