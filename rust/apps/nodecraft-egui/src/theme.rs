@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Theme {
     pub window: [u8; 4],
+    #[serde(default = "default_viewport_background")]
+    pub viewport_background: [u8; 4],
+    #[serde(default = "default_grid_minor")]
+    pub grid_minor: [u8; 4],
+    #[serde(default = "default_grid_major")]
+    pub grid_major: [u8; 4],
     pub panel: [u8; 4],
     pub control: [u8; 4],
     pub border: [u8; 4],
@@ -26,6 +32,10 @@ pub struct Theme {
     pub card_border: [u8; 4],
     #[serde(alias = "wire")]
     pub cable: [u8; 4],
+    #[serde(default = "default_cable_selected")]
+    pub cable_selected: [u8; 4],
+    #[serde(default = "default_cable_selected_outline")]
+    pub cable_selected_outline: [u8; 4],
     #[serde(
         default = "default_cable_outline",
         alias = "cable_outline_opacity",
@@ -36,7 +46,10 @@ pub struct Theme {
     pub cable_width: f32,
     #[serde(default = "default_cable_outline_width")]
     pub cable_outline_width: f32,
-    pub panel_glass: [u8; 4],
+    #[serde(default = "default_backdrop_blur")]
+    pub backdrop_blur: f32,
+    #[serde(alias = "panel_glass")]
+    pub blur_tint: [u8; 4],
     pub minimap_bg: [u8; 4],
     pub minimap_border: [u8; 4],
     pub minimap_node: [u8; 4],
@@ -56,12 +69,36 @@ fn default_cable_outline() -> [u8; 4] {
     [0, 0, 0, 191]
 }
 
+fn default_cable_selected() -> [u8; 4] {
+    [10, 132, 255, 255]
+}
+
+fn default_cable_selected_outline() -> [u8; 4] {
+    [0, 0, 0, 191]
+}
+
 fn default_cable_width() -> f32 {
     5.0
 }
 
 fn default_cable_outline_width() -> f32 {
     2.0
+}
+
+fn default_backdrop_blur() -> f32 {
+    18.0
+}
+
+fn default_viewport_background() -> [u8; 4] {
+    [28, 28, 30, 255]
+}
+
+fn default_grid_minor() -> [u8; 4] {
+    [152, 152, 157, 255]
+}
+
+fn default_grid_major() -> [u8; 4] {
+    [245, 245, 247, 255]
 }
 
 #[derive(Deserialize)]
@@ -89,8 +126,12 @@ where
 
 pub const DEFAULT_THEME_NAME: &str = "NodeCraft Dark";
 pub const LIGHT_THEME_NAME: &str = "NodeCraft Light";
+pub const FOREST_THEME_NAME: &str = "NodeCraft Forest";
+pub const PUNK_THEME_NAME: &str = "NodeCraft Punk";
 pub const CUSTOM_THEME_NAME: &str = "NodeCraft Dark (custom)";
 pub const LIGHT_CUSTOM_THEME_NAME: &str = "NodeCraft Light (custom)";
+pub const FOREST_CUSTOM_THEME_NAME: &str = "NodeCraft Forest (custom)";
+pub const PUNK_CUSTOM_THEME_NAME: &str = "NodeCraft Punk (custom)";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThemePreset {
@@ -112,6 +153,22 @@ fn light_preset() -> ThemePreset {
     ThemePreset {
         name: LIGHT_THEME_NAME.to_owned(),
         id: "light".to_owned(),
+        path: None,
+    }
+}
+
+fn forest_preset() -> ThemePreset {
+    ThemePreset {
+        name: FOREST_THEME_NAME.to_owned(),
+        id: "forest".to_owned(),
+        path: None,
+    }
+}
+
+fn punk_preset() -> ThemePreset {
+    ThemePreset {
+        name: PUNK_THEME_NAME.to_owned(),
+        id: "punk".to_owned(),
         path: None,
     }
 }
@@ -151,6 +208,16 @@ impl Theme {
         serde_json::from_str(include_str!("../assets/theme-light.json"))
             .expect("embedded theme-light.json must be valid")
     }
+
+    pub fn forest() -> Self {
+        serde_json::from_str(include_str!("../assets/theme-forest.json"))
+            .expect("embedded theme-forest.json must be valid")
+    }
+
+    pub fn punk() -> Self {
+        serde_json::from_str(include_str!("../assets/theme-punk.json"))
+            .expect("embedded theme-punk.json must be valid")
+    }
 }
 
 impl Theme {
@@ -162,14 +229,87 @@ impl Theme {
         format!("#{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2])
     }
 
+    /// Hex colour including alpha, used by editable settings fields.
+    pub fn hex_rgba(rgba: [u8; 4]) -> String {
+        format!(
+            "#{:02x}{:02x}{:02x}{:02x}",
+            rgba[0], rgba[1], rgba[2], rgba[3]
+        )
+    }
+
+    /// Parse `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`.
+    ///
+    /// Six-digit input keeps `fallback_alpha`; three/four-digit input expands
+    /// each nibble. The optional leading `#` is accepted.
+    pub fn parse_hex(text: &str, fallback_alpha: u8) -> Option<[u8; 4]> {
+        let hex = text.trim().strip_prefix('#').unwrap_or(text.trim());
+        if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let nibble = |c: char| c.to_digit(16).map(|v| v as u8);
+        let byte = |chars: &[char]| -> Option<u8> {
+            Some(nibble(*chars.first()?)? << 4 | nibble(*chars.get(1)?)?)
+        };
+        let rgba = match hex.len() {
+            3 | 4 => {
+                let c: Vec<char> = hex.chars().collect();
+                let expand = |x: char| nibble(x).map(|v| v * 17);
+                [
+                    expand(c[0])?,
+                    expand(c[1])?,
+                    expand(c[2])?,
+                    if c.len() == 4 { expand(c[3])? } else { fallback_alpha },
+                ]
+            }
+            6 | 8 => {
+                let c: Vec<char> = hex.chars().collect();
+                [
+                    byte(&c[0..2])?,
+                    byte(&c[2..4])?,
+                    byte(&c[4..6])?,
+                    if c.len() == 8 { byte(&c[6..8])? } else { fallback_alpha },
+                ]
+            }
+            _ => return None,
+        };
+        Some(rgba)
+    }
+
     pub fn with_alpha(&self, rgba: [u8; 4], alpha: u8) -> egui::Color32 {
         egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], alpha)
+    }
+
+    /// Map the user-facing radius to the backdrop's dual-Kawase sample scale.
+    /// 24 px is one full sample-scale unit; the default 18 px preserves the
+    /// previous 0.75 backdrop blur.
+    pub fn backdrop_blur_scale(&self) -> f32 {
+        (self.backdrop_blur / 24.0).clamp(0.0, 2.5)
+    }
+
+    /// Number of pyramid levels used by the backdrop blur.
+    ///
+    /// One level is the smallest nonzero blur; five is the full chain. The
+    /// 18 px reference keeps the previous full-strength appearance.
+    /// Blend from the direct low-pass into the full pyramid.
+    pub fn backdrop_blur_mix(&self) -> f32 {
+        let t = (self.backdrop_blur / 18.0).clamp(0.0, 1.0);
+        t * t
+    }
+
+    pub fn backdrop_blur_levels(&self) -> usize {
+        if self.backdrop_blur <= 0.0 {
+            return 0;
+        }
+        ((self.backdrop_blur / 18.0 * 5.0).ceil() as usize).clamp(1, 5)
     }
 
     /// Update one palette entry by its JSON key. Returns false for unknown keys.
     pub fn set_color(&mut self, key: &str, value: [u8; 4]) -> bool {
         match key {
             "window" => self.window = value,
+            "viewport_background" => self.viewport_background = value,
+            "grid_minor" => self.grid_minor = value,
+            "grid_major" => self.grid_major = value,
             "panel" => self.panel = value,
             "control" => self.control = value,
             "border" => self.border = value,
@@ -182,8 +322,10 @@ impl Theme {
             "card" => self.card = value,
             "card_border" => self.card_border = value,
             "cable" => self.cable = value,
+            "cable_selected" => self.cable_selected = value,
             "cable_outline" => self.cable_outline = value,
-            "panel_glass" => self.panel_glass = value,
+            "cable_selected_outline" => self.cable_selected_outline = value,
+            "blur_tint" | "panel_glass" => self.blur_tint = value,
             "minimap_bg" => self.minimap_bg = value,
             "minimap_border" => self.minimap_border = value,
             "minimap_node" => self.minimap_node = value,
@@ -202,6 +344,7 @@ impl Theme {
         match key {
             "cable_width" => self.cable_width = value.clamp(1.0, 32.0),
             "cable_outline_width" => self.cable_outline_width = value.clamp(0.0, 15.0),
+            "backdrop_blur" => self.backdrop_blur = value.clamp(0.0, 128.0),
             _ => return false,
         }
         true
@@ -244,6 +387,14 @@ impl Theme {
 
     fn light_custom_path() -> Option<PathBuf> {
         Self::config_dir().map(|dir| dir.join("nodecraft-light-user.json"))
+    }
+
+    fn forest_custom_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("nodecraft-forest-user.json"))
+    }
+
+    fn punk_custom_path() -> Option<PathBuf> {
+        Self::config_dir().map(|dir| dir.join("nodecraft-punk-user.json"))
     }
 
     fn selection_path() -> Option<PathBuf> {
@@ -300,6 +451,18 @@ impl Theme {
                 return ThemeState {
                     theme: Theme::light(),
                     preset: light_preset(),
+                };
+            }
+            if selected == "forest" {
+                return ThemeState {
+                    theme: Theme::forest(),
+                    preset: forest_preset(),
+                };
+            }
+            if selected == "punk" {
+                return ThemeState {
+                    theme: Theme::punk(),
+                    preset: punk_preset(),
                 };
             }
             if selected != "default"
@@ -446,10 +609,11 @@ pub fn active_name() -> String {
 /// The baseline palette for the active built-in theme.
 pub fn active_defaults() -> Theme {
     let preset = active_preset();
-    if preset.path.is_none() && preset.id == "light" {
-        Theme::light()
-    } else {
-        Theme::default()
+    match preset.path.is_none().then_some(preset.id.as_str()) {
+        Some("light") => Theme::light(),
+        Some("forest") => Theme::forest(),
+        Some("punk") => Theme::punk(),
+        _ => Theme::default(),
     }
 }
 
@@ -474,6 +638,16 @@ fn user_theme_files() -> Vec<ThemePreset> {
     {
         themes.push(preset_from_path(path, Some(LIGHT_CUSTOM_THEME_NAME.to_owned())));
     }
+    if let Some(path) = Theme::forest_custom_path()
+        && path.is_file()
+    {
+        themes.push(preset_from_path(path, Some(FOREST_CUSTOM_THEME_NAME.to_owned())));
+    }
+    if let Some(path) = Theme::punk_custom_path()
+        && path.is_file()
+    {
+        themes.push(preset_from_path(path, Some(PUNK_CUSTOM_THEME_NAME.to_owned())));
+    }
     if let Some(dir) = Theme::themes_dir()
         && let Ok(entries) = std::fs::read_dir(dir)
     {
@@ -493,7 +667,7 @@ fn user_theme_files() -> Vec<ThemePreset> {
 }
 
 pub fn available_themes() -> Vec<ThemePreset> {
-    let mut themes = vec![default_preset(), light_preset()];
+    let mut themes = vec![default_preset(), light_preset(), forest_preset(), punk_preset()];
     themes.extend(user_theme_files());
     let active = active_preset();
     if !themes.iter().any(|preset| preset.id == active.id) {
@@ -504,13 +678,12 @@ pub fn available_themes() -> Vec<ThemePreset> {
 
 pub fn load_preset(preset: &ThemePreset) -> Result<Theme, String> {
     let theme = match preset.path.as_deref() {
-        None => {
-            if preset.id == "light" {
-                Theme::light()
-            } else {
-                Theme::default()
-            }
-        }
+        None => match preset.id.as_str() {
+            "light" => Theme::light(),
+            "forest" => Theme::forest(),
+            "punk" => Theme::punk(),
+            _ => Theme::default(),
+        },
         Some(path) => Theme::load_file(path)?
             .ok_or_else(|| format!("theme does not exist: {}", path.display()))?,
     };
@@ -533,6 +706,16 @@ pub fn save(theme: &Theme) -> Result<(), String> {
             Theme::light_custom_path()
                 .ok_or_else(|| "no user theme path available".to_owned())?,
             LIGHT_CUSTOM_THEME_NAME,
+        ),
+        None if preset.id == "forest" => (
+            Theme::forest_custom_path()
+                .ok_or_else(|| "no user theme path available".to_owned())?,
+            FOREST_CUSTOM_THEME_NAME,
+        ),
+        None if preset.id == "punk" => (
+            Theme::punk_custom_path()
+                .ok_or_else(|| "no user theme path available".to_owned())?,
+            PUNK_CUSTOM_THEME_NAME,
         ),
         None => (
             Theme::legacy_custom_path()
@@ -630,10 +813,11 @@ pub fn rename_theme(preset: &ThemePreset, name: &str) -> Result<ThemePreset, Str
 /// A custom theme keeps its name and file; only its colours are reset.
 pub fn reset_current_theme() -> Result<Theme, String> {
     let preset = active_preset();
-    let theme = if preset.path.is_none() && preset.id == "light" {
-        Theme::light()
-    } else {
-        Theme::default()
+    let theme = match preset.path.is_none().then_some(preset.id.as_str()) {
+        Some("light") => Theme::light(),
+        Some("forest") => Theme::forest(),
+        Some("punk") => Theme::punk(),
+        _ => Theme::default(),
     };
     if let Some(path) = &preset.path {
         Theme::write_theme(path, &theme)?;
@@ -928,7 +1112,7 @@ fn number(
 pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
     vec![
         ThemeGroup {
-            title: "GUI chrome",
+            title: "GUI",
             description: "Window, panels, controls and popup surfaces.",
             entries: vec![
                 color("window", "Window", "Main application background", theme.window),
@@ -937,7 +1121,16 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("border", "Border", "Default dividers and outlines", theme.border),
                 color("border_strong", "Strong border", "Selected and emphasized outlines", theme.border_strong),
                 color("popup", "Popup", "Menus and floating popup background", theme.popup),
-                color("panel_glass", "Panel glass", "Floating translucent panel tint", theme.panel_glass),
+                color("blur_tint", "Blur tint", "Tint applied to the blurred backdrop", theme.blur_tint),
+                number(
+                    "backdrop_blur",
+                    "Backdrop blur",
+                    "Approximate screen-space blur radius; 0 disables",
+                    theme.backdrop_blur,
+                    0.0,
+                    128.0,
+                    0.25,
+                ),
             ],
         },
         ThemeGroup {
@@ -962,6 +1155,18 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                     "Cable outline",
                     "Dark cable outline",
                     theme.cable_outline,
+                ),
+                color(
+                    "cable_selected",
+                    "Selected cable",
+                    "Cable core when selected or highlighted",
+                    theme.cable_selected,
+                ),
+                color(
+                    "cable_selected_outline",
+                    "Selected outline",
+                    "Outline for selected or highlighted cables",
+                    theme.cable_selected_outline,
                 ),
                 number(
                     "cable_width",
@@ -1003,8 +1208,16 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
         },
         ThemeGroup {
             title: "3D viewport",
-            description: "World-axis colours in the viewport.",
+            description: "Background, ground grid and world-axis colours.",
             entries: vec![
+                color(
+                    "viewport_background",
+                    "Background",
+                    "3D viewport clear colour",
+                    theme.viewport_background,
+                ),
+                color("grid_minor", "Grid minor", "Minor ground-grid lines", theme.grid_minor),
+                color("grid_major", "Grid major", "Major ground-grid lines", theme.grid_major),
                 color("axis_x", "X axis", "World X axis colour", theme.axis_x),
                 color("axis_y", "Y axis", "World Y axis colour", theme.axis_y),
                 color("axis_z", "Z axis", "World Z axis colour", theme.axis_z),
@@ -1047,11 +1260,29 @@ mod palette_tests {
     }
 
     #[test]
+    fn backdrop_blur_maps_radius_to_sample_scale() {
+        let mut theme = Theme::default();
+        assert!((theme.backdrop_blur_scale() - 0.75).abs() < f32::EPSILON);
+        theme.backdrop_blur = 0.0;
+        assert_eq!(theme.backdrop_blur_scale(), 0.0);
+        theme.backdrop_blur = 24.0;
+        assert_eq!(theme.backdrop_blur_scale(), 1.0);
+        theme.backdrop_blur = 1.0;
+        assert_eq!(theme.backdrop_blur_levels(), 1);
+        theme.backdrop_blur = 18.0;
+        assert_eq!(theme.backdrop_blur_levels(), 5);
+    }
+
+    #[test]
     fn built_in_light_theme_is_distinct() {
         assert_ne!(Theme::light(), Theme::default());
         assert!(Theme::light().text[0] < Theme::default().text[0]);
+        assert!(Theme::forest().accent[1] > Theme::forest().accent[0]);
+        assert!(Theme::punk().accent[0] > Theme::punk().accent[1]);
         let themes = available_themes();
         assert!(themes.iter().any(|preset| preset.id == "light"));
+        assert!(themes.iter().any(|preset| preset.id == "forest"));
+        assert!(themes.iter().any(|preset| preset.id == "punk"));
         assert!(themes.iter().any(|preset| preset.id == "default"));
     }
 }
@@ -1083,4 +1314,29 @@ pub fn scroll_style_thin() -> egui::style::ScrollStyle {
     style.active_handle_opacity = 0.55;
     style.interact_handle_opacity = 0.9;
     style
+}
+
+#[cfg(test)]
+mod hex_color_tests {
+    use super::Theme;
+
+    #[test]
+    fn parses_six_digit_hex_and_preserves_alpha() {
+        assert_eq!(Theme::parse_hex("#ff8800", 0x80), Some([255, 136, 0, 0x80]));
+        assert_eq!(Theme::parse_hex("00ff00", 0x20), Some([0, 255, 0, 0x20]));
+    }
+
+    #[test]
+    fn parses_short_and_alpha_hex() {
+        assert_eq!(Theme::parse_hex("#f80", 0xff), Some([255, 136, 0, 0xff]));
+        assert_eq!(Theme::parse_hex("#f80a", 0xff), Some([255, 136, 0, 0xaa]));
+        assert_eq!(Theme::parse_hex("#ff880080", 0xff), Some([255, 136, 0, 0x80]));
+    }
+
+    #[test]
+    fn rejects_bad_hex() {
+        assert_eq!(Theme::parse_hex("#xyz", 0xff), None);
+        assert_eq!(Theme::parse_hex("#12345", 0xff), None);
+        assert_eq!(Theme::parse_hex("", 0xff), None);
+    }
 }

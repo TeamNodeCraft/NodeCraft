@@ -172,6 +172,8 @@ pub struct NodeEditor {
     left_dock: f32,
     resize_start: Option<(f32, f32)>,
     geometry_key: Option<u64>,
+    occlusion_key: Option<u64>,
+    occlusion: Option<HashMap<String, Vec<Rect>>>,
     geometry: Option<Arc<NodeGeometry>>,
     shapes: Option<Arc<Vec<ShapeInstance>>>,
     cables: Option<Arc<Vec<CableVertex>>>,
@@ -205,6 +207,8 @@ impl Default for NodeEditor {
             left_dock: 0.0,
             resize_start: None,
             geometry_key: None,
+            occlusion_key: None,
+            occlusion: None,
             geometry: None,
             shapes: None,
             cables: None,
@@ -582,6 +586,13 @@ impl NodeEditor {
             shapes,
             cables,
             transform: [self.zoom, panel.min.x + self.pan.x, panel.min.y + CANVAS_TOP + self.pan.y, 0.0],
+            clip: [
+                panel.min.x + 1.0,
+                panel.min.y + 1.0,
+                panel.max.x - 1.0,
+                panel.max.y - 1.0,
+            ],
+            clip_radius: PANEL_RADIUS - 1.0,
             ppp,
             // Multiplier for cable subdivision; one place to tune the visual
             // smoothness/vertex-cost tradeoff.
@@ -605,7 +616,7 @@ impl NodeEditor {
                     painter.add(crate::squircle::shape(
                         panel,
                         PANEL_RADIUS,
-                        self.theme.color(self.theme.panel_glass),
+                        self.theme.color(self.theme.blur_tint),
                         Stroke::NONE,
                     ));
                 }
@@ -896,8 +907,26 @@ impl NodeEditor {
                     }
                 }
 
-                let blockers_by_node =
-                    occlusion_map(&visible_nodes, &self.z_order, canvas, draw_pan, self.zoom);
+                let occlusion_key = {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    key.hash(&mut hasher);
+                    canvas.min.x.to_bits().hash(&mut hasher);
+                    canvas.min.y.to_bits().hash(&mut hasher);
+                    canvas.width().to_bits().hash(&mut hasher);
+                    canvas.height().to_bits().hash(&mut hasher);
+                    draw_pan.x.to_bits().hash(&mut hasher);
+                    draw_pan.y.to_bits().hash(&mut hasher);
+                    self.zoom.to_bits().hash(&mut hasher);
+                    hasher.finish()
+                };
+                let blockers_by_node = if self.occlusion_key == Some(occlusion_key) {
+                    self.occlusion.clone().unwrap_or_default()
+                } else {
+                    let map = occlusion_map(&visible_nodes, &self.z_order, canvas, draw_pan, self.zoom);
+                    self.occlusion = Some(map.clone());
+                    self.occlusion_key = Some(occlusion_key);
+                    map
+                };
                 for node in &visible_nodes {
                     let rect = node_rect(node, canvas, draw_pan, self.zoom);
                     let text_size = 11.0 * self.zoom;
@@ -1237,6 +1266,29 @@ impl NodeEditor {
                             egui::StrokeKind::Inside,
                         );
                     }
+
+                    // Canvas zoom is relative to 1 graph unit = 1 egui point.
+                    // Keep the readout inside the minimap's top-right corner.
+                    let percent = format!("{}%", zoom_percent(self.zoom));
+                    let font = egui::FontId::proportional(14.0);
+                    let galley = painter.layout_no_wrap(
+                        percent,
+                        font,
+                        self.theme.color(self.theme.text),
+                    );
+                    let text_pos = egui::pos2(
+                        mini.max.x - 9.0 - galley.size().x,
+                        mini.max.y - 9.0 - galley.size().y,
+                    );
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            text_pos - egui::vec2(5.0, 3.0),
+                            galley.size() + egui::vec2(10.0, 6.0),
+                        ),
+                        egui::CornerRadius::same(5),
+                        self.theme.with_alpha(self.theme.window, 200),
+                    );
+                    painter.galley(text_pos, galley, self.theme.color(self.theme.text));
 
                     let minimap = ui.interact(mini, egui::Id::new("node-editor-minimap"), Sense::click_and_drag());
                     if minimap.clicked() {
@@ -1596,6 +1648,13 @@ fn occlusion_map(
             )
         })
         .collect();
+    // A card's left/right buttons protrude outside the card. Use those expanded
+    // bounds for overlap detection; otherwise a back node's icon can draw over
+    // a front node's eye/power button.
+    let bounds: Vec<Rect> = nodes
+        .iter()
+        .map(|node| node_bounds(node, canvas, pan, zoom))
+        .collect();
 
     // Cards only occlude nearby cards. Hash them into screen-space cells sized
     // to the card itself, then compare each card with its local candidates.
@@ -1604,9 +1663,9 @@ fn occlusion_map(
     let cell = (NODE_MIN_WIDTH * zoom).max(16.0);
     let cell_of = |p: Pos2| ((p.x / cell).floor() as i32, (p.y / cell).floor() as i32);
     let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-    for (index, (_, card)) in cards.iter().enumerate() {
-        let (x0, y0) = cell_of(card.min);
-        let (x1, y1) = cell_of(card.max);
+    for (index, bound) in bounds.iter().enumerate() {
+        let (x0, y0) = cell_of(bound.min);
+        let (x1, y1) = cell_of(bound.max);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 grid.entry((x, y)).or_default().push(index);
@@ -1618,8 +1677,9 @@ fn occlusion_map(
     let mut seen: HashSet<usize> = HashSet::new();
     for (index, node) in nodes.iter().enumerate() {
         let (rank, card) = cards[index];
+        let bound = bounds[index];
         let mut candidates: Vec<usize> = Vec::new();
-        let (x0, y0) = cell_of(card.min);
+        let (x0, y0) = cell_of(bound.min);
         let (x1, y1) = cell_of(card.max);
         for y in y0..=y1 {
             for x in x0..=x1 {
@@ -1634,14 +1694,24 @@ fn occlusion_map(
         }
         for candidate in candidates {
             let (front_rank, front) = cards[candidate];
-            if front_rank > rank && front.intersects(card) {
-                map.entry(node.id.clone()).or_default().push(front);
+            if front_rank > rank && bounds[candidate].intersects(bound) {
+                let blockers = map.entry(node.id.clone()).or_default();
+                blockers.push(front);
+                let (power, eye) = button_centers(front);
+                blockers.push(Rect::from_center_size(
+                    power,
+                    Vec2::splat(BUTTON_RADIUS * 2.0 * zoom),
+                ));
+                blockers.push(Rect::from_center_size(
+                    eye,
+                    Vec2::splat(VIEW_BUTTON_RADIUS * 2.0 * zoom),
+                ));
             }
         }
         // The candidate set is indexed by card index, so clearing by walking the
         // touched cells is cheaper than allocating a fresh HashSet per card.
-        let (x0, y0) = cell_of(card.min);
-        let (x1, y1) = cell_of(card.max);
+        let (x0, y0) = cell_of(bound.min);
+        let (x1, y1) = cell_of(bound.max);
         for y in y0..=y1 {
             for x in x0..=x1 {
                 if let Some(indices) = grid.get(&(x, y)) {
@@ -2472,6 +2542,7 @@ fn build_cables(
     let highlighted = highlighted_edges(document, selected);
     let selected_cables = selected_cable_lookup(selected_connections);
     let outline = theme.f32(theme.cable_outline);
+    let selected_outline = theme.f32(theme.cable_selected_outline);
     let core_width = theme.cable_width.clamp(1.0, 32.0);
     let outline_width = theme.cable_outline_width.clamp(0.0, 15.0);
     let total_width = core_width + outline_width;
@@ -2499,12 +2570,13 @@ fn build_cables(
                 connection.out.as_str(),
             ))
         });
-        let mut core = if highlighted.contains(&index) || is_selected {
-            theme.f32(theme.accent)
+        let highlighted = highlighted.contains(&index) || is_selected;
+        let core = if highlighted {
+            theme.f32(theme.cable_selected)
         } else {
             theme.f32(theme.cable)
         };
-        core[3] = 1.0;
+        let outline = if highlighted { selected_outline } else { outline };
         cables.push(CableVertex {
             a: [from_x, start.max.y],
             b: [to_x, end.min.y],
@@ -2551,6 +2623,11 @@ fn highlighted_edges(document: &GraphDocument, selected: &HashSet<String>) -> Ha
         }
     }
     highlighted
+}
+
+/// Canvas zoom percentage. 100% means one graph unit per egui point.
+fn zoom_percent(zoom: f32) -> i32 {
+    (zoom * 100.0).round() as i32
 }
 
 fn hex_colour(rgba: [u8; 4]) -> String {
@@ -2819,6 +2896,42 @@ mod tests {
         let cables = build_cables(&document, &HashSet::new(), &HashSet::new(), &theme);
         assert_eq!(cables[0].width, 30.0);
         assert!((cables[0].core_ratio - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn cable_alpha_comes_from_theme() {
+        let mut document = GraphDocument::new("cable-alpha");
+        document.nodes = vec![
+            nodecraft_session::GraphNode {
+                id: "a".into(),
+                node_type: "primitive".into(),
+                values: Default::default(),
+                suppressed: false,
+                x: 20.0,
+                y: 30.0,
+            },
+            nodecraft_session::GraphNode {
+                id: "b".into(),
+                node_type: "translate".into(),
+                values: Default::default(),
+                suppressed: false,
+                x: 320.0,
+                y: 430.0,
+            },
+        ];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "a".into(),
+            to: "b".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        let mut theme = crate::theme::CanvasTheme::default();
+        theme.cable = [10, 20, 30, 77];
+        let cables = build_cables(&document, &HashSet::new(), &HashSet::new(), &theme);
+        assert!((cables[0].core[0] - 10.0 / 255.0).abs() < f32::EPSILON);
+        assert!((cables[0].core[1] - 20.0 / 255.0).abs() < f32::EPSILON);
+        assert!((cables[0].core[2] - 30.0 / 255.0).abs() < f32::EPSILON);
+        assert!((cables[0].core[3] - 77.0 / 255.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3404,6 +3517,14 @@ mod tests {
             insertion_probe(Some(outside), &node, panel, pan, zoom),
             outside
         );
+    }
+
+    #[test]
+    fn zoom_percentage_uses_one_graph_unit_per_point_as_100() {
+        assert_eq!(zoom_percent(1.0), 100);
+        assert_eq!(zoom_percent(0.5), 50);
+        assert_eq!(zoom_percent(2.0), 200);
+        assert_eq!(zoom_percent(0.125), 13);
     }
 
     #[test]

@@ -85,6 +85,8 @@ pub struct NodeDraw {
     pub shapes: Option<Arc<Vec<ShapeInstance>>>,
     pub cables: Option<Arc<Vec<CableVertex>>>,
     pub transform: [f32; 4], // scale, offset x, offset y, unused
+    pub clip: [f32; 4],
+    pub clip_radius: f32,
     pub ppp: f32,
     pub curve_resolution: f32,
     pub texts: Vec<NodeText>,
@@ -92,9 +94,22 @@ pub struct NodeDraw {
 
 const SHADER: &str = r#"
 struct Globals {
-  screen_scale: vec4<f32>, // screen x, screen y, scale, unused
-  offset: vec4<f32>,       // offset x, offset y, unused, unused
+  screen_scale: vec4<f32>,
+  offset: vec4<f32>,
+  clip_rect: vec4<f32>,
+  clip_params: vec4<f32>,
 };
+
+fn inside_rounded(p: vec2<f32>) -> bool {
+  let r = max(globals.clip_params.x, 0.001);
+  let inner_min = globals.clip_rect.xy + vec2<f32>(r);
+  let inner_max = globals.clip_rect.zw - vec2<f32>(r);
+  let nearest = clamp(p, inner_min, inner_max);
+  let q = abs(p - nearest) / r;
+  // Match the panel's squircle: |x|^4 + |y|^4 <= 1.
+  let q2 = q * q;
+  return dot(q2, q2) <= 1.0;
+}
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 struct VertexIn {
@@ -103,7 +118,8 @@ struct VertexIn {
 };
 struct VertexOut {
   @builtin(position) clip: vec4<f32>,
-  @location(0) color: vec4<f32>,
+  @location(0) screen: vec2<f32>,
+  @location(1) color: vec4<f32>,
 };
 
 @vertex
@@ -119,12 +135,14 @@ fn vs(in: VertexIn) -> VertexOut {
     0.0,
     1.0
   );
+  out.screen = p;
   out.color = in.color;
   return out;
 }
 
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+  if (!inside_rounded(in.screen)) { discard; }
   return in.color;
 }
 "#;
@@ -133,7 +151,20 @@ const CABLE_SHADER: &str = r#"
 struct Globals {
   screen_scale: vec4<f32>,
   offset: vec4<f32>,
+  clip_rect: vec4<f32>,
+  clip_params: vec4<f32>,
 };
+
+fn inside_rounded(p: vec2<f32>) -> bool {
+  let r = max(globals.clip_params.x, 0.001);
+  let inner_min = globals.clip_rect.xy + vec2<f32>(r);
+  let inner_max = globals.clip_rect.zw - vec2<f32>(r);
+  let nearest = clamp(p, inner_min, inner_max);
+  let q = abs(p - nearest) / r;
+  // Match the panel's squircle: |x|^4 + |y|^4 <= 1.
+  let q2 = q * q;
+  return dot(q2, q2) <= 1.0;
+}
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 struct Instance {
@@ -146,10 +177,11 @@ struct Instance {
 };
 struct Out {
   @builtin(position) clip: vec4<f32>,
-  @location(0) core: vec4<f32>,
-  @location(1) outline: vec4<f32>,
-  @location(2) side: f32,
-  @location(3) core_ratio: f32,
+  @location(0) screen: vec2<f32>,
+  @location(1) core: vec4<f32>,
+  @location(2) outline: vec4<f32>,
+  @location(3) side: f32,
+  @location(4) core_ratio: f32,
 };
 
 const BASE_SEGMENTS: f32 = 12.0;
@@ -250,6 +282,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
     0.0,
     1.0
   );
+  out.screen = screen;
   out.core = inst.core;
   out.outline = inst.outline;
   out.side = side;
@@ -259,6 +292,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
+  if (!inside_rounded(in.screen)) { discard; }
   let d = abs(in.side);
   let outer = 1.0 - smoothstep(0.84, 1.0, d);
   let core_mix = smoothstep(in.core_ratio - 0.08, in.core_ratio + 0.08, d);
@@ -272,8 +306,21 @@ const SHAPE_SHADER: &str = r#"
 struct Globals {
   screen_scale: vec4<f32>,
   offset: vec4<f32>,
+  clip_rect: vec4<f32>,
+  clip_params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
+
+fn inside_rounded(p: vec2<f32>) -> bool {
+  let r = max(globals.clip_params.x, 0.001);
+  let inner_min = globals.clip_rect.xy + vec2<f32>(r);
+  let inner_max = globals.clip_rect.zw - vec2<f32>(r);
+  let nearest = clamp(p, inner_min, inner_max);
+  let q = abs(p - nearest) / r;
+  // Match the panel's squircle: |x|^4 + |y|^4 <= 1.
+  let q2 = q * q;
+  return dot(q2, q2) <= 1.0;
+}
 
 struct Instance {
   @location(0) center: vec2<f32>,
@@ -287,13 +334,14 @@ struct Instance {
 
 struct Out {
   @builtin(position) clip: vec4<f32>,
-  @location(0) local: vec2<f32>,
-  @location(1) half_size: vec2<f32>,
-  @location(2) fill: vec4<f32>,
-  @location(3) stroke: vec4<f32>,
-  @location(4) radius: f32,
-  @location(5) stroke_width: f32,
-  @location(6) kind: f32,
+  @location(0) screen: vec2<f32>,
+  @location(1) local: vec2<f32>,
+  @location(2) half_size: vec2<f32>,
+  @location(3) fill: vec4<f32>,
+  @location(4) stroke: vec4<f32>,
+  @location(5) radius: f32,
+  @location(6) stroke_width: f32,
+  @location(7) kind: f32,
 };
 
 fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -308,7 +356,11 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
     vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0)
   );
   let half_size = inst.size * 0.5;
-  let pad = 2.0 / max(globals.screen_scale.z, 0.0001);
+  // Cover the antialias fringe and the stroke's outer half. Stroke width is
+  // in graph units, so convert its half-width to screen pixels before adding
+  // the constant AA fringe, then convert the total back to graph units.
+  let scale = max(globals.screen_scale.z, 0.0001);
+  let pad = 2.5 / scale + inst.stroke_width * 0.5;
   let local = half_size + vec2<f32>(pad);
   let graph = inst.center + corners[vi] * local;
   let screen = graph * globals.screen_scale.z + globals.offset.xy;
@@ -319,6 +371,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
     0.0,
     1.0
   );
+  out.screen = screen;
   out.local = corners[vi] * local;
   out.half_size = half_size;
   out.fill = inst.fill;
@@ -331,6 +384,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
+  if (!inside_rounded(in.screen)) { discard; }
   var distance: f32;
   if (in.kind > 0.5) {
     distance = length(in.local) - in.half_size.x;
@@ -406,7 +460,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
 
     let uniform = rs.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("node-lyon-globals"),
-        size: 32,
+        size: 64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -414,7 +468,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
         label: Some("node-lyon-bgl"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -622,6 +676,14 @@ impl CallbackTrait for NodeCallback {
                 draw.transform[2] * draw.ppp,
                 0.0,
                 0.0,
+                draw.clip[0] * draw.ppp,
+                draw.clip[1] * draw.ppp,
+                draw.clip[2] * draw.ppp,
+                draw.clip[3] * draw.ppp,
+                draw.clip_radius * draw.ppp,
+                0.0,
+                0.0,
+                0.0,
             ];
             queue.write_buffer(&renderer.uniform, 0, &globals.map(f32::to_le_bytes).concat());
             if let Some(geometry) = &draw.geometry {
@@ -808,10 +870,22 @@ impl CallbackTrait for NodeCallback {
 
     fn paint(
         &self,
-        _info: egui::PaintCallbackInfo,
+        info: egui::PaintCallbackInfo,
         pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
+        // Egui paint callbacks are not scissored automatically; without this
+        // the GPU cards/cables escape the floating panel rectangle.
+        let clip = info.clip_rect_in_pixels();
+        if clip.width_px <= 0 || clip.height_px <= 0 {
+            return;
+        }
+        pass.set_scissor_rect(
+            clip.left_px.max(0) as u32,
+            clip.top_px.max(0) as u32,
+            clip.width_px as u32,
+            clip.height_px as u32,
+        );
         if let Some(renderer) = resources.get::<Arc<Mutex<NodeRenderer>>>() {
             if let Ok(renderer) = renderer.lock() {
                 if let Some(cb) = &renderer.cable_buffer {

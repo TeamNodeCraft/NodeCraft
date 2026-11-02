@@ -5,7 +5,7 @@ use egui::Color32;
 #[derive(Clone, Debug)]
 pub struct CanvasTheme {
     pub window: [u8; 4],
-    pub panel_glass: [u8; 4],
+    pub blur_tint: [u8; 4],
     pub control: [u8; 4],
     pub border: [u8; 4],
     pub text: [u8; 4],
@@ -16,7 +16,9 @@ pub struct CanvasTheme {
     pub card: [u8; 4],
     pub card_border: [u8; 4],
     pub cable: [u8; 4],
+    pub cable_selected: [u8; 4],
     pub cable_outline: [u8; 4],
+    pub cable_selected_outline: [u8; 4],
     pub cable_width: f32,
     pub cable_outline_width: f32,
     pub minimap_bg: [u8; 4],
@@ -31,7 +33,7 @@ impl Default for CanvasTheme {
     fn default() -> Self {
         Self {
             window: [28, 28, 30, 255],
-            panel_glass: [14, 14, 16, 184],
+            blur_tint: [14, 14, 16, 184],
             control: [45, 45, 47, 255],
             border: [58, 58, 60, 255],
             text: [245, 245, 247, 255],
@@ -42,7 +44,9 @@ impl Default for CanvasTheme {
             card: [60, 60, 63, 255],
             card_border: [72, 72, 74, 255],
             cable: [142, 142, 147, 51],
+            cable_selected: [10, 132, 255, 255],
             cable_outline: [0, 0, 0, 191],
+            cable_selected_outline: [0, 0, 0, 191],
             cable_width: 5.0,
             cable_outline_width: 2.0,
             minimap_bg: [36, 36, 38, 235],
@@ -60,7 +64,7 @@ impl std::hash::Hash for CanvasTheme {
         use std::hash::Hash as _;
         for field in [
             self.window,
-            self.panel_glass,
+            self.blur_tint,
             self.control,
             self.border,
             self.text,
@@ -71,7 +75,9 @@ impl std::hash::Hash for CanvasTheme {
             self.card,
             self.card_border,
             self.cable,
+            self.cable_selected,
             self.cable_outline,
+            self.cable_selected_outline,
             self.minimap_bg,
             self.minimap_border,
             self.minimap_node,

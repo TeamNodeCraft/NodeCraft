@@ -12,6 +12,7 @@ struct Proj {
     camera: Camera,
     rect: Rect,
     radius: f64,
+    shift: [f32; 2],
 }
 
 impl Proj {
@@ -22,13 +23,19 @@ impl Proj {
             f64::from(self.rect.height()),
             self.radius,
         )?;
-        Some(self.rect.min + vec2(x as f32, y as f32))
+        let shifted = vec2(
+            x as f32 + self.shift[0] * self.rect.width() * 0.5,
+            y as f32 - self.shift[1] * self.rect.height() * 0.5,
+        );
+        Some(self.rect.min + shifted)
     }
 
     fn ray(&self, point: Pos2) -> (Vec3, Vec3) {
         self.camera.ray(
-            f64::from(point.x - self.rect.min.x),
-            f64::from(point.y - self.rect.min.y),
+            f64::from(point.x - self.rect.min.x)
+                - f64::from(self.shift[0]) * f64::from(self.rect.width()) * 0.5,
+            f64::from(point.y - self.rect.min.y)
+                + f64::from(self.shift[1]) * f64::from(self.rect.height()) * 0.5,
             f64::from(self.rect.width()),
             f64::from(self.rect.height()),
         )
@@ -94,6 +101,7 @@ pub fn show(
     ui: &mut egui::Ui,
     rect: Rect,
     camera: &Camera,
+    shift: [f32; 2],
     radius: f64,
     gizmo: &mut Gizmo,
     state: &mut GizmoState,
@@ -104,7 +112,7 @@ pub fn show(
         state.start_rotation = None;
         state.dragging = false;
     }
-    let proj = Proj { camera: *camera, rect, radius };
+    let proj = Proj { camera: *camera, rect, radius, shift };
     let triad = Triad {
         center: Vec3::new(gizmo.pivot[0], gizmo.pivot[1], gizmo.pivot[2]),
         translate: true,

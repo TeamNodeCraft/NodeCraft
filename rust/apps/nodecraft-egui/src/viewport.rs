@@ -13,7 +13,8 @@ use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
 use crate::gpu_viewport::GpuViewport;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ViewSettings {
     /// Draw the shaded solid with alpha blending.
     pub translucent: bool,
@@ -25,11 +26,33 @@ pub struct ViewSettings {
     pub face_colours: bool,
     /// Zebra-stripe reflection analysis for checking surface continuity.
     pub zebra: bool,
+    /// PBR material roughness.
+    pub roughness: f32,
+    /// PBR material metallic fraction.
+    pub metallic: f32,
+    /// CAD-style mouse navigation: middle drag orbits, Shift+middle pans.
+    pub cad_mouse: bool,
+    /// Multiplier for pan interaction speed.
+    pub pan_speed: f32,
+    /// Multiplier for orbit interaction speed.
+    pub orbit_speed: f32,
 }
 
 impl Default for ViewSettings {
     fn default() -> Self {
-        Self { translucent: false, edges: true, triangles: false, normals: false, face_colours: false, zebra: false }
+        Self {
+            translucent: false,
+            edges: true,
+            triangles: false,
+            normals: false,
+            face_colours: false,
+            zebra: false,
+            roughness: 0.42,
+            metallic: 0.0,
+            cad_mouse: true,
+            pan_speed: 1.0,
+            orbit_speed: 1.0,
+        }
     }
 }
 
@@ -44,6 +67,9 @@ pub struct Viewport {
     chrome_visible: bool,
     display: Option<DisplayMesh>,
     view: ViewSettings,
+    /// NDC projection offset used to place the pivot at the visible viewport
+    /// centre while leaving `camera.target` at the model centre.
+    lens_shift: [f32; 2],
     texture: Option<egui::TextureHandle>,
     dirty: bool,
     last_size: [usize; 2],
@@ -63,6 +89,7 @@ impl Default for Viewport {
             chrome_visible: true,
             display: None,
             view: ViewSettings::default(),
+            lens_shift: [0.0, 0.0],
             texture: None,
             dirty: true,
             last_size: [0, 0],
@@ -99,7 +126,7 @@ impl Viewport {
     pub fn set_theme(&mut self, theme: &crate::theme::Theme) {
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_background(theme.window);
+            gpu.set_background(theme.viewport_background);
         }
         self.dirty = true;
     }
@@ -163,6 +190,43 @@ impl Viewport {
         self.camera.yaw = -yaw;
         self.camera.pitch = pitch;
         self.camera.distance = (display.radius * 3.0).max(1.0);
+        self.lens_shift = [0.0, 0.0];
+        self.dirty = true;
+    }
+
+    /// Fit the model into the unobstructed viewport region and center it there.
+    /// `full` is the whole 3D viewport; `visible` is the part not covered by
+    /// the floating node/tool panels.
+    pub fn fit_visible(&mut self, full: egui::Rect, visible: egui::Rect) {
+        let Some(display) = &self.display else {
+            self.camera = Camera::default();
+            self.dirty = true;
+            return;
+        };
+        let visible = visible.intersect(full);
+        if visible.width() <= 1.0 || visible.height() <= 1.0 {
+            self.fit();
+            return;
+        }
+        let (yaw, pitch) = StandardView::Iso.angles();
+        self.camera.yaw = -yaw;
+        self.camera.pitch = pitch;
+        let aspect = f64::from(visible.width() / visible.height());
+        let tan_half = if self.camera.fov > 0.0 {
+            (self.camera.fov * 0.5).tan()
+        } else {
+            0.4
+        };
+        let vertical = display.radius / (tan_half * 0.9);
+        let horizontal = display.radius / (tan_half * aspect * 0.9);
+        self.camera.distance = vertical.max(horizontal).max(1.0);
+        // Keep the pivot at the model bounds centre. Composition is performed by
+        // the projection lens shift, not by moving the orbit pivot.
+        self.camera.target = display.center;
+        self.lens_shift = [
+            2.0 * (visible.center().x - full.center().x) / full.width().max(1.0),
+            -2.0 * (visible.center().y - full.center().y) / full.height().max(1.0),
+        ];
         self.dirty = true;
     }
 
@@ -196,6 +260,7 @@ impl Viewport {
             ui,
             rect,
             &self.camera,
+            self.lens_shift,
             display.radius,
             gizmo,
             &mut self.gizmo_state,
@@ -231,10 +296,34 @@ impl Viewport {
         let width = available.x.max(32.0) as usize;
         let height = available.y.max(32.0) as usize;
         let (rect, response) = ui.allocate_exact_size(available, egui::Sense::click_and_drag());
+        let visible = egui::Rect::from_min_max(
+            egui::pos2(overlay.max.x.clamp(rect.min.x, rect.max.x), rect.min.y),
+            rect.max,
+        );
 
-        if response.dragged_by(egui::PointerButton::Secondary) {
+        let modifiers = ui.ctx().input(|input| input.modifiers);
+        let middle = response.dragged_by(egui::PointerButton::Middle);
+        let secondary = response.dragged_by(egui::PointerButton::Secondary);
+        let orbit_drag = self.view.cad_mouse && middle && !modifiers.shift;
+        let pan_drag = if self.view.cad_mouse {
+            (middle && modifiers.shift) || secondary
+        } else {
+            middle || secondary
+        };
+        if orbit_drag || pan_drag {
             let delta = response.drag_delta();
-            self.camera.pan(f64::from(delta.x), f64::from(delta.y), f64::from(rect.height()));
+            if orbit_drag {
+                self.camera.orbit(
+                    f64::from(delta.x) * f64::from(self.view.orbit_speed),
+                    f64::from(delta.y) * f64::from(self.view.orbit_speed),
+                );
+            } else {
+                self.camera.pan(
+                    f64::from(delta.x) * f64::from(self.view.pan_speed),
+                    f64::from(delta.y) * f64::from(self.view.pan_speed),
+                    f64::from(rect.height()),
+                );
+            }
             self.dirty = true;
         }
         let gesture = nodecraft_node_canvas::gesture::TrackpadGesture::read(ui.ctx());
@@ -254,13 +343,13 @@ impl Viewport {
                 if gesture.shift {
                     // Shift + two fingers rotates the model.
                     self.camera.orbit(
-                        f64::from(gesture.pan.x),
-                        f64::from(gesture.pan.y),
+                        f64::from(gesture.pan.x) * f64::from(self.view.orbit_speed),
+                        f64::from(gesture.pan.y) * f64::from(self.view.orbit_speed),
                     );
                 } else {
                     self.camera.pan(
-                        f64::from(gesture.pan.x),
-                        f64::from(gesture.pan.y),
+                        f64::from(gesture.pan.x) * f64::from(self.view.pan_speed),
+                        f64::from(gesture.pan.y) * f64::from(self.view.pan_speed),
                         f64::from(rect.height()),
                     );
                 }
@@ -285,6 +374,7 @@ impl Viewport {
             let bounds = *gpu.bounds();
             let frame = gpu.frame(
                 &self.camera,
+                self.lens_shift,
                 rect.width(),
                 rect.height(),
                 pixels_per_point,
@@ -298,14 +388,20 @@ impl Viewport {
                     // can bleed into them before it enters the panel.
                     [x, y, w, h]
                 },
-                [
-                    (440.0 / backdrop_rect.width().max(1.0)).clamp(0.35, 2.5) * 0.75,
-                    0.75,
-                ],
+                {
+                    let theme = crate::theme::get();
+                    let radius = (theme.backdrop_blur * 0.5).clamp(0.0, 64.0);
+                    [
+                        radius,
+                        radius,
+                        crate::gpu_backdrop::BLUR_WIDTH as f32,
+                        crate::gpu_backdrop::BLUR_HEIGHT as f32,
+                    ]
+                },
             );
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, frame));
             if self.chrome_visible {
-                self.axis_gizmo(ui, rect);
+                self.axis_gizmo(ui, rect, visible);
                 self.draw_transform_gizmo(ui, rect);
             }
             return;
@@ -328,14 +424,14 @@ impl Viewport {
             );
         }
         if self.chrome_visible {
-            self.axis_gizmo(ui, rect);
+            self.axis_gizmo(ui, rect, visible);
             self.draw_transform_gizmo(ui, rect);
         }
     }
 
     /// SolidCraft-style signed XYZ compass in the viewport's top-right corner.
     /// Clicking a positive tip chooses that standard view; dragging the compass orbits.
-    fn axis_gizmo(&mut self, ui: &mut egui::Ui, viewport: egui::Rect) {
+    fn axis_gizmo(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, visible: egui::Rect) {
         let theme = crate::theme::get();
         const SIZE: f32 = 94.0;
         const MARGIN: f32 = 14.0;
@@ -462,7 +558,7 @@ impl Viewport {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if home.clicked() {
-            self.set_standard_view(StandardView::Iso);
+            self.fit_visible(viewport, visible);
             ui.ctx().request_repaint();
         }
         let icon_colour = if home.hovered() {
@@ -598,6 +694,28 @@ impl Viewport {
                 changed |= crate::theme::menu_toggle(ui, &mut edited.normals, "Face normals");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.face_colours, "Face colours");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.zebra, "Zebra analysis");
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new("Material")
+                        .size(11.0)
+                        .color(crate::theme::get().color(crate::theme::get().muted)),
+                );
+                ui.add_space(2.0);
+                ui.spacing_mut().slider_width = 150.0;
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut edited.roughness, 0.045..=1.0)
+                            .text("Roughness")
+                            .max_decimals(2),
+                    )
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::Slider::new(&mut edited.metallic, 0.0..=1.0)
+                            .text("Metallic")
+                            .max_decimals(2),
+                    )
+                    .changed();
             });
         if changed {
             self.set_view(edited);
@@ -666,8 +784,8 @@ fn add_grid(
     for line in grid_lines(radius) {
         let base_alpha = if perspective { line.alpha } else { ortho_fade };
         let (colour, alpha, width) = match line.kind {
-            GridKind::Minor => (theme.muted, 0.08 * base_alpha, 1.0),
-            GridKind::Major => (theme.icon_hover, 0.24 * base_alpha, 1.2),
+            GridKind::Minor => (theme.grid_minor, 0.08 * base_alpha, 1.0),
+            GridKind::Major => (theme.grid_major, 0.24 * base_alpha, 1.2),
             GridKind::AxisX => (theme.axis_x, 0.9 * base_alpha, 2.2),
             GridKind::AxisY => (theme.axis_y, 0.9 * base_alpha, 2.2),
             GridKind::AxisZ => (theme.axis_z, 0.9 * base_alpha, 2.2),
@@ -700,7 +818,11 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
     // Match the sharp GPU viewport background and mesh colours so the blurred
     // backdrop is the same content, only defocused.
     let theme = crate::theme::get();
-    let background = Rgb(theme.window[0], theme.window[1], theme.window[2]);
+    let background = Rgb(
+        theme.viewport_background[0],
+        theme.viewport_background[1],
+        theme.viewport_background[2],
+    );
     scene.background = Some((background, background));
     let ortho_fade = if camera.fov > 0.0 {
         1.0

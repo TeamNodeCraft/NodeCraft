@@ -211,12 +211,15 @@ fn clipboard_payload(document: &GraphDocument, selected: &HashSet<&str>) -> Opti
     if nodes.is_empty() {
         return None;
     }
-    // Keep incoming links from unselected nodes, so copying a single
-    // Translate or Surface Loft node keeps its upstream socket.
+    // Copy only connections whose endpoints are both part of the selection.
+    // External upstream/downstream links are not owned by the copied subgraph
+    // and must not be recreated on paste.
     let connections: Vec<GraphConnection> = document
         .connections
         .iter()
-        .filter(|link| selected.contains(link.to.as_str()))
+        .filter(|link| {
+            selected.contains(link.from.as_str()) && selected.contains(link.to.as_str())
+        })
         .cloned()
         .collect();
     Some(NodeClipboard { nodes, connections })
@@ -255,7 +258,11 @@ fn paste_plan(
             .get(&link.from)
             .cloned()
             .unwrap_or_else(|| link.from.clone());
-        if !document.nodes.iter().any(|node| node.id == from) && !ids.contains_key(&link.from) {
+        let from_exists = ids.contains_key(&link.from)
+            || document.nodes.iter().any(|node| node.id == from);
+        let to_exists =
+            ids.contains_key(&link.to) || document.nodes.iter().any(|node| node.id == to);
+        if !from_exists || !to_exists {
             continue;
         }
         commands.push(Command::Connect {
@@ -474,6 +481,11 @@ pub struct NodeCraftApp {
     render_model: bool,
     preserve_view_for_next_mesh: bool,
     camera_initialized: bool,
+    last_saved_view: crate::viewport::ViewSettings,
+    last_saved_theme: Option<String>,
+    recent_files: Vec<PathBuf>,
+    last_saved_recent: Vec<PathBuf>,
+    view_save_due: Option<Instant>,
     auto_eval_due: Option<Instant>,
     layout_animation: Option<LayoutAnimation>,
     node_position_animation: Option<NodePositionAnimation>,
@@ -532,6 +544,10 @@ impl NodeCraftApp {
         // Keep egui and the native macOS titlebar in dark mode even on a light system.
         cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
+        let settings = load_app_settings().unwrap_or_default();
+        if std::env::var_os("NODECRAFT_THEME").is_none() {
+            apply_saved_theme(settings.theme.as_deref());
+        }
         configure_style(&cc.egui_ctx);
         let mut viewport = Viewport::default();
         let mut node_editor = NodeEditor::default();
@@ -551,6 +567,18 @@ impl NodeCraftApp {
         if render_model {
             viewport.set_chrome_visible(false);
         }
+        let persisted_view = settings.view;
+        let initial_theme_id = Some(crate::theme::active_preset().id);
+        let mut recent_files: Vec<PathBuf> = settings
+            .recent_files
+            .iter()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .collect();
+        recent_files.truncate(10);
+        let startup_recent = recent_files.first().cloned();
+        viewport.set_view(persisted_view);
+        let persisted_recent = recent_files.clone();
         let mut app = Self {
             session: None,
             path: None,
@@ -577,6 +605,11 @@ impl NodeCraftApp {
             render_model,
             preserve_view_for_next_mesh: false,
             camera_initialized: false,
+            last_saved_view: persisted_view,
+            last_saved_theme: initial_theme_id,
+            recent_files,
+            last_saved_recent: persisted_recent,
+            view_save_due: None,
             auto_eval_due: None,
             layout_animation: None,
             node_position_animation: None,
@@ -601,7 +634,7 @@ impl NodeCraftApp {
             control_requests: control_server::start(cc.egui_ctx.clone()),
             last_pointer: None,
         };
-        if let Some(path) = choose_startup_document(initial, restore_last_document(), default_document()) {
+        if let Some(path) = choose_startup_document(initial, startup_recent, default_document()) {
             app.open(path);
         } else {
             app.new_blank();
@@ -629,16 +662,28 @@ impl NodeCraftApp {
             .map(str::to_owned)
             .unwrap_or(document_id);
         if let Some(index) = self.tabs.iter().position(|tab| tab.document_id == document_id) {
+            self.remember_document(&path);
             self.activate_tab(index);
             return;
         }
         let session = Session::new(document);
-        remember_document(&path);
+        self.remember_document(&path);
         self.open_session(
             session,
             Some(path),
             format!("Opened in {:.1} ms", started.elapsed().as_secs_f64() * 1000.0),
         );
+    }
+
+    fn remember_document(&mut self, path: &Path) {
+        let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.recent_files.retain(|recent| recent != &absolute);
+        self.recent_files.insert(0, absolute);
+        self.recent_files.truncate(10);
+    }
+
+    fn clear_recent_documents(&mut self) {
+        self.recent_files.clear();
     }
 
     fn save_active_tab(&mut self) {
@@ -686,7 +731,7 @@ impl NodeCraftApp {
             return;
         }
         self.path = Some(path.clone());
-        remember_document(&path);
+        self.remember_document(&path);
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let document_id = tab.document_id.clone();
             let _ = self.documents.set_session(document_id.clone(), session);
@@ -722,8 +767,8 @@ impl NodeCraftApp {
             self.camera_initialized = false;
             self.viewport.set_mesh(self.mesh.as_ref());
         }
-        if let Some(path) = &self.path {
-            remember_document(path);
+        if let Some(path) = self.path.clone() {
+            self.remember_document(&path);
         }
         self.node_editor.reset_view();
         self.eval_pending = None;
@@ -1004,7 +1049,7 @@ impl NodeCraftApp {
         if let Some((texture, uv)) = backdrop {
             ui_shape::image(&background, texture, dock, uv);
         } else {
-            ui_shape::fill(&background, dock, theme.color(theme.panel_glass));
+            ui_shape::fill(&background, dock, theme.color(theme.blur_tint));
         }
         ui_shape::outline(
             &background,
@@ -1687,6 +1732,17 @@ impl NodeCraftApp {
                     }
                     SettingsTab::Viewport => {
                         content.heading("Viewport");
+                        content.checkbox(&mut view.cad_mouse, "CAD mouse (middle orbit, Shift+middle pan)");
+                        content.add(
+                            egui::Slider::new(&mut view.pan_speed, 0.25..=4.0)
+                                .text("Pan speed")
+                                .max_decimals(2),
+                        );
+                        content.add(
+                            egui::Slider::new(&mut view.orbit_speed, 0.25..=4.0)
+                                .text("Orbit speed")
+                                .max_decimals(2),
+                        );
                         content.checkbox(&mut view.translucent, "Translucent");
                         content.checkbox(&mut view.edges, "Edges");
                         content.checkbox(&mut view.triangles, "Triangles");
@@ -1955,6 +2011,51 @@ impl NodeCraftApp {
 
 impl eframe::App for NodeCraftApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        {
+            let save_as = ctx.input_mut(|input| {
+                input.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                    egui::Key::S,
+                ))
+            });
+            let save = !save_as
+                && ctx.input_mut(|input| {
+                    input.consume_shortcut(&egui::KeyboardShortcut::new(
+                        egui::Modifiers::COMMAND,
+                        egui::Key::S,
+                    ))
+                });
+            if save_as {
+                self.save_document(true);
+            } else if save {
+                self.save_document(false);
+            }
+        }
+        let view = self.viewport.view();
+        let theme_id = Some(crate::theme::active_preset().id);
+        if view != self.last_saved_view
+            || theme_id != self.last_saved_theme
+            || self.recent_files != self.last_saved_recent
+        {
+            self.last_saved_view = view;
+            self.last_saved_theme = theme_id.clone();
+            self.last_saved_recent = self.recent_files.clone();
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(500));
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if self.view_save_due.is_some_and(|due| Instant::now() >= due) {
+            if save_app_settings(
+                self.last_saved_view,
+                self.last_saved_theme.clone(),
+                &self.last_saved_recent,
+            )
+            .is_ok()
+            {
+                self.view_save_due = None;
+            } else {
+                self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(2000));
+            }
+        }
         self.poll_evaluation();
         if self.eval_pending.is_none()
             && self
@@ -2216,38 +2317,43 @@ impl eframe::App for NodeCraftApp {
                         }
                         ui.menu_button("Open Recent", |ui| {
                             ui.set_min_width(230.0);
-                            match restore_last_document() {
-                                Some(path) => {
+                            if self.recent_files.is_empty() {
+                                ui.add_enabled(false, egui::Button::new("No recent documents"));
+                            } else {
+                                for path in self.recent_files.clone() {
                                     let label = path
                                         .file_name()
                                         .and_then(|name| name.to_str())
                                         .unwrap_or("Recent document");
-                                    if ui.button(label).clicked() {
+                                    if ui
+                                        .button(label)
+                                        .on_hover_text(path.display().to_string())
+                                        .clicked()
+                                    {
                                         ui.close();
                                         self.open(path);
                                     }
                                 }
-                                None => {
-                                    ui.add_enabled(false, egui::Button::new("No recent documents"));
-                                }
                             }
                             ui.separator();
-                            let has_recent = recent_document_file().is_some_and(|file| file.is_file());
                             if ui
-                                .add_enabled(has_recent, egui::Button::new("Clear Recent"))
+                                .add_enabled(
+                                    !self.recent_files.is_empty(),
+                                    egui::Button::new("Clear Recent"),
+                                )
                                 .clicked()
                             {
                                 ui.close();
-                                clear_recent_document();
+                                self.clear_recent_documents();
                             }
                         });
                         ui.separator();
                         let has_document = self.session.is_some();
-                        if ui.add_enabled(has_document, egui::Button::new("Save")).clicked() {
+                        if ui.add_enabled(has_document, egui::Button::new("Save").shortcut_text("⌘S")).clicked() {
                             ui.close();
                             self.save_document(false);
                         }
-                        if ui.add_enabled(has_document, egui::Button::new("Save As…")).clicked() {
+                        if ui.add_enabled(has_document, egui::Button::new("Save As…").shortcut_text("⇧⌘S")).clicked() {
                             ui.close();
                             self.save_document(true);
                         }
@@ -2722,7 +2828,7 @@ impl eframe::App for NodeCraftApp {
                     ui_shape::fill(
                         &ui.painter(),
                         panel_rect,
-                        theme.color(theme.panel_glass),
+                        theme.color(theme.blur_tint),
                     );
                 }
                 ui_shape::outline(
@@ -2781,6 +2887,7 @@ impl eframe::App for NodeCraftApp {
                         // The title and disclosure control stay fully opaque; only the
                         // body below fades with the collapse animation.
                         ui.set_opacity(1.0);
+                        let header_top = ui.cursor().min.y;
                         ui.label(
                             egui::RichText::new("INSPECTOR")
                                 .size(9.0)
@@ -2843,6 +2950,29 @@ impl eframe::App for NodeCraftApp {
                                 },
                             );
                         });
+                        // Double-clicking anywhere in the header toggles the
+                        // inspector, including over the disclosure chevron.
+                        let header_bottom = ui.cursor().min.y;
+                        let header_rect = egui::Rect::from_min_max(
+                            egui::pos2(panel_rect.left(), header_top),
+                            egui::pos2(panel_rect.right(), header_bottom),
+                        );
+                        let header_double_clicked = ui.ctx().input(|input| {
+                            if !input.pointer.button_double_clicked(egui::PointerButton::Primary) {
+                                return false;
+                            }
+                            let Some(pointer) = input
+                                .pointer
+                                .interact_pos()
+                                .or_else(|| input.pointer.latest_pos())
+                            else {
+                                return false;
+                            };
+                            header_rect.contains(pointer)
+                        });
+                        if header_double_clicked {
+                            toggle_inspector = true;
+                        }
                         if self.inspector_reveal > 0.001 {
                             ui.scope(|ui| {
                                 ui.set_opacity(self.inspector_reveal.clamp(0.0, 1.0));
@@ -3325,10 +3455,9 @@ fn current_config_platform() -> ConfigPlatform {
     }
 }
 
-/// Where the last successfully opened graph is remembered between launches.
-fn recent_document_file() -> Option<PathBuf> {
+fn settings_file() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("NODECRAFT_CONFIG_DIR") {
-        return Some(PathBuf::from(dir).join("last-document"));
+        return Some(PathBuf::from(dir).join("settings.json"));
     }
     let home = std::env::var_os("HOME");
     let appdata = std::env::var_os("APPDATA");
@@ -3342,8 +3471,81 @@ fn recent_document_file() -> Option<PathBuf> {
             userprofile.as_deref(),
             xdg.as_deref(),
         )?
-        .join("last-document"),
+        .join("settings.json"),
     )
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct AppSettings {
+    #[serde(flatten)]
+    view: crate::viewport::ViewSettings,
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    recent_files: Vec<String>,
+}
+
+fn load_app_settings() -> Option<AppSettings> {
+    let text = std::fs::read_to_string(settings_file()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_app_settings(
+    view: crate::viewport::ViewSettings,
+    theme: Option<String>,
+    recent_files: &[PathBuf],
+) -> Result<(), ()> {
+    let path = settings_file().ok_or(())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|_| ())?;
+    }
+    let settings = AppSettings {
+        view,
+        theme,
+        recent_files: recent_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+    };
+    let text = serde_json::to_string_pretty(&settings).map_err(|_| ())?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, text).map_err(|_| ())?;
+    std::fs::rename(&temp, &path).map_err(|_| ())?;
+    Ok(())
+}
+
+/// Apply the saved theme id. Missing, moved or invalid themes intentionally fall
+/// back to the embedded default dark palette.
+fn apply_saved_theme(id: Option<&str>) {
+    let mut preset = id.and_then(|id| {
+        crate::theme::available_themes()
+            .into_iter()
+            .find(|preset| preset.id == id)
+    });
+    if preset.is_none()
+        && let Some(id) = id
+        && id != "default"
+        && id != "light"
+        && id != "forest"
+        && std::path::Path::new(id).is_file()
+    {
+        preset = Some(crate::theme::ThemePreset {
+            name: id.to_owned(),
+            id: id.to_owned(),
+            path: Some(PathBuf::from(id)),
+        });
+    }
+    let loaded = preset
+        .as_ref()
+        .is_some_and(|preset| crate::theme::load_preset(preset).is_ok());
+    if !loaded {
+        let default = crate::theme::ThemePreset {
+            name: crate::theme::DEFAULT_THEME_NAME.to_owned(),
+            id: "default".to_owned(),
+            path: None,
+        };
+        let _ = crate::theme::load_preset(&default);
+    }
 }
 
 fn normalize_document_path(mut path: PathBuf) -> PathBuf {
@@ -3351,26 +3553,6 @@ fn normalize_document_path(mut path: PathBuf) -> PathBuf {
         path.set_extension("nodecraft");
     }
     path
-}
-
-fn restore_last_document() -> Option<PathBuf> {
-    let text = std::fs::read_to_string(recent_document_file()?).ok()?;
-    let path = PathBuf::from(text.trim());
-    path.is_file().then_some(path)
-}
-
-fn clear_recent_document() {
-    let Some(file) = recent_document_file() else { return };
-    let _ = std::fs::remove_file(file);
-}
-
-fn remember_document(path: &Path) {
-    let absolute = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let Some(file) = recent_document_file() else { return };
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(file, absolute.display().to_string());
 }
 
 fn window_resize_direction(ctx: &egui::Context) -> Option<egui::viewport::ResizeDirection> {
@@ -3411,7 +3593,7 @@ fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon
 fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
     CanvasTheme {
         window: theme.window,
-        panel_glass: theme.panel_glass,
+        blur_tint: theme.blur_tint,
         control: theme.control,
         border: theme.border,
         text: theme.text,
@@ -3422,7 +3604,9 @@ fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
         card: theme.card,
         card_border: theme.card_border,
         cable: theme.cable,
+        cable_selected: theme.cable_selected,
         cable_outline: theme.cable_outline,
+        cable_selected_outline: theme.cable_selected_outline,
         cable_width: theme.cable_width,
         cable_outline_width: theme.cable_outline_width,
         minimap_bg: theme.minimap_bg,
@@ -3592,6 +3776,57 @@ fn theme_add_button(ui: &mut egui::Ui) -> egui::Response {
     response
 }
 
+#[derive(Clone)]
+struct ThemeHexDraft {
+    text: String,
+    rgba: [u8; 4],
+}
+
+/// Editable hex field for a palette colour. Accepts `#RGB`, `#RGBA`,
+/// `#RRGGBB`, and `#RRGGBBAA`; six-digit input keeps the current alpha.
+fn theme_hex_edit(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> Option<[u8; 4]> {
+    let data_id = ui.make_persistent_id(("theme-hex-color", key));
+    let field_id = egui::Id::new(("theme-hex-field", key));
+    let mut draft = ui
+        .data(|data| data.get_temp::<ThemeHexDraft>(data_id))
+        .unwrap_or_else(|| ThemeHexDraft {
+            text: crate::theme::Theme::hex_rgba(rgba),
+            rgba,
+        });
+
+    let response = ui
+        .add_sized(
+            [ui.available_width(), 18.0],
+            egui::TextEdit::singleline(&mut draft.text)
+                .id(field_id)
+                .font(egui::TextStyle::Monospace)
+                .horizontal_align(egui::Align::RIGHT)
+                .hint_text("#rrggbbaa"),
+        )
+        .on_hover_text(
+            "Hex colour: #RGB, #RGBA, #RRGGBB, or #RRGGBBAA\n             Six-digit input preserves the current alpha.",
+        );
+
+    let mut changed = None;
+    if response.changed() {
+        if let Some(next) = crate::theme::Theme::parse_hex(&draft.text, draft.rgba[3]) {
+            draft.rgba = next;
+            changed = Some(next);
+        }
+    }
+    if response.has_focus() {
+        // Keep partial/invalid input while the user is typing.
+    } else if draft.rgba != rgba {
+        draft.rgba = rgba;
+        draft.text = crate::theme::Theme::hex_rgba(rgba);
+    } else if response.lost_focus() {
+        draft.text = crate::theme::Theme::hex_rgba(draft.rgba);
+    }
+
+    ui.data_mut(|data| data.insert_temp(data_id, draft));
+    changed
+}
+
 fn theme_palette_row(
     ui: &mut egui::Ui,
     entry: &crate::theme::ThemeEntry,
@@ -3603,15 +3838,26 @@ fn theme_palette_row(
     let spacing = ui.spacing().item_spacing.x;
     let label_width = (row_width - DOT_WIDTH - VALUE_WIDTH - spacing * 2.0).max(72.0);
     let value = match entry.value {
-        crate::theme::ThemeValue::Color(rgba) => format!(
-            "{} · {}%",
-            crate::theme::Theme::hex(rgba),
-            (u32::from(rgba[3]) * 100 + 127) / 255
-        ),
+        crate::theme::ThemeValue::Color(_) => String::new(),
         crate::theme::ThemeValue::Number { value, .. } => format!("{value:.1}"),
     };
 
-    ui.horizontal(|ui| {
+    let row_rect = egui::Rect::from_min_size(
+        ui.cursor().min,
+        egui::vec2(row_width, 20.0),
+    );
+    if ui.rect_contains_pointer(row_rect) {
+        ui.painter().rect_filled(
+            row_rect.expand2(egui::vec2(4.0, 1.0)),
+            egui::CornerRadius::same(4),
+            theme.with_alpha(theme.highlight, 24),
+        );
+    }
+
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(row_rect),
+        |ui| {
+            ui.horizontal(|ui| {
         ui.allocate_ui_with_layout(
             egui::vec2(DOT_WIDTH, 20.0),
             egui::Layout::left_to_right(egui::Align::Center),
@@ -3626,12 +3872,8 @@ fn theme_palette_row(
                         .id(egui::Id::new(("theme-color-picker", entry.key)))
                         .style(crate::theme::menu_style)
                         .show(|ui| {
-                            let mut color = theme.color(rgba);
-                            if theme_color_wheel(ui, &mut color) {
-                                let _ = theme.set_color(
-                                    entry.key,
-                                    [color.r(), color.g(), color.b(), color.a()],
-                                );
+                            if let Some(color) = theme_color_wheel(ui, entry.key, rgba) {
+                                let _ = theme.set_color(entry.key, color);
                             }
                         });
                 } else {
@@ -3664,52 +3906,116 @@ fn theme_palette_row(
                 } = entry.value
                 {
                     let mut number = number;
-                    let response = ui.add(
-                        egui::DragValue::new(&mut number)
-                            .range(min..=max)
-                            .speed(step)
-                            .max_decimals(1),
-                    );
+                    let response = if entry.key == "backdrop_blur" {
+                        ui.add(
+                            egui::Slider::new(&mut number, min..=max)
+                                .step_by(f64::from(step))
+                                .show_value(true),
+                        )
+                    } else {
+                        ui.add(
+                            egui::DragValue::new(&mut number)
+                                .range(min..=max)
+                                .speed(step)
+                                .max_decimals(1),
+                        )
+                    };
                     if response.changed() {
                         let _ = theme.set_number(entry.key, number);
+                    }
+                } else if let crate::theme::ThemeValue::Color(rgba) = entry.value {
+                    if let Some(color) = theme_hex_edit(ui, entry.key, rgba) {
+                        let _ = theme.set_color(entry.key, color);
                     }
                 } else {
                     ui.monospace(value);
                 }
             },
         );
-    });
+            });
+        },
+    );
 }
 
-fn theme_color_wheel(ui: &mut egui::Ui, color: &mut egui::Color32) -> bool {
+fn make_color_wheel_texture(ctx: &egui::Context, radius: f32, size: f32) -> egui::TextureHandle {
     use egui::ecolor::Hsva;
+    const WHEEL_SIZE: usize = 256;
+    let radius_px = WHEEL_SIZE as f32 * (radius / size);
+    let center_px = WHEEL_SIZE as f32 * 0.5;
+    let mut pixels = Vec::with_capacity(WHEEL_SIZE * WHEEL_SIZE);
+    for y in 0..WHEEL_SIZE {
+        for x in 0..WHEEL_SIZE {
+            let dx = x as f32 + 0.5 - center_px;
+            let dy = y as f32 + 0.5 - center_px;
+            let distance = (dx * dx + dy * dy).sqrt();
+            if distance > radius_px {
+                pixels.push(egui::Color32::TRANSPARENT);
+            } else {
+                let hue = dy.atan2(dx).rem_euclid(std::f32::consts::TAU)
+                    / std::f32::consts::TAU;
+                let saturation = (distance / radius_px).clamp(0.0, 1.0);
+                // Fixed full HSV value: luminosity is a separate control and
+                // must never feed back into the wheel.
+                pixels.push(egui::Color32::from(Hsva::new(hue, saturation, 1.0, 1.0)));
+            }
+        }
+    }
+    ctx.load_texture(
+        "theme-color-wheel-gradient",
+        egui::ColorImage::new([WHEEL_SIZE, WHEEL_SIZE], pixels),
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+/// Perceptual response for the luminosity slider: slider position is
+/// gamma-decoded to HSV value, giving much finer control near black.
+const LUMINOSITY_GAMMA: f32 = 2.2;
+
+#[derive(Clone, Copy)]
+struct ColorWheelState {
+    hsva: egui::ecolor::Hsva,
+    rgba: [u8; 4],
+}
+
+fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> Option<[u8; 4]> {
+    use egui::ecolor::Hsva;
+
+    let state_id = ui.make_persistent_id(("theme-color-wheel-state", key));
+    let mut state = ui
+        .data(|data| data.get_temp::<ColorWheelState>(state_id))
+        .filter(|state| state.rgba == rgba)
+        .unwrap_or_else(|| ColorWheelState {
+            hsva: Hsva::from(crate::theme::get().color(rgba)),
+            rgba,
+        });
 
     let size = 188.0;
     let (wheel_rect, wheel_response) =
         ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click_and_drag());
     let center = wheel_rect.center();
     let radius = size * 0.5 - 3.0;
-    let mut hsva = Hsva::from(*color);
     let mut changed = false;
+    let mut hsva = state.hsva;
 
-    // Circular hue/saturation wheel: angle is hue, radius is saturation.
-    const SEGMENTS: usize = 96;
-    let mut mesh = egui::Mesh::default();
-    let white = egui::Color32::WHITE;
-    for step in 0..SEGMENTS {
-        let a0 = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        let a1 = (step + 1) as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        let p0 = center + egui::vec2(a0.cos(), a0.sin()) * radius;
-        let p1 = center + egui::vec2(a1.cos(), a1.sin()) * radius;
-        let h = step as f32 / SEGMENTS as f32;
-        let hue = egui::Color32::from(Hsva::new(h, 1.0, 1.0, 1.0));
-        mesh.colored_vertex(center, white);
-        mesh.colored_vertex(p0, hue);
-        mesh.colored_vertex(p1, hue);
-        let base = mesh.vertices.len() as u32 - 3;
-        mesh.add_triangle(base, base + 1, base + 2);
-    }
-    ui.painter().add(egui::Shape::mesh(mesh));
+    // Circular HSV hue/saturation wheel at fixed full value. Hue/saturation,
+    // luminosity and alpha are independent controls with no feedback path.
+    let texture = {
+        let ctx = ui.ctx().clone();
+        let id = egui::Id::new("theme-color-wheel-gradient");
+        if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
+            texture
+        } else {
+            let texture = make_color_wheel_texture(&ctx, radius, size);
+            ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
+            texture
+        }
+    };
+    ui.painter().image(
+        texture.id(),
+        wheel_rect,
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
+    );
     ui.painter().circle_stroke(
         center,
         radius,
@@ -3750,12 +4056,12 @@ fn theme_color_wheel(ui: &mut egui::Ui, color: &mut egui::Color32) -> bool {
 
     ui.add_space(6.0);
     ui.spacing_mut().slider_width = 150.0;
-    let mut value = hsva.v;
+    let mut luminosity = hsva.v.powf(1.0 / LUMINOSITY_GAMMA);
     if ui
-        .add(egui::Slider::new(&mut value, 0.0..=1.0).text("Value"))
+        .add(egui::Slider::new(&mut luminosity, 0.0..=1.0).text("Luminosity"))
         .changed()
     {
-        hsva.v = value;
+        hsva.v = luminosity.powf(LUMINOSITY_GAMMA);
         changed = true;
     }
     let mut alpha = hsva.a;
@@ -3767,9 +4073,14 @@ fn theme_color_wheel(ui: &mut egui::Ui, color: &mut egui::Color32) -> bool {
         changed = true;
     }
     if changed {
-        *color = egui::Color32::from(Hsva::new(hsva.h, hsva.s, hsva.v, hsva.a));
+        let color = egui::Color32::from(Hsva::new(hsva.h, hsva.s, hsva.v, hsva.a));
+        let out = color.to_srgba_unmultiplied();
+        state.hsva = hsva;
+        state.rgba = out;
+        ui.data_mut(|data| data.insert_temp(state_id, state));
+        return Some(out);
     }
-    changed
+    None
 }
 
 fn configure_style(ctx: &egui::Context) {
@@ -3835,8 +4146,13 @@ fn configure_style(ctx: &egui::Context) {
     visuals.hyperlink_color = accent;
     ctx.set_visuals(visuals);
     ctx.all_styles_mut(|style| {
+        // Twelve points is the smallest UI text size we use. Dense technical
+        // panels still need readable labels at default display scaling.
+        const MIN_UI_TEXT_SIZE: f32 = 12.0;
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        // Labels are UI chrome, not data. TextEdit/DragValue remain selectable.
+        style.interaction.selectable_labels = false;
         style.text_styles.insert(
             egui::TextStyle::Body,
             egui::FontId::new(13.0, egui::FontFamily::Proportional),
@@ -3847,7 +4163,7 @@ fn configure_style(ctx: &egui::Context) {
         );
         style.text_styles.insert(
             egui::TextStyle::Small,
-            egui::FontId::new(10.0, egui::FontFamily::Proportional),
+            egui::FontId::new(MIN_UI_TEXT_SIZE, egui::FontFamily::Proportional),
         );
         style.text_styles.insert(
             egui::TextStyle::Heading,
@@ -3855,7 +4171,7 @@ fn configure_style(ctx: &egui::Context) {
         );
         style.text_styles.insert(
             egui::TextStyle::Monospace,
-            egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            egui::FontId::new(MIN_UI_TEXT_SIZE, egui::FontFamily::Monospace),
         );
     });
 }
@@ -4049,6 +4365,23 @@ mod tests {
     }
 
     #[test]
+    fn app_settings_round_trip_recent_files() {
+        let settings = AppSettings {
+            view: crate::viewport::ViewSettings::default(),
+            theme: Some("punk".to_owned()),
+            recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
+        };
+        let text = serde_json::to_string(&settings).expect("serialize settings");
+        let parsed: AppSettings = serde_json::from_str(&text).expect("parse settings");
+        assert_eq!(parsed.theme.as_deref(), Some("punk"));
+        assert_eq!(
+            parsed.recent_files,
+            vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()]
+        );
+        assert_eq!(parsed.view, crate::viewport::ViewSettings::default());
+    }
+
+    #[test]
     fn document_save_paths_are_cross_platform() {
         let base = std::path::PathBuf::from("folder");
         assert_eq!(
@@ -4147,37 +4480,42 @@ mod tests {
     }
 
     #[test]
-    fn copying_a_translate_keeps_its_upstream_shape_link() {
+    fn copying_a_single_node_does_not_copy_external_links() {
         let document = clipboard_fixture();
         let selected: HashSet<&str> = ["translate"].into_iter().collect();
         let payload = clipboard_payload(&document, &selected).expect("payload");
         assert_eq!(payload.nodes.len(), 1);
-        assert_eq!(payload.connections.len(), 1);
-        assert_eq!(payload.connections[0].from, "sketch");
-        assert_eq!(payload.connections[0].to, "translate");
+        assert!(payload.connections.is_empty());
     }
 
     #[test]
-    fn pasted_surface_loft_keeps_its_external_section_cable() {
+    fn copying_a_source_does_not_copy_its_outgoing_link() {
+        let document = clipboard_fixture();
+        let selected: HashSet<&str> = ["sketch"].into_iter().collect();
+        let payload = clipboard_payload(&document, &selected).expect("payload");
+        assert_eq!(payload.nodes.len(), 1);
+        assert!(payload.connections.is_empty());
+    }
+
+    #[test]
+    fn copying_a_multiselect_keeps_internal_links_only() {
+        let document = clipboard_fixture();
+        let selected: HashSet<&str> = ["translate", "loft"].into_iter().collect();
+        let payload = clipboard_payload(&document, &selected).expect("payload");
+        assert_eq!(payload.nodes.len(), 2);
+        assert_eq!(payload.connections.len(), 1);
+        assert_eq!(payload.connections[0].from, "translate");
+        assert_eq!(payload.connections[0].to, "loft");
+    }
+
+    #[test]
+    fn pasting_single_loft_does_not_restore_upstream_sections() {
         let document = clipboard_fixture();
         let selected: HashSet<&str> = ["loft"].into_iter().collect();
         let payload = clipboard_payload(&document, &selected).expect("payload");
         let (commands, _, _) = paste_plan(&document, payload, None);
-        let mut added_loft = false;
-        let mut wires = Vec::new();
-        for command in commands {
-            match command {
-                Command::AddNode { node } if node.node_type == "surfaceloft" => added_loft = true,
-                Command::Connect { from, to, input, .. } if input == "sections" => {
-                    wires.push((from, to));
-                }
-                _ => {}
-            }
-        }
-        assert!(added_loft);
-        assert_eq!(wires.len(), 1);
-        assert_eq!(wires[0].0, "translate");
-        assert_ne!(wires[0].1, "loft");
+        assert!(commands.iter().any(|command| matches!(command, Command::AddNode { node } if node.node_type == "surfaceloft")));
+        assert!(!commands.iter().any(|command| matches!(command, Command::Connect { input, .. } if input == "sections")));
     }
 
     #[test]
