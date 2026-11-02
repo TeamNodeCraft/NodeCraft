@@ -199,6 +199,76 @@ fn surface_loft_sections(ui: &mut Ui, sections: &[String], output: &mut Output) 
     }
 }
 
+fn shell_faces(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+    let theme = crate::theme::get();
+    ui.label(
+        egui::RichText::new("OPENING FACES")
+            .size(9.0)
+            .color(theme.with_alpha(theme.muted, 190)),
+    );
+    let mut faces: Vec<String> = node
+        .values
+        .get("faces")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    if faces.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "No openings. Select the Face filter in the viewport, then click faces to open the shell.",
+            )
+            .size(10.0)
+            .color(theme.with_alpha(theme.muted, 220)),
+        );
+    } else {
+        let mut remove = None;
+        for (index, face) in faces.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(face)
+                        .size(10.0)
+                        .color(theme.color(theme.text)),
+                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text("Remove opening").clicked() {
+                        remove = Some(index);
+                    }
+                });
+            });
+        }
+        let mut changed = remove.is_some();
+        if let Some(index) = remove {
+            faces.remove(index);
+        }
+        if !faces.is_empty()
+            && ui
+                .small_button("Clear openings")
+                .on_hover_text("Close the shell")
+                .clicked()
+        {
+            faces.clear();
+            changed = true;
+        }
+        if changed {
+            output.changes.push(Change {
+                field: "faces".to_owned(),
+                value: Value::Array(
+                    faces
+                        .into_iter()
+                        .map(|id| serde_json::json!({ "id": id }))
+                        .collect(),
+                ),
+            });
+        }
+    }
+}
+
 fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let theme = crate::theme::get();
     let mut points: Vec<(f64, f64)> = node
@@ -778,6 +848,10 @@ pub fn show(ui: &mut Ui, node: &GraphNode, sections: &[String]) -> Output {
         }
         if node.node_type == "surfaceloft" {
             surface_loft_sections(ui, sections, &mut output);
+            ui.add_space(6.0);
+        }
+        if node.node_type == "shell" {
+            shell_faces(ui, node, &mut output);
             ui.add_space(6.0);
         }
         egui::Grid::new(("inspector-grid", &node.id))

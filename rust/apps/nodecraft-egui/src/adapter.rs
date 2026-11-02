@@ -12,6 +12,8 @@ use nodecraft_protocol::Mesh as NodeMesh;
 /// A display mesh plus its edge polylines, ready for the SolidCraft CPU rasterizer.
 pub struct DisplayMesh {
     pub mesh: Arc<CraftMesh>,
+    /// Face-group ids indexed by `mesh.tri_face`.
+    pub face_ids: Vec<String>,
     pub radius: f64,
     pub center: Vec3,
 }
@@ -69,6 +71,10 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
             *face_index.entry(group).or_insert(next)
         })
         .collect();
+    let mut face_ids = vec![String::new(); face_index.len()];
+    for (name, index) in face_index {
+        if let Some(slot) = face_ids.get_mut(index as usize) { *slot = name; }
+    }
 
     let edges = crease_edges(&raw);
 
@@ -87,7 +93,7 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     let bounds = mesh.bounds();
     let center = bounds.center();
     let radius = (bounds.diagonal() * 0.5).max(1.0);
-    DisplayMesh { mesh: Arc::new(mesh), radius, center }
+    DisplayMesh { mesh: Arc::new(mesh), face_ids, radius, center }
 }
 
 /// Build display edges from triangle adjacency. A joined edge is shown only when
@@ -175,6 +181,7 @@ mod tests {
         let display = display_mesh(&source);
         assert_eq!(display.mesh.triangles.len(), 1);
         assert_eq!(display.mesh.tri_face, vec![0]);
+        assert_eq!(display.face_ids, vec!["face:0".to_owned()]);
         assert_eq!(display.mesh.edges.len(), 3);
         assert!(display.radius > 0.0);
     }

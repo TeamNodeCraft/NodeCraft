@@ -634,11 +634,24 @@ fn boolean_mode(values: &serde_json::Value) -> Result<(nodecraft_bool::BooleanOp
     Ok((op, reverse))
 }
 
-fn face_reference_index(reference: &str) -> Option<usize> {
+fn face_reference_body_and_index(reference: &str) -> Option<(Option<usize>, usize)> {
     // Viewer selection ids are namespaced by body: `body:0:face:3`; accept both
     // that and the plain `face:3` form.
-    let tail = reference.rsplit("face:").next()?;
-    tail.split(':').next()?.parse().ok()
+    let mut body = None;
+    let mut face = None;
+    let mut parts = reference.split(':');
+    while let Some(part) = parts.next() {
+        match part {
+            "body" => body = parts.next()?.parse().ok(),
+            "face" => face = parts.next()?.parse().ok(),
+            _ => {}
+        }
+    }
+    Some((body, face?))
+}
+
+fn face_reference_index(reference: &str) -> Option<usize> {
+    face_reference_body_and_index(reference).map(|(_, face)| face)
 }
 
 fn export_extrude_exact(request: &Request, extrude_id: &str, path: &str) -> Result<(), String> {
@@ -2108,14 +2121,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         faces.iter().filter_map(|face| face.get("id").and_then(serde_json::Value::as_str)).collect()
                     }).unwrap_or_default();
                     let mut bodies = Vec::with_capacity(solids.len());
-                    for brep in solids {
+                    for (body_index, brep) in solids.into_iter().enumerate() {
                         let mut openings = Vec::new();
                         for reference in &references {
-                            if let Some(index) = face_reference_index(reference) {
-                                if let Some(face) = brep.faces().ids().nth(index) { openings.push(face); }
-                            }
+                            let Some((body, face_index)) = face_reference_body_and_index(reference) else { continue };
+                            if body.is_some_and(|body| body != body_index) { continue; }
+                            if let Some(face) = brep.faces().ids().nth(face_index) { openings.push(face); }
                         }
-                        let shelled = nodecraft_bool::shell_brep(brep, signed, &openings)?;
+                        let shelled = nodecraft_bool::shell_brep_solid(brep, signed, &openings)?;
                         bodies.push(BodyInstance { body: Arc::new(shelled), transforms: Vec::new() });
                     }
                     Ok(Part { bodies, ..Part::empty() })
@@ -4766,6 +4779,26 @@ mod tests {
         assert!((min[2] - 2.5).abs() < 1e-6 && (max[2] - 7.5).abs() < 1e-6, "{min:?} {max:?}");
     }
 
+    fn mesh_signed_volume(mesh: &Mesh) -> f64 {
+        mesh.faces
+            .iter()
+            .map(|face| {
+                let a = mesh.vertices[face[0] as usize];
+                let b = mesh.vertices[face[1] as usize];
+                let c = mesh.vertices[face[2] as usize];
+                let cross = [
+                    f64::from(b[1]) * f64::from(c[2]) - f64::from(b[2]) * f64::from(c[1]),
+                    f64::from(b[2]) * f64::from(c[0]) - f64::from(b[0]) * f64::from(c[2]),
+                    f64::from(b[0]) * f64::from(c[1]) - f64::from(b[1]) * f64::from(c[0]),
+                ];
+                (f64::from(a[0]) * cross[0]
+                    + f64::from(a[1]) * cross[1]
+                    + f64::from(a[2]) * cross[2])
+                    / 6.0
+            })
+            .sum()
+    }
+
     #[test]
     fn part_shell_target_uses_exact_brep() {
         let request: Request = serde_json::from_value(serde_json::json!({
@@ -4778,8 +4811,31 @@ mod tests {
         })).expect("request");
         let (response, cache, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        assert!(!response.meshes["s"].mesh.faces.is_empty());
+        let mesh = &response.meshes["s"].mesh;
+        assert!(!mesh.faces.is_empty());
+        let (min, max) = nodecraft_kernel::bounds(mesh).unwrap_or(([0.0; 3], [0.0; 3]));
+        assert_eq!(min, [-10.0, -10.0, -10.0]);
+        assert_eq!(max, [10.0, 10.0, 10.0]);
+        assert!(mesh.vertices.len() >= 16, "shell has no inner wall");
+        assert!(mesh.faces.len() >= 24, "shell is missing faces");
         assert!(cache.part_entries() > 0);
+    }
+
+    #[test]
+    fn shell_resolves_body_scoped_face_references() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["s"], "meshTargets": ["s"],
+            "nodes": [
+                {"id": "p", "type": "primitive", "values": {"primitiveType": "box", "length": 20, "width": 20, "height": 20}, "cache": {"key": "p"}},
+                {"id": "s", "type": "shell", "values": {"thickness": 2.0, "direction": "inward", "faces": [{"id": "body:0:face:1"}]}, "cache": {"key": "s"}}
+            ],
+            "connections": [{"from": "p", "to": "s", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        let (response, _, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        assert!(!response.meshes["s"].mesh.faces.is_empty());
+        assert_eq!(face_reference_body_and_index("body:3:face:7"), Some((Some(3), 7)));
+        assert_eq!(face_reference_body_and_index("face:2"), Some((None, 2)));
     }
 
     #[test]

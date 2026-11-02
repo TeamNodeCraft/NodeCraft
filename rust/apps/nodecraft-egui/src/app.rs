@@ -479,6 +479,7 @@ pub struct NodeCraftApp {
     selected_nodes: HashSet<String>,
     selected_connections: HashSet<ConnectionKey>,
     viewer_breakpoint: Option<String>,
+    face_pick_target: Option<String>,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -611,6 +612,7 @@ impl NodeCraftApp {
             selected_nodes: HashSet::new(),
             selected_connections: HashSet::new(),
             viewer_breakpoint: None,
+            face_pick_target: None,
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
@@ -1413,6 +1415,34 @@ impl NodeCraftApp {
         }
     }
 
+    /// While the face selector is active on a Shell node, show the shell's
+    /// upstream body so picked face groups refer to the exact input topology.
+    fn sync_face_pick_target(&mut self) {
+        let desired = if self.viewport.selection_mode() == crate::viewport::SelectionMode::Face
+            && self.selected_nodes.len() == 1
+        {
+            let shell_id = self.selected_nodes.iter().next().cloned();
+            self.session.as_ref().and_then(|session| {
+                let document = session.document();
+                let shell = document
+                    .nodes
+                    .iter()
+                    .find(|node| Some(&node.id) == shell_id.as_ref() && node.node_type == "shell")?;
+                document
+                    .connections
+                    .iter()
+                    .find(|link| link.to == shell.id && (link.input == "shape" || link.input == "a"))
+                    .map(|link| link.from.clone())
+            })
+        } else {
+            None
+        };
+        if desired != self.face_pick_target {
+            self.face_pick_target = desired;
+            self.evaluate();
+        }
+    }
+
     fn evaluate(&mut self) {
         self.evaluate_with_cache_policy(false);
     }
@@ -1428,8 +1458,12 @@ impl NodeCraftApp {
             self.eval_pending = None;
             return;
         }
+        let evaluation_selection = self
+            .face_pick_target
+            .clone()
+            .or_else(|| self.viewer_breakpoint.clone());
         if !self.pending_dirty.is_empty() {
-            let target = engine_bridge::target_for(session.document(), self.viewer_breakpoint.as_deref());
+            let target = engine_bridge::target_for(session.document(), evaluation_selection.as_deref());
             let affected = target.as_deref().is_some_and(|target| {
                 let closure = target_closure(session.document(), target);
                 self.pending_dirty.iter().any(|id| closure.contains(id))
@@ -1444,7 +1478,7 @@ impl NodeCraftApp {
         self.eval_next = self.eval_next.wrapping_add(1);
         let id = self.eval_next;
         self.eval_pending = Some(id);
-        let total = engine_bridge::target_for(session.document(), self.viewer_breakpoint.as_deref())
+        let total = engine_bridge::target_for(session.document(), evaluation_selection.as_deref())
             .map(|target| target_closure(session.document(), &target).len())
             .unwrap_or(0);
         self.eval_progress = (total > 0).then_some(EvalProgress { total, done: 0 });
@@ -1462,7 +1496,7 @@ impl NodeCraftApp {
             tab_id,
             linked_documents,
             document: session.document().clone(),
-            selected: self.viewer_breakpoint.clone(),
+            selected: evaluation_selection,
             clear_cache,
         });
         self.egui_ctx.request_repaint();
@@ -2927,6 +2961,54 @@ impl eframe::App for NodeCraftApp {
                     self.preserve_view_for_next_mesh = true;
                     self.evaluate();
                 }
+            }
+        }
+
+        self.sync_face_pick_target();
+        let face_picks = self.viewport.take_face_picks();
+        if !face_picks.is_empty()
+            && let Some(node) = selected_node.as_ref().filter(|node| node.node_type == "shell")
+        {
+            let mut faces: Vec<String> = node
+                .values
+                .get("faces")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for pick in face_picks {
+                if let Some(index) = faces.iter().position(|face| face == &pick) {
+                    faces.remove(index);
+                } else {
+                    faces.push(pick);
+                }
+            }
+            let values = serde_json::Value::Array(
+                faces
+                    .into_iter()
+                    .map(|id| serde_json::json!({ "id": id }))
+                    .collect(),
+            );
+            if self.apply_commands(
+                &[Command::SetValue {
+                    node: node.id.clone(),
+                    field: "faces".to_owned(),
+                    value: values,
+                }],
+                Some("shell-face-pick"),
+            ) {
+                // Return to the shell result immediately; re-enter Face mode to
+                // pick another opening. This prevents the input body from looking
+                // like the shell output after a pick.
+                self.face_pick_target = None;
+                self.viewport
+                    .set_selection_mode(crate::viewport::SelectionMode::Object);
+                self.evaluate();
             }
         }
 

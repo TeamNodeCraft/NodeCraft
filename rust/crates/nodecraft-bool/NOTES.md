@@ -257,12 +257,46 @@ usable should not be made: it returns an empty volume but an invalid B-rep (0 sh
 | `boolean_breps(op, a, b)` | `Result<Brep, String>` | `api_brep::boolean`; consumes operands |
 | `boolean_mesh(op, a, b)` | `Result<Mesh, String>` | boolean + `display_mesh` |
 | `shell_brep(brep, thickness, openings)` | `Result<Brep, String>` | rounded shell, default `ShellOptions` |
+| `shell_brep_solid(brep, thickness, openings)` | `Result<Brep, String>` | sharp shell using extended convex edges + merged results |
 | `shell_brep_with_options(brep, options, openings)` | `Result<Brep, String>` | reaches extended path / side walls |
 | `shell_mesh(brep, thickness, openings)` | `Result<Mesh, String>` | shell + `display_mesh` |
 | `display_mesh(&Brep)` / `display_mesh_with_options` | `Result<Mesh, String>` | generic B-rep → protocol mesh bridge (not centered) |
 | `box_brep` / `box_brep_at` | `Result<Brep, String>` | operand constructor (B-rep coordinates) |
 | `brep_faces(&Brep)` | `Result<Vec<FaceId>, String>` | shell `openings` ids |
 | `map_error` / `is_unported_error` / `UNPORTED_PREFIX` | — | unported dependency vs invalid input |
+
+## Shell status and known issues
+
+`nodecraft_bool::shell_brep_solid` is the current feature-node shell entry point.
+It uses:
+
+```text
+extend_convex_edges = true
+merge_results       = true
+create_offset_solid = false
+merge_sheet_side_walls = false
+```
+
+Current observations:
+
+| Input | Result |
+|-------|--------|
+| box, inward/outward | works; sharp inner and outer walls; openings resolve by `FaceId` |
+| cylinder | completes but slow (~1.2 s in the probe) and needs volume/orientation checks |
+| sphere | completes but slow (~0.3 s in the probe) and needs volume/orientation checks |
+| cone | fails display tessellation: `solidcore curved tessellation produced no triangles` |
+
+Open concerns:
+
+- inner-shell orientation is not yet validated against SolidCore mass properties
+- curved shell results need volume/area and watertightness checks
+- `shell_brep` and `shell_brep_with_options` still expose rounded-shell defaults;
+  feature nodes should use `shell_brep_solid`
+- offset options are internal policy, not inspector controls
+- shell opening selection is ordinal/body-scoped; persistent topological naming
+  across upstream edits remains outstanding
+- the contextual inspector selection plan is documented privately and is not
+  part of this public snapshot
 
 ## Next steps when solidcore lands the missing pieces
 

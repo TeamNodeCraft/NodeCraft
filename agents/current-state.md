@@ -16,15 +16,23 @@ SolidCore/SMLib for exact geometry.
 - native OS settings viewport with display and diagnostic sections
 - macOS-style menus with modeless popup rows
 - public snapshot build and GitHub Actions matrix for macOS/Linux/Windows
+- Geometry graph value carrying exact BRep solids and sketches
+- Geometry-native primitive, translate, mirror, combine, Boolean, STEP import,
+  extrude, sketch, spline, loft, surfaceloft, shell and scatter evaluation
+- rendered viewport targets evaluate through the Geometry evaluator
+- Part/Geometry cache reuse and exact cache-hit reporting
+- face/edge/vertex selection filter dock in the viewport
+- shell opening-face selection from the viewport, with inspector chips
+- sharp-wall shell attempt using SolidCore's extended offset path
 
 ## Test baseline
 
 Latest local baseline for the public subset:
 
 ```text
-nodecraft-egui          42 passed
+nodecraft-egui          62 passed
 nodecraft-node-canvas   19 passed
-nodecraft-engine        58 passed / 1 ignored
+nodecraft-engine        75 passed / 1 ignored
 ```
 
 The public snapshot does not include the large STEP corpora used by the private
@@ -40,6 +48,25 @@ call. See [How NodeCraft works](architecture.md).
 The monolithic evaluator is the main architectural debt. The next stage is to
 split exact evaluation from display meshing and give them independent bounded
 pools and caches, not to wrap the current monolith in a second thread pool.
+
+## Known shell limitations
+
+Shelling is not yet general. Current state:
+
+- box shelling works with sharp inner/outer walls
+- cylinder and sphere shell through the curved path but are slow and need
+  volume/orientation validation
+- cone shelling currently fails at curved display tessellation
+  (`solidcore curved tessellation produced no triangles`)
+- inner-shell orientation still needs a correctness audit
+- openings are accepted as body-scoped face references and resolved to
+  SolidCore `FaceId`s
+- the offset options (`extend_convex_edges`, `merge_results`,
+  `create_offset_solid`, `merge_sheet_side_walls`) remain engine policy, not
+  inspector controls
+
+The next shell work is per-input option selection, volume/area validation for
+curved primitives, and contextual face editing from the inspector.
 
 ## Platforms
 

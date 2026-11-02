@@ -62,6 +62,74 @@ impl ViewSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    #[default]
+    Object,
+    Face,
+    Edge,
+    Vertex,
+}
+
+impl SelectionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Object => "Object",
+            Self::Face => "Face",
+            Self::Edge => "Edge",
+            Self::Vertex => "Vertex",
+        }
+    }
+}
+
+fn raycast_face(
+    mesh: &solidcraft_geom::Mesh,
+    face_ids: &[String],
+    origin: solidcraft_geom::Vec3,
+    direction: solidcraft_geom::Vec3,
+) -> Option<String> {
+    use solidcraft_geom::Vec3;
+    let mut best = f64::INFINITY;
+    let mut best_face = None;
+    for (index, triangle) in mesh.triangles.iter().enumerate() {
+        let (Some(a), Some(b), Some(c)) = (
+            mesh.positions.get(triangle[0] as usize),
+            mesh.positions.get(triangle[1] as usize),
+            mesh.positions.get(triangle[2] as usize),
+        ) else {
+            continue;
+        };
+        let (a, b, c) = (*a, *b, *c);
+        let edge1: Vec3 = b - a;
+        let edge2: Vec3 = c - a;
+        let h = direction.cross(edge2);
+        let det = edge1.dot(h);
+        if det.abs() < 1.0e-12 {
+            continue;
+        }
+        let inv = 1.0 / det;
+        let s = origin - a;
+        let u = inv * s.dot(h);
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        let q = s.cross(edge1);
+        let v = inv * direction.dot(q);
+        if v < 0.0 || u + v > 1.0 {
+            continue;
+        }
+        let t = inv * edge2.dot(q);
+        if t > 1.0e-9 && t < best {
+            let face = mesh.tri_face.get(index).copied().unwrap_or(u32::MAX) as usize;
+            if let Some(id) = face_ids.get(face) {
+                best = t;
+                best_face = Some(id.clone());
+            }
+        }
+    }
+    best_face
+}
+
 pub struct Viewport {
     pub camera: Camera,
     chrome_visible: bool,
@@ -75,6 +143,9 @@ pub struct Viewport {
     last_size: [usize; 2],
     /// Right-hand chrome inset used when a floating panel covers the viewport.
     pub chrome_right_inset: f32,
+    selection_mode: SelectionMode,
+    face_picks: Vec<String>,
+    dock_rect: Option<egui::Rect>,
     transform_gizmo: Option<Gizmo>,
     gizmo_state: GizmoState,
     gizmo_changes: Vec<(String, f64)>,
@@ -94,6 +165,9 @@ impl Default for Viewport {
             dirty: true,
             last_size: [0, 0],
             chrome_right_inset: 0.0,
+            selection_mode: SelectionMode::Object,
+            face_picks: Vec::new(),
+            dock_rect: None,
             transform_gizmo: None,
             gizmo_state: GizmoState::default(),
             gizmo_changes: Vec::new(),
@@ -175,6 +249,18 @@ impl Viewport {
 
     pub fn view(&self) -> ViewSettings {
         self.view
+    }
+
+    pub fn selection_mode(&self) -> SelectionMode {
+        self.selection_mode
+    }
+
+    pub fn take_face_picks(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.face_picks)
+    }
+
+    pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        self.selection_mode = mode;
     }
 
     pub fn fit(&mut self) {
@@ -420,6 +506,8 @@ impl Viewport {
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, frame));
             if self.chrome_visible {
                 self.axis_gizmo(ui, rect, visible);
+                self.selection_dock(ui, rect, visible);
+                self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
                 self.draw_transform_gizmo(ui, rect);
             }
             return;
@@ -443,7 +531,125 @@ impl Viewport {
         }
         if self.chrome_visible {
             self.axis_gizmo(ui, rect, visible);
+            self.selection_dock(ui, rect, visible);
+            self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
             self.draw_transform_gizmo(ui, rect);
+        }
+    }
+
+    /// Pick the nearest display-mesh face under the pointer in face mode.
+    fn pick_face(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, clicked: bool, blocked: bool) {
+        if !clicked || blocked || self.selection_mode != SelectionMode::Face {
+            return;
+        }
+        let Some(pointer) = ui.ctx().pointer_interact_pos() else { return };
+        if !viewport.contains(pointer) || self.dock_rect.is_some_and(|dock| dock.contains(pointer)) {
+            return;
+        }
+        let Some(display) = self.display.as_ref() else { return };
+        let width = f64::from(viewport.width()).max(1.0);
+        let height = f64::from(viewport.height()).max(1.0);
+        let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
+        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+        let (origin, direction) = self.camera.ray(x, y, width, height);
+        let Some(face) = raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction) else {
+            return;
+        };
+        self.face_picks.push(face);
+        ui.ctx().request_repaint();
+    }
+
+    /// Top-of-viewport filter dock for face, edge and vertex selection.
+    fn selection_dock(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, visible: egui::Rect) {
+        const MARGIN: f32 = 14.0;
+        const BUTTON: f32 = 34.0;
+        const HEIGHT: f32 = 30.0;
+        const GAP: f32 = 4.0;
+        let width = BUTTON * 3.0 + GAP * 2.0 + 12.0;
+        // Centre between the node editor's right edge and the window's right edge.
+        let available_left = visible.min.x.clamp(viewport.min.x, viewport.max.x);
+        let available_right = viewport.max.x;
+        let dock_center_x = (available_left + available_right) * 0.5;
+        let dock = egui::Rect::from_center_size(
+            egui::Pos2::new(dock_center_x, viewport.top() + MARGIN + HEIGHT * 0.5),
+            egui::Vec2::new(width, HEIGHT),
+        );
+        // Keep the dock out from under the XYZ compass in narrow viewports.
+        let right_limit = viewport.right() - self.chrome_right_inset - 94.0 - MARGIN * 2.0;
+        let dock = if dock.right() > right_limit {
+            egui::Rect::from_min_size(
+                egui::Pos2::new(right_limit - dock.width(), dock.min.y),
+                dock.size(),
+            )
+        } else {
+            dock
+        };
+        let theme = crate::theme::get();
+        self.dock_rect = Some(dock);
+        let painter = ui.painter().with_clip_rect(viewport);
+        painter.rect_filled(dock, 10.0, theme.with_alpha(theme.window, 205));
+        painter.rect_stroke(
+            dock,
+            10.0,
+            egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
+            egui::StrokeKind::Inside,
+        );
+        let modes = [SelectionMode::Face, SelectionMode::Edge, SelectionMode::Vertex];
+        let mut x = dock.min.x + 6.0;
+        for mode in modes {
+            let button = egui::Rect::from_min_size(
+                egui::Pos2::new(x, dock.min.y + (HEIGHT - BUTTON) * 0.5),
+                egui::Vec2::splat(BUTTON),
+            );
+            let response = ui
+                .interact(
+                    button,
+                    egui::Id::new(("viewport-selection-mode", mode.label())),
+                    egui::Sense::click(),
+                )
+                .on_hover_text(format!("{} selection", mode.label()));
+            let active = self.selection_mode == mode;
+            if active || response.hovered() {
+                painter.rect_filled(
+                    button,
+                    7.0,
+                    theme.with_alpha(if active { theme.highlight } else { theme.control }, 210),
+                );
+            }
+            if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.clicked() {
+                self.selection_mode = if active { SelectionMode::Object } else { mode };
+                ui.ctx().request_repaint();
+            }
+            let colour = if active {
+                theme.color(theme.accent)
+            } else {
+                theme.color(theme.icon)
+            };
+            let center = button.center();
+            match mode {
+                SelectionMode::Face => {
+                    let face = egui::Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::Vec2::splat(13.0));
+                    painter.rect_filled(face, 2.0, theme.with_alpha(theme.icon, 60));
+                    painter.rect_stroke(face, 2.0, egui::Stroke::new(1.5, colour), egui::StrokeKind::Inside);
+                }
+                SelectionMode::Edge => {
+                    painter.line_segment(
+                        [center + egui::vec2(-7.0, 5.0), center + egui::vec2(7.0, -5.0)],
+                        egui::Stroke::new(2.0, colour),
+                    );
+                    painter.circle_filled(center + egui::vec2(-7.0, 5.0), 2.0, colour);
+                    painter.circle_filled(center + egui::vec2(7.0, -5.0), 2.0, colour);
+                }
+                SelectionMode::Vertex => {
+                    painter.circle_filled(center, 5.0, colour);
+                    painter.circle_stroke(center, 7.0, egui::Stroke::new(1.2, colour));
+                }
+                SelectionMode::Object => {}
+            }
+            x += BUTTON + GAP;
         }
     }
 
@@ -903,6 +1109,33 @@ mod tests {
         assert!(!view.any_extra());
         view.zebra = true;
         assert!(view.any_extra());
+    }
+
+    #[test]
+    fn face_pick_returns_the_solidcore_face_group() {
+        let mesh = solidcraft_geom::Mesh {
+            positions: vec![
+                solidcraft_geom::Vec3::new(-1.0, -1.0, 0.0),
+                solidcraft_geom::Vec3::new(1.0, -1.0, 0.0),
+                solidcraft_geom::Vec3::new(1.0, 1.0, 0.0),
+            ],
+            normals: vec![solidcraft_geom::Vec3::Z; 3],
+            triangles: vec![[0, 1, 2]],
+            tri_face: vec![0],
+            edges: Vec::new(),
+            display_only_edges: false,
+            seams: Vec::new(),
+            smooth_edges: Vec::new(),
+            sharp_edges: Vec::new(),
+            edge_faces: Vec::new(),
+        };
+        let picked = raycast_face(
+            &mesh,
+            &["body:0:face:9".to_owned()],
+            solidcraft_geom::Vec3::new(0.0, 0.0, 5.0),
+            solidcraft_geom::Vec3::new(0.0, 0.0, -1.0),
+        );
+        assert_eq!(picked.as_deref(), Some("body:0:face:9"));
     }
 
     #[test]

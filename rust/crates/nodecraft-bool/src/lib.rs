@@ -542,6 +542,23 @@ pub fn shell_brep(brep: Brep, thickness: f64, openings: &[FaceId]) -> Result<Bre
 /// # Errors
 ///
 /// A message from solidcore; unported dependencies carry [`UNPORTED_PREFIX`].
+/// Shell with sharp offset walls rather than rounded convex corners.
+pub fn shell_brep_solid(brep: Brep, thickness: f64, openings: &[FaceId]) -> Result<Brep, String> {
+    shell_brep_with_options(
+        brep,
+        ShellOptions {
+            offset: OffsetOptions {
+                distance: thickness,
+                extend_convex_edges: true,
+                merge_results: true,
+            },
+            create_offset_solid: false,
+            merge_sheet_side_walls: false,
+        },
+        openings,
+    )
+}
+
 pub fn shell_brep_with_options(
     brep: Brep,
     options: ShellOptions,
