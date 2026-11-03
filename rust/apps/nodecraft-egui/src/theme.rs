@@ -59,6 +59,18 @@ pub struct Theme {
     pub axis_x: [u8; 4],
     pub axis_y: [u8; 4],
     pub axis_z: [u8; 4],
+    #[serde(default = "default_preview_add")]
+    pub preview_add: [u8; 4],
+    #[serde(default = "default_preview_cut")]
+    pub preview_cut: [u8; 4],
+}
+
+fn default_preview_add() -> [u8; 4] {
+    [74, 158, 255, 128]
+}
+
+fn default_preview_cut() -> [u8; 4] {
+    [255, 92, 92, 128]
 }
 
 fn default_port_input() -> [u8; 4] {

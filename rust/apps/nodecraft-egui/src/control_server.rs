@@ -16,6 +16,8 @@ pub enum Command {
     FitGraph,
     ZoomOut,
     EnsureVisible,
+    SelectNode(String),
+    BeginSelection { node: String, field: String },
     State,
 }
 
@@ -110,6 +112,27 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
             Some(path) => Command::OpenStep(path),
             None => {
                 let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}");
+                return;
+            }
+        },
+        "/select" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+        {
+            Some(id) => Command::SelectNode(id),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                return;
+            }
+        },
+        "/begin-selection" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
+            let node = value.get("node")?.as_str()?.to_owned();
+            let field = value.get("field")?.as_str()?.to_owned();
+            Some((node, field))
+        }) {
+            Some((node, field)) => Command::BeginSelection { node, field },
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"node\\\": ..., \\\"field\\\": ...}\"}");
                 return;
             }
         },

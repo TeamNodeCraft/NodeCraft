@@ -843,6 +843,29 @@ mod transaction_tests {
     }
 
     #[test]
+    fn old_chamfer_fillet_nodes_migrate_to_fillet_type() {
+        let graph = GraphDocument {
+            schema_version: 1,
+            id: "root".into(),
+            nodes: vec![GraphNode {
+                id: "f".into(),
+                node_type: "chamfer".into(),
+                values: json!({"mode": "fillet", "length": 3}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+            interface: GraphInterface::default(),
+        };
+        let graph = Session::new(graph).document().clone();
+        assert_eq!(graph.nodes[0].node_type, "fillet");
+        assert!(graph.nodes[0].values.get("mode").is_none());
+        assert_eq!(graph.nodes[0].values["continuity"], "");
+        assert_eq!(graph.nodes[0].values["length"], 3);
+    }
+
+    #[test]
     fn session_canonicalizes_structural_defaults_once() {
         let mut graph = GraphDocument {
             schema_version: 1,

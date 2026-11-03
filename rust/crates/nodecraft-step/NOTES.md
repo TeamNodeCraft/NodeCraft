@@ -166,3 +166,15 @@ Trimmed-face limits:
   is where that is exercised).
 - STEP files are still written in mm only, closed shells only (no sheets/voids), and the
   planar reader still does not rebuild curved topology.
+
+
+## ADVANCED_FACE same_sense
+
+Newer SolidCore `step-brep` exports use the material face-use orientation, so a
+valid solid can have `.F.` faces. The legacy planar body stores only loop order,
+not per-face surface normals. `read_planar_body` therefore normalizes a closed
+solid after reading: if its signed volume is negative, every outer and hole loop
+is reversed. This exactly negates the signed volume and avoids a centroid
+heuristic on multi-body or non-convex solids. SolidCore's own topology-first
+builder reads the same files with positive volume, confirming the export is
+valid.

@@ -20,7 +20,7 @@ const BUILD_GIT_HASH: &str = match option_env!("NODECRAFT_GIT_HASH") {
 use crate::engine_bridge;
 use crate::inspector;
 use nodecraft_node_canvas::canvas::{
-    node_width, ConnectionKey, LayoutMode, NodeEditor, NodeEditorAction, NODE_HEIGHT,
+    node_extent, node_width, ConnectionKey, LayoutMode, NodeEditor, NodeEditorAction, NODE_HEIGHT,
     NODE_LEFT_PADDING, NODE_RIGHT_PADDING,
 };
 use nodecraft_node_canvas::theme::CanvasTheme;
@@ -38,7 +38,7 @@ struct NodeClipboard {
 }
 
 const PASTE_OFFSET: f64 = 32.0;
-fn tint_svg(source: &[u8], colour: &str) -> String {
+pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
     let mut svg = std::str::from_utf8(source)
         .unwrap_or_default()
         .replace("#212121", colour)
@@ -121,6 +121,7 @@ impl ToolSection {
             ToolItem { label: "Boolean", node_type: "boolean", primitive: None },
             ToolItem { label: "Combine to Part", node_type: "combine", primitive: None },
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
+            ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None },
             ToolItem { label: "Extrude", node_type: "extrude", primitive: None },
             ToolItem { label: "Loft", node_type: "loft", primitive: None },
@@ -479,10 +480,21 @@ pub struct NodeCraftApp {
     selected_nodes: HashSet<String>,
     selected_connections: HashSet<ConnectionKey>,
     viewer_breakpoint: Option<String>,
+    /// Selection remembered while the tool dock is open; the canvas click-away
+    /// that opens the dock clears `selected_nodes` before the tool item is chosen.
+    tool_add_source: Option<String>,
     face_pick_target: Option<String>,
+    /// Target whose display mesh is currently shown. Picking is only valid when
+    /// this is the explicit topology source for the active selection session.
+    eval_target: Option<String>,
+    comparison_pair: Option<(String, String)>,
+    difference_stats: Option<(usize, usize)>,
+    difference_error: Option<String>,
+    feature_overlay: bool,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
+    last_eval_key: Option<(String, u64, Option<String>, Option<(String, String)>)>,
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
@@ -612,10 +624,17 @@ impl NodeCraftApp {
             selected_nodes: HashSet::new(),
             selected_connections: HashSet::new(),
             viewer_breakpoint: None,
+            tool_add_source: None,
             face_pick_target: None,
+            eval_target: None,
+            comparison_pair: None,
+            difference_stats: None,
+            difference_error: None,
+            feature_overlay: settings.feature_overlay,
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
+            last_eval_key: None,
             eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
             mesh: None,
@@ -882,6 +901,7 @@ impl NodeCraftApp {
 
     fn open_session(&mut self, session: Session, path: Option<PathBuf>, status: String) {
         self.save_active_tab();
+        self.last_eval_key = None;
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
         let document_id = match &path {
@@ -1030,7 +1050,166 @@ impl NodeCraftApp {
         self.evaluate_with_cache_policy(true);
     }
 
-    fn add_tool_node(&mut self, tool: ToolItem, workspace: egui::Rect) {
+    /// The primary geometry input a newly-added node should use when inserted
+    /// downstream of the selected node. Non-geometry nodes return `None`.
+    fn primary_geometry_input(node_type: &str) -> Option<&'static str> {
+        match node_type {
+            "boolean" | "fuse" => Some("a"),
+            "combine" | "translate" | "mirror" | "shell" | "chamfer" | "fillet"
+            | "scatter" | "exporter" | "sceneTransform" => Some("shape"),
+            "extrude" => Some("profile"),
+            "loft" => Some("bottom"),
+            "surfaceloft" => Some("sections"),
+            _ => None,
+        }
+    }
+
+    fn primary_output(node_type: &str) -> Option<&'static str> {
+        match node_type {
+            "exporter" | "time" | "linkedpart" => None,
+            "sketch" | "spline" => Some("sketch"),
+            _ => Some("shape"),
+        }
+    }
+
+    fn auto_connect_ports(previous: &str, added: &str) -> Option<(&'static str, &'static str)> {
+        Some((Self::primary_geometry_input(added)?, Self::primary_output(previous)?))
+    }
+
+    fn auto_connect_position(
+        source_x: f64,
+        source_y: f64,
+        source_width: f32,
+        added_width: f32,
+    ) -> (f64, f64) {
+        const VERTICAL_GAP: f32 = 56.0;
+        (
+            source_x + f64::from(source_width - added_width) * 0.5,
+            source_y + f64::from(NODE_HEIGHT + VERTICAL_GAP),
+        )
+    }
+
+    fn cubic_cable_point(path: [egui::Pos2; 4], t: f32) -> egui::Pos2 {
+        let u = 1.0 - t;
+        let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
+        egui::pos2(
+            a * path[0].x + b * path[1].x + c * path[2].x + d * path[3].x,
+            a * path[0].y + b * path[1].y + c * path[2].y + d * path[3].y,
+        )
+    }
+
+    fn cable_intersects_rect(path: [egui::Pos2; 4], rect: egui::Rect, padding: f32) -> bool {
+        let rect = rect.expand(padding);
+        let mut previous = path[0];
+        for step in 1..=16 {
+            let point = Self::cubic_cable_point(path, step as f32 / 16.0);
+            let segment = egui::Rect::from_two_pos(previous, point);
+            if rect.intersects(segment) {
+                return true;
+            }
+            previous = point;
+        }
+        false
+    }
+
+    fn auto_connect_placement(
+        document: &GraphDocument,
+        added: &GraphNode,
+        source: &str,
+        initial: (f64, f64),
+    ) -> (f64, f64, Vec<(String, f64, f64)>) {
+        let added_extent = node_extent(added);
+        let added_width = added_extent.width;
+        let added_height = added_extent.height;
+        let padded_rect = |x: f64, y: f64, extent: nodecraft_node_canvas::canvas::NodeExtent| {
+            extent.padded_rect(x, y)
+        };
+        let node_rect = |node: &GraphNode, positions: &HashMap<String, (f64, f64)>| {
+            let (x, y) = positions.get(&node.id).copied().unwrap_or((node.x, node.y));
+            padded_rect(x, y, node_extent(node))
+        };
+        let mut positions: HashMap<String, (f64, f64)> = document
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), (node.x, node.y)))
+            .collect();
+        let mut moved: std::collections::BTreeMap<String, (f64, f64)> = std::collections::BTreeMap::new();
+        let (mut x, mut y) = initial;
+        for _ in 0..16 {
+            let candidate = added_extent.padded_rect(x, y);
+            let cables = NodeEditor::connection_paths(document, &positions);
+            let node_blocker = document.nodes.iter().find(|node| {
+                node.id != added.id && candidate.intersects(node_rect(node, &positions))
+            });
+            let cable_blocker = cables.iter().find_map(|(path, key)| {
+                Self::cable_intersects_rect(*path, candidate, 10.0).then(|| {
+                    document
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == key.to)
+                        .or_else(|| document.nodes.iter().find(|node| node.id == key.from))
+                }).flatten()
+            });
+            let Some(blocker) = node_blocker.or(cable_blocker) else {
+                return (x, y, moved.into_iter().map(|(id, (x, y))| (id, x, y)).collect());
+            };
+            let blocker_rect = node_rect(blocker, &positions);
+            let candidates = [
+                (f64::from(blocker_rect.max.x) + f64::from(added_extent.padding), blocker_rect.min.y as f64),
+                (f64::from(blocker_rect.min.x) - f64::from(added_width) - f64::from(added_extent.padding), blocker_rect.min.y as f64),
+                (blocker_rect.min.x as f64, f64::from(blocker_rect.max.y) + f64::from(added_extent.padding)),
+                (blocker_rect.min.x as f64, f64::from(blocker_rect.min.y) - f64::from(added_extent.padding) - f64::from(added_height)),
+            ];
+            if let Some((side_x, side_y)) = candidates.into_iter().find(|(side_x, side_y)| {
+                let side = added_extent.padded_rect(*side_x, *side_y);
+                let clear_nodes = !document.nodes.iter().any(|node| {
+                    node.id != added.id && side.intersects(node_rect(node, &positions))
+                });
+                let clear_cables = !cables.iter().any(|(path, _)| {
+                    Self::cable_intersects_rect(*path, side, 10.0)
+                });
+                clear_nodes && clear_cables
+            }) {
+                return (side_x, side_y, moved.into_iter().map(|(id, (x, y))| (id, x, y)).collect());
+            }
+
+            // No free side: move the blocking branch across, including children.
+            let branch = {
+                let mut branch = HashSet::new();
+                let mut stack = vec![blocker.id.clone()];
+                while let Some(current) = stack.pop() {
+                    if !branch.insert(current.clone()) { continue; }
+                    for link in document.connections.iter().filter(|link| link.from == current) {
+                        stack.push(link.to.clone());
+                    }
+                }
+                branch
+            };
+            let candidate_rect = added_extent.padded_rect(x, y);
+            let delta = if candidate_rect.center().x >= blocker_rect.center().x {
+                f64::from(candidate_rect.max.x - blocker_rect.min.x)
+            } else {
+                f64::from(candidate_rect.min.x - blocker_rect.max.x)
+            };
+            for id in &branch {
+                if let Some((px, py)) = positions.get_mut(id) {
+                    *px += delta;
+                    moved.insert(id.clone(), (*px, *py));
+                }
+            }
+            if branch.contains(source) {
+                x += delta;
+            }
+        }
+        (x, y, moved.into_iter().map(|(id, (x, y))| (id, x, y)).collect())
+    }
+
+    fn add_tool_node(
+        &mut self,
+        tool: ToolItem,
+        workspace: egui::Rect,
+        connect_source: Option<String>,
+    ) {
         let Some(session) = &self.session else {
             self.status = "No document".to_owned();
             return;
@@ -1052,13 +1231,67 @@ impl NodeCraftApp {
             x: 0.0,
             y: 0.0,
         };
-        node.x = f64::from(graph.x) - f64::from(node_width(&node)) * 0.5;
-        node.y = f64::from(graph.y) - f64::from(NODE_HEIGHT) * 0.5;
-        if self.apply_commands(&[Command::AddNode { node }], Some("tool-dock-add-node")) {
+        let connect = connect_source.and_then(|selected| {
+            let session = self.session.as_ref()?;
+            let previous = session.document().nodes.iter().find(|node| node.id == selected)?;
+            let (input, output) = Self::auto_connect_ports(&previous.node_type, &tool.node_type)?;
+            Some((
+                selected,
+                input,
+                output,
+                previous.x,
+                previous.y,
+                node_width(previous),
+            ))
+        });
+        let mut moved = Vec::new();
+        if let Some((selected, _, _, x, y, source_width)) = connect.clone() {
+            let (x, y) = Self::auto_connect_position(x, y, source_width, node_width(&node));
+            let session = self.session.as_ref().expect("session checked above");
+            let (x, y, branch_moves) =
+                Self::auto_connect_placement(session.document(), &node, &selected, (x, y));
+            node.x = x;
+            node.y = y;
+            moved = branch_moves;
+        } else {
+            node.x = f64::from(graph.x) - f64::from(node_width(&node)) * 0.5;
+            node.y = f64::from(graph.y) - f64::from(NODE_HEIGHT) * 0.5;
+        }
+        let added_rect = egui::Rect::from_min_size(
+            egui::pos2(node.x as f32, node.y as f32),
+            egui::vec2(node_width(&node), NODE_HEIGHT),
+        );
+        let mut commands = vec![Command::AddNode { node }];
+        if let Some((selected, input, output, _, _, _)) = connect {
+            commands.push(Command::Connect {
+                from: selected,
+                to: id.clone(),
+                input: input.to_owned(),
+                out: output.to_owned(),
+            });
+        }
+        for (moved_id, x, y) in moved {
+            commands.push(Command::SetPosition {
+                node: moved_id,
+                x,
+                y,
+            });
+        }
+        let connected = commands.iter().any(|command| matches!(command, Command::Connect { .. }));
+        if self.apply_commands(&commands, Some("tool-dock-add-node")) {
+            self.node_editor.begin_node_fade(&id);
+            self.node_editor
+                .ensure_graph_rect_visible(workspace, added_rect, 24.0);
+            self.egui_ctx.request_repaint();
+            self.tool_add_source = None;
             self.selected_nodes.clear();
             self.selected_nodes.insert(id.clone());
             self.selected_connections.clear();
-            self.status = format!("Added {}", tool.label);
+            self.status = if connected {
+                format!("Added {} and connected it downstream", tool.label)
+            } else {
+                format!("Added {}", tool.label)
+            };
             self.evaluate();
         }
     }
@@ -1068,6 +1301,7 @@ impl NodeCraftApp {
         ctx: &egui::Context,
         workspace: egui::Rect,
         backdrop: Option<(egui::TextureId, egui::Rect)>,
+        connect_source: Option<String>,
     ) {
         let theme = crate::theme::get();
         let dock = tool_dock_rect(workspace);
@@ -1202,9 +1436,10 @@ impl NodeCraftApp {
             });
         if !category_clicked && menu_response.response.clicked_elsewhere() {
             self.tool_section = None;
+            self.tool_add_source = None;
         }
         if let Some(tool) = chosen {
-            self.add_tool_node(tool, workspace);
+            self.add_tool_node(tool, workspace, connect_source);
             self.tool_section = None;
         }
     }
@@ -1417,30 +1652,202 @@ impl NodeCraftApp {
 
     /// While the face selector is active on a Shell node, show the shell's
     /// upstream body so picked face groups refer to the exact input topology.
+    fn comparison_pair_for(
+        document: &GraphDocument,
+        selected: &str,
+    ) -> Option<(String, String)> {
+        let node = document.nodes.iter().find(|node| node.id == selected)?;
+        let before = Self::single_geometry_input(document, node)?;
+        if let Some((field, _)) = Self::selection_spec(&node.node_type) {
+            let has_selection = node
+                .values
+                .get(field)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty());
+            if !has_selection {
+                return None;
+            }
+        }
+        Some((before, node.id.clone()))
+    }
+
+    fn begin_selection_session(&mut self, node_id: &str, field: &str) -> bool {
+        let Some(session) = &self.session else { return false };
+        let Some(node) = session.document().nodes.iter().find(|node| node.id == node_id) else { return false; };
+        let Some((spec_field, mode)) = Self::selection_spec(&node.node_type) else { return false; };
+        if spec_field != field { return false; }
+        let active = self.viewport.selection_mode() == mode;
+        if active {
+            self.viewport.set_selection_mode(crate::viewport::SelectionMode::Object);
+            self.face_pick_target = None;
+            self.comparison_pair = None;
+            self.viewport.set_edge_picking_enabled(false);
+            self.sync_comparison_target();
+            self.evaluate();
+            return true;
+        }
+        let source = Self::single_geometry_input(session.document(), node)
+            .or_else(|| {
+                session.document().connections.iter()
+                    .find(|link| link.to == node.id && (link.input == "shape" || link.input == "a"))
+                    .map(|link| link.from.clone())
+            });
+        self.viewport.set_selection_mode(mode);
+        self.viewport.set_edge_picking_enabled(false);
+        self.face_pick_target = source;
+        self.comparison_pair = None;
+        self.viewport.clear_edge_selection();
+        self.refresh_topology_picking();
+        self.evaluate();
+        true
+    }
+
+    fn end_selection_session(&mut self) {
+        self.viewport
+            .set_selection_mode(crate::viewport::SelectionMode::Object);
+        self.viewport.set_edge_picking_enabled(false);
+        self.viewport.clear_edge_selection();
+        self.face_pick_target = None;
+        self.comparison_pair = None;
+        self.sync_comparison_target();
+        self.evaluate();
+        self.egui_ctx.request_repaint();
+    }
+
+    fn active_selection_field(&self) -> Option<&'static str> {
+        let mode = self.viewport.selection_mode();
+        if mode == crate::viewport::SelectionMode::Object || self.selected_nodes.len() != 1 {
+            return None;
+        }
+        let selected = self.selected_nodes.iter().next()?;
+        let session = self.session.as_ref()?;
+        let node = session.document().nodes.iter().find(|node| &node.id == selected)?;
+        Self::selection_spec(&node.node_type)
+            .filter(|(_, required)| *required == mode)
+            .map(|(field, _)| field)
+    }
+
+    fn selection_spec(node_type: &str) -> Option<(&'static str, crate::viewport::SelectionMode)> {
+        match node_type {
+            "chamfer" | "fillet" => Some(("edges", crate::viewport::SelectionMode::Edge)),
+            "shell" => Some(("faces", crate::viewport::SelectionMode::Face)),
+            "extrude" => Some(("faces", crate::viewport::SelectionMode::Face)),
+            _ => None,
+        }
+    }
+
+    fn refresh_topology_picking(&mut self) {
+        let mode = self.viewport.selection_mode();
+        let matching_target = mode != crate::viewport::SelectionMode::Object
+            && self.eval_target.is_some()
+            && self.eval_target == self.face_pick_target;
+        self.viewport.set_edge_picking_enabled(matching_target);
+    }
+
     fn sync_face_pick_target(&mut self) {
-        let desired = if self.viewport.selection_mode() == crate::viewport::SelectionMode::Face
-            && self.selected_nodes.len() == 1
-        {
-            let shell_id = self.selected_nodes.iter().next().cloned();
+        let mode = self.viewport.selection_mode();
+        let desired = if self.selected_nodes.len() == 1 {
+            let selected = self.selected_nodes.iter().next().cloned();
             self.session.as_ref().and_then(|session| {
                 let document = session.document();
-                let shell = document
+                let node = document
                     .nodes
                     .iter()
-                    .find(|node| Some(&node.id) == shell_id.as_ref() && node.node_type == "shell")?;
-                document
-                    .connections
-                    .iter()
-                    .find(|link| link.to == shell.id && (link.input == "shape" || link.input == "a"))
-                    .map(|link| link.from.clone())
+                    .find(|node| Some(&node.id) == selected.as_ref())?;
+                let pickable = Self::selection_spec(&node.node_type)
+                    .is_some_and(|(_, required)| required == mode);
+                pickable.then(|| {
+                    document
+                        .connections
+                        .iter()
+                        .find(|link| link.to == node.id && (link.input == "shape" || link.input == "a"))
+                        .map(|link| link.from.clone())
+                })?
             })
         } else {
             None
         };
         if desired != self.face_pick_target {
             self.face_pick_target = desired;
+            self.viewport.clear_edge_selection();
+            self.viewport.set_edge_picking_enabled(false);
             self.evaluate();
         }
+        self.refresh_topology_picking();
+    }
+
+    fn single_geometry_input(document: &GraphDocument, node: &GraphNode) -> Option<String> {
+        let geometry_inputs = ["shape", "a", "b", "profile", "bottom", "top", "sections"];
+        let mut links = document.connections.iter().filter(|link| {
+            link.to == node.id && geometry_inputs.contains(&link.input.as_str())
+        });
+        let link = links.next()?;
+        links.next().is_none().then(|| link.from.clone())
+    }
+
+    fn sync_comparison_target(&mut self) {
+        let desired = if self.feature_overlay && self.selected_nodes.len() == 1 {
+            let selected = self.selected_nodes.iter().next().cloned();
+            self.session.as_ref().and_then(|session| {
+                Self::comparison_pair_for(session.document(), selected.as_deref()?)
+            })
+        } else {
+            None
+        };
+        if desired != self.comparison_pair {
+            self.comparison_pair = desired;
+            self.viewport
+                .set_mesh_preserving_camera(self.mesh.as_ref());
+            self.evaluate();
+        }
+    }
+
+    fn toggle_reference_picks(
+        &mut self,
+        node: &nodecraft_session::GraphNode,
+        field: &'static str,
+        picks: Vec<String>,
+        tag: &str,
+    ) -> bool {
+        let mut references: Vec<String> = node
+            .values
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for pick in picks {
+            if let Some(index) = references.iter().position(|reference| reference == &pick) {
+                references.remove(index);
+            } else {
+                references.push(pick);
+            }
+        }
+        let changed = self.apply_commands(
+            &[Command::SetValue {
+                node: node.id.clone(),
+                field: field.to_owned(),
+                value: serde_json::Value::Array(
+                    references
+                        .into_iter()
+                        .map(|id| serde_json::json!({ "id": id }))
+                        .collect(),
+                ),
+            }],
+            Some(tag),
+        );
+        if changed {
+            self.face_pick_target = None;
+            self.viewport
+                .set_selection_mode(crate::viewport::SelectionMode::Object);
+            self.evaluate();
+        }
+        changed
     }
 
     fn evaluate(&mut self) {
@@ -1462,11 +1869,23 @@ impl NodeCraftApp {
             .face_pick_target
             .clone()
             .or_else(|| self.viewer_breakpoint.clone());
+        let comparison = (self.feature_overlay && self.selected_nodes.len() == 1)
+            .then(|| {
+                let selected = self.selected_nodes.iter().next()?;
+                Self::comparison_pair_for(session.document(), selected)
+            })
+            .flatten();
         if !self.pending_dirty.is_empty() {
             let target = engine_bridge::target_for(session.document(), evaluation_selection.as_deref());
             let affected = target.as_deref().is_some_and(|target| {
                 let closure = target_closure(session.document(), target);
                 self.pending_dirty.iter().any(|id| closure.contains(id))
+            }) || comparison.as_ref().is_some_and(|(before, after)| {
+                [before, after].iter().any(|id| {
+                    target_closure(session.document(), id)
+                        .iter()
+                        .any(|candidate| self.pending_dirty.contains(candidate))
+                })
             });
             self.pending_dirty.clear();
             if !affected {
@@ -1475,28 +1894,43 @@ impl NodeCraftApp {
                 return;
             }
         }
+        // Sync helpers can run every frame. Evaluation is a pure function of the
+        // graph revision, viewed target and comparison pair; skip identical work
+        // before allocating a new pending id.
+        let key = (
+            session.document().id.clone(),
+            session.revision(),
+            evaluation_selection.clone(),
+            comparison.clone(),
+        );
+        if !clear_cache && self.last_eval_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.last_eval_key = Some(key);
         self.eval_next = self.eval_next.wrapping_add(1);
         let id = self.eval_next;
         self.eval_pending = Some(id);
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
         let total = engine_bridge::target_for(session.document(), evaluation_selection.as_deref())
             .map(|target| target_closure(session.document(), &target).len())
             .unwrap_or(0);
         self.eval_progress = (total > 0).then_some(EvalProgress { total, done: 0 });
         self.node_editor.clear_activity();
         self.status = "Evaluating…".to_owned();
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
         let mut linked_documents = std::collections::BTreeMap::new();
         for (document_id, document) in self.documents.documents() {
             if let Some(path) = self.documents.path(document_id) {
                 linked_documents.insert(path.to_path_buf(), document.clone());
             }
         }
+        self.comparison_pair = comparison.clone();
         self.eval_worker.send(EvalJob {
             id,
             tab_id,
             linked_documents,
             document: session.document().clone(),
             selected: evaluation_selection,
+            comparison,
             clear_cache,
         });
         self.egui_ctx.request_repaint();
@@ -1537,6 +1971,7 @@ impl NodeCraftApp {
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
         let mut activity = self.activity;
+        let mut feature_overlay = self.feature_overlay;
         let mut close = false;
         let mut builder = egui::ViewportBuilder::default()
             .with_title("NodeCraft Settings")
@@ -1840,6 +2275,11 @@ impl NodeCraftApp {
                         content.checkbox(&mut view.normals, "Face normals");
                         content.checkbox(&mut view.face_colours, "Face colours");
                         content.checkbox(&mut view.zebra, "Zebra analysis");
+                        content.checkbox(
+                            &mut feature_overlay,
+                            "Editing action overlay",
+                        );
+                        content.small("Show translucent added/removed surfaces while a feature node is selected.");
                     }
                     SettingsTab::Diagnostics => {
                         content.heading("Diagnostics");
@@ -1892,6 +2332,11 @@ impl NodeCraftApp {
         }
         if view != self.viewport.view() {
             self.viewport.set_view(view);
+        }
+        if feature_overlay != self.feature_overlay {
+            self.feature_overlay = feature_overlay;
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
         }
         if activity != self.activity {
             self.activity = activity;
@@ -1980,14 +2425,78 @@ impl NodeCraftApp {
             self.cache_misses = evaluation.cache_misses;
             self.error = evaluation.error;
             let had_mesh = self.mesh.is_some();
+            self.eval_target = Some(evaluation.target.clone());
             self.mesh = evaluation.mesh;
             let preserve = std::mem::take(&mut self.preserve_view_for_next_mesh)
                 || (self.camera_initialized && had_mesh);
-            if preserve {
+            self.difference_stats = evaluation
+                .difference
+                .as_ref()
+                .map(|(added, removed)| (added.faces.len(), removed.faces.len()));
+            self.difference_error = evaluation.difference_error.clone();
+            if let Some((before, after)) = &evaluation.comparison {
+                let base = if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
+                    after
+                } else {
+                    before
+                };
+                if let Some((added, removed)) = &evaluation.difference {
+                    if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
+                        self.viewport
+                            .set_exact_comparison_mesh(after, added, removed);
+                    } else {
+                        self.viewport
+                            .set_selection_comparison_mesh(after, before, added, removed);
+                    }
+                } else {
+                    // Exact comparison unavailable: keep the original-mesh ghost.
+                    let empty = Mesh::default();
+                    if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
+                        self.viewport.set_exact_comparison_mesh(after, &empty, before);
+                    } else {
+                        self.viewport
+                            .set_selection_comparison_mesh(after, before, &empty, before);
+                    }
+                }
+                if !self.camera_initialized {
+                    self.viewport.fit();
+                    self.camera_initialized = true;
+                }
+            } else if preserve {
                 self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
             } else {
                 self.viewport.set_mesh(self.mesh.as_ref());
                 self.camera_initialized = true;
+            }
+            self.refresh_topology_picking();
+            if self.viewport.selection_mode() == crate::viewport::SelectionMode::Edge
+                && self.eval_target == self.face_pick_target
+                && self.selected_nodes.len() == 1
+                && let Some(session) = &self.session
+                && let Some(node) = session
+                    .document()
+                    .nodes
+                    .iter()
+                    .find(|node| self.selected_nodes.contains(&node.id))
+                && Self::selection_spec(&node.node_type)
+                    .is_some_and(|(_, mode)| mode == crate::viewport::SelectionMode::Edge)
+            {
+                let centers: Vec<[f64; 3]> = node
+                    .values
+                    .get("edges")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| {
+                        let center = item.get("center")?.as_array()?;
+                        (center.len() == 3).then(|| [
+                            center[0].as_f64().unwrap_or_default(),
+                            center[1].as_f64().unwrap_or_default(),
+                            center[2].as_f64().unwrap_or_default(),
+                        ])
+                    })
+                    .collect();
+                self.viewport.select_edges_by_centers(&centers);
             }
             self.node_editor.pulse_glow();
             self.warmup_until = self
@@ -2125,6 +2634,21 @@ impl NodeCraftApp {
                     self.viewport.fit();
                     "{\"ok\":true}".to_owned()
                 }
+                control_server::Command::SelectNode(id) => {
+                    self.selected_nodes.clear();
+                    self.selected_nodes.insert(id);
+                    self.selected_connections.clear();
+                    self.sync_comparison_target();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::BeginSelection { node, field } => {
+                    if self.begin_selection_session(&node, &field) {
+                        self.egui_ctx.request_repaint();
+                        "{\"ok\":true}".to_owned()
+                    } else {
+                        "{\"ok\":false}".to_owned()
+                    }
+                }
                 control_server::Command::State => {
                     if let Some(session) = &self.session {
                         serde_json::json!({
@@ -2132,6 +2656,15 @@ impl NodeCraftApp {
                         "connections": session.document().connections,
                         "viewed": self.viewer_breakpoint,
                         "selection": self.selected_nodes,
+                        "evalTarget": self.eval_target,
+                        "pickTarget": self.face_pick_target,
+                        "selectionMode": format!("{:?}", self.viewport.selection_mode()),
+                        "edgePicking": self.viewport.edge_picking_enabled(),
+                        "visibleEdges": self.viewport.edge_ids().len(),
+                        "beginSelectionActive": self.active_selection_field(),
+                        "comparisonActive": self.comparison_pair.is_some(),
+                        "differenceFaces": self.difference_stats,
+                        "differenceError": self.difference_error,
                         "errors": self.error,
                         "status": self.status,
                         "mesh": self.mesh.as_ref().map(|mesh| serde_json::json!({
@@ -2189,6 +2722,7 @@ impl eframe::App for NodeCraftApp {
                 self.last_saved_view,
                 self.last_saved_theme.clone(),
                 self.activity,
+                self.feature_overlay,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -2815,7 +3349,25 @@ impl eframe::App for NodeCraftApp {
                 if let Some(error) = &self.error {
                     ui.separator();
                     let error_color = ui.visuals().error_fg_color;
-                    ui.colored_label(error_color, error);
+                    let response = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(error).color(error_color),
+                        )
+                        .selectable(true),
+                    );
+                    response.context_menu(|ui| {
+                        if ui.button("Copy error").clicked() {
+                            ui.ctx().copy_text(error.clone());
+                            ui.close();
+                        }
+                    });
+                    if ui
+                        .small_button("Copy")
+                        .on_hover_text("Copy error message")
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(error.clone());
+                    }
                 }
             });
         });
@@ -2909,6 +3461,12 @@ impl eframe::App for NodeCraftApp {
         // can reclaim the top-right corner of the window.
         self.viewport.chrome_right_inset = 0.0;
 
+        if self.selected_nodes.len() == 1 {
+            self.tool_add_source = self.selected_nodes.iter().next().cloned();
+        } else if self.tool_section.is_none() {
+            self.tool_add_source = None;
+        }
+        let tool_connect_source = self.tool_add_source.clone();
         let mut editor_actions = Vec::new();
         let mut viewport_rect = workspace_rect;
         // No central-panel frame/margin: the wgpu viewport paint callback must start
@@ -2942,6 +3500,7 @@ impl eframe::App for NodeCraftApp {
                 );
             }
         });
+        self.sync_comparison_target();
         let gizmo_changes = self.viewport.take_gizmo_changes();
         if let Some(node) = &selected_node {
             if node.node_type == "translate" && !gizmo_changes.is_empty() {
@@ -2967,47 +3526,66 @@ impl eframe::App for NodeCraftApp {
         self.sync_face_pick_target();
         let face_picks = self.viewport.take_face_picks();
         if !face_picks.is_empty()
-            && let Some(node) = selected_node.as_ref().filter(|node| node.node_type == "shell")
+            && let Some(node) = selected_node.as_ref()
+            && let Some((field, mode)) = Self::selection_spec(&node.node_type)
+            && mode == crate::viewport::SelectionMode::Face
         {
-            let mut faces: Vec<String> = node
+            self.toggle_reference_picks(node, field, face_picks, "face-pick");
+        }
+        if self.viewport.take_selection_miss()
+            && self.viewport.selection_mode() != crate::viewport::SelectionMode::Object
+        {
+            self.end_selection_session();
+        }
+        let edge_picks = self.viewport.take_edge_picks();
+        if !edge_picks.is_empty()
+            && self.eval_target.is_some()
+            && self.eval_target == self.face_pick_target
+            && let Some(node) = selected_node.as_ref()
+            && let Some((field, mode)) = Self::selection_spec(&node.node_type)
+            && mode == crate::viewport::SelectionMode::Edge
+        {
+            let mut references: Vec<serde_json::Value> = node
                 .values
-                .get("faces")
+                .get(field)
                 .and_then(serde_json::Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
-                        .map(str::to_owned)
-                        .collect()
-                })
+                .cloned()
                 .unwrap_or_default();
-            for pick in face_picks {
-                if let Some(index) = faces.iter().position(|face| face == &pick) {
-                    faces.remove(index);
+            for pick in edge_picks {
+                let existing = references.iter().position(|reference| {
+                    if reference.get("id").and_then(serde_json::Value::as_str) == Some(&pick.id) {
+                        return true;
+                    }
+                    let Some(center) = reference.get("center").and_then(serde_json::Value::as_array) else {
+                        return false;
+                    };
+                    if center.len() != 3 {
+                        return false;
+                    }
+                    let dx = center[0].as_f64().unwrap_or_default() - pick.center[0];
+                    let dy = center[1].as_f64().unwrap_or_default() - pick.center[1];
+                    let dz = center[2].as_f64().unwrap_or_default() - pick.center[2];
+                    (dx * dx + dy * dy + dz * dz).sqrt() <= 1.0e-4
+                });
+                if let Some(index) = existing {
+                    references.remove(index);
                 } else {
-                    faces.push(pick);
+                    references.push(serde_json::json!({
+                        "id": pick.id,
+                        "center": [pick.center[0], pick.center[1], pick.center[2]],
+                    }));
                 }
             }
-            let values = serde_json::Value::Array(
-                faces
-                    .into_iter()
-                    .map(|id| serde_json::json!({ "id": id }))
-                    .collect(),
-            );
             if self.apply_commands(
                 &[Command::SetValue {
                     node: node.id.clone(),
-                    field: "faces".to_owned(),
-                    value: values,
+                    field: field.to_owned(),
+                    value: serde_json::Value::Array(references),
                 }],
-                Some("shell-face-pick"),
+                Some("edge-pick"),
             ) {
-                // Return to the shell result immediately; re-enter Face mode to
-                // pick another opening. This prevents the input body from looking
-                // like the shell output after a pick.
-                self.face_pick_target = None;
-                self.viewport
-                    .set_selection_mode(crate::viewport::SelectionMode::Object);
+                // Stay in the edge-selection session so existing selections remain
+                // visible and can be toggled off.
                 self.evaluate();
             }
         }
@@ -3232,6 +3810,8 @@ impl eframe::App for NodeCraftApp {
                             ui.style_mut().visuals.widgets.inactive.corner_radius = bar_corner;
                             ui.style_mut().visuals.widgets.hovered.corner_radius = bar_corner;
                             ui.style_mut().visuals.widgets.active.corner_radius = bar_corner;
+                            let active_selection =
+                                self.active_selection_field().map(str::to_owned);
                             let reflow = self.inspector_reflow;
                             let mut scroll = egui::ScrollArea::vertical()
                                 .max_height(list_height)
@@ -3244,7 +3824,12 @@ impl eframe::App for NodeCraftApp {
                                 scroll = scroll.vertical_scroll_offset(0.0);
                             }
                             scroll.show(ui, |ui| {
-                                    let mut output = inspector::show(ui, node, &surface_sections);
+                                    let mut output = inspector::show(
+                                        ui,
+                                        node,
+                                        &surface_sections,
+                                        active_selection.as_deref(),
+                                    );
                                     inspector::note(ui, node);
                                     ui.add_space(8.0);
                                     inspector::actions(ui, node, &mut output);
@@ -3284,6 +3869,11 @@ impl eframe::App for NodeCraftApp {
                     self.evaluate();
                 }
             } else {
+                if let Some(field) = output.begin_selection.clone()
+                    && self.begin_selection_session(&node.id, &field)
+                {
+                    self.egui_ctx.request_repaint();
+                }
                 if let Some(order) = output.section_order.clone() {
                     let mut commands = Vec::new();
                     if let Some(session) = &self.session {
@@ -3551,7 +4141,12 @@ impl eframe::App for NodeCraftApp {
                 }
             }
         }
-        self.show_tool_dock(ui.ctx(), workspace_rect, tool_dock_backdrop);
+        self.show_tool_dock(
+            ui.ctx(),
+            workspace_rect,
+            tool_dock_backdrop,
+            tool_connect_source,
+        );
     }
 }
 
@@ -3561,6 +4156,7 @@ struct EvalJob {
     linked_documents: std::collections::BTreeMap<PathBuf, GraphDocument>,
     document: GraphDocument,
     selected: Option<String>,
+    comparison: Option<(String, String)>,
     clear_cache: bool,
 }
 
@@ -3593,12 +4189,13 @@ impl EvalWorker {
                     let _ = progress_tx.send((job.id, job.tab_id, event));
                 };
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    engine_bridge::evaluate_with_linked_progress(
+                    engine_bridge::evaluate_with_linked_progress_comparison(
                         &job.document,
                         cache,
                         job.selected.as_deref(),
                         &job.linked_documents,
                         Some(&mut on_progress),
+                        job.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
                     )
                 }));
                 let evaluation = match outcome {
@@ -3613,6 +4210,9 @@ impl EvalWorker {
                         target.map(|target| engine_bridge::Evaluation {
                             target,
                             mesh: None,
+                            comparison: None,
+                            difference: None,
+                            difference_error: None,
                             error: Some("Engine panicked while evaluating this target".into()),
                             elapsed_ms: 0.0,
                             cache_hits: 0,
@@ -3742,8 +4342,14 @@ struct AppSettings {
     theme: Option<String>,
     #[serde(default)]
     activity: ActivitySettings,
+    #[serde(default = "default_feature_overlay")]
+    feature_overlay: bool,
     #[serde(default)]
     recent_files: Vec<String>,
+}
+
+fn default_feature_overlay() -> bool {
+    true
 }
 
 fn load_app_settings() -> Option<AppSettings> {
@@ -3755,6 +4361,7 @@ fn save_app_settings(
     view: crate::viewport::ViewSettings,
     theme: Option<String>,
     activity: ActivitySettings,
+    feature_overlay: bool,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -3765,6 +4372,7 @@ fn save_app_settings(
         view,
         theme,
         activity,
+        feature_overlay,
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -4641,6 +5249,7 @@ mod tests {
             view: crate::viewport::ViewSettings::default(),
             theme: Some("punk".to_owned()),
             activity: ActivitySettings::default(),
+            feature_overlay: true,
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");
@@ -4652,6 +5261,7 @@ mod tests {
         );
         assert_eq!(parsed.view, crate::viewport::ViewSettings::default());
         assert_eq!(parsed.activity, ActivitySettings::default());
+        assert!(parsed.feature_overlay);
     }
 
     #[test]
@@ -4844,6 +5454,149 @@ mod tests {
         .collect();
         let commands = delete_selection_commands(&nodes, &cables);
         assert_eq!(commands, vec![Command::RemoveNode { id: "a".into() }]);
+    }
+
+    #[test]
+    fn tool_insert_uses_the_primary_geometry_ports() {
+        assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "chamfer"), Some(("shape", "shape")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "fillet"), Some(("shape", "shape")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "boolean"), Some(("a", "shape")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("sketch", "loft"), Some(("bottom", "sketch")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("spline", "surfaceloft"), Some(("sections", "sketch")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("exporter", "chamfer"), None);
+        assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "primitive"), None);
+    }
+
+    #[test]
+    fn auto_connect_placement_avoids_an_existing_node() {
+        let mut document = history_fixture();
+        let mut blocker = document.nodes[0].clone();
+        blocker.id = "blocker".into();
+        blocker.node_type = "chamfer".into();
+        blocker.x = 0.0;
+        blocker.y = f64::from(NODE_HEIGHT + 56.0);
+        document.nodes.push(blocker.clone());
+        let mut added = blocker.clone();
+        added.id = "new".into();
+        added.node_type = "fillet".into();
+        let initial = NodeCraftApp::auto_connect_position(
+            document.nodes[0].x,
+            document.nodes[0].y,
+            node_width(&document.nodes[0]),
+            node_width(&added),
+        );
+        let (x, y, moved) =
+            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial);
+        let placed = egui::Rect::from_min_size(
+            egui::pos2(x as f32, y as f32),
+            egui::vec2(node_width(&added), NODE_HEIGHT),
+        );
+        let (blocker_x, blocker_y) = moved
+            .iter()
+            .find(|(id, _, _)| id == "blocker")
+            .map(|(_, x, y)| (*x, *y))
+            .unwrap_or((blocker.x, blocker.y));
+        let blocked = egui::Rect::from_min_size(
+            egui::pos2(blocker_x as f32, blocker_y as f32),
+            egui::vec2(node_width(&blocker), NODE_HEIGHT),
+        );
+        assert!(!placed.intersects(blocked));
+    }
+
+    #[test]
+    fn auto_connect_placement_moves_a_blocked_branch_and_children() {
+        let mut document = history_fixture();
+        let y = f64::from(NODE_HEIGHT + 56.0);
+        let mut blocker = document.nodes[0].clone();
+        blocker.id = "blocker".into();
+        blocker.node_type = "chamfer".into();
+        blocker.x = 0.0;
+        blocker.y = y;
+        let mut child = blocker.clone();
+        child.id = "child".into();
+        child.node_type = "fillet".into();
+        child.y = y + f64::from(NODE_HEIGHT) + 24.0;
+        let blocker_width = f64::from(node_width(&blocker));
+        let mut right = blocker.clone();
+        right.id = "right".into();
+        right.x = blocker_width + 28.0;
+        right.y = y;
+        let mut left = blocker.clone();
+        left.id = "left".into();
+        left.x = -blocker_width - 28.0;
+        left.y = y;
+        let mut below = blocker.clone();
+        below.id = "below".into();
+        below.x = 0.0;
+        below.y = y + f64::from(NODE_HEIGHT) + 28.0;
+        document.nodes.extend([blocker.clone(), child, right, left, below]);
+        document.connections.push(GraphConnection {
+            from: "blocker".into(),
+            to: "child".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
+        let mut added = blocker.clone();
+        added.id = "new".into();
+        added.node_type = "fillet".into();
+        let initial = NodeCraftApp::auto_connect_position(
+            document.nodes[0].x,
+            document.nodes[0].y,
+            node_width(&document.nodes[0]),
+            node_width(&added),
+        );
+        let (x, y, moved) =
+            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial);
+        let moved_ids: HashSet<&str> = moved.iter().map(|(id, _, _)| id.as_str()).collect();
+        assert!(moved_ids.contains("blocker"), "{moved:?}");
+        assert!(moved_ids.contains("child"), "{moved:?}");
+        let placed = egui::Rect::from_min_size(
+            egui::pos2(x as f32, y as f32),
+            egui::vec2(node_width(&added), NODE_HEIGHT),
+        );
+        for node in &document.nodes {
+            let (nx, ny) = moved
+                .iter()
+                .find(|(id, _, _)| id == &node.id)
+                .map(|(_, x, y)| (*x, *y))
+                .unwrap_or((node.x, node.y));
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(nx as f32, ny as f32),
+                egui::vec2(node_width(node), NODE_HEIGHT),
+            );
+            assert!(!placed.intersects(rect), "{} overlaps new node", node.id);
+        }
+    }
+
+    #[test]
+    fn selection_spec_defers_to_the_node_opting_in() {
+        assert_eq!(
+            NodeCraftApp::selection_spec("chamfer"),
+            Some(("edges", crate::viewport::SelectionMode::Edge))
+        );
+        assert_eq!(
+            NodeCraftApp::selection_spec("shell"),
+            Some(("faces", crate::viewport::SelectionMode::Face))
+        );
+        assert_eq!(NodeCraftApp::selection_spec("primitive"), None);
+    }
+
+    #[test]
+    fn auto_connected_nodes_align_below_their_source() {
+        let source = history_fixture().nodes[0].clone();
+        let mut added = source.clone();
+        added.node_type = "chamfer".to_owned();
+        let (x, y) = NodeCraftApp::auto_connect_position(
+            source.x,
+            source.y,
+            node_width(&source),
+            node_width(&added),
+        );
+        assert_eq!(y, source.y + f64::from(NODE_HEIGHT) + 56.0);
+        assert_eq!(
+            x,
+            source.x + f64::from(node_width(&source) - node_width(&added)) * 0.5
+        );
     }
 
     #[test]

@@ -6,6 +6,9 @@
 
 use nodecraft_kernel::{Kernel, ProceduralKernel};
 use base64::Engine as _;
+mod comparison;
+pub use comparison::{DifferenceMeshes, compare_parts};
+
 use nodecraft_protocol::{CacheStats, Connection, Mesh, MeshPayload, Node, Request, Response};
 use nodecraft_mesh::{import_step, merge_meshes, StepDiagnostics};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -970,6 +973,29 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
                 (None, None) => Err("Boolean has no connected operand".into()),
             }
         }
+        "chamfer" => {
+            let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("chamfer has no shape input")?;
+            let source = exact_operand_brep(request, &link.from)?;
+            let mut values = node.values.clone();
+            values["mode"] = serde_json::json!("chamfer");
+            nodecraft_blend::chamfer_brep_exact(&source, &values)
+                .map_err(|error| format!("Edge preview: {error}"))
+        }
+        "shell" => {
+            let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("shell has no shape input")?;
+            let source = exact_operand_brep(request, &link.from)?;
+            let thickness = node.values.get("thickness").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
+            let inward = node.values.get("direction").and_then(serde_json::Value::as_str).unwrap_or("inward") == "inward";
+            let signed = if inward { -thickness } else { thickness };
+            let mut openings = Vec::new();
+            for face in node.values.get("faces").and_then(serde_json::Value::as_array).into_iter().flatten() {
+                let Some(reference) = face.get("id").and_then(serde_json::Value::as_str) else { continue };
+                let Some((body, index)) = face_reference_body_and_index(reference) else { continue };
+                if body.unwrap_or(0) != 0 { continue; }
+                if let Some(face) = source.faces().ids().nth(index) { openings.push(face); }
+            }
+            nodecraft_bool::shell_brep_solid(source, signed, &openings)
+        }
         "mirror" => {
             let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("mirror has no shape input")?;
             let source_brep = exact_operand_brep(request, &link.from)?;
@@ -1040,7 +1066,7 @@ fn exact_brep_demands(request: &Request) -> HashSet<String> {
         .iter()
         .filter(|node| matches!(
             node.node_type.as_str(),
-            "boolean" | "fuse" | "chamfer" | "shell" | "extrude" | "loft" | "surfaceloft" | "exporter"
+            "boolean" | "fuse" | "chamfer" | "fillet" | "shell" | "extrude" | "loft" | "surfaceloft" | "exporter"
         ))
         .map(|node| node.id.clone())
         .collect();
@@ -1914,6 +1940,27 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 result = nodecraft_bool::boolean_breps(op.clone(), result, brep)?;
             }
             Ok(result)
+        } else if node.node_type == "chamfer" {
+            let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Chamfer has no shape input")?;
+            let source = self.operand_brep(&link.from)?;
+            let mut values = node.values.clone();
+            values["mode"] = serde_json::json!("chamfer");
+            nodecraft_blend::chamfer_brep_exact(&source, &values)
+                .map_err(|error| format!("Edge preview: {error}"))
+        } else if node.node_type == "shell" {
+            let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
+            let source = self.operand_brep(&link.from)?;
+            let thickness = node.values.get("thickness").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
+            let inward = node.values.get("direction").and_then(serde_json::Value::as_str).unwrap_or("inward") == "inward";
+            let signed = if inward { -thickness } else { thickness };
+            let mut openings = Vec::new();
+            for face in node.values.get("faces").and_then(serde_json::Value::as_array).into_iter().flatten() {
+                let Some(reference) = face.get("id").and_then(serde_json::Value::as_str) else { continue };
+                let Some((body, index)) = face_reference_body_and_index(reference) else { continue };
+                if body.unwrap_or(0) != 0 { continue; }
+                if let Some(face) = source.faces().ids().nth(index) { openings.push(face); }
+            }
+            nodecraft_bool::shell_brep_solid(source, signed, &openings)
         } else {
             exact_operand_brep(self.request, start)
         };
@@ -2107,6 +2154,19 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
                     let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                     Ok(Part::from_brep(multi_section_surface_loft(&mut kernel, &sections, ruled, false)?))
+                }
+                "chamfer" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Chamfer has no shape input")?;
+                    let source_part = self.evaluate_part(&link.from)?;
+                    let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
+                        .is_some_and(|edges| !edges.is_empty());
+                    if !has_edges { return Ok((*source_part).clone()); }
+                    let source = source_part.realized_solids()?.into_iter().next().ok_or("Chamfer source Part is empty")?;
+                    let mut values = node.values.clone();
+                    values["mode"] = serde_json::json!("chamfer");
+                    nodecraft_blend::chamfer_brep_exact(&source, &values)
+                        .map(Part::from_brep)
+                        .map_err(|error| format!("Edge preview: {error}"))
                 }
                 "shell" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
@@ -2332,7 +2392,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node = node(self.request, node_id)?.clone();
         if node.suppressed {
             match node.node_type.as_str() {
-                "translate" | "mirror" | "time" | "chamfer" | "shell" | "exporter" => {
+                "translate" | "mirror" | "time" | "chamfer" | "fillet" | "shell" | "exporter" => {
                     if let Some(link) = source(self.request, node_id) {
                         return self.evaluate(&link.from);
                     }
@@ -2852,14 +2912,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 }
                 Ok(merge_meshes(meshes))
             }
-            "chamfer" => (|| -> Result<Mesh, String> {
+            "chamfer" | "fillet" => (|| -> Result<Mesh, String> {
                 let link = source(self.request, node_id).ok_or("Edge node has no shape input")?;
-                if resolve_primitive_chain(self.request, &link.from).is_none() {
-                    return Err("Edge preview supports primitive or transformed-primitive inputs; exact blend for fused/Boolean inputs is not implemented.".into());
+                // A fresh edge node has no selected edges yet: pass the input through
+                // until the user picks edges, just like extrude without a face.
+                let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
+                    .is_some_and(|edges| !edges.is_empty());
+                if !has_edges {
+                    return self.evaluate(&link.from).ok_or_else(|| "Edge source did not evaluate".to_owned());
                 }
                 let brep = self.operand_brep(&link.from)?;
                 let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
-                nodecraft_blend::edge_treatment_preview(&kernel, &brep, &node.values).map_err(|error| error.to_string())
+                let mut values = node.values.clone();
+                values["mode"] = serde_json::json!(if node.node_type == "fillet" { "fillet" } else { "chamfer" });
+                nodecraft_blend::edge_treatment_preview(&kernel, &brep, &values)
+                    .map_err(|error| format!("Edge preview: {error}"))
             })(),
             "translate" => {
                 let Some(link) = source(self.request, node_id) else {
@@ -3060,7 +3127,7 @@ fn ancestors_of(request: &Request, target: &str) -> HashSet<String> {
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
-        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter"
+        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter" | "chamfer"
     )
 }
 
@@ -3209,6 +3276,37 @@ pub fn evaluate(
             None => empty_targets.push(id.clone()),
         }
     }
+    let comparison = request
+        .comparison_targets
+        .as_ref()
+        .filter(|targets| targets.len() == 2)
+        .and_then(|targets| {
+            // Skip the kernel difference when the display payloads already prove
+            // there is no material change. This also avoids coincident-solid
+            // booleans for pass-through features.
+            let before = mesh_payloads.get(&targets[0])?.mesh.clone();
+            let after = mesh_payloads.get(&targets[1])?.mesh.clone();
+            let before_volume = comparison::mesh_volume(&before);
+            let after_volume = comparison::mesh_volume(&after);
+            if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
+                return None;
+            }
+            let before = eval.evaluate_part(&targets[0]).ok()?;
+            let after = eval.evaluate_part(&targets[1]).ok()?;
+            Some(compare_parts(&before, &after))
+        })
+        .map(|difference| match difference {
+            Ok(difference) => nodecraft_protocol::ComparisonPayload {
+                added: difference.added,
+                removed: difference.removed,
+                error: None,
+            },
+            Err(error) => nodecraft_protocol::ComparisonPayload {
+                added: Default::default(),
+                removed: Default::default(),
+                error: Some(error),
+            },
+        });
     let response = Response {
         request_id,
         tab_id,
@@ -3221,6 +3319,7 @@ pub fn evaluate(
         brep_timings: eval.brep_timings,
         evaluation_ms: started.elapsed().as_secs_f64() * 1000.0,
         cache_stats: Some(CacheStats { hits: eval.cache_hits, misses: eval.cache_misses }),
+        comparison,
         engine: "solidcore-experiment".into(),
     };
     nodecraft_mesh::set_display_tolerance(None);
@@ -3410,7 +3509,7 @@ mod tests {
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let mesh = &output.response.meshes.get("chamfer").expect("chamfer mesh").mesh;
         assert!(!mesh.faces.is_empty(), "chamfer preview should have faces");
-        assert!(mesh.face_groups.iter().any(|group| group.starts_with("blend:")), "missing blend group");
+        assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
     }
 
     #[test]
@@ -3461,6 +3560,110 @@ mod tests {
     }
 
     #[test]
+    fn edge_node_without_selection_passes_input_through() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 407,
+            "targets": ["c"],
+            "meshTargets": ["c"],
+            "nodes": [
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 20, "width": 20, "height": 20}, "cache": {"key": "b"}},
+                {"id": "c", "type": "chamfer", "values": {"length": 1}, "cache": {"key": "c"}}
+            ],
+            "connections": [{"from": "b", "to": "c", "in": "shape", "out": "shape"}]
+        })).expect("chamfer request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        assert!(!mesh.faces.is_empty());
+        assert!(!mesh.face_groups.iter().any(|group| group.starts_with("blend:")), "preview should wait for an edge selection");
+    }
+
+    #[test]
+    fn chained_chamfers_evaluate_exactly() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 410,
+            "targets": ["c2"],
+            "meshTargets": ["c2"],
+            "nodes": [
+                {"id": "p", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "p"}},
+                {"id": "c1", "type": "chamfer", "values": {"chamferType": "equal", "length": 2, "edges": [{"id": "edge:0"}]}, "cache": {"key": "c1"}},
+                {"id": "c2", "type": "chamfer", "values": {"chamferType": "equal", "length": 2, "edges": [{"id": "edge:1"}]}, "cache": {"key": "c2"}}
+            ],
+            "connections": [
+                {"from": "p", "to": "c1", "in": "shape", "out": "shape"},
+                {"from": "c1", "to": "c2", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert!(!output.response.meshes["c2"].mesh.faces.is_empty());
+    }
+
+    #[test]
+    fn chamfer_preview_user_distance_angle_selection() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 409,
+            "targets": ["chamfer"],
+            "meshTargets": ["chamfer"],
+            "nodes": [
+                {"id": "primitive", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "primitive"}},
+                {"id": "chamfer", "type": "chamfer", "values": {"angle": 72.5, "chamferType": "distance-angle", "distance2": 3.74, "edges": [{"id": "edge:9"},{"id": "edge:3"},{"id": "edge:1"},{"id": "edge:0"}], "length": 2.61, "mode": "chamfer"}, "cache": {"key": "chamfer"}}
+            ],
+            "connections": [{"from": "primitive", "to": "chamfer", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        let started = std::time::Instant::now();
+        let output = evaluate(request, EngineCache::new(), None);
+        let _ = started;
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes["chamfer"].mesh;
+        assert!(!mesh.faces.is_empty());
+        assert!(mesh.brep_edges.iter().any(|edge| edge.kind == "edge"));
+    }
+
+    #[test]
+    fn chamfer_preview_accepts_body_scoped_edge_ids() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 408,
+            "targets": ["c"],
+            "meshTargets": ["c"],
+            "nodes": [
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 20, "width": 20, "height": 20}, "cache": {"key": "b"}},
+                {"id": "c", "type": "chamfer", "values": {"length": 1, "edges": [{"id": "body:0:edge:0"}]}, "cache": {"key": "c"}}
+            ],
+            "connections": [{"from": "b", "to": "c", "in": "shape", "out": "shape"}]
+        })).expect("chamfer request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
+    }
+
+    #[test]
+    fn chamfer_preview_accepts_a_boolean_input() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 406,
+            "targets": ["c"],
+            "meshTargets": ["c"],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 20, "width": 20, "height": 20}, "cache": {"key": "a"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 20}, "cache": {"key": "b"}},
+                {"id": "u", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u"}},
+                {"id": "c", "type": "chamfer", "values": {"length": 1, "edges": [{"ordinal": 0}]}, "cache": {"key": "c"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "u", "in": "a", "out": "shape"},
+                {"from": "b", "to": "u", "in": "b", "out": "shape"},
+                {"from": "u", "to": "c", "in": "shape", "out": "shape"}
+            ]
+        })).expect("chamfer request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        assert!(!mesh.faces.is_empty());
+        assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
+    }
+
+    #[test]
     fn evaluates_fillet_node_from_blend_preview() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 405,
@@ -3469,7 +3672,7 @@ mod tests {
             "binaryMesh": false,
             "nodes": [
                 {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 40, "width": 30, "height": 20}},
-                {"id": "fillet", "type": "chamfer", "values": {"mode": "fillet", "continuity": "", "length": 2, "edges": [{"ordinal": 0}]}}
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "", "length": 2, "edges": [{"ordinal": 0}]}}
             ],
             "connections": [{"from": "box", "to": "fillet", "in": "shape", "out": "shape"}]
         })).expect("fillet request json");
@@ -3523,8 +3726,13 @@ mod tests {
         assert!(!response.node_errors.contains_key("n68"));
         assert!(!response.node_errors.contains_key("n72"));
         assert!(!response.node_errors.contains_key("n74"));
-        assert!(response.node_errors["n75"].contains("Edge preview supports"), "{}", response.node_errors["n75"]);
-        assert!(response.node_errors["n76"].contains("Input n75 failed"), "{}", response.node_errors["n76"]);
+        assert!(response.node_errors["n75"].contains("Edge preview"), "{}", response.node_errors["n75"]);
+        assert!(
+            response.node_errors["n76"].contains("Input n75 failed")
+                || response.node_errors["n76"].contains("Edge preview"),
+            "{}",
+            response.node_errors["n76"]
+        );
         assert!(starts.len() == 76 && starts.iter().collect::<std::collections::HashSet<_>>().len() == 76);
         let mesh = &output.response.meshes.get("n69").expect("n69 mesh").mesh;
         assert!(!mesh.faces.is_empty(), "n69 should produce geometry");
@@ -4819,6 +5027,18 @@ mod tests {
         assert!(mesh.vertices.len() >= 16, "shell has no inner wall");
         assert!(mesh.faces.len() >= 24, "shell is missing faces");
         assert!(cache.part_entries() > 0);
+    }
+
+    #[test]
+    fn probe_box_brep_edge_metadata() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["p"], "meshTargets": ["p"],
+            "nodes": [{"id":"p","type":"primitive","values":{"primitiveType":"box","length":20,"width":20,"height":20},"cache":{"key":"p"}}],
+            "connections": []
+        })).expect("request");
+        let (response, _, _) = respond(request, EngineCache::new());
+        let mesh = &response.meshes["p"].mesh;
+        eprintln!("edges={} kinds={:?}", mesh.brep_edges.len(), mesh.brep_edges.iter().map(|e| (e.id.clone(), e.kind.clone(), e.segments.len())).collect::<Vec<_>>());
     }
 
     #[test]

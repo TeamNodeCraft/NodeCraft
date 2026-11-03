@@ -249,8 +249,21 @@ fn select_reference(
             .map(|mut selections| selections.remove(0))
             .map_err(|error| BlendError::InvalidInput(error.to_string()));
     }
+    // Viewer picks are body-scoped ids such as `body:0:edge:3`.
+    if let Some(id) = reference.get("id").and_then(Value::as_str) {
+        if id.starts_with("preview-edge:") {
+            return Err(BlendError::InvalidInput(
+                "a preview-only edge cannot be used for an exact treatment; select a B-rep edge".into(),
+            ));
+        }
+        if let Some(ordinal) = id.rsplit("edge:").next().and_then(|tail| tail.parse::<usize>().ok()) {
+            return select_edges_by_ordinals(kernel, brep, &[ordinal])
+                .map(|mut selections| selections.remove(0))
+                .map_err(|error| BlendError::InvalidInput(error.to_string()));
+        }
+    }
     Err(BlendError::InvalidInput(
-        "edge reference needs a \"center\"/\"point\" or an \"ordinal\"".into(),
+        "edge reference needs a \"center\"/\"point\", an \"ordinal\" or an \"id\"".into(),
     ))
 }
 

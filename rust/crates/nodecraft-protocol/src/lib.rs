@@ -28,6 +28,9 @@ pub struct Request {
     /// Display max-sag override for LOD. `None` uses the viewport default.
     #[serde(default)]
     pub mesh_tolerance: Option<f64>,
+    /// `[before, after]` feature targets for an exact comparison payload.
+    #[serde(default)]
+    pub comparison_targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +135,18 @@ pub struct Response {
     pub evaluation_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_stats: Option<CacheStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<ComparisonPayload>,
     pub engine: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComparisonPayload {
+    pub added: Mesh,
+    pub removed: Mesh,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

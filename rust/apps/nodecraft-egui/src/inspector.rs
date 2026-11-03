@@ -22,6 +22,7 @@ pub struct Output {
     pub toggle_suppressed: bool,
     pub delete: bool,
     pub section_order: Option<Vec<String>>,
+    pub begin_selection: Option<String>,
 }
 
 #[derive(Clone)]
@@ -199,16 +200,56 @@ fn surface_loft_sections(ui: &mut Ui, sections: &[String], output: &mut Output) 
     }
 }
 
-fn shell_faces(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+fn topology_references(
+    ui: &mut Ui,
+    node: &GraphNode,
+    output: &mut Output,
+    field: &str,
+    title: &str,
+    empty: &str,
+    remove_hint: &str,
+    clear_label: &str,
+    clear_hint: &str,
+    active: bool,
+) {
     let theme = crate::theme::get();
-    ui.label(
-        egui::RichText::new("OPENING FACES")
-            .size(9.0)
-            .color(theme.with_alpha(theme.muted, 190)),
-    );
-    let mut faces: Vec<String> = node
+    egui::Frame::new()
+        .fill(theme.with_alpha(theme.control, 90))
+        .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.border, 170)))
+        .corner_radius(6.0)
+        .inner_margin(8.0)
+        .show(ui, |ui| {
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(title)
+                .size(9.0)
+                .color(theme.with_alpha(theme.muted, 190)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let svg = include_str!("../../../../vendor/fluent/edit.svg");
+            let colour = if active {
+                crate::theme::Theme::hex(theme.highlight)
+            } else {
+                "#ffffff".to_owned()
+            };
+            let svg = crate::app::tint_svg(svg.as_bytes(), &colour);
+            let icon = egui::Image::from_bytes(
+                if active { "bytes://inspector-edit-active.svg" } else { "bytes://inspector-edit-idle.svg" },
+                svg.into_bytes(),
+            )
+            .fit_to_exact_size(egui::vec2(14.0, 14.0));
+            if ui
+                .add(egui::Button::image(icon).frame(false))
+                .on_hover_text("Edit selection")
+                .clicked()
+            {
+                output.begin_selection = Some(field.to_owned());
+            }
+        });
+    });
+    let mut references: Vec<String> = node
         .values
-        .get("faces")
+        .get(field)
         .and_then(Value::as_array)
         .map(|items| {
             items
@@ -218,25 +259,23 @@ fn shell_faces(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                 .collect()
         })
         .unwrap_or_default();
-    if faces.is_empty() {
+    if references.is_empty() {
         ui.label(
-            egui::RichText::new(
-                "No openings. Select the Face filter in the viewport, then click faces to open the shell.",
-            )
-            .size(10.0)
-            .color(theme.with_alpha(theme.muted, 220)),
+            egui::RichText::new(empty)
+                .size(10.0)
+                .color(theme.with_alpha(theme.muted, 220)),
         );
     } else {
         let mut remove = None;
-        for (index, face) in faces.iter().enumerate() {
+        for (index, reference) in references.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(face)
+                    egui::RichText::new(reference)
                         .size(10.0)
                         .color(theme.color(theme.text)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("Remove opening").clicked() {
+                    if ui.small_button("×").on_hover_text(remove_hint).clicked() {
                         remove = Some(index);
                     }
                 });
@@ -244,22 +283,22 @@ fn shell_faces(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         }
         let mut changed = remove.is_some();
         if let Some(index) = remove {
-            faces.remove(index);
+            references.remove(index);
         }
-        if !faces.is_empty()
+        if !references.is_empty()
             && ui
-                .small_button("Clear openings")
-                .on_hover_text("Close the shell")
+                .small_button(clear_label)
+                .on_hover_text(clear_hint)
                 .clicked()
         {
-            faces.clear();
+            references.clear();
             changed = true;
         }
         if changed {
             output.changes.push(Change {
-                field: "faces".to_owned(),
+                field: field.to_owned(),
                 value: Value::Array(
-                    faces
+                    references
                         .into_iter()
                         .map(|id| serde_json::json!({ "id": id }))
                         .collect(),
@@ -267,6 +306,7 @@ fn shell_faces(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             });
         }
     }
+    });
 }
 
 fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
@@ -380,8 +420,7 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
         ],
         "loft" | "surfaceloft" => vec![slider("ruled", "Ruled", 0.0, 0.0, 1.0, 1.0)],
         "chamfer" => vec![
-            choice("mode", "Mode", "chamfer", &[("chamfer", "Chamfer"), ("fillet", "Fillet")]),
-            slider("length", "Size", 2.0, 0.0, 100.0, 0.01),
+            slider("length", "Distance", 2.0, 0.0, 100.0, 0.01),
             choice("chamferType", "Type", "equal", &[
                 ("equal", "Equal distance"),
                 ("two-distance", "Two distances"),
@@ -389,7 +428,14 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
             ]),
             slider("distance2", "Distance 2", 2.0, 0.0, 100.0, 0.01),
             slider("angle", "Angle°", 45.0, 0.1, 179.9, 0.1),
-            choice("continuity", "Continuity", "", &[("", "None"), ("G1", "G1"), ("G2", "G2")]),
+        ],
+        "fillet" => vec![
+            slider("length", "Radius", 2.0, 0.0, 100.0, 0.01),
+            choice("continuity", "Continuity", "", &[
+                ("", "Circular (G1)"),
+                ("G2", "Curvature (G2)"),
+                ("G3", "Curvature (G3)"),
+            ]),
         ],
         "shell" => vec![
             slider("thickness", "Thickness", 2.0, 0.0, 100.0, 0.01),
@@ -576,13 +622,8 @@ pub fn node_title(node: &GraphNode) -> String {
         "boolean" => "Boolean".to_owned(),
         "combine" => "Combine to Part".to_owned(),
         "fuse" => "Fuse".to_owned(),
-        "chamfer" => {
-            if node.values.get("mode").and_then(Value::as_str) == Some("fillet") {
-                "Fillet".to_owned()
-            } else {
-                "Chamfer".to_owned()
-            }
-        }
+        "chamfer" => "Chamfer".to_owned(),
+        "fillet" => "Fillet".to_owned(),
         other => title_case(&other.replace(['_', '-'], " ")),
     }
 }
@@ -611,7 +652,7 @@ pub fn node_badge(node: &GraphNode) -> String {
         "sketch" => "Sketch",
         "spline" => "Curve",
         "extrude" => "Operation",
-        "chamfer" | "shell" => "Feature",
+        "chamfer" | "fillet" | "shell" => "Feature",
         "scatter" => "Generator",
         _ => "Node",
     }
@@ -629,7 +670,8 @@ fn section_title(node: &GraphNode) -> &'static str {
         "sketch" => "SKETCH",
         "spline" => "SPLINE",
         "extrude" => "EXTRUSION",
-        "chamfer" => "EDGE FEATURE",
+        "chamfer" => "CHAMFER",
+        "fillet" => "FILLET",
         "shell" => "SHELL",
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
@@ -654,7 +696,8 @@ fn node_description(node: &GraphNode) -> Option<String> {
         }
         "combine" => "Collects every connected shape into a single Part.".to_owned(),
         "mirror" => "Reflects the incoming shape across a world plane.".to_owned(),
-        "chamfer" => "Cuts or rounds selected edges of the incoming shape.".to_owned(),
+        "chamfer" => "Cuts selected edges of the incoming shape.".to_owned(),
+        "fillet" => "Rounds selected edges of the incoming shape.".to_owned(),
         "shell" => "Hollows the incoming shape by removing selected faces.".to_owned(),
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
         "scatter" => "Repeats a shape across a seeded area.".to_owned(),
@@ -831,7 +874,12 @@ fn action_buttons(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
 }
 
 /// Draw the generated inspector for one node and return field and action changes.
-pub fn show(ui: &mut Ui, node: &GraphNode, sections: &[String]) -> Output {
+pub fn show(
+    ui: &mut Ui,
+    node: &GraphNode,
+    sections: &[String],
+    active_selection: Option<&str>,
+) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
         section_label(ui, section_title(node));
@@ -851,7 +899,33 @@ pub fn show(ui: &mut Ui, node: &GraphNode, sections: &[String]) -> Output {
             ui.add_space(6.0);
         }
         if node.node_type == "shell" {
-            shell_faces(ui, node, &mut output);
+            topology_references(
+                ui,
+                node,
+                &mut output,
+                "faces",
+                "OPENING FACES",
+                "No openings. Select the Face filter in the viewport, then click faces to open the shell.",
+                "Remove opening",
+                "Clear openings",
+                "Close the shell",
+                active_selection == Some("faces"),
+            );
+            ui.add_space(6.0);
+        }
+        if node.node_type == "chamfer" || node.node_type == "fillet" {
+            topology_references(
+                ui,
+                node,
+                &mut output,
+                "edges",
+                "EDGES",
+                "No edges. Click the edit icon, then click edges in the viewport to apply the treatment.",
+                "Remove edge",
+                "Clear edges",
+                "Remove all edge selections",
+                active_selection == Some("edges"),
+            );
             ui.add_space(6.0);
         }
         egui::Grid::new(("inspector-grid", &node.id))

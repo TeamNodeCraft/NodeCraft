@@ -9,16 +9,21 @@ use nodecraft_session::GraphDocument;
 pub struct Evaluation {
     pub target: String,
     pub mesh: Option<Mesh>,
+    /// Before/after pair when the selected feature can be compared.
+    pub comparison: Option<(Mesh, Mesh)>,
+    /// Exact before/after difference bodies from the kernel.
+    pub difference: Option<(Mesh, Mesh)>,
+    pub difference_error: Option<String>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
     pub cache_hits: u32,
     pub cache_misses: u32,
 }
 
-pub fn target_for(document: &GraphDocument, selected: Option<&str>) -> Option<String> {
-    // The most recently selected node is the viewer breakpoint. Interface
-    // outputs are only the fallback when nothing is selected.
-    if let Some(selected) = selected {
+pub fn target_for(document: &GraphDocument, viewer_breakpoint: Option<&str>) -> Option<String> {
+    // The viewer breakpoint is explicit: selection never changes it. Interface
+    // outputs are the fallback when no breakpoint is pinned.
+    if let Some(selected) = viewer_breakpoint {
         if document.nodes.iter().any(|node| node.id == selected) {
             return Some(selected.to_owned());
         }
@@ -64,6 +69,17 @@ pub fn evaluate_with_linked_progress(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
 ) -> (Option<Evaluation>, EngineCache) {
+    evaluate_with_linked_progress_comparison(document, cache, selected, linked_documents, progress, None)
+}
+
+pub fn evaluate_with_linked_progress_comparison(
+    document: &GraphDocument,
+    cache: EngineCache,
+    selected: Option<&str>,
+    linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+) -> (Option<Evaluation>, EngineCache) {
     let Some(target) = target_for(document, selected) else {
         return (None, cache);
     };
@@ -75,6 +91,9 @@ pub fn evaluate_with_linked_progress(
                 Some(Evaluation {
                     target,
                     mesh: None,
+                    comparison: None,
+                    difference: None,
+                    difference_error: None,
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                     cache_hits: 0,
@@ -90,8 +109,28 @@ pub fn evaluate_with_linked_progress(
         request_id: 1,
         tab_id: None,
         graph_revision: None,
-        targets: vec![target.clone()],
-        mesh_targets: Some(vec![target.clone()]),
+        targets: {
+            let mut targets = vec![target.clone()];
+            if let Some((before, after)) = comparison {
+                for id in [before, after] {
+                    if !targets.iter().any(|existing| existing == id) {
+                        targets.push(id.to_owned());
+                    }
+                }
+            }
+            targets
+        },
+        mesh_targets: Some({
+            let mut targets = vec![target.clone()];
+            if let Some((before, after)) = comparison {
+                for id in [before, after] {
+                    if !targets.iter().any(|existing| existing == id) {
+                        targets.push(id.to_owned());
+                    }
+                }
+            }
+            targets
+        }),
         nodes: document
             .nodes
             .iter()
@@ -120,6 +159,7 @@ pub fn evaluate_with_linked_progress(
         project_directory: None,
         progress: progress.is_some(),
         mesh_tolerance: None,
+        comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
     };
     let output = nodecraft_engine::evaluate(request, cache, progress);
     let cache = output.cache;
@@ -127,10 +167,18 @@ pub fn evaluate_with_linked_progress(
     let cache_stats = output.response.cache_stats;
     let error = output.response.node_errors.get(&target).cloned();
     let mesh = output.response.meshes.get(&target).map(|payload| payload.mesh.clone());
+    let comparison = comparison.and_then(|(before, after)| {
+        let before = output.response.meshes.get(before)?.mesh.clone();
+        let after = output.response.meshes.get(after)?.mesh.clone();
+        Some((before, after))
+    });
     (
         Some(Evaluation {
             target,
             mesh: if error.is_some() { None } else { mesh },
+            comparison,
+            difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
+            difference_error: output.response.comparison.and_then(|payload| payload.error),
             error,
             elapsed_ms,
             cache_hits: cache_stats.as_ref().map_or(0, |stats| stats.hits),

@@ -323,6 +323,28 @@ fn push_mesh_triangle(
 ///
 /// The faces and their normals come from the exact B-rep (not from triangles), so the
 /// preview is independent of how finely `brep_display_mesh` samples a face boundary.
+fn face_normal_order(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let key = |normal: [f64; 3]| {
+        [
+            normal[2].abs(),
+            normal[0].abs(),
+            normal[1].abs(),
+            normal[2],
+            normal[0],
+            normal[1],
+        ]
+    };
+    let (a, b) = (key(a), key(b));
+    for (left, right) in a.iter().zip(b.iter()) {
+        match left.partial_cmp(right).unwrap_or(Ordering::Equal) {
+            Ordering::Equal => {}
+            order => return order.reverse(),
+        }
+    }
+    Ordering::Equal
+}
+
 fn edge_frame(
     kernel: &Kernel,
     brep: &solidcore::topology::Brep,
@@ -348,13 +370,19 @@ fn edge_frame(
             ),
         ));
     }
-    let mut normals = Vec::with_capacity(2);
+    let mut faces_with_normals = Vec::with_capacity(2);
     for face in &distinct {
         let context = format!("edge {} face", selection.ordinal);
-        normals.push(planar_face_normal(kernel, brep, *face, &context, interior)?);
+        faces_with_normals.push((*face, planar_face_normal(kernel, brep, *face, &context, interior)?));
     }
-    let normal_a = normals[0];
-    let normal_b = normals[1];
+    // A two-distance or distance-angle chamfer needs a consistent reference face.
+    // B-rep face enumeration is arbitrary, so order the adjacent faces by their
+    // dominant outward axis: horizontal faces first (top/bottom), then the
+    // X/Y-facing sides. This keeps distances on a loop of edges from alternating
+    // between the two faces, which made some chamfers face up and others down.
+    faces_with_normals.sort_by(|a, b| face_normal_order(a.1, b.1));
+    let normal_a = faces_with_normals[0].1;
+    let normal_b = faces_with_normals[1].1;
     let direction = selection.direction().map_err(|_| {
         BlendError::unsupported(
             "edge treatment",
@@ -779,6 +807,81 @@ fn fan_triangulate(polygon: &[[f64; 3]], group: &str, out: &mut Vec<Tri>) {
 }
 
 /// Build the protocol mesh from working triangles, centred on `center`.
+/// Exact planar chamfer for the preview's supported straight 90-degree edges.
+///
+/// Each chamfer plane is realized as a large oriented box on the removed side
+/// of the plane and subtracted from the input B-rep. This is not the full
+/// SolidCore blend, but it produces an exact closed B-rep for the cases this
+/// preview already accepts and lets chained/exported chamfers stay exact.
+pub fn chamfer_brep_exact(
+    brep: &solidcore::topology::Brep,
+    values: &serde_json::Value,
+) -> Result<solidcore::topology::Brep, String> {
+    use solidcore::geom::axis2_placement::Axis2Placement;
+    use solidcore::math::{Point3, Vec3};
+    use solidcore::primitive::api_primitives as api;
+    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| error.to_string())?;
+    treatment.validate().map_err(|error| error.to_string())?;
+    if treatment.mode != EdgeMode::Chamfer {
+        return Err("exact chamfer requires chamfer mode".into());
+    }
+    let mut kernel = Kernel::default();
+    let selections = crate::edge::select_edges_from_values(&kernel, brep, values)
+        .map_err(|error| error.to_string())?;
+    if selections.is_empty() {
+        return Err("an edge treatment needs at least one selected edge".into());
+    }
+    let interior = brep_center(&kernel, brep).map_err(|error| error.to_string())?;
+    let (min, max) = brep_vertex_bounds(brep)?;
+    let diagonal = length(sub(max, min)).max(1.0);
+    let extent = diagonal * 4.0 + 100.0;
+    let mut result = brep.clone();
+    for selection in &selections {
+        let frame = edge_frame(&kernel, brep, selection, interior).map_err(|error| error.to_string())?;
+        let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| error.to_string())?;
+        for plane in planes {
+            let plane = plane.orient_towards(interior);
+            let normal = normalize(plane.normal).ok_or("chamfer plane has no normal")?;
+            let helper = if normal[2].abs() < 0.9 { Vec3::new(0.0, 0.0, 1.0) } else { Vec3::new(1.0, 0.0, 0.0) };
+            let normal = Vec3::new(normal[0], normal[1], normal[2]);
+            let x_axis = normal.cross(helper).unitize().map_err(|error| error.to_string())?;
+            let y_axis = normal.cross(x_axis).unitize().map_err(|error| error.to_string())?;
+            let mut tool = api::create_box(&mut kernel, Point3::new(-extent, -extent, 0.0), 2.0 * extent, 2.0 * extent, extent)
+                .map_err(|error| error.to_string())?;
+            let placement = Axis2Placement::new(
+                Point3::new(plane.point[0], plane.point[1], plane.point[2]),
+                x_axis,
+                y_axis,
+            );
+            solidcore::topology::brep::p5::transform(
+                &mut kernel,
+                &mut tool,
+                &placement,
+                None,
+                true,
+            ).map_err(|error| error.to_string())?;
+            result = nodecraft_bool::boolean_breps_with_kernel(
+                &mut kernel,
+                nodecraft_bool::BooleanOp::Difference,
+                result,
+                tool,
+            )?;
+        }
+    }
+    Ok(result)
+}
+
+fn brep_vertex_bounds(brep: &solidcore::topology::Brep) -> Result<([f64; 3], [f64; 3]), String> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for id in brep.vertex_list() {
+        let point = brep.vertex(*id).map_err(|error| error.to_string())?.point;
+        min = [min[0].min(point.x), min[1].min(point.y), min[2].min(point.z)];
+        max = [max[0].max(point.x), max[1].max(point.y), max[2].max(point.z)];
+    }
+    Ok((min, max))
+}
+
 fn triangles_to_mesh(triangles: &[Tri], center: [f64; 3]) -> Result<Mesh, BlendError> {
     let mut mesh = Mesh {
         lightweight: true,
@@ -810,9 +913,76 @@ fn triangles_to_mesh(triangles: &[Tri], center: [f64; 3]) -> Result<Mesh, BlendE
             "edge treatment produced no triangles".into(),
         ));
     }
-    // Kept for API symmetry with the other bridges: the preview has no exact edges.
-    mesh.brep_edges = Vec::<BrepEdge>::new();
+    add_preview_feature_edges(&mut mesh, triangles, center);
     Ok(mesh)
+}
+
+/// Add the treatment's new boundaries as preview-only display edges.
+///
+/// There is no exact B-rep for the clipped preview, so derive one segment per
+/// boundary between different triangle groups (and per open mesh boundary). The
+/// ids are deliberately namespaced as `preview-edge:...`; they are display data,
+/// not addresses for a later exact feature.
+fn add_preview_feature_edges(mesh: &mut Mesh, triangles: &[Tri], center: [f64; 3]) {
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct Segment {
+        points: [[f64; 3]; 2],
+        groups: Vec<String>,
+    }
+
+    let quantized = |point: [f64; 3]| {
+        [
+            ((point[0] - center[0]) * 1.0e7).round() as i64,
+            ((point[1] - center[1]) * 1.0e7).round() as i64,
+            ((point[2] - center[2]) * 1.0e7).round() as i64,
+        ]
+    };
+    let mut segments: BTreeMap<[i64; 6], Segment> = BTreeMap::new();
+    for triangle in triangles {
+        for corner in 0..3 {
+            let a = triangle.points[corner];
+            let b = triangle.points[(corner + 1) % 3];
+            let (ka, kb) = (quantized(a), quantized(b));
+            let (key, first, second) = if ka < kb {
+                ([ka[0], ka[1], ka[2], kb[0], kb[1], kb[2]], a, b)
+            } else {
+                ([kb[0], kb[1], kb[2], ka[0], ka[1], ka[2]], b, a)
+            };
+            let segment = segments.entry(key).or_insert_with(|| Segment {
+                points: [first, second],
+                groups: Vec::new(),
+            });
+            if !segment.groups.contains(&triangle.group) {
+                segment.groups.push(triangle.group.clone());
+            }
+        }
+    }
+    let mut index = 0usize;
+    for segment in segments.into_values() {
+        // Only boundaries between two distinct face groups are treatment edges.
+        // Edges inside one tessellated face/cap group are triangulation, not
+        // topology, and must not be drawn.
+        if segment.groups.len() != 2 || segment.groups[0] == segment.groups[1] {
+            continue;
+        }
+        let base = mesh.vertices.len() as u32;
+        for point in segment.points {
+            mesh.vertices.push([
+                (point[0] - center[0]) as f32,
+                (point[1] - center[1]) as f32,
+                (point[2] - center[2]) as f32,
+            ]);
+            mesh.normals.push([0.0, 0.0, 1.0]);
+        }
+        mesh.brep_edges.push(BrepEdge {
+            id: format!("preview-edge:{index}"),
+            kind: "preview".into(),
+            segments: vec![[base, base + 1]],
+        });
+        index += 1;
+    }
 }
 
 /// Append `point` unless it duplicates the previous polygon corner.
@@ -884,4 +1054,57 @@ fn normalize(a: [f64; 3]) -> Option<[f64; 3]> {
 
 fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     add(a, scale(sub(b, a), t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solidcore::kernel::Kernel;
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+
+    #[test]
+    fn exact_chamfer_cuts_a_box_edge() {
+        let mut kernel = Kernel::default();
+        let brep = api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+            .expect("box");
+        let values = serde_json::json!({
+            "mode": "chamfer",
+            "chamferType": "equal",
+            "length": 1.0,
+            "edges": [{"ordinal": 0}]
+        });
+        let result = chamfer_brep_exact(&brep, &values).expect("exact chamfer");
+        assert!(result.faces().len() > brep.faces().len());
+        assert!(result.vertices().len() > brep.vertices().len());
+    }
+
+    #[test]
+    fn top_edge_frames_use_the_horizontal_face_as_reference() {
+        let mut kernel = Kernel::default();
+        let brep = api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+            .expect("box");
+        let interior = brep_center(&kernel, &brep).expect("center");
+        let selections = crate::edge::edge_selections(&kernel, &brep).expect("edges");
+        let top: Vec<_> = selections
+            .into_iter()
+            .filter(|selection| selection.midpoint[2] > 4.9)
+            .collect();
+        assert!(!top.is_empty());
+        for selection in top {
+            let frame = edge_frame(&kernel, &brep, &selection, interior).expect("frame");
+            assert!(
+                frame.away_a[2].abs() < 1.0e-9,
+                "top edge {} reference face is not horizontal: away_a={:?}",
+                selection.ordinal,
+                frame.away_a
+            );
+            assert!(
+                frame.away_b[2].abs() > 0.9,
+                "top edge {} second face is not vertical: away_b={:?}",
+                selection.ordinal,
+                frame.away_b
+            );
+        }
+    }
 }

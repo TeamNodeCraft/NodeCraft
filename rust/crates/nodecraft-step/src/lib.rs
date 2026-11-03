@@ -675,6 +675,18 @@ pub fn read_planar_body(path: &str) -> Result<PlanarBody, String> {
     if !dangling.is_empty() { return Err(format!("STEP file has dangling entity references: {dangling:?}")); }
     let mut body = planar_body_from_file(&file)?;
     for point in &mut body.points { for value in point.iter_mut() { *value *= scale; } }
+    // STEP encodes a face's orientation both in ADVANCED_FACE.same_sense and in
+    // its loop order. The legacy planar body has only the loops, so normalize a
+    // closed solid to positive volume after reading. This keeps older .T. files
+    // and newer SolidCore exports that use the material face-use orientation.
+    if body.volume().is_finite() && body.volume() < 0.0 {
+        // Reverse every loop; this negates the signed volume exactly and does not
+        // rely on a centroid heuristic for multi-body or non-convex solids.
+        for face in &mut body.faces { face.reverse(); }
+        for holes in &mut body.holes {
+            for hole in holes { hole.reverse(); }
+        }
+    }
     Ok(body)
 }
 
@@ -815,7 +827,7 @@ fn planar_body_from_file(file: &StepFile) -> Result<PlanarBody, String> {
             // present the first bound is the outer loop and the rest are holes.
             outer = Some(holes.remove(0));
         }
-        if let Some(outer) = outer {
+        if let Some(mut outer) = outer {
             if outer.len() < 3 {
                 // Non-polygonal outer bound (for example a single closed curve).
                 continue;

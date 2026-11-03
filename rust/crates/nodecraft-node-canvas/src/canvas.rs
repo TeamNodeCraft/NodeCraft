@@ -104,6 +104,13 @@ struct ViewAnimation {
     start_zoom: f32,
 }
 
+struct PanAnimation {
+    started: Instant,
+    duration: Duration,
+    start_pan: Vec2,
+    target_pan: Vec2,
+}
+
 struct NodeDrag {
     primary: String,
     ids: Vec<String>,
@@ -200,6 +207,10 @@ pub struct NodeEditor {
     theme: crate::theme::CanvasTheme,
     last_viewport: Option<Rect>,
     view_animation: Option<ViewAnimation>,
+    pan_animation: Option<PanAnimation>,
+    node_fades: HashMap<String, Instant>,
+    known_nodes: HashSet<String>,
+    fade_document: Option<String>,
     glow_pulse: Option<Instant>,
     last_selected: HashSet<String>,
     activity: HashMap<String, ActivityGlow>,
@@ -241,6 +252,10 @@ impl Default for NodeEditor {
             theme: crate::theme::CanvasTheme::default(),
             last_viewport: None,
             view_animation: None,
+            pan_animation: None,
+            node_fades: HashMap::new(),
+            known_nodes: HashSet::new(),
+            fade_document: None,
             glow_pulse: None,
             last_selected: HashSet::new(),
             activity: HashMap::new(),
@@ -251,6 +266,9 @@ impl Default for NodeEditor {
         }
     }
 }
+
+/// One place to tune new-node appearance.
+const NODE_FADE_IN: Duration = Duration::from_millis(240);
 
 /// Selection-pulse envelope: 40 ms fade up, 500 ms hold, 40 ms fade down.
 fn glow_strength(elapsed: Duration) -> f32 {
@@ -320,6 +338,36 @@ impl NodeEditor {
         Rect::from_min_size(Pos2::new(left, inset_viewport.min.y), Vec2::new(width, inset_viewport.height()))
     }
 
+    /// Pan just enough to bring `graph` into the visible canvas with padding.
+    /// Used after inserting a node so a card placed below the current view does
+    /// not appear off-screen.
+    pub fn ensure_graph_rect_visible(&mut self, viewport: Rect, graph: Rect, padding: f32) {
+        let panel = self.panel_rect(viewport);
+        let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
+        let screen = Rect::from_min_size(
+            canvas.min + self.pan + graph.min.to_vec2() * self.zoom,
+            graph.size() * self.zoom,
+        );
+        let mut delta = ensure_visible_delta(canvas, screen, padding);
+        // Keep the added node clear of the minimap. Move the canvas up just enough
+        // if the target would sit underneath it.
+        let minimap = node_minimap_rect(panel).expand(padding);
+        let adjusted = screen.translate(delta);
+        if adjusted.intersects(minimap) {
+            delta.y -= adjusted.max.y - (minimap.min.y - padding);
+        }
+        let target = self.pan + delta;
+        if target != self.pan {
+            self.view_animation = None;
+            self.pan_animation = Some(PanAnimation {
+                started: Instant::now(),
+                duration: Duration::from_millis(220),
+                start_pan: self.pan,
+                target_pan: target,
+            });
+        }
+    }
+
     pub fn install_gpu(&mut self, render_state: &egui_wgpu::RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) {
         // Diagnostic escape hatch for exercising the CPU fallback renderer.
         if std::env::var_os("NODECRAFT_CPU_NODES").is_some() {
@@ -377,6 +425,7 @@ impl NodeEditor {
     pub fn reset_view(&mut self) {
         self.view_document = None;
         self.view_animation = None;
+        self.pan_animation = None;
         self.fit_next = true;
     }
 
@@ -386,6 +435,7 @@ impl NodeEditor {
 
     pub fn request_fit(&mut self) {
         self.view_animation = None;
+        self.pan_animation = None;
         self.fit_next = true;
     }
 
@@ -396,6 +446,7 @@ impl NodeEditor {
             return;
         }
         self.fit_next = false;
+        self.pan_animation = None;
         self.view_animation = Some(ViewAnimation {
             started: Instant::now(),
             duration,
@@ -412,6 +463,51 @@ impl NodeEditor {
         let panel = self.panel_rect(viewport);
         let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
         Some(((screen - canvas.min - self.pan) / self.zoom).to_pos2())
+    }
+
+    /// Routed cable paths in graph coordinates, optionally using temporary node
+    /// positions (used by placement before the moves are committed).
+    pub fn connection_paths(
+        document: &GraphDocument,
+        positions: &HashMap<String, (f64, f64)>,
+    ) -> Vec<([Pos2; 4], ConnectionKey)> {
+        let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        let mut paths = Vec::new();
+        for connection in &document.connections {
+            let Some(from) = nodes.get(connection.from.as_str()).copied() else { continue };
+            let Some(to) = nodes.get(connection.to.as_str()).copied() else { continue };
+            let (fx, fy) = positions.get(&from.id).copied().unwrap_or((from.x, from.y));
+            let (tx, ty) = positions.get(&to.id).copied().unwrap_or((to.x, to.y));
+            let source = Rect::from_min_size(
+                Pos2::new(fx as f32, fy as f32),
+                Vec2::new(node_width(from), NODE_HEIGHT),
+            );
+            let target = Rect::from_min_size(
+                Pos2::new(tx as f32, ty as f32),
+                Vec2::new(node_width(to), NODE_HEIGHT),
+            );
+            let outputs = node_outputs(from);
+            let inputs = node_inputs(to);
+            let x0 = port_x(source, port_index(outputs, &connection.out), outputs.len(), 1.0);
+            let y0 = source.max.y;
+            let x1 = port_x(target, port_index(inputs, &connection.input), inputs.len(), 1.0);
+            let y1 = target.min.y;
+            let route = crate::routing::route(x0, y0, x1, y1, 1.0);
+            paths.push((
+                [
+                    Pos2::new(x0, y0),
+                    route.control1,
+                    route.control2,
+                    Pos2::new(x1, y1),
+                ],
+                ConnectionKey::from_connection(connection),
+            ));
+        }
+        paths
     }
 
     fn insert_candidate(
@@ -648,10 +744,16 @@ impl NodeEditor {
             self.fit_graph(fit_canvas, document);
         }
         self.tick_view_animation(fit_canvas, ctx);
+        self.tick_pan_animation(ctx);
         self.update_insert_preview(ctx, document, panel);
+        self.update_node_fades(document);
         let preview_document = self.preview_document(document);
         let document = preview_document.as_ref().unwrap_or(document);
         let now = Instant::now();
+        let node_fades = self.node_fade_map(document, now);
+        if !node_fades.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
         self.activity.retain(|_, activity| {
             activity.ended.is_none_or(|ended| {
                 now < ended.max(activity.started + self.activity_hold) + self.activity_fade_out
@@ -698,8 +800,18 @@ impl NodeEditor {
         let mut actions = Vec::new();
         let mut chrome_clicked = false;
         let mut empty_canvas_clicked = false;
-        let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>)> = Vec::new();
-        let key = geometry_key(document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>, f32)> = Vec::new();
+        let mut key = geometry_key(document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        if !node_fades.is_empty() {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            key.hash(&mut hasher);
+            for (id, alpha) in &node_fades {
+                id.hash(&mut hasher);
+                alpha.to_bits().hash(&mut hasher);
+            }
+            key = hasher.finish();
+        }
         if self.geometry_key != Some(key) {
             if self.gpu_ready {
                 self.shapes = Some(Arc::new(build_shape_instances(
@@ -708,10 +820,11 @@ impl NodeEditor {
                     &self.z_order,
                     viewer_breakpoint,
                     &self.theme,
+                    &node_fades,
                 )));
                 self.geometry = None;
             } else {
-                self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme)));
+                self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme, &node_fades)));
                 self.shapes = None;
             }
             self.cables = Some(Arc::new(build_cables(document, selected_nodes, selected_connections, &self.theme)));
@@ -782,10 +895,7 @@ impl NodeEditor {
                 );
 
                 let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
-                let mini = Rect::from_min_size(
-                    Pos2::new(panel.max.x - 12.0 - 132.0, panel.max.y - 12.0 - 132.0),
-                    Vec2::new(132.0, 132.0),
-                );
+                let mini = node_minimap_rect(panel);
                 let pointer = ui.ctx().pointer_latest_pos();
                 if self.wire_drag.is_none()
                     && pointer.is_some_and(|pointer| panel.contains(pointer))
@@ -1015,11 +1125,22 @@ impl NodeEditor {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if eye.clicked() {
-                            actions.push(NodeEditorAction::SetViewerBreakpoint {
-                                id: node.id.clone(),
-                            });
+                            // Shift-click steps the viewer to the first consumer, which
+                            // is the explicit way to inspect the graph after this
+                            // breakpoint without moving it implicitly on selection.
+                            let target = if ui.ctx().input(|input| input.modifiers.shift) {
+                                document
+                                    .connections
+                                    .iter()
+                                    .find(|link| link.from == node.id)
+                                    .map_or_else(|| node.id.clone(), |link| link.to.clone())
+                            } else {
+                                node.id.clone()
+                            };
+                            actions.push(NodeEditorAction::SetViewerBreakpoint { id: target });
                             chrome_clicked = true;
                         }
+                        eye.on_hover_text("View output · Shift-click: next node");
                         continue;
                     }
                     let response = ui.interact(rect, egui::Id::new(("node", &node.id)), Sense::click_and_drag());
@@ -1088,12 +1209,13 @@ impl NodeEditor {
                     );
                     let blockers = blockers_by_node.get(&node.id);
                     if blockers.map_or(true, Vec::is_empty) {
+                        let fade = self.node_fade_alpha(&node.id, now);
                         draw.texts.push(NodeText {
                             text: node.node_type.to_uppercase(),
                             center_x: rect.center().x,
                             top: rect.max.y - 24.0 * self.zoom,
                             size: 11.0 * self.zoom,
-                            color: self.theme.text,
+                            color: fade_color(self.theme.text, fade),
                             bounds: glyphon::TextBounds::default(),
                         });
                     } else {
@@ -1103,6 +1225,7 @@ impl NodeEditor {
                             text_size,
                             label_rect,
                             blockers.cloned().unwrap_or_default(),
+                            self.node_fade_alpha(&node.id, now),
                         ));
                     }
                 }
@@ -1110,14 +1233,14 @@ impl NodeEditor {
                     ui.painter().add(egui_wgpu::Callback::new_paint_callback(ctx.content_rect(), NodeCallback(draw)));
                 }
 
-                for (text, position, size, label_rect, blockers) in &overlay_texts {
+                for (text, position, size, label_rect, blockers, fade) in &overlay_texts {
                     for part in subtract_rects(*label_rect, blockers) {
                         painter.with_clip_rect(part).text(
                             *position,
                             egui::Align2::CENTER_TOP,
                             text,
                             egui::FontId::proportional(*size),
-                            self.theme.color(self.theme.text),
+                            fade_color32(self.theme.color(self.theme.text), *fade),
                         );
                     }
                 }
@@ -1211,7 +1334,10 @@ impl NodeEditor {
                             egui::Align2::CENTER_CENTER,
                             node.node_type.to_uppercase(),
                             egui::FontId::proportional(11.0 * self.zoom),
-                            self.theme.color(self.theme.text),
+                            {
+                                let fade = self.node_fade_alpha(&node.id, now);
+                                fade_color32(self.theme.color(self.theme.text), fade)
+                            },
                         );
                     }
                 }
@@ -1257,6 +1383,7 @@ impl NodeEditor {
                         .cloned()
                         .unwrap_or_default();
                     let (name, source) = icon_for(node);
+                    let node_fade = self.node_fade_alpha(&node.id, now);
                     let texture = self.icon_texture(ui.ctx(), name, source, self.theme.text);
                     // Large, low-opacity silhouette, clipped against any card
                     // that is in front of this node.
@@ -1266,7 +1393,7 @@ impl NodeEditor {
                             texture.id(),
                             icon_rect,
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 150),
+                            Color32::from_rgba_unmultiplied(255, 255, 255, (150.0 * node_fade) as u8),
                         );
                     }
                     let (suppress_center, view_center) = button_centers(rect);
@@ -1291,7 +1418,7 @@ impl NodeEditor {
                                 texture.id(),
                                 button_icon,
                                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                Color32::WHITE,
+                                Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * node_fade) as u8),
                             );
                         }
                     }
@@ -1714,6 +1841,64 @@ impl NodeEditor {
         }
     }
 
+    fn tick_pan_animation(&mut self, ctx: &egui::Context) {
+        let Some(animation) = &self.pan_animation else { return };
+        let progress = (animation.started.elapsed().as_secs_f32()
+            / animation.duration.as_secs_f32().max(0.001))
+        .clamp(0.0, 1.0);
+        let eased = progress * progress * (3.0 - 2.0 * progress);
+        self.pan = animation.start_pan + (animation.target_pan - animation.start_pan) * eased;
+        if progress >= 1.0 {
+            self.pan_animation = None;
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn update_node_fades(&mut self, document: &GraphDocument) {
+        let now = Instant::now();
+        if self.fade_document.as_deref() != Some(document.id.as_str()) {
+            self.fade_document = Some(document.id.clone());
+            self.known_nodes = document.nodes.iter().map(|node| node.id.clone()).collect();
+            self.node_fades.clear();
+            return;
+        }
+        for node in &document.nodes {
+            if self.known_nodes.insert(node.id.clone()) {
+                self.node_fades.insert(node.id.clone(), now);
+            }
+        }
+        let live: HashSet<&str> = document.nodes.iter().map(|node| node.id.as_str()).collect();
+        self.node_fades.retain(|id, _| live.contains(id.as_str()));
+    }
+
+    fn node_fade_alpha(&self, id: &str, now: Instant) -> f32 {
+        let Some(started) = self.node_fades.get(id) else { return 1.0 };
+        let t = (now.duration_since(*started).as_secs_f32()
+            / NODE_FADE_IN.as_secs_f32().max(0.001))
+        .clamp(0.0, 1.0);
+        // Smoothstep; change NODE_FADE_IN for timing and this for the curve.
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Start a fade for a node the app has just added, so the fade and the
+    /// view-pan animation begin on the same frame.
+    pub fn begin_node_fade(&mut self, id: &str) {
+        self.known_nodes.insert(id.to_owned());
+        self.node_fades.insert(id.to_owned(), Instant::now());
+    }
+
+    fn node_fade_map(&self, document: &GraphDocument, now: Instant) -> HashMap<String, f32> {
+        document
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let alpha = self.node_fade_alpha(&node.id, now);
+                (alpha < 1.0).then(|| (node.id.clone(), alpha))
+            })
+            .collect()
+    }
+
     fn tick_view_animation(&mut self, canvas: Rect, ctx: &egui::Context) {
         let Some(animation) = &self.view_animation else { return };
         let progress = (animation.started.elapsed().as_secs_f32()
@@ -1989,7 +2174,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "loft" | "surfaceloft" | "extrude" => "arrow_up",
         "sketch" => "edit",
         "spline" => "spline",
-        "chamfer" => "subtract",
+        "chamfer" | "fillet" => "subtract",
         "shell" => "square_multiple",
         "primitive" => primitive_icon(primitive),
         "box" => "cube",
@@ -2030,7 +2215,8 @@ fn node_title(node_type: &str) -> &'static str {
         "sketch" => "Sketch",
         "spline" => "Spline",
         "extrude" => "Extrude",
-        "chamfer" => "Edge",
+        "chamfer" => "Chamfer",
+        "fillet" => "Fillet",
         "shell" => "Shell",
         "box" => "Box",
         "cylinder" => "Cylinder",
@@ -2067,7 +2253,7 @@ fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
         },
         "sketch" | "spline" | "linkedpart" | "stepimporter" => &[],
         "extrude" => &["profile", "amount"],
-        "chamfer" => &["shape", "length"],
+        "chamfer" | "fillet" => &["shape", "length"],
         "shell" => &["shape", "thickness"],
         "translate" => &["shape", "x", "y", "z", "rx", "ry", "rz"],
         "scatter" => &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"],
@@ -2234,6 +2420,40 @@ pub fn node_width(node: &nodecraft_session::GraphNode) -> f32 {
         .max(52.0 + title * 9.5)
 }
 
+/// Graph-space card and clearance metrics used by layout code. Keep background,
+/// shadow and port overhang changes here rather than in placement call sites.
+#[derive(Clone, Copy, Debug)]
+pub struct NodeExtent {
+    pub width: f32,
+    pub height: f32,
+    pub padding: f32,
+}
+
+impl NodeExtent {
+    #[must_use]
+    pub fn card_rect(self, x: f64, y: f64) -> Rect {
+        Rect::from_min_size(
+            Pos2::new(x as f32, y as f32),
+            Vec2::new(self.width, self.height),
+        )
+    }
+
+    #[must_use]
+    pub fn padded_rect(self, x: f64, y: f64) -> Rect {
+        self.card_rect(x, y).expand(self.padding)
+    }
+}
+
+#[must_use]
+pub fn node_extent(node: &nodecraft_session::GraphNode) -> NodeExtent {
+    const CLEARANCE: f32 = 24.0;
+    NodeExtent {
+        width: node_width(node),
+        height: NODE_HEIGHT,
+        padding: CLEARANCE,
+    }
+}
+
 fn graph_rect(node: &nodecraft_session::GraphNode) -> Rect {
     Rect::from_min_size(
         Pos2::new(node.x as f32, node.y as f32),
@@ -2387,13 +2607,39 @@ fn document_roi(document: &GraphDocument) -> Option<Rect> {
     (min.x.is_finite() && max.x.is_finite()).then(|| Rect::from_min_max(min, max))
 }
 
+fn node_minimap_rect(panel: Rect) -> Rect {
+    Rect::from_min_size(
+        Pos2::new(panel.max.x - 12.0 - 132.0, panel.max.y - 12.0 - 132.0),
+        Vec2::new(132.0, 132.0),
+    )
+}
+
+fn ensure_visible_delta(canvas: Rect, target: Rect, padding: f32) -> Vec2 {
+    let min = canvas.min + Vec2::splat(padding);
+    let max = canvas.max - Vec2::splat(padding);
+    let mut delta = Vec2::ZERO;
+    if target.max.x > max.x {
+        delta.x = max.x - target.max.x;
+    } else if target.min.x < min.x {
+        delta.x = min.x - target.min.x;
+    }
+    if target.max.y > max.y {
+        delta.y = max.y - target.max.y;
+    } else if target.min.y < min.y {
+        delta.y = min.y - target.min.y;
+    }
+    delta
+}
+
 fn fitted_view(canvas: Rect, roi: Rect) -> (Vec2, f32) {
     let pad = 24.0;
     let graph_w = roi.width().max(1.0);
     let graph_h = roi.height().max(1.0);
+    // Fit may zoom out to make a large graph visible, but it must not magnify past
+    // 100% when the graph already fits with room to spare.
     let zoom = ((canvas.width() - 2.0 * pad) / graph_w)
         .min((canvas.height() - 2.0 * pad) / graph_h)
-        .clamp(MIN_ZOOM, MAX_ZOOM);
+        .clamp(MIN_ZOOM, MAX_ZOOM.min(1.0));
     let pan = canvas.center().to_vec2() - canvas.min.to_vec2() - roi.center().to_vec2() * zoom;
     (pan, zoom)
 }
@@ -2444,6 +2690,7 @@ fn build_geometry(
     z_order: &[String],
     viewer_breakpoint: Option<&str>,
     theme: &crate::theme::CanvasTheme,
+    fades: &HashMap<String, f32>,
 ) -> NodeGeometry {
     let mut builder = GeometryBuilder::default();
     let rects: Vec<Rect> = document.nodes.iter().map(graph_rect).collect();
@@ -2464,24 +2711,25 @@ fn build_geometry(
         let node = &document.nodes[index];
         let selected_here = selected.contains(node.id.as_str());
         let viewer_here = viewer_breakpoint == Some(node.id.as_str());
+        let fade = fades.get(&node.id).copied().unwrap_or(1.0);
         let card = squircle_rect_path(rect.min.x, rect.min.y, rect.width(), rect.height(), 26.0);
-        builder.fill_path(&card, theme.f32(theme.card));
+        builder.fill_path(&card, fade_rgba(theme.f32(theme.card), fade));
         builder.stroke_path(
             &card,
-            if selected_here { theme.f32(theme.accent) } else { theme.f32(theme.card_border) },
+            fade_rgba(if selected_here { theme.f32(theme.accent) } else { theme.f32(theme.card_border) }, fade),
             if selected_here { 3.0 } else { 2.0 },
         );
         let (suppress_center, view_center) = button_centers(rect);
         let suppress = circle_path(suppress_center.x, suppress_center.y, BUTTON_RADIUS);
-        builder.fill_path(&suppress, theme.f32(theme.control));
-        builder.stroke_path(&suppress, theme.f32(theme.card_border), 1.0);
+        builder.fill_path(&suppress, fade_rgba(theme.f32(theme.control), fade));
+        builder.stroke_path(&suppress, fade_rgba(theme.f32(theme.card_border), fade), 1.0);
         let view = circle_path(view_center.x, view_center.y, VIEW_BUTTON_RADIUS);
-        builder.fill_path(&view, if viewer_here { theme.f32(theme.accent) } else { theme.f32(theme.control) });
-        builder.stroke_path(&view, theme.f32(theme.card_border), 1.0);
+        builder.fill_path(&view, fade_rgba(if viewer_here { theme.f32(theme.accent) } else { theme.f32(theme.control) }, fade));
+        builder.stroke_path(&view, fade_rgba(theme.f32(theme.card_border), fade), 1.0);
         // Eyelet ports: fill the outer disc, stroke the accent ring, then paint
         // an opaque card-coloured inner disc over the ring's antialiased edge.
         // One eyelet is drawn per declared inlet/outlet, spread across the edge.
-        let card_colour = theme.f32(theme.card);
+        let card_colour = fade_rgba(theme.f32(theme.card), fade);
         let inputs = node_inputs(node);
         for (index, port) in inputs.iter().enumerate() {
             let x = port_x(rect, index, inputs.len(), 1.0);
@@ -2492,7 +2740,7 @@ fn build_geometry(
             } else {
                 theme.accent
             };
-            builder.stroke_path(&input, theme.f32(colour), 2.0);
+            builder.stroke_path(&input, fade_rgba(theme.f32(colour), fade), 2.0);
             builder.fill_path(&circle_path(x, rect.min.y, 5.8), card_colour);
         }
         let outputs = node_outputs(node);
@@ -2500,11 +2748,28 @@ fn build_geometry(
             let x = port_x(rect, port, outputs.len(), 1.0);
             let output = circle_path(x, rect.max.y, 8.0);
             builder.fill_path(&output, card_colour);
-            builder.stroke_path(&output, theme.f32(theme.accent), 2.0);
+            builder.stroke_path(&output, fade_rgba(theme.f32(theme.accent), fade), 2.0);
             builder.fill_path(&circle_path(x, rect.max.y, 5.8), card_colour);
         }
     }
     builder.finish()
+}
+
+fn fade_color(color: [u8; 4], alpha: f32) -> [u8; 4] {
+    [color[0], color[1], color[2], (f32::from(color[3]) * alpha) as u8]
+}
+
+fn fade_color32(color: egui::Color32, alpha: f32) -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        (f32::from(color.a()) * alpha) as u8,
+    )
+}
+
+fn fade_rgba(color: [f32; 4], alpha: f32) -> [f32; 4] {
+    [color[0], color[1], color[2], color[3] * alpha]
 }
 
 fn shape_circle(
@@ -2560,6 +2825,7 @@ fn build_shape_instances(
     z_order: &[String],
     viewer_breakpoint: Option<&str>,
     theme: &crate::theme::CanvasTheme,
+    fades: &HashMap<String, f32>,
 ) -> Vec<ShapeInstance> {
     let ranks: HashMap<&str, usize> = z_order
         .iter()
@@ -2583,11 +2849,15 @@ fn build_shape_instances(
         let rect = graph_rect(node);
         let selected_here = selected.contains(node.id.as_str());
         let viewer_here = viewer_breakpoint == Some(node.id.as_str());
+        let fade = fades.get(&node.id).copied().unwrap_or(1.0);
+        let fill = fade_rgba(card_fill, fade);
+        let stroke = fade_rgba(if selected_here { accent } else { card_stroke }, fade);
+        let control = fade_rgba(control, fade);
         out.push(ShapeInstance {
             center: [rect.center().x, rect.center().y],
             size: [rect.width(), rect.height()],
-            fill: card_fill,
-            stroke: if selected_here { accent } else { card_stroke },
+            fill,
+            stroke,
             radius: 26.0,
             stroke_width: if selected_here { 3.0 } else { 2.0 },
             kind: 0.0,
@@ -2600,15 +2870,15 @@ fn build_shape_instances(
             suppress_center,
             BUTTON_RADIUS * 2.0,
             control,
-            card_stroke,
+            stroke,
             1.0,
         );
         shape_circle(
             &mut out,
             view_center,
             VIEW_BUTTON_RADIUS * 2.0,
-            if viewer_here { accent } else { control },
-            card_stroke,
+            if viewer_here { fade_rgba(accent, fade) } else { control },
+            stroke,
             1.0,
         );
 
@@ -2621,15 +2891,15 @@ fn build_shape_instances(
             } else {
                 accent
             };
-            shape_circle(&mut out, center, 16.0, card_fill, ring, 2.0);
-            shape_circle(&mut out, center, 11.6, card_fill, card_fill, 0.0);
+            shape_circle(&mut out, center, 16.0, fill, fade_rgba(ring, fade), 2.0);
+            shape_circle(&mut out, center, 11.6, fill, fill, 0.0);
         }
         let outputs = node_outputs(node);
         for (port_index, _) in outputs.iter().enumerate() {
             let x = port_x(rect, port_index, outputs.len(), 1.0);
             let center = Pos2::new(x, rect.max.y);
-            shape_circle(&mut out, center, 16.0, card_fill, accent, 2.0);
-            shape_circle(&mut out, center, 11.6, card_fill, card_fill, 0.0);
+            shape_circle(&mut out, center, 16.0, fill, fade_rgba(accent, fade), 2.0);
+            shape_circle(&mut out, center, 11.6, fill, fill, 0.0);
         }
     }
     out
@@ -3382,11 +3652,11 @@ mod tests {
             let key_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let geometry = build_geometry(&document, &selected, &z_order, None, &theme);
+            let geometry = build_geometry(&document, &selected, &z_order, None, &theme, &HashMap::new());
             let geometry_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme);
+            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, &HashMap::new());
             let shapes_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
@@ -3812,6 +4082,51 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn fit_does_not_zoom_past_one_hundred_percent() {
+        let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(1000.0, 800.0));
+        let small = Rect::from_min_max(Pos2::ZERO, Pos2::new(100.0, 80.0));
+        let (_, zoom) = fitted_view(canvas, small);
+        assert_eq!(zoom, 1.0);
+    }
+
+    #[test]
+    fn newly_added_nodes_start_a_fade_in() {
+        let mut editor = NodeEditor::default();
+        let mut document = GraphDocument::new("fade");
+        document.nodes.push(nodecraft_session::GraphNode {
+            id: "a".into(),
+            node_type: "primitive".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        editor.update_node_fades(&document);
+        assert!(editor.node_fades.is_empty(), "initial nodes do not animate");
+        document.nodes.push(nodecraft_session::GraphNode {
+            id: "b".into(),
+            node_type: "chamfer".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 200.0,
+        });
+        editor.update_node_fades(&document);
+        assert!(editor.node_fades.contains_key("b"));
+        assert!(editor.node_fade_alpha("b", Instant::now()) < 1.0);
+    }
+
+    #[test]
+    fn ensure_visible_pans_a_below_view_node_into_view() {
+        let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(800.0, 600.0));
+        let below = Rect::from_min_size(Pos2::new(100.0, 650.0), Vec2::new(180.0, 70.0));
+        let delta = ensure_visible_delta(canvas, below, 24.0);
+        assert!(delta.y < 0.0, "content should move up: {delta:?}");
+        assert_eq!(delta.y, 576.0 - 720.0);
+        assert_eq!(delta.x, 0.0);
+    }
+
     fn zoom_percentage_uses_one_graph_unit_per_point_as_100() {
         assert_eq!(zoom_percent(1.0), 100);
         assert_eq!(zoom_percent(0.5), 50);

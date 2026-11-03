@@ -1159,7 +1159,7 @@ impl GpuViewport {
         let mut scene = GpuScene::with_palette(palette);
         let _body = PaletteIndex(0);
         let edge = PaletteIndex(1);
-        let edge_width = 2.2;
+        let edge_width = 3.2;
         let triangle_edge = PaletteIndex(3);
         let face_normal = PaletteIndex(4);
         let mut object_vertices = Vec::new();
@@ -1198,10 +1198,14 @@ impl GpuViewport {
                 }
             }
             if self.view.edges {
-                for edge_points in &mesh.edges {
-                    for pair in edge_points.windows(2) {
+                for display_edge in &display.edges {
+                    for (index, pair) in display_edge.points.windows(2).enumerate() {
                         let [a, b] = [pair[0], pair[1]];
-                        scene.line(a.to_f32(), b.to_f32(), edge, edge_width, false);
+                        let normals = [
+                            display_edge.normals.get(index).copied().unwrap_or([0.0; 3]),
+                            display_edge.normals.get(index + 1).copied().unwrap_or([0.0; 3]),
+                        ];
+                        scene.lifted_line(a.to_f32(), b.to_f32(), edge, edge_width, normals);
                     }
                 }
             }

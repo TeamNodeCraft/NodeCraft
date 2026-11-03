@@ -13,6 +13,10 @@ use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
 use crate::gpu_viewport::GpuViewport;
 
+fn center_distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ViewSettings {
@@ -82,6 +86,16 @@ impl SelectionMode {
     }
 }
 
+fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let length_sq = ab.length_sq();
+    if length_sq <= f32::EPSILON {
+        return point.distance(a);
+    }
+    let t = ((point - a).dot(ab) / length_sq).clamp(0.0, 1.0);
+    point.distance(a + ab * t)
+}
+
 fn raycast_face(
     mesh: &solidcraft_geom::Mesh,
     face_ids: &[String],
@@ -130,6 +144,12 @@ fn raycast_face(
     best_face
 }
 
+#[derive(Clone, Debug)]
+pub struct EdgePick {
+    pub id: String,
+    pub center: [f64; 3],
+}
+
 pub struct Viewport {
     pub camera: Camera,
     chrome_visible: bool,
@@ -145,6 +165,14 @@ pub struct Viewport {
     pub chrome_right_inset: f32,
     selection_mode: SelectionMode,
     face_picks: Vec<String>,
+    edge_picks: Vec<EdgePick>,
+    /// Picking is disabled while the viewport still shows a different target than
+    /// the selection session's input geometry.
+    edge_picking_enabled: bool,
+    /// A click in a topology mode landed on empty space.
+    selection_miss: bool,
+    hovered_edge: Option<String>,
+    selected_edges: std::collections::BTreeSet<String>,
     dock_rect: Option<egui::Rect>,
     transform_gizmo: Option<Gizmo>,
     gizmo_state: GizmoState,
@@ -167,6 +195,11 @@ impl Default for Viewport {
             chrome_right_inset: 0.0,
             selection_mode: SelectionMode::Object,
             face_picks: Vec::new(),
+            edge_picks: Vec::new(),
+            edge_picking_enabled: false,
+            selection_miss: false,
+            hovered_edge: None,
+            selected_edges: std::collections::BTreeSet::new(),
             dock_rect: None,
             transform_gizmo: None,
             gizmo_state: GizmoState::default(),
@@ -226,7 +259,78 @@ impl Viewport {
         self.update_mesh(mesh);
     }
 
+    pub fn set_comparison_mesh(&mut self, before: &NodeMesh, after: &NodeMesh) {
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+        self.display = Some(crate::adapter::display_mesh_with_comparison(after, before));
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+        }
+        self.dirty = true;
+    }
+
+    pub fn set_source_comparison_mesh(&mut self, before: &NodeMesh, after: &NodeMesh) {
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+        self.display = Some(crate::adapter::display_mesh_with_comparison_on(
+            before, after, before,
+        ));
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+        }
+        self.dirty = true;
+    }
+
+    pub fn set_exact_comparison_mesh(
+        &mut self,
+        base: &NodeMesh,
+        added: &NodeMesh,
+        removed: &NodeMesh,
+    ) {
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+        self.display = Some(crate::adapter::display_mesh_with_difference(base, added, removed));
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+        }
+        self.dirty = true;
+    }
+
+    pub fn set_selection_comparison_mesh(
+        &mut self,
+        base: &NodeMesh,
+        selection_source: &NodeMesh,
+        added: &NodeMesh,
+        removed: &NodeMesh,
+    ) {
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+        let mut display = crate::adapter::display_mesh_with_difference(base, added, removed);
+        // The selection display is originalIn -> difference overlay -> originalIn.edges.
+        // Replace the result body's edge set so no generated edge can be drawn or picked.
+        display.edges = crate::adapter::display_mesh(selection_source).edges;
+        display.selection_edges = None;
+        self.display = Some(display);
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+        }
+        self.dirty = true;
+    }
+
     fn update_mesh(&mut self, mesh: Option<&NodeMesh>) {
+        // Edge ids belong to the previous display target. Keeping the highlight
+        // across an evaluation makes unrelated edges look selected on the next
+        // node/document.
+        self.selected_edges.clear();
+        self.hovered_edge = None;
         self.display = mesh.map(adapter::display_mesh);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
@@ -259,8 +363,84 @@ impl Viewport {
         std::mem::take(&mut self.face_picks)
     }
 
+    pub fn take_edge_picks(&mut self) -> Vec<EdgePick> {
+        std::mem::take(&mut self.edge_picks)
+    }
+
+    pub fn selected_edges(&self) -> &std::collections::BTreeSet<String> {
+        &self.selected_edges
+    }
+
     pub fn set_selection_mode(&mut self, mode: SelectionMode) {
+        if mode != self.selection_mode {
+            self.selected_edges.clear();
+            self.hovered_edge = None;
+        }
         self.selection_mode = mode;
+    }
+
+    pub fn clear_edge_selection(&mut self) {
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+    }
+
+    pub fn set_selected_edges(&mut self, ids: impl IntoIterator<Item = String>) {
+        self.selected_edges = ids.into_iter().collect();
+        self.hovered_edge = None;
+    }
+
+    pub fn edge_picking_enabled(&self) -> bool {
+        self.edge_picking_enabled
+    }
+
+    pub fn take_selection_miss(&mut self) -> bool {
+        std::mem::take(&mut self.selection_miss)
+    }
+
+    pub fn set_edge_picking_enabled(&mut self, enabled: bool) {
+        self.edge_picking_enabled = enabled;
+        if !enabled {
+            self.edge_picks.clear();
+        }
+    }
+
+    pub fn select_edges_by_centers(&mut self, centers: &[[f64; 3]]) {
+        let Some(display) = self.display.as_ref() else {
+            self.selected_edges.clear();
+            return;
+        };
+        self.selected_edges = centers
+            .iter()
+            .filter_map(|center| {
+                self.topology_edges(display)
+                    .iter()
+                    .min_by(|a, b| {
+                        center_distance(&a.midpoint, center)
+                            .total_cmp(&center_distance(&b.midpoint, center))
+                    })
+                    .filter(|edge| center_distance(&edge.midpoint, center) <= 1.0e-4)
+                    .map(|edge| edge.id.clone())
+            })
+            .collect();
+    }
+
+    fn topology_edges<'a>(&'a self, display: &'a DisplayMesh) -> &'a [crate::adapter::DisplayEdge] {
+        display
+            .selection_edges
+            .as_deref()
+            .unwrap_or(display.edges.as_slice())
+    }
+
+    pub fn edge_ids(&self) -> std::collections::HashSet<String> {
+        self.display
+            .as_ref()
+            .map(|display| {
+                self.topology_edges(display)
+                    .iter()
+                    .map(|edge| edge.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn fit(&mut self) {
@@ -506,8 +686,13 @@ impl Viewport {
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, frame));
             if self.chrome_visible {
                 self.axis_gizmo(ui, rect, visible);
-                self.selection_dock(ui, rect, visible);
+                // Top selection dock intentionally disabled for the inspector-driven
+                // selection experiment. Keep `selection_dock` for a future opt-in.
                 self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
+                self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+                self.draw_comparison_overlay(ui, rect);
+                self.draw_edge_highlights(ui, rect);
+                self.draw_comparison_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
             return;
@@ -531,13 +716,187 @@ impl Viewport {
         }
         if self.chrome_visible {
             self.axis_gizmo(ui, rect, visible);
-            self.selection_dock(ui, rect, visible);
+            // Top selection dock intentionally disabled; see inspector edit action.
             self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
+            self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+            self.draw_comparison_overlay(ui, rect);
+            self.draw_edge_highlights(ui, rect);
+            self.draw_comparison_edges(ui, rect);
             self.draw_transform_gizmo(ui, rect);
         }
     }
 
+    /// Update the hovered edge and toggle the selected edge on click.
+    fn update_edge_selection(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        clicked: bool,
+        blocked: bool,
+    ) {
+        let pointer = ui.ctx().pointer_hover_pos();
+        if blocked
+            || self.dock_rect.is_some_and(|dock| pointer.is_some_and(|pos| dock.contains(pos)))
+            || !pointer.is_some_and(|pos| viewport.contains(pos))
+            || self.selection_mode != SelectionMode::Edge
+        {
+            if self.hovered_edge.take().is_some() { ui.ctx().request_repaint(); }
+            return;
+        }
+        let Some(pointer) = pointer else { return };
+        let nearest = self.nearest_edge(pointer, viewport, 7.0);
+        let nearest_id = nearest.as_ref().map(|(id, _)| id.clone());
+        if nearest_id != self.hovered_edge {
+            self.hovered_edge = nearest_id;
+            ui.ctx().request_repaint();
+        }
+        if clicked {
+            let Some((edge_id, center)) = nearest else {
+                if !self.pointer_hits_body(pointer, viewport) {
+                    self.selection_miss = true;
+                    ui.ctx().request_repaint();
+                }
+                return;
+            };
+            if !self.selected_edges.remove(&edge_id) {
+                self.selected_edges.insert(edge_id.clone());
+            }
+            self.edge_picks.push(EdgePick { id: edge_id, center });
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn nearest_edge(&self, pointer: egui::Pos2, viewport: egui::Rect, threshold: f32) -> Option<(String, [f64; 3])> {
+        if !self.edge_picking_enabled {
+            return None;
+        }
+        let display = self.display.as_ref()?;
+        let mut best = threshold * threshold;
+        let mut nearest = None;
+        for edge in &display.edges {
+            // Preview treatment edges have no exact BRep id and cannot be used as
+            // feature selections.
+            if edge.id.starts_with("preview-edge:") {
+                continue;
+            }
+            let points: Vec<egui::Pos2> = edge
+                .points
+                .iter()
+                .filter_map(|point| self.project_to_viewport(*point, viewport))
+                .collect();
+            for pair in points.windows(2) {
+                let distance = distance_to_segment(pointer, pair[0], pair[1]);
+                if distance <= best {
+                    best = distance;
+                    nearest = Some((edge.id.clone(), edge.midpoint));
+                }
+            }
+        }
+        nearest
+    }
+
+    fn project_to_viewport(&self, point: solidcraft_geom::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+        let display = self.display.as_ref()?;
+        let width = f64::from(viewport.width()).max(1.0);
+        let height = f64::from(viewport.height()).max(1.0);
+        let (x, y, _) = self.camera.to_screen(point, width, height, display.radius)?;
+        Some(egui::pos2(
+            viewport.min.x + x as f32 + self.lens_shift[0] * viewport.width() * 0.5,
+            viewport.min.y + y as f32 - self.lens_shift[1] * viewport.height() * 0.5,
+        ))
+    }
+
+    fn draw_comparison_overlay(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(display) = self.display.as_ref() else { return };
+        let Some(comparison) = &display.comparison else { return };
+        let theme = crate::theme::get();
+        let painter = ui.painter().with_clip_rect(viewport);
+        let mut draw_layer = |triangles: &[([solidcraft_geom::Vec3; 3], [solidcraft_geom::Vec3; 3])], color: egui::Color32| {
+            for (points, _) in triangles {
+                let projected: Vec<egui::Pos2> = points
+                    .iter()
+                    .filter_map(|point| self.project_to_viewport(*point, viewport))
+                    .collect();
+                if projected.len() != 3 { continue; }
+                let mut mesh = egui::Mesh::default();
+                for point in projected {
+                    mesh.colored_vertex(point, color);
+                }
+                mesh.add_triangle(0, 1, 2);
+                painter.add(egui::Shape::mesh(mesh));
+            }
+        };
+        // Display-only comparison layer. It is painted above the shaded result,
+        // never enters the display mesh, and therefore never feeds face/edge/vertex
+        // picking. 50% alpha keeps the result readable underneath.
+        const OVERLAY_ALPHA: u8 = 38;
+        let add = theme.preview_add;
+        draw_layer(&comparison.added, egui::Color32::from_rgba_unmultiplied(add[0], add[1], add[2], OVERLAY_ALPHA));
+        let cut = theme.preview_cut;
+        draw_layer(&comparison.removed, egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], OVERLAY_ALPHA));
+    }
+
+    fn draw_comparison_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(display) = self.display.as_ref() else { return };
+        let Some(comparison) = &display.comparison else { return };
+        if comparison.edges.is_empty() { return; }
+        let theme = crate::theme::get();
+        let cut = theme.preview_cut;
+        let painter = ui.painter().with_clip_rect(viewport);
+        let edge_colour = egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], 128);
+        for edge in &comparison.edges {
+            let points: Vec<egui::Pos2> = edge
+                .points
+                .iter()
+                .filter_map(|point| self.project_to_viewport(*point, viewport))
+                .collect();
+            for pair in points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(2.0, edge_colour));
+            }
+        }
+    }
+
+    /// Draw body-scoped edge ids over the rendered viewport.
+    fn draw_edge_highlights(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(display) = self.display.as_ref() else { return };
+        let theme = crate::theme::get();
+        let painter = ui.painter().with_clip_rect(viewport);
+        let draw = |id: &str, colour: egui::Color32, width: f32| {
+            let Some(edge) = display.edges.iter().find(|edge| edge.id == id) else { return };
+            let points: Vec<egui::Pos2> = edge
+                .points
+                .iter()
+                .filter_map(|point| self.project_to_viewport(*point, viewport))
+                .collect();
+            for pair in points.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, colour));
+            }
+            for point in points {
+                painter.circle_filled(point, width * 0.7, colour);
+            }
+        };
+        for id in &self.selected_edges {
+            draw(id, theme.color(theme.accent), 3.0);
+        }
+        if self.selection_mode == SelectionMode::Edge
+            && let Some(id) = &self.hovered_edge
+            && !self.selected_edges.contains(id)
+        {
+            draw(id, theme.color(theme.highlight), 2.5);
+        }
+    }
+
     /// Pick the nearest display-mesh face under the pointer in face mode.
+    fn pointer_hits_body(&self, pointer: egui::Pos2, viewport: egui::Rect) -> bool {
+        let Some(display) = self.display.as_ref() else { return false };
+        let width = f64::from(viewport.width()).max(1.0);
+        let height = f64::from(viewport.height()).max(1.0);
+        let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
+        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+        let (origin, direction) = self.camera.ray(x, y, width, height);
+        raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction).is_some()
+    }
+
     fn pick_face(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, clicked: bool, blocked: bool) {
         if !clicked || blocked || self.selection_mode != SelectionMode::Face {
             return;
@@ -553,6 +912,8 @@ impl Viewport {
         let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
         let (origin, direction) = self.camera.ray(x, y, width, height);
         let Some(face) = raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction) else {
+            self.selection_miss = true;
+            ui.ctx().request_repaint();
             return;
         };
         self.face_picks.push(face);
@@ -620,7 +981,7 @@ impl Viewport {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             if response.clicked() {
-                self.selection_mode = if active { SelectionMode::Object } else { mode };
+                self.set_selection_mode(if active { SelectionMode::Object } else { mode });
                 ui.ctx().request_repaint();
             }
             let colour = if active {
@@ -1109,6 +1470,25 @@ mod tests {
         assert!(!view.any_extra());
         view.zebra = true;
         assert!(view.any_extra());
+    }
+
+    #[test]
+    fn changing_the_display_mesh_clears_edge_highlights() {
+        let mut viewport = Viewport::default();
+        viewport.selected_edges.insert("edge:0".into());
+        viewport.hovered_edge = Some("edge:1".into());
+        viewport.set_mesh(Some(&NodeMesh::default()));
+        assert!(viewport.selected_edges.is_empty());
+        assert!(viewport.hovered_edge.is_none());
+    }
+
+    #[test]
+    fn edge_pick_distance_is_screen_space() {
+        let a = egui::pos2(0.0, 0.0);
+        let b = egui::pos2(20.0, 0.0);
+        assert!(distance_to_segment(egui::pos2(10.0, 3.0), a, b) - 3.0 < 1.0e-6);
+        assert!(distance_to_segment(egui::pos2(-5.0, 0.0), a, b) - 5.0 < 1.0e-6);
+        assert!(distance_to_segment(egui::pos2(25.0, 0.0), a, b) - 5.0 < 1.0e-6);
     }
 
     #[test]

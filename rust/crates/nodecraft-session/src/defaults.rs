@@ -16,6 +16,13 @@ pub fn canonicalize_document(document: &mut GraphDocument) {
 /// node's mode/space/identity and are needed by the UI and content hash.
 pub fn canonicalize_node(node: &mut GraphNode) {
     if !node.values.is_object() { node.values = json!({}); }
+    // Older documents stored fillets as chamfer nodes with mode: "fillet".
+    if node.node_type == "chamfer"
+        && node.values.get("mode").and_then(serde_json::Value::as_str) == Some("fillet")
+    {
+        node.node_type = "fillet".to_owned();
+        node.values.as_object_mut().map(|values| values.remove("mode"));
+    }
     match node.node_type.as_str() {
         "primitive" => {
             if node.values.get("primitiveType").is_none() { node.values["primitiveType"] = json!("box"); }
@@ -31,6 +38,8 @@ pub fn canonicalize_node(node: &mut GraphNode) {
         "chamfer" => {
             if node.values.get("mode").is_none() { node.values["mode"] = json!("chamfer"); }
             if node.values.get("chamferType").is_none() { node.values["chamferType"] = json!("equal"); }
+        }
+        "fillet" => {
             if node.values.get("continuity").is_none() { node.values["continuity"] = json!(""); }
         }
         "surfaceloft" => {
