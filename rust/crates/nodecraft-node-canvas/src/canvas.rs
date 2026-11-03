@@ -212,6 +212,7 @@ pub struct NodeEditor {
     known_nodes: HashSet<String>,
     fade_document: Option<String>,
     glow_pulse: Option<Instant>,
+    error_nodes: HashSet<String>,
     last_selected: HashSet<String>,
     activity: HashMap<String, ActivityGlow>,
     activity_fade_in: Duration,
@@ -257,6 +258,7 @@ impl Default for NodeEditor {
             known_nodes: HashSet::new(),
             fade_document: None,
             glow_pulse: None,
+            error_nodes: HashSet::new(),
             last_selected: HashSet::new(),
             activity: HashMap::new(),
             activity_fade_in: Duration::from_millis(40),
@@ -674,6 +676,12 @@ impl NodeEditor {
         Some(preview_document)
     }
 
+    pub fn set_error_nodes(&mut self, nodes: HashSet<String>) {
+        if self.error_nodes != nodes {
+            self.error_nodes = nodes;
+        }
+    }
+
     /// Restart the selected-node glow envelope. Called when evaluation
     /// completes so the pulse follows the result rather than the click.
     pub fn pulse_glow(&mut self) {
@@ -770,8 +778,9 @@ impl NodeEditor {
                 .map(|node| (node.id.as_str(), node))
                 .collect();
             let radius = glow_radius(self.zoom);
-            let accent = self.theme.f32(self.theme.accent);
+            let accent = self.theme.f32(self.theme.node_activity);
             for (id, activity) in &self.activity {
+                if self.error_nodes.contains(id) { continue; }
                 let Some(node) = nodes.get(id.as_str()) else { continue };
                 let strength = activity_strength(
                     activity.started,
@@ -788,10 +797,20 @@ impl NodeEditor {
             // Selection glow is dynamic too: zooming changes its screen-space
             // radius but must not rebuild every card's shape instances.
             for id in selected_nodes {
+                if self.error_nodes.contains(id) { continue; }
                 if let Some(node) = nodes.get(id.as_str()) {
                     shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, radius);
                 }
             }
+        }
+        if !self.error_nodes.is_empty() {
+            let radius = glow_radius(self.zoom);
+            for id in &self.error_nodes {
+                if let Some(node) = document.nodes.iter().find(|node| &node.id == id) {
+                    shape_glow(&mut activity_glows, graph_rect(node), self.theme.f32(self.theme.node_error), 4.0, 1.0, radius * 1.25);
+                }
+            }
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
 
         self.sync_z_order(document);

@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use nodecraft_session::store::DocumentStore;
 use nodecraft_session::{Command, GraphConnection, GraphDocument, GraphNode, Session};
 
+const SOLIDCORE_GIT_HASH: &str = match option_env!("SOLIDCORE_GIT_HASH") {
+    Some(hash) => hash,
+    None => "unknown",
+};
+
 const BUILD_GIT_HASH: &str = match option_env!("NODECRAFT_GIT_HASH") {
     Some(hash) => hash,
     None => "unknown",
@@ -437,6 +442,54 @@ impl SettingsTab {
     }
 }
 
+fn reframe_mesh_place(mesh: &Mesh, offset: [f64; 3], rotation: [f64; 3]) -> Mesh {
+    let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
+    let rotate = |point: [f64; 3]| {
+        let (mut x, mut y, mut z) = (point[0], point[1], point[2]);
+        let (sx, cx) = rx.sin_cos();
+        let (sy, cy) = ry.sin_cos();
+        let (sz, cz) = rz.sin_cos();
+        (y, z) = (y * cx - z * sx, y * sx + z * cx);
+        (x, z) = (x * cy + z * sy, -x * sy + z * cy);
+        (x, y) = (x * cz - y * sz, x * sz + y * cz);
+        [x, y, z]
+    };
+    let mut out = mesh.clone();
+    for vertex in &mut out.vertices {
+        let point = rotate([f64::from(vertex[0]), f64::from(vertex[1]), f64::from(vertex[2])]);
+        vertex[0] = (point[0] + offset[0]) as f32;
+        vertex[1] = (point[1] + offset[1]) as f32;
+        vertex[2] = (point[2] + offset[2]) as f32;
+    }
+    for normal in &mut out.normals {
+        let rotated = rotate([f64::from(normal[0]), f64::from(normal[1]), f64::from(normal[2])]);
+        *normal = [rotated[0] as f32, rotated[1] as f32, rotated[2] as f32];
+    }
+    out
+}
+
+fn reframe_mesh_mirror(mesh: &Mesh, plane: &str, offset: f64) -> Mesh {
+    let mut out = mesh.clone();
+    for vertex in &mut out.vertices {
+        match plane {
+            "xz" => vertex[1] = (2.0 * offset - f64::from(vertex[1])) as f32,
+            "yz" => vertex[0] = (2.0 * offset - f64::from(vertex[0])) as f32,
+            _ => vertex[2] = (2.0 * offset - f64::from(vertex[2])) as f32,
+        }
+    }
+    for normal in &mut out.normals {
+        match plane {
+            "xz" => normal[1] = -normal[1],
+            "yz" => normal[0] = -normal[0],
+            _ => normal[2] = -normal[2],
+        }
+    }
+    for face in &mut out.faces {
+        face.swap(1, 2);
+    }
+    out
+}
+
 fn target_closure(document: &GraphDocument, target: &str) -> HashSet<String> {
     let mut closure = HashSet::new();
     let mut stack = vec![target.to_owned()];
@@ -489,12 +542,13 @@ pub struct NodeCraftApp {
     eval_target: Option<String>,
     comparison_pair: Option<(String, String)>,
     difference_stats: Option<(usize, usize)>,
+    node_errors: HashSet<String>,
     difference_error: Option<String>,
     feature_overlay: bool,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
-    last_eval_key: Option<(String, u64, Option<String>, Option<(String, String)>)>,
+    last_eval_key: Option<(String, u64, Option<String>, Option<(String, String)>, bool)>,
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
@@ -629,6 +683,7 @@ impl NodeCraftApp {
             eval_target: None,
             comparison_pair: None,
             difference_stats: None,
+            node_errors: HashSet::new(),
             difference_error: None,
             feature_overlay: settings.feature_overlay,
             eval_worker: EvalWorker::new(),
@@ -899,6 +954,36 @@ impl NodeCraftApp {
         self.evaluate();
     }
 
+    fn open_linked_part_document(&mut self, node_id: &str) {
+        let Some(session) = &self.session else { return };
+        let Some(node) = session.document().nodes.iter().find(|node| node.id == node_id) else { return };
+        let path = node.values.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        if path.is_empty() {
+            self.error = Some("Linked part has no .nodecraft path".to_owned());
+            return;
+        }
+        let path = normalize_document_path(PathBuf::from(path));
+        let document_id = document_id_for_path(&path);
+        if let Some(index) = self.tabs.iter().position(|tab| tab.document_id == document_id) {
+            self.activate_tab(index);
+            return;
+        }
+        match nodecraft_session::store::load(&path) {
+            Ok(document) => {
+                self.remember_document(&path);
+                self.open_session(
+                    Session::new(document),
+                    Some(path.clone()),
+                    format!("Opened linked document {}", path.display()),
+                );
+            }
+            Err(error) => {
+                self.error = Some(format!("Linked document: {error}"));
+                self.status = "Linked document failed to load".to_owned();
+            }
+        }
+    }
+
     fn open_session(&mut self, session: Session, path: Option<PathBuf>, status: String) {
         self.save_active_tab();
         self.last_eval_key = None;
@@ -963,6 +1048,9 @@ impl NodeCraftApp {
         self.save_active_tab();
         self.active_tab = index;
         self.restore_active_tab();
+        // Linked documents are evaluated from the open-tab set. Re-evaluate when
+        // activating a tab so edits in a shared subpatch are reflected here.
+        self.evaluate();
     }
 
     fn remap_selection(&mut self) {
@@ -1006,7 +1094,7 @@ impl NodeCraftApp {
         };
         self.viewer_breakpoint = Some(exporter.clone());
         self.status = format!("Exporting via {exporter}…");
-        self.evaluate();
+        self.evaluate_with_cache_policy(false, true);
     }
 
     fn non_export_target(document: &GraphDocument, start: Option<&str>) -> Option<String> {
@@ -1047,7 +1135,7 @@ impl NodeCraftApp {
         self.viewer_breakpoint = Some(target.clone());
         self.error = None;
         self.status = format!("Re-evaluating {target}…");
-        self.evaluate_with_cache_policy(true);
+        self.evaluate_with_cache_policy(true, false);
     }
 
     /// The primary geometry input a newly-added node should use when inserted
@@ -1657,17 +1745,19 @@ impl NodeCraftApp {
         selected: &str,
     ) -> Option<(String, String)> {
         let node = document.nodes.iter().find(|node| node.id == selected)?;
-        let before = Self::single_geometry_input(document, node)?;
-        if let Some((field, _)) = Self::selection_spec(&node.node_type) {
-            let has_selection = node
-                .values
-                .get(field)
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|items| !items.is_empty());
-            if !has_selection {
-                return None;
-            }
+        // Comparison is an opt-in capability, not a universal selection effect.
+        // Only nodes that own a topology-selection field and currently have a
+        // non-empty selection can produce a meaningful before/after difference.
+        let (field, _) = Self::selection_spec(&node.node_type)?;
+        let has_selection = node
+            .values
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        if !has_selection {
+            return None;
         }
+        let before = Self::single_geometry_input(document, node)?;
         Some((before, node.id.clone()))
     }
 
@@ -1712,6 +1802,79 @@ impl NodeCraftApp {
         self.sync_comparison_target();
         self.evaluate();
         self.egui_ctx.request_repaint();
+    }
+
+    /// Transform nodes between the edited feature and the viewed breakpoint. The
+    /// engine graph stays canonical; this only re-frames comparison display data.
+    fn view_transform_chain(&self, selected: &str) -> Vec<GraphNode> {
+        let Some(session) = &self.session else { return Vec::new(); };
+        let document = session.document();
+        let Some(breakpoint) = engine_bridge::target_for(document, self.viewer_breakpoint.as_deref()) else {
+            return Vec::new();
+        };
+        if breakpoint == selected { return Vec::new(); }
+        fn find_path(
+            document: &GraphDocument,
+            current: &str,
+            selected: &str,
+            visited: &mut HashSet<String>,
+            path: &mut Vec<String>,
+        ) -> bool {
+            if !visited.insert(current.to_owned()) { return false; }
+            path.push(current.to_owned());
+            if current == selected { return true; }
+            for link in document.connections.iter().filter(|link| link.to == current) {
+                if find_path(document, &link.from, selected, visited, path) { return true; }
+            }
+            path.pop();
+            false
+        }
+        let mut path = Vec::new();
+        if !find_path(document, &breakpoint, selected, &mut HashSet::new(), &mut path) {
+            return Vec::new();
+        }
+        // path is breakpoint → selected; downstream order is selected → breakpoint.
+        path.pop();
+        let mut nodes: Vec<GraphNode> = path
+            .into_iter()
+            .rev()
+            .filter_map(|id| document.nodes.iter().find(|node| node.id == id).cloned())
+            .collect();
+        if nodes.iter().any(|node| !matches!(node.node_type.as_str(), "translate" | "mirror")) {
+            return Vec::new();
+        }
+        nodes.reverse();
+        nodes
+    }
+
+    fn reframe_comparison(&self, selected: &str, mesh: &Mesh) -> Mesh {
+        let chain = self.view_transform_chain(selected);
+        if chain.is_empty() { return mesh.clone(); }
+        let mut transformed = mesh.clone();
+        for node in chain.iter().rev() {
+            transformed = match node.node_type.as_str() {
+                "translate" => {
+                    let offset = [
+                        node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                        node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                        node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                    ];
+                    let rotation = [
+                        node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                        node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                        node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                    ];
+                    reframe_mesh_place(&transformed, offset, rotation)
+                }
+                "mirror" => {
+                    let plane = node.values.get("plane").and_then(serde_json::Value::as_str).unwrap_or("xy");
+                    let offset = node.values.get("offset").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+                    reframe_mesh_mirror(&transformed, plane, offset)
+                }
+                _ => transformed,
+            };
+        }
+        transformed
     }
 
     fn active_selection_field(&self) -> Option<&'static str> {
@@ -1851,10 +2014,10 @@ impl NodeCraftApp {
     }
 
     fn evaluate(&mut self) {
-        self.evaluate_with_cache_policy(false);
+        self.evaluate_with_cache_policy(false, false);
     }
 
-    fn evaluate_with_cache_policy(&mut self, clear_cache: bool) {
+    fn evaluate_with_cache_policy(&mut self, clear_cache: bool, run_exporters: bool) {
         self.auto_eval_due = None;
         let Some(session) = &self.session else {
             self.status = "No document".to_owned();
@@ -1902,6 +2065,7 @@ impl NodeCraftApp {
             session.revision(),
             evaluation_selection.clone(),
             comparison.clone(),
+            run_exporters,
         );
         if !clear_cache && self.last_eval_key.as_ref() == Some(&key) {
             return;
@@ -1932,6 +2096,7 @@ impl NodeCraftApp {
             selected: evaluation_selection,
             comparison,
             clear_cache,
+            run_exporters,
         });
         self.egui_ctx.request_repaint();
     }
@@ -1970,6 +2135,7 @@ impl NodeCraftApp {
         let mut theme_rename_focus = self.theme_rename_focus;
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
+        let mut show_view_matrix = self.viewport.show_view_matrix();
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
         let mut close = false;
@@ -2284,9 +2450,14 @@ impl NodeCraftApp {
                     SettingsTab::Diagnostics => {
                         content.heading("Diagnostics");
                         content.monospace(format!("NodeCraft {}", env!("CARGO_PKG_VERSION")));
-                        content.monospace(format!("GIT: {BUILD_GIT_HASH}"));
+                        content.monospace(format!("NodeCraft Git Hash: {BUILD_GIT_HASH}"));
+                        content.monospace(format!("SolidCore Git Hash: {SOLIDCORE_GIT_HASH}"));
                         #[cfg(feature = "gpu-viewport")]
                         content.monospace(format!("MSAA: {}x", crate::gpu_viewport::msaa_samples()));
+                        content.checkbox(
+                            &mut show_view_matrix,
+                            "Show view matrix / camera debug",
+                        );
                         content.add_space(8.0);
                         content.heading("Node activity glow");
                         content.small(
@@ -2333,6 +2504,7 @@ impl NodeCraftApp {
         if view != self.viewport.view() {
             self.viewport.set_view(view);
         }
+        self.viewport.set_show_view_matrix(show_view_matrix);
         if feature_overlay != self.feature_overlay {
             self.feature_overlay = feature_overlay;
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
@@ -2424,41 +2596,45 @@ impl NodeCraftApp {
             self.cache_hits = evaluation.cache_hits;
             self.cache_misses = evaluation.cache_misses;
             self.error = evaluation.error;
+            self.node_errors = evaluation.node_errors.keys().cloned().collect();
+            self.node_editor.set_error_nodes(self.node_errors.clone());
             let had_mesh = self.mesh.is_some();
+            let previous_target = self.eval_target.clone();
+            let same_target = previous_target.as_deref() == Some(evaluation.target.as_str());
             self.eval_target = Some(evaluation.target.clone());
             self.mesh = evaluation.mesh;
+            // Preserve the camera for updates of the same viewed target (slider/edit),
+            // but fit when the breakpoint/target changes so a sphere added to a large
+            // graph is framed at its own position instead of the old assembly view.
             let preserve = std::mem::take(&mut self.preserve_view_for_next_mesh)
-                || (self.camera_initialized && had_mesh);
+                || (self.camera_initialized && had_mesh && same_target);
             self.difference_stats = evaluation
                 .difference
                 .as_ref()
                 .map(|(added, removed)| (added.faces.len(), removed.faces.len()));
             self.difference_error = evaluation.difference_error.clone();
             if let Some((before, after)) = &evaluation.comparison {
-                let base = if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                    after
-                } else {
-                    before
-                };
+                let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
+                let before = self.reframe_comparison(&selected, before);
+                let after = self.reframe_comparison(&selected, after);
                 if let Some((added, removed)) = &evaluation.difference {
+                    let added = self.reframe_comparison(&selected, added);
+                    let removed = self.reframe_comparison(&selected, removed);
                     if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                        self.viewport
-                            .set_exact_comparison_mesh(after, added, removed);
+                        self.viewport.set_exact_comparison_mesh(&after, &added, &removed);
                     } else {
-                        self.viewport
-                            .set_selection_comparison_mesh(after, before, added, removed);
+                        self.viewport.set_selection_comparison_mesh(&after, &before, &added, &removed);
                     }
                 } else {
                     // Exact comparison unavailable: keep the original-mesh ghost.
                     let empty = Mesh::default();
                     if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                        self.viewport.set_exact_comparison_mesh(after, &empty, before);
+                        self.viewport.set_exact_comparison_mesh(&after, &empty, &before);
                     } else {
-                        self.viewport
-                            .set_selection_comparison_mesh(after, before, &empty, before);
+                        self.viewport.set_selection_comparison_mesh(&after, &before, &empty, &before);
                     }
                 }
-                if !self.camera_initialized {
+                if !self.camera_initialized || !same_target {
                     self.viewport.fit();
                     self.camera_initialized = true;
                 }
@@ -2648,6 +2824,27 @@ impl NodeCraftApp {
                     } else {
                         "{\"ok\":false}".to_owned()
                     }
+                }
+                control_server::Command::ViewNode(id) => {
+                    self.viewer_breakpoint = Some(id);
+                    self.evaluate();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::Home => {
+                    self.viewport.home();
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::Orbit { dx, dy } => {
+                    self.viewport.camera.orbit(dx, dy);
+                    self.viewport.mark_dirty();
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::Capture(path) => {
+                    self.screenshot = Some((PathBuf::from(path), 0));
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
                 }
                 control_server::Command::State => {
                     if let Some(session) = &self.session {
@@ -3915,6 +4112,25 @@ impl eframe::App for NodeCraftApp {
                     };
                     changed |= self.apply_commands(&[command], Some(&coalesce));
                 }
+                if output.choose_linked_part {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("NodeCraft graph", &["nodecraft"])
+                        .pick_file()
+                    {
+                        let command = Command::SetValue {
+                            node: node.id.clone(),
+                            field: "path".to_owned(),
+                            value: serde_json::Value::String(path.display().to_string()),
+                        };
+                        changed |= self.apply_commands(&[command], Some("linked-part-path"));
+                        if changed {
+                            self.open_linked_part_document(&node.id);
+                        }
+                    }
+                }
+                if output.open_linked_part {
+                    self.open_linked_part_document(&node.id);
+                }
                 if output.choose_file {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("STEP model", &["step", "stp"])
@@ -4158,6 +4374,7 @@ struct EvalJob {
     selected: Option<String>,
     comparison: Option<(String, String)>,
     clear_cache: bool,
+    run_exporters: bool,
 }
 
 struct EvalWorker {
@@ -4172,12 +4389,17 @@ impl EvalWorker {
         let (result_tx, result_rx) = channel();
         let (progress_tx, progress_rx) = channel();
         std::thread::spawn(move || {
-            let mut cache = EngineCache::new();
+            // Cache ownership follows the tab/document, not the worker. This keeps
+            // per-document dirty/cache lifetimes aligned and prevents one tab from
+            // evicting or reusing another tab's entries.
+            let mut caches: std::collections::HashMap<u64, EngineCache> =
+                std::collections::HashMap::new();
             while let Ok(mut job) = job_rx.recv() {
                 // Only the newest request matters; discard queued stale work.
                 while let Ok(next) = job_rx.try_recv() {
                     job = next;
                 }
+                let mut cache = caches.remove(&job.tab_id).unwrap_or_default();
                 if job.clear_cache {
                     // Re-evaluate is an explicit request for a fresh result: do
                     // not let mesh/BRep/failure/import entries answer it.
@@ -4196,6 +4418,7 @@ impl EvalWorker {
                         &job.linked_documents,
                         Some(&mut on_progress),
                         job.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
+                        job.run_exporters,
                     )
                 }));
                 let evaluation = match outcome {
@@ -4213,6 +4436,7 @@ impl EvalWorker {
                             comparison: None,
                             difference: None,
                             difference_error: None,
+                            node_errors: Default::default(),
                             error: Some("Engine panicked while evaluating this target".into()),
                             elapsed_ms: 0.0,
                             cache_hits: 0,
@@ -4220,6 +4444,12 @@ impl EvalWorker {
                         })
                     }
                 };
+                caches.insert(job.tab_id, cache);
+                if caches.len() > 16
+                    && let Some(oldest) = caches.keys().next().copied()
+                {
+                    caches.remove(&oldest);
+                }
                 if let Some(evaluation) = evaluation {
                     if result_tx.send((job.id, job.tab_id, evaluation)).is_err() {
                         break;
@@ -4471,6 +4701,8 @@ fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
         muted: theme.muted,
         accent: theme.accent,
         highlight: theme.highlight,
+        node_activity: theme.node_activity,
+        node_error: theme.node_error,
         port_input: theme.port_input,
         card: theme.card,
         card_border: theme.card_border,

@@ -26,6 +26,10 @@ pub struct Theme {
     pub muted: [u8; 4],
     pub accent: [u8; 4],
     pub highlight: [u8; 4],
+    #[serde(default = "default_node_activity")]
+    pub node_activity: [u8; 4],
+    #[serde(default = "default_node_error")]
+    pub node_error: [u8; 4],
     #[serde(default = "default_port_input")]
     pub port_input: [u8; 4],
     pub card: [u8; 4],
@@ -63,6 +67,14 @@ pub struct Theme {
     pub preview_add: [u8; 4],
     #[serde(default = "default_preview_cut")]
     pub preview_cut: [u8; 4],
+}
+
+fn default_node_activity() -> [u8; 4] {
+    [10, 132, 255, 255]
+}
+
+fn default_node_error() -> [u8; 4] {
+    [255, 38, 38, 255]
 }
 
 fn default_preview_add() -> [u8; 4] {
@@ -330,6 +342,8 @@ impl Theme {
             "muted" => self.muted = value,
             "accent" => self.accent = value,
             "highlight" => self.highlight = value,
+            "node_activity" => self.node_activity = value,
+            "node_error" => self.node_error = value,
             "port_input" => self.port_input = value,
             "card" => self.card = value,
             "card_border" => self.card_border = value,
@@ -1153,6 +1167,8 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("muted", "Muted text", "Secondary labels and hints", theme.muted),
                 color("accent", "Accent", "Primary selection and action colour", theme.accent),
                 color("highlight", "Highlight", "Secondary highlight and hover wash", theme.highlight),
+                color("node_activity", "Node activity", "Node processing glow colour", theme.node_activity),
+                color("node_error", "Node error", "Failed-node glow colour", theme.node_error),
             ],
         },
         ThemeGroup {

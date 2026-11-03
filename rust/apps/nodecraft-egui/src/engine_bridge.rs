@@ -14,6 +14,7 @@ pub struct Evaluation {
     /// Exact before/after difference bodies from the kernel.
     pub difference: Option<(Mesh, Mesh)>,
     pub difference_error: Option<String>,
+    pub node_errors: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
     pub cache_hits: u32,
@@ -69,7 +70,7 @@ pub fn evaluate_with_linked_progress(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_with_linked_progress_comparison(document, cache, selected, linked_documents, progress, None)
+    evaluate_with_linked_progress_comparison(document, cache, selected, linked_documents, progress, None, false)
 }
 
 pub fn evaluate_with_linked_progress_comparison(
@@ -79,6 +80,7 @@ pub fn evaluate_with_linked_progress_comparison(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
     comparison: Option<(&str, &str)>,
+    run_exporters: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     let Some(target) = target_for(document, selected) else {
         return (None, cache);
@@ -94,6 +96,7 @@ pub fn evaluate_with_linked_progress_comparison(
                     comparison: None,
                     difference: None,
                     difference_error: None,
+                    node_errors: Default::default(),
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                     cache_hits: 0,
@@ -158,6 +161,7 @@ pub fn evaluate_with_linked_progress_comparison(
         binary_mesh: false,
         project_directory: None,
         progress: progress.is_some(),
+        run_exporters,
         mesh_tolerance: None,
         comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
     };
@@ -178,7 +182,8 @@ pub fn evaluate_with_linked_progress_comparison(
             mesh: if error.is_some() { None } else { mesh },
             comparison,
             difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
-            difference_error: output.response.comparison.and_then(|payload| payload.error),
+            difference_error: output.response.comparison.as_ref().and_then(|payload| payload.error.clone()),
+            node_errors: output.response.node_errors,
             error,
             elapsed_ms,
             cache_hits: cache_stats.as_ref().map_or(0, |stats| stats.hits),

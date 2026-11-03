@@ -1159,7 +1159,7 @@ impl GpuViewport {
         let mut scene = GpuScene::with_palette(palette);
         let _body = PaletteIndex(0);
         let edge = PaletteIndex(1);
-        let edge_width = 3.2;
+        let edge_width = 1.0;
         let triangle_edge = PaletteIndex(3);
         let face_normal = PaletteIndex(4);
         let mut object_vertices = Vec::new();

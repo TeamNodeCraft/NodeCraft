@@ -71,6 +71,50 @@ pub const fn port_units() -> &'static [&'static str] {
     PORT_UNITS
 }
 
+/// Exact circular fillet of the selected edges from node `values`.
+///
+/// Uses solidcore's public `fillet_edges` entry point; this is the modeling
+/// path, not the display-mesh preview.
+pub fn fillet_brep_exact(brep: &Brep, values: &serde_json::Value) -> Result<Brep, String> {
+    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| error.to_string())?;
+    treatment.validate().map_err(|error| error.to_string())?;
+    if treatment.mode != EdgeMode::Fillet {
+        return Err("exact fillet requires fillet mode".into());
+    }
+    if treatment.continuity != Continuity::Circular {
+        return Err("G2/G3 fillets need a B-spline fillet law; only circular G1 is exact here".into());
+    }
+    let kernel = Kernel::default();
+    let selections = crate::edge::select_edges_from_values(&kernel, brep, values)
+        .map_err(|error| error.to_string())?;
+    if selections.is_empty() {
+        return Err("an edge treatment needs at least one selected edge".into());
+    }
+    let edges: Vec<solidcore::topology::EdgeId> = selections.iter().map(|selection| selection.edge).collect();
+    let mut kernel = Kernel::default();
+    let mut result = brep.clone_standing_for_self().map_err(|error| error.to_string())?;
+    solidcore::blend::fillet_executive::api::fillet_edges(
+        &mut kernel,
+        &mut result,
+        &edges,
+        treatment.length,
+        2, // exact circular cross-section
+        1, // G1
+        1.0,
+    )
+    .map_err(|error| {
+        let text = error.to_string();
+        if text.contains("status 1001") {
+            format!(
+                "solidcore fillet failed (status 1001): the radius may be too large for the selected edges or shell wall; reduce it ({text})"
+            )
+        } else {
+            format!("solidcore fillet: {text}")
+        }
+    })?;
+    Ok(result)
+}
+
 /// Exact B-rep chamfer/fillet of the selected edges.
 ///
 /// Returns the missing solidcore API as [`BlendError::Unsupported`] at the locked
@@ -136,4 +180,23 @@ pub fn fillet_brep(
         ));
     }
     apply_edge_treatment_brep(kernel, brep, selections, treatment)
+}
+
+#[cfg(test)]
+mod exact_fillet_tests {
+    use super::*;
+
+    #[test]
+    fn exact_circular_fillet_of_a_box_is_a_closed_solid() {
+        let (_kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let values = serde_json::json!({
+            "mode": "fillet",
+            "continuity": "",
+            "length": 4.0,
+            "edges": [{"ordinal": 0}]
+        });
+        let filleted = fillet_brep_exact(&brep, &values).expect("exact fillet");
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        assert!(!filleted.faces().is_empty());
+    }
 }

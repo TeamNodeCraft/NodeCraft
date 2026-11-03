@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+fn default_run_exporters() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
@@ -25,6 +27,10 @@ pub struct Request {
     pub project_directory: Option<String>,
     #[serde(default)]
     pub progress: bool,
+    /// Run exporter side effects (write STEP files). Normal UI evaluation
+    /// leaves this false so editing export metadata cannot write files.
+    #[serde(default = "default_run_exporters")]
+    pub run_exporters: bool,
     /// Display max-sag override for LOD. `None` uses the viewport default.
     #[serde(default)]
     pub mesh_tolerance: Option<f64>,

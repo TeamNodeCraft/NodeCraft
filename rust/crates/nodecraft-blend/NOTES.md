@@ -8,6 +8,19 @@ solidcore port, and a working mesh preview covers the node today.**
 
 solidcore revision: git `main`, `Cargo.lock` rev `6ecdaaa`.
 
+> **2026-11 status — exact BRep fillet is live.** SolidCore is now at
+> `fb937dd8d991072cf5b6fa7d16cf46ea110ea238`. The shell path uses upstream
+> `create_offset_solid` and returns a closed manifold hollow solid, and
+> `solidcore::blend::fillet_executive::api::fillet_edges` completes for a box.
+>
+> The exact fillet integration must clone the input with
+> `Brep::clone_standing_for_self()` before calling the kernel; a plain `clone()`
+> loses the standing context and fails at
+> `merge_curve_on_surfaces: upstream status 1006`.
+>
+> `fillet_brep_exact` now routes through that API, and the engine evaluates
+> fillet as a Part. Mesh preview remains display-only.
+
 ## API
 
 | Item | Purpose |

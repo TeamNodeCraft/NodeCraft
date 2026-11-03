@@ -151,6 +151,7 @@ impl GraphRuntime {
             binary_mesh: true,
             project_directory: None,
             progress: progress.is_some(),
+            run_exporters: false,
             mesh_tolerance,
             comparison_targets: None,
         };

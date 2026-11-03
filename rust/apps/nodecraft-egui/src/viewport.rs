@@ -163,6 +163,10 @@ pub struct Viewport {
     last_size: [usize; 2],
     /// Right-hand chrome inset used when a floating panel covers the viewport.
     pub chrome_right_inset: f32,
+    last_full: Option<egui::Rect>,
+    last_visible: Option<egui::Rect>,
+    /// Development-only camera diagnostics. Deliberately not serialized.
+    show_view_matrix: bool,
     selection_mode: SelectionMode,
     face_picks: Vec<String>,
     edge_picks: Vec<EdgePick>,
@@ -172,6 +176,7 @@ pub struct Viewport {
     /// A click in a topology mode landed on empty space.
     selection_miss: bool,
     hovered_edge: Option<String>,
+    hovered_face: Option<String>,
     selected_edges: std::collections::BTreeSet<String>,
     dock_rect: Option<egui::Rect>,
     transform_gizmo: Option<Gizmo>,
@@ -193,12 +198,16 @@ impl Default for Viewport {
             dirty: true,
             last_size: [0, 0],
             chrome_right_inset: 0.0,
+            last_full: None,
+            last_visible: None,
+            show_view_matrix: false,
             selection_mode: SelectionMode::Object,
             face_picks: Vec::new(),
             edge_picks: Vec::new(),
             edge_picking_enabled: false,
             selection_miss: false,
             hovered_edge: None,
+            hovered_face: None,
             selected_edges: std::collections::BTreeSet::new(),
             dock_rect: None,
             transform_gizmo: None,
@@ -496,6 +505,24 @@ impl Viewport {
         self.dirty = true;
     }
 
+    pub fn show_view_matrix(&self) -> bool {
+        self.show_view_matrix
+    }
+
+    pub fn set_show_view_matrix(&mut self, show: bool) {
+        self.show_view_matrix = show;
+    }
+
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    pub fn home(&mut self) {
+        if let (Some(full), Some(visible)) = (self.last_full, self.last_visible) {
+            self.fit_visible(full, visible);
+        }
+    }
+
     pub fn set_standard_view(&mut self, view: StandardView) {
         let (yaw, pitch) = view.angles();
         self.camera.yaw = if matches!(view, StandardView::Iso) { -yaw } else { yaw };
@@ -584,6 +611,8 @@ impl Viewport {
             egui::pos2(overlay.max.x.clamp(rect.min.x, rect.max.x), rect.min.y),
             rect.max,
         );
+        self.last_full = Some(rect);
+        self.last_visible = Some(visible);
 
         let modifiers = ui.ctx().input(|input| input.modifiers);
         let middle = response.dragged_by(egui::PointerButton::Middle);
@@ -690,11 +719,13 @@ impl Viewport {
                 // selection experiment. Keep `selection_dock` for a future opt-in.
                 self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
                 self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+                self.draw_face_hover(ui, rect);
                 self.draw_comparison_overlay(ui, rect);
                 self.draw_edge_highlights(ui, rect);
                 self.draw_comparison_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
+            self.draw_view_matrix_debug(ui, rect);
             return;
         }
 
@@ -714,11 +745,13 @@ impl Viewport {
                 ui.visuals().weak_text_color(),
             );
         }
+        self.draw_view_matrix_debug(ui, rect);
         if self.chrome_visible {
             self.axis_gizmo(ui, rect, visible);
             // Top selection dock intentionally disabled; see inspector edit action.
             self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
             self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+            self.draw_face_hover(ui, rect);
             self.draw_comparison_overlay(ui, rect);
             self.draw_edge_highlights(ui, rect);
             self.draw_comparison_edges(ui, rect);
@@ -804,6 +837,85 @@ impl Viewport {
             viewport.min.x + x as f32 + self.lens_shift[0] * viewport.width() * 0.5,
             viewport.min.y + y as f32 - self.lens_shift[1] * viewport.height() * 0.5,
         ))
+    }
+
+    fn draw_view_matrix_debug(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        if !self.show_view_matrix { return; }
+        let camera = &self.camera;
+        let (right, up, back) = camera.basis();
+        let view = camera.view().0;
+        let target = camera.target;
+        let eye = camera.eye();
+        let lines = [
+            format!(
+                "camera yaw {:.2}  pitch {:.2}  roll {:.2}",
+                camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.roll.to_degrees()
+            ),
+            format!("fov {:.3}  distance {:.3}  half_h {:.3}", camera.fov, camera.distance, camera.half_height()),
+            format!("target {:.3} {:.3} {:.3}", target.x, target.y, target.z),
+            format!("eye    {:.3} {:.3} {:.3}", eye.x, eye.y, eye.z),
+            format!("right  {:.3} {:.3} {:.3}", right.x, right.y, right.z),
+            format!("up     {:.3} {:.3} {:.3}", up.x, up.y, up.z),
+            format!("back   {:.3} {:.3} {:.3}", back.x, back.y, back.z),
+            format!("lens   {:.4} {:.4}", self.lens_shift[0], self.lens_shift[1]),
+            "view matrix".to_owned(),
+        ]
+        .into_iter()
+        .chain(view.iter().map(|row| {
+            format!("{:.3} {:.3} {:.3} {:.3}", row[0], row[1], row[2], row[3])
+        }))
+        .collect::<Vec<_>>();
+        // Diagnostics must sit above the node editor, inspector and all viewport
+        // chrome, so use the global foreground layer rather than the viewport layer.
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("view-matrix-debug"),
+        ));
+        let pos = viewport.min + egui::vec2(12.0, 12.0);
+        painter.rect_filled(
+            egui::Rect::from_min_size(pos - egui::vec2(6.0, 6.0), egui::vec2(365.0, 19.0 + 15.0 * lines.len() as f32)),
+            5.0,
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 190),
+        );
+        for (index, line) in lines.iter().enumerate() {
+            painter.text(
+                pos + egui::vec2(0.0, 15.0 * index as f32),
+                egui::Align2::LEFT_TOP,
+                line,
+                egui::FontId::monospace(11.0),
+                egui::Color32::from_rgb(210, 225, 220),
+            );
+        }
+    }
+
+    fn draw_face_hover(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(display) = self.display.as_ref() else { return };
+        let Some(hovered) = self.hovered_face.as_deref() else { return };
+        let theme = crate::theme::get();
+        let colour = egui::Color32::from_rgba_unmultiplied(
+            theme.highlight[0], theme.highlight[1], theme.highlight[2], 90,
+        );
+        let painter = ui.painter().with_clip_rect(viewport);
+        for (index, triangle) in display.mesh.triangles.iter().enumerate() {
+            let face = display.mesh.tri_face.get(index).copied().unwrap_or(u32::MAX) as usize;
+            if display.face_ids.get(face).map(String::as_str) != Some(hovered) {
+                continue;
+            }
+            let points: Vec<egui::Pos2> = triangle
+                .iter()
+                .filter_map(|corner| {
+                    let point = display.mesh.positions.get(*corner as usize)?;
+                    self.project_to_viewport(*point, viewport)
+                })
+                .collect();
+            if points.len() != 3 { continue; }
+            let mut mesh = egui::Mesh::default();
+            for point in points {
+                mesh.colored_vertex(point, colour);
+            }
+            mesh.add_triangle(0, 1, 2);
+            painter.add(egui::Shape::mesh(mesh));
+        }
     }
 
     fn draw_comparison_overlay(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -898,11 +1010,18 @@ impl Viewport {
     }
 
     fn pick_face(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, clicked: bool, blocked: bool) {
-        if !clicked || blocked || self.selection_mode != SelectionMode::Face {
+        if blocked || self.selection_mode != SelectionMode::Face {
+            if self.hovered_face.take().is_some() {
+                ui.ctx().request_repaint();
+            }
             return;
         }
-        let Some(pointer) = ui.ctx().pointer_interact_pos() else { return };
+        let Some(pointer) = ui.ctx().pointer_hover_pos() else {
+            self.hovered_face = None;
+            return;
+        };
         if !viewport.contains(pointer) || self.dock_rect.is_some_and(|dock| dock.contains(pointer)) {
+            self.hovered_face = None;
             return;
         }
         let Some(display) = self.display.as_ref() else { return };
@@ -911,13 +1030,20 @@ impl Viewport {
         let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
         let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
         let (origin, direction) = self.camera.ray(x, y, width, height);
-        let Some(face) = raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction) else {
-            self.selection_miss = true;
+        let hovered = raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction);
+        if hovered != self.hovered_face {
+            self.hovered_face = hovered.clone();
             ui.ctx().request_repaint();
-            return;
-        };
-        self.face_picks.push(face);
-        ui.ctx().request_repaint();
+        }
+        if clicked {
+            let Some(face) = hovered else {
+                self.selection_miss = true;
+                ui.ctx().request_repaint();
+                return;
+            };
+            self.face_picks.push(face);
+            ui.ctx().request_repaint();
+        }
     }
 
     /// Top-of-viewport filter dock for face, edge and vertex selection.

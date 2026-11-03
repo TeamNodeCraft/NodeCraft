@@ -238,10 +238,14 @@ fn select_reference(
     reference: &Value,
     center: [f64; 3],
 ) -> Result<EdgeSelection, BlendError> {
+    let mut center_error = None;
     if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
         let centered = json_point(point)?;
         let in_brep = add(centered, center);
-        return select_edge_by_midpoint(kernel, brep, in_brep);
+        match select_edge_by_midpoint(kernel, brep, in_brep) {
+            Ok(selection) => return Ok(selection),
+            Err(error) => center_error = Some(error),
+        }
     }
     if let Some(ordinal) = reference.get("ordinal") {
         let ordinal = json_ordinal(ordinal)?;
@@ -261,6 +265,9 @@ fn select_reference(
                 .map(|mut selections| selections.remove(0))
                 .map_err(|error| BlendError::InvalidInput(error.to_string()));
         }
+    }
+    if let Some(error) = center_error {
+        return Err(error);
     }
     Err(BlendError::InvalidInput(
         "edge reference needs a \"center\"/\"point\", an \"ordinal\" or an \"id\"".into(),
@@ -306,6 +313,10 @@ fn evaluate_point(
     parameter: f64,
     ordinal: usize,
 ) -> Result<[f64; 3], BlendError> {
+    let parameter = curve.map_or(parameter, |curve| {
+        let natural = curve.natural_interval();
+        parameter.clamp(natural.min(), natural.max())
+    });
     let evaluated = evaluate_curve(kernel, curve, parameter)
         .map_err(|error| BlendError::Kernel(format!("edge {ordinal} curve: {error}")))?;
     Ok([evaluated[0].x, evaluated[0].y, evaluated[0].z])

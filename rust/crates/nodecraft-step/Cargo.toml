@@ -9,3 +9,4 @@ step-import = { workspace = true }
 step-export = { workspace = true }
 step-brep = { workspace = true }
 solidcore = { workspace = true }
+earcutr = "0.5.0"

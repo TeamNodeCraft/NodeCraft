@@ -149,71 +149,19 @@ treat the face as an untrimmed rectangle. The fix is to pass the caller's
 `CacheFace`/face handle through `face_intersect`'s coincidence path
 (`TrimSrfCache::build_tree_with_face`), not to port a new algorithm.
 
-## Shell blockers — every public path returns Unported
+## Shell/offset support (SolidCore a9ef4c70)
 
-### Rounded shell/offset (`shell_brep`, `offset_brep`; `extend_convex_edges = false`)
+The earlier "every shell path is unported" claim is obsolete.
 
-```
-solidcore unported: solidcore shell_brep: SmBrep::ShrinkGeometry (topology.brep_p4) is not ported
-```
+- `shell_brep` (rounded, `create_offset_solid = false`) completes and returns an
+  offset shell.
+- `shell_brep_solid` (extended edges, `create_offset_solid = true`) completes and
+  returns a **closed manifold hollow solid**, including with opening faces.
+  Covered by `shell_solid_is_a_closed_manifold_with_openings`.
+- `shell_brep_with_options` exposes both modes.
 
-**Correction (stale claim):** `SmBrep::ShrinkGeometry` *is* ported.
-`topology::brep::p4::shrink_geometry` (`topology/brep/p4.rs:1645`) is implemented and
-succeeds on a real box in a probe (faces stay 6) — test
-`shrink_geometry_symbol_is_ported_despite_the_shell_marker`. The error is a deliberate
-placeholder emitted by `OffsetExecutive::do_solid_offset`
-(`offset/offset_executive/p2.rs:294-298`); the inline comment says the stub "also marks
-where this unit's unported `DoSolidOffset` continuation (cpp:648–1051) begins".
-
-**Exact missing implementation:** the remainder of `SmOffsetExecutive::DoSolidOffset`
-in `offset.offset_executive_p2`: gather original edgeuses with a claimed mark, call
-`BuildOffsetOfEdgeuses` (ignored statuses), optionally build lamina side walls
-(`BuildSideWallOfEdgeuse`), `BuildOffsetOfVertex` + trimmed/natural-domain cap faces,
-then the `skip_stitch_merge` / `PiecewiseMerge` / `StitchIntoSolid` / `MakeManifold`
-continuation (summarized in the `do_solid_offset` continuation comment,
-`offset/offset_executive/p2.rs:283-298`). The next concrete dependency after that is
-`SmMerge::PiecewiseMerge` (`boolean.merge_p3`), unported at
-`offset/offset_executive/p1.rs:1077-1080`. `shell_brep` is additionally guarded by the
-manifold query and a `distance >= 2 * brep tolerance` check (a sub-tolerance distance
-returns upstream status `1007`, not Unported).
-
-### Extended shell/offset (`extend_convex_edges = true`)
-
-```
-solidcore unported: solidcore shell_brep: SmOffsetExecutive::BuildOffsetOfEdgeuses (geometry-creation adapter) (offset.offset_executive_p1) is not ported
-```
-
-Site: `offset/offset_executive/p1.rs:762-766` (comment: "The generic EdgeuseOffset
-creator is ported; its backend still needs this executive's source/result topology, SSI
-and mark adapters"), also referenced at `offset/offset_executive/p2.rs:2038`. Same
-failure for `offset_brep` (solid offset). Evidence:
-`extended_shell_hits_the_build_offset_of_edgeuses_adapter`.
-
-### `SmApiShellBrepFull` (`api_shell_brep_full`)
-
-```
-solidcore unported: ...: SmBrep::SmBrep (topology.brep_p3) is not ported
-```
-
-**Correction (stale claim):** the B-rep copy constructor *is* ported —
-`topology::brep::p3::copy_brep` (`topology/brep/p3.rs:576`) copies a box (6 faces, edges
-present) in a probe — test
-`brep_copy_constructor_is_ported_despite_the_api_shell_stub`. The hardcoded error at
-`offset/offset_executive/p2.rs:813-814` predates that port; `api_shell_brep_full` could
-now be wired as copy_brep + shell_brep, but would then hit the rounded-shell blocker
-above, so it still cannot return a B-rep.
-
-### Shell summary
-
-| Entry point | Result | First unported dependency |
-|-------------|--------|---------------------------|
-| `OffsetExecutive::shell_brep` (rounded, default) | Err | placeholder `SmBrep::ShrinkGeometry` → missing `DoSolidOffset` continuation (`offset.offset_executive_p2`) |
-| `OffsetExecutive::shell_brep` (extended) | Err | `SmOffsetExecutive::BuildOffsetOfEdgeuses (geometry-creation adapter)` (`offset.offset_executive_p1`) |
-| `offset_brep` (rounded / extended) | Err | same two, respectively |
-| `api_shell_brep_full` | Err | stale `SmBrep::SmBrep` stub; copy ctor now ported, but downstream shell is blocked |
-| `api_offset_brep_full` | Err | forwards to `offset_brep` |
-
-No shell/offset public path produces a `Brep` in the checked revisions.
+`offset_brep`, `api_shell_brep_full` and `api_offset_brep_full` have not been
+re-verified in this revision.
 
 ## Corrections to prior claims (summary)
 

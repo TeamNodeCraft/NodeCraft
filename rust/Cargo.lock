@@ -827,6 +827,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "earcutr"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "afc28d89ac6cb489f679fcf51aaa62b4667bb0fb73a30f1d4d23949069707c07"
+dependencies = [
+ "itertools 0.14.0",
+ "num-traits",
+]
+
+[[package]]
 name = "ecolor"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -882,7 +892,7 @@ dependencies = [
  "bitflags 2.13.2",
  "emath",
  "epaint",
- "itertools",
+ "itertools 0.15.0",
  "log",
  "nohash-hasher",
  "profiling",
@@ -941,7 +951,7 @@ dependencies = [
  "ahash",
  "egui",
  "enum-map",
- "itertools",
+ "itertools 0.15.0",
  "log",
  "profiling",
  "resvg",
@@ -1586,6 +1596,15 @@ dependencies = [
 
 [[package]]
 name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b4baf93f58d4425749ca49a51c50ebab072c5df6994d08fed93541c331481dc"
@@ -1996,6 +2015,7 @@ dependencies = [
  "nodecraft-bool",
  "nodecraft-protocol",
  "nodecraft-solidcore",
+ "nodecraft-step",
  "serde_json",
  "solidcore",
 ]
@@ -2150,6 +2170,7 @@ dependencies = [
 name = "nodecraft-step"
 version = "0.0.1"
 dependencies = [
+ "earcutr",
  "solidcore",
  "step-brep",
  "step-export",
@@ -2215,7 +2236,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#d85f648466a752e00d6e1ce8f546e0be0db0896c"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#e7b4e4d0927a05f361bdcde6742b2e324ffe72f7"
 
 [[package]]
 name = "objc-sys"
@@ -3394,8 +3415,9 @@ checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#d85f648466a752e00d6e1ce8f546e0be0db0896c"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#e7b4e4d0927a05f361bdcde6742b2e324ffe72f7"
 dependencies = [
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -3495,7 +3517,7 @@ dependencies = [
 [[package]]
 name = "step-brep"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#d85f648466a752e00d6e1ce8f546e0be0db0896c"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#e7b4e4d0927a05f361bdcde6742b2e324ffe72f7"
 dependencies = [
  "solidcore",
  "step-import",
@@ -3511,7 +3533,7 @@ dependencies = [
 [[package]]
 name = "step-export"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#d85f648466a752e00d6e1ce8f546e0be0db0896c"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#e7b4e4d0927a05f361bdcde6742b2e324ffe72f7"
 dependencies = [
  "step-import",
 ]
@@ -3519,7 +3541,7 @@ dependencies = [
 [[package]]
 name = "step-import"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#d85f648466a752e00d6e1ce8f546e0be0db0896c"
+source = "git+https://github.com/tangency-labs/solidcore?branch=main#e7b4e4d0927a05f361bdcde6742b2e324ffe72f7"
 
 [[package]]
 name = "step-nurbs"

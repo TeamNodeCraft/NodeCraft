@@ -535,9 +535,9 @@ pub fn shell_brep(brep: Brep, thickness: f64, openings: &[FaceId]) -> Result<Bre
 /// path (`extend_convex_edges`) and the offset-solid side walls
 /// (`create_offset_solid`).
 ///
-/// **Current coverage:** rounded and extended offset shells complete; creating an
-/// offset solid relative to a manifold input is still rejected by the native
-/// proto-topology edge-imprint guard (`SM_ERR_NULL_POINTER`, status 1006).
+/// **Current coverage:** rounded and extended offset shells complete. Since the
+/// upstream shell construction fixes, `create_offset_solid` produces a manifold
+/// hollow solid rather than an open offset sheet.
 ///
 /// # Errors
 ///
@@ -552,7 +552,7 @@ pub fn shell_brep_solid(brep: Brep, thickness: f64, openings: &[FaceId]) -> Resu
                 extend_convex_edges: true,
                 merge_results: true,
             },
-            create_offset_solid: false,
+            create_offset_solid: true,
             merge_sheet_side_walls: false,
         },
         openings,
@@ -830,6 +830,20 @@ mod tests {
         let mesh = boolean_mesh(BooleanOp::Union, a, b).expect("overlap mesh");
         assert!(!mesh.vertices.is_empty());
         assert_bounds(&mesh, [0.0, 0.0, 0.0], [15.0, 10.0, 10.0]);
+    }
+
+    #[test]
+    fn shell_solid_is_a_closed_manifold_with_openings() {
+        for openings in [0usize, 1] {
+            let brep = box_brep(10.0, 10.0, 10.0).expect("box");
+            let faces = brep_faces(&brep).expect("faces");
+            let shell = shell_brep_solid(brep, -1.0, &faces[..openings]).expect("shell solid");
+            assert!(
+                solidcore::query::api_queries::brep_is_manifold_solid(&shell).expect("manifold query"),
+                "{openings}: shell is not a closed manifold solid"
+            );
+            assert!(!shell.faces().is_empty(), "{openings}: shell has no faces");
+        }
     }
 
     /// Rounded shelling a real box now completes in solidcore.

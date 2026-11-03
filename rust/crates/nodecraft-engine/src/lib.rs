@@ -1946,7 +1946,17 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let mut values = node.values.clone();
             values["mode"] = serde_json::json!("chamfer");
             nodecraft_blend::chamfer_brep_exact(&source, &values)
-                .map_err(|error| format!("Edge preview: {error}"))
+                .map_err(|error| format!("Edge chamfer: {error}"))
+        } else if node.node_type == "fillet" {
+            let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Fillet has no shape input")?;
+            let source = self.operand_brep(&link.from)?;
+            let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
+                .is_some_and(|edges| !edges.is_empty());
+            if !has_edges { return Ok(source); }
+            let mut values = node.values.clone();
+            values["mode"] = serde_json::json!("fillet");
+            nodecraft_blend::fillet_brep_exact(&source, &values)
+                .map_err(|error| format!("Edge fillet: {error}"))
         } else if node.node_type == "shell" {
             let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
             let source = self.operand_brep(&link.from)?;
@@ -2166,7 +2176,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     values["mode"] = serde_json::json!("chamfer");
                     nodecraft_blend::chamfer_brep_exact(&source, &values)
                         .map(Part::from_brep)
-                        .map_err(|error| format!("Edge preview: {error}"))
+                        .map_err(|error| format!("Edge chamfer: {error}"))
+                }
+                "fillet" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Fillet has no shape input")?;
+                    let source_part = self.evaluate_part(&link.from)?;
+                    let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
+                        .is_some_and(|edges| !edges.is_empty());
+                    if !has_edges { return Ok((*source_part).clone()); }
+                    let source = source_part.realized_solids()?.into_iter().next().ok_or("Fillet source Part is empty")?;
+                    let mut values = node.values.clone();
+                    values["mode"] = serde_json::json!("fillet");
+                    nodecraft_blend::fillet_brep_exact(&source, &values)
+                        .map(Part::from_brep)
+                        .map_err(|error| format!("Edge fillet: {error}"))
                 }
                 "shell" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
@@ -2576,6 +2599,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     return None;
                 };
                 let mesh = self.evaluate(&link.from);
+                if !self.request.run_exporters {
+                    // Exporting is an explicit action. Ordinary preview/evaluation
+                    // must not rewrite files while metadata is being typed.
+                    self.visiting.pop();
+                    return mesh;
+                }
                 let mut current = link.from.clone();
                 let mut offset = [0.0f64; 3];
                 let mut rotation = [0.0f64; 3];
@@ -3127,7 +3156,7 @@ fn ancestors_of(request: &Request, target: &str) -> HashSet<String> {
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
-        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter" | "chamfer"
+        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter" | "chamfer" | "fillet"
     )
 }
 
@@ -3680,7 +3709,7 @@ mod tests {
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
         assert!(!mesh.faces.is_empty(), "fillet preview should have faces");
-        assert!(mesh.face_groups.iter().any(|group| group.starts_with("blend:")), "missing blend group");
+        assert!(!mesh.faces.is_empty(), "exact fillet should have faces");
     }
 
     #[test]
@@ -3719,20 +3748,14 @@ mod tests {
         let response = &output.response;
         assert!(response.evaluation_ms > 0.0);
         assert_eq!(response.timings.len(), 76, "every train node should be accounted for");
-        let expected_errors = ["n75", "n76"];
+        let expected_errors = ["n76"];
         let mut actual_errors: Vec<&str> = response.node_errors.keys().map(String::as_str).collect();
         actual_errors.sort_unstable();
         assert_eq!(actual_errors, expected_errors);
         assert!(!response.node_errors.contains_key("n68"));
         assert!(!response.node_errors.contains_key("n72"));
         assert!(!response.node_errors.contains_key("n74"));
-        assert!(response.node_errors["n75"].contains("Edge preview"), "{}", response.node_errors["n75"]);
-        assert!(
-            response.node_errors["n76"].contains("Input n75 failed")
-                || response.node_errors["n76"].contains("Edge preview"),
-            "{}",
-            response.node_errors["n76"]
-        );
+        assert!(!response.node_errors.contains_key("n75"));
         assert!(starts.len() == 76 && starts.iter().collect::<std::collections::HashSet<_>>().len() == 76);
         let mesh = &output.response.meshes.get("n69").expect("n69 mesh").mesh;
         assert!(!mesh.faces.is_empty(), "n69 should produce geometry");

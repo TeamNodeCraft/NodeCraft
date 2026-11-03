@@ -90,6 +90,52 @@ impl PlanarBody {
         Ok(triangles)
     }
 
+    /// Triangulates one face with the shared earcut backend. This is the
+    /// general polygon-with-holes path for display/preview caps; the bridge-and-
+    /// ear-clip [`Self::face_triangles`] remains the B-rep face path.
+    pub fn face_triangles_earcut(&self, face: usize) -> Result<Vec<[usize; 3]>, String> {
+        let outer = self.faces.get(face).ok_or_else(|| format!("face {face} does not exist"))?;
+        if outer.len() < 3 {
+            return Err(format!("face {face} outer loop has fewer than three vertices"));
+        }
+        let normal = newell_normal(&self.points, outer)
+            .ok_or_else(|| format!("face {face} outer loop is degenerate"))?;
+        let base = if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+        let basis_a = unit(cross3(base, normal), "face basis")?;
+        let basis_b = cross3(normal, basis_a);
+        let mut flat = Vec::new();
+        let mut holes = Vec::new();
+        let mut global = Vec::new();
+        for (loop_index, loop_points) in self.loops(face).enumerate() {
+            if loop_index > 0 { holes.push(global.len()); }
+            for &index in loop_points {
+                let point = *self.points.get(index).ok_or_else(|| format!("face {face} references missing point {index}"))?;
+                flat.push(dot3(point, basis_a));
+                flat.push(dot3(point, basis_b));
+                global.push(index);
+            }
+        }
+        let triangles = earcutr::earcut(&flat, &holes, 2)
+            .map_err(|_| format!("face {face} earcut triangulation failed"))?;
+        let mut out = Vec::with_capacity(triangles.len() / 3);
+        for triangle in triangles.chunks_exact(3) {
+            out.push([global[triangle[0]], global[triangle[1]], global[triangle[2]]]);
+        }
+        if out.is_empty() {
+            return Err(format!("face {face} earcut produced no triangles"));
+        }
+        Ok(out)
+    }
+
+    /// Triangulates every face with the shared earcut backend.
+    pub fn triangulate_earcut(&self) -> Result<Vec<[usize; 3]>, String> {
+        let mut out = Vec::new();
+        for face in 0..self.faces.len() {
+            out.extend(self.face_triangles_earcut(face)?);
+        }
+        Ok(out)
+    }
+
     /// Triangulates one face, honoring its holes.
     pub fn face_triangles(&self, face: usize) -> Result<Vec<[usize; 3]>, String> {
         let outer = self

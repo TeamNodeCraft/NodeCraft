@@ -18,6 +18,10 @@ pub enum Command {
     EnsureVisible,
     SelectNode(String),
     BeginSelection { node: String, field: String },
+    ViewNode(String),
+    Home,
+    Orbit { dx: f64, dy: f64 },
+    Capture(String),
     State,
 }
 
@@ -122,6 +126,36 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
             Some(id) => Command::SelectNode(id),
             None => {
                 let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                return;
+            }
+        },
+        "/view" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+        {
+            Some(id) => Command::ViewNode(id),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                return;
+            }
+        },
+        "/home" => Command::Home,
+        "/orbit" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
+            Some((value.get("dx")?.as_f64()?, value.get("dy")?.as_f64()?))
+        }) {
+            Some((dx, dy)) => Command::Orbit { dx, dy },
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"dx\\\": ..., \\\"dy\\\": ...}\"}");
+                return;
+            }
+        },
+        "/capture" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("path").and_then(|path| path.as_str()).map(str::to_owned))
+        {
+            Some(path) => Command::Capture(path),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}");
                 return;
             }
         },

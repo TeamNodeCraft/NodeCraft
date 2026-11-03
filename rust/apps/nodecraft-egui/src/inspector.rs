@@ -23,6 +23,8 @@ pub struct Output {
     pub delete: bool,
     pub section_order: Option<Vec<String>>,
     pub begin_selection: Option<String>,
+    pub choose_linked_part: bool,
+    pub open_linked_part: bool,
 }
 
 #[derive(Clone)]
@@ -721,6 +723,32 @@ fn description(ui: &mut Ui, text: &str) {
     ui_shape::callout(ui, text);
 }
 
+fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+    let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
+    ui.horizontal(|ui| {
+        let button_width = 76.0;
+        let path_width = (ui.available_width() - button_width - 8.0).max(80.0);
+        if ui
+            .add_sized(
+                [path_width, 26.0],
+                egui::TextEdit::singleline(&mut path).hint_text("Path to .nodecraft"),
+            )
+            .changed()
+        {
+            output.changes.push(Change { field: "path".to_owned(), value: Value::String(path.clone()) });
+        }
+        if ui.button("Choose…").clicked() {
+            output.choose_linked_part = true;
+        }
+    });
+    ui.add_space(6.0);
+    let enabled = !path.is_empty();
+    if ui.add_enabled(enabled, egui::Button::new("Open in new tab")).clicked() {
+        output.open_linked_part = true;
+    }
+    description(ui, "Opens this .nodecraft document as an editable tab. Linked parts may themselves link further documents.");
+}
+
 fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let theme = crate::theme::get();
     let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -884,6 +912,9 @@ pub fn show(
     if node.node_type == "stepimporter" {
         section_label(ui, section_title(node));
         step_import_fields(ui, node, &mut output);
+    } else if node.node_type == "linkedpart" {
+        section_label(ui, section_title(node));
+        linked_part_fields(ui, node, &mut output);
     } else if node.node_type == "exporter" {
         section_label(ui, section_title(node));
         export_fields(ui, node, &mut output);

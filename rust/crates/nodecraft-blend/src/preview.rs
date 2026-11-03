@@ -42,6 +42,7 @@ use solidcore::nurbs::knots::Side;
 use solidcore::query::api_queries as queries;
 use solidcore::query::face::p1::evaluate_curve;
 use nodecraft_protocol::{BrepEdge, Mesh};
+use nodecraft_step::PlanarBody;
 
 use crate::edge::{EdgeSelection, brep_center};
 use crate::error::BlendError;
@@ -697,75 +698,127 @@ fn cap_opening(
             "the cut cross-section has no boundary points",
         ));
     }
-    let mut previous = usize::MAX;
-    let mut current = 0usize;
-    loop {
-        if loop_points.len() > points.len() {
-            return Err(BlendError::unsupported(
-                "edge treatment",
-                "the cut cross-section does not close",
-            ));
-        }
-        loop_points.push(points[current]);
-        let neighbours = &adjacency[current];
-        if neighbours.len() != 2 {
-            return Err(BlendError::unsupported(
-                "edge treatment",
-                format!(
-                    "the cut cross-section is not a manifold loop (vertex degree {})",
-                    neighbours.len()
-                ),
-            ));
-        }
-        let next = if neighbours[0] == previous {
-            neighbours[1]
-        } else {
-            neighbours[0]
-        };
-        previous = current;
-        current = next;
-        if current == 0 {
-            break;
-        }
+    if points.is_empty() {
+        return Err(BlendError::unsupported("edge treatment", "the cut cross-section has no boundary points"));
     }
-    if loop_points.len() != points.len() || loop_points.len() < 3 {
-        return Err(BlendError::unsupported(
-            "edge treatment",
-            "the cut cross-section is not a single closed loop",
-        ));
-    }
-    // Orient the loop so its Newell normal points along the plane's outward normal.
-    let newell = newell_normal(&loop_points);
-    if dot(newell, plane.normal) < 0.0 {
-        loop_points.reverse();
-    }
-    let centroid = average(&loop_points);
-    let mut caps = Vec::with_capacity(loop_points.len());
-    for corner in 0..loop_points.len() {
-        let next = (corner + 1) % loop_points.len();
-        let points = [centroid, loop_points[corner], loop_points[next]];
-        let normal = cross(sub(points[1], points[0]), sub(points[2], points[0]));
-        let normal = normalize(normal).ok_or_else(|| {
-            BlendError::unsupported(
-                "edge treatment",
-                "the cut cross-section triangulation produced a degenerate facet",
-            )
-        })?;
-        if dot(normal, plane.normal) <= 0.0 {
-            return Err(BlendError::unsupported(
-                "edge treatment",
-                "the cut cross-section is not convex; only convex bodies are supported",
-            ));
+    let mut visited = vec![false; points.len()];
+    let mut loops: Vec<Vec<usize>> = Vec::new();
+    for start in 0..points.len() {
+        if visited[start] { continue; }
+        let mut walk = Vec::new();
+        let mut previous = usize::MAX;
+        let mut current = start;
+        loop {
+            if walk.len() > points.len() {
+                return Err(BlendError::unsupported("edge treatment", "the cut cross-section does not close"));
+            }
+            walk.push(current);
+            visited[current] = true;
+            let neighbours = &adjacency[current];
+            if neighbours.len() != 2 {
+                return Err(BlendError::unsupported("edge treatment", format!("the cut cross-section is not a manifold loop (vertex degree {})", neighbours.len())));
+            }
+            let next = if neighbours[0] == previous { neighbours[1] } else { neighbours[0] };
+            previous = current;
+            current = next;
+            if current == start { break; }
+            if visited[current] {
+                return Err(BlendError::unsupported("edge treatment", "the cut cross-section has intersecting loops"));
+            }
         }
-        caps.push(Tri {
-            points,
-            group: group.to_string(),
-        });
+        if walk.len() < 3 {
+            return Err(BlendError::unsupported("edge treatment", "a cut cross-section loop has fewer than three points"));
+        }
+        loops.push(walk);
+    }
+    if loops.len() == 1 {
+        let mut loop_points: Vec<[f64; 3]> = loops[0].iter().map(|index| points[*index]).collect();
+        let newell = newell_normal(&loop_points);
+        if dot(newell, plane.normal) < 0.0 { loop_points.reverse(); }
+        let centroid = average(&loop_points);
+        let mut caps = Vec::with_capacity(loop_points.len());
+        for corner in 0..loop_points.len() {
+            let next = (corner + 1) % loop_points.len();
+            let facet = [centroid, loop_points[corner], loop_points[next]];
+            let normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
+            let normal = normalize(normal).ok_or_else(|| BlendError::unsupported("edge treatment", "the cut cross-section triangulation produced a degenerate facet"))?;
+            if dot(normal, plane.normal) <= 0.0 {
+                return Err(BlendError::unsupported("edge treatment", "the cut cross-section is not convex; only convex bodies are supported"));
+            }
+            caps.push(Tri { points: facet, group: group.to_string() });
+        }
+        return Ok(caps);
+    }
+    cap_planar_loops(&loops, &points, plane, group)
+}
+
+/// Cap a planar cut whose boundary is several loops (outer walls plus cavity loops).
+fn cap_planar_loops(
+    loops: &[Vec<usize>],
+    points: &[[f64; 3]],
+    plane: Plane,
+    group: &str,
+) -> Result<Vec<Tri>, BlendError> {
+    let normal = plane.normal;
+    let helper = if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
+    let u = normalize(cross(normal, helper)).ok_or_else(|| BlendError::unsupported("edge treatment", "degenerate cut plane"))?;
+    let v = cross(normal, u);
+    let project = |point: [f64; 3]| [dot(point, u), dot(point, v)];
+    let loop_2d: Vec<Vec<[f64; 2]>> = loops.iter().map(|indices| indices.iter().map(|index| project(points[*index])).collect()).collect();
+    let area = |loop2d: &[[f64; 2]]| {
+        let mut sum = 0.0;
+        for corner in 0..loop2d.len() {
+            let next = (corner + 1) % loop2d.len();
+            sum += loop2d[corner][0] * loop2d[next][1] - loop2d[next][0] * loop2d[corner][1];
+        }
+        sum.abs() * 0.5
+    };
+    let inside = |point: [f64; 2], loop2d: &[[f64; 2]]| {
+        let mut hit = false;
+        for corner in 0..loop2d.len() {
+            let next = (corner + 1) % loop2d.len();
+            let (a, b) = (loop2d[corner], loop2d[next]);
+            if (a[1] > point[1]) != (b[1] > point[1])
+                && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
+            { hit = !hit; }
+        }
+        hit
+    };
+    let areas: Vec<f64> = loop_2d.iter().map(|loop2d| area(loop2d)).collect();
+    let mut parent: Vec<Option<usize>> = vec![None; loops.len()];
+    for index in 0..loops.len() {
+        let point = loop_2d[index][0];
+        parent[index] = (0..loops.len())
+            .filter(|candidate| *candidate != index && areas[*candidate] > areas[index] && inside(point, &loop_2d[*candidate]))
+            .min_by(|left, right| areas[*left].total_cmp(&areas[*right]));
+    }
+    let mut planar = PlanarBody { points: points.to_vec(), faces: vec![], holes: vec![] };
+    for root in 0..loops.len() {
+        if parent[root].is_some() { continue; }
+        let mut outer = loops[root].clone();
+        if dot(newell_normal(&outer.iter().map(|index| points[*index]).collect::<Vec<_>>()), normal) < 0.0 { outer.reverse(); }
+        let holes: Vec<Vec<usize>> = loops
+            .iter()
+            .enumerate()
+            .filter(|(child, _)| parent[*child] == Some(root))
+            .map(|(_, hole)| hole.clone())
+            .collect();
+        planar.push_face(outer, holes);
+    }
+    let indices = planar
+        .triangulate_earcut()
+        .map_err(|error| BlendError::unsupported("edge treatment", error))?;
+    let mut caps = Vec::with_capacity(indices.len());
+    for [a, b, c] in indices {
+        let mut facet = [planar.points[a], planar.points[b], planar.points[c]];
+        let facet_normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
+        if dot(facet_normal, normal) < 0.0 { facet.swap(1, 2); }
+        caps.push(Tri { points: facet, group: group.to_string() });
     }
     Ok(caps)
 }
 
-/// Weld one cap-boundary point and return its index.
+/// Weld one cap-boundary point and return its index./// Weld one cap-boundary point and return its index.
 fn intern(
     point: [f64; 3],
     weld_epsilon: f64,
