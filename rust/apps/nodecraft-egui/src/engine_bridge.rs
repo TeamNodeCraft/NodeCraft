@@ -106,7 +106,21 @@ pub fn evaluate_with_linked_progress_comparison(
             );
         }
     };
-    let document = &expanded;
+    evaluate_flat_with_progress_comparison(&expanded, target, cache, progress, comparison, run_exporters)
+}
+
+/// Evaluate an already-flattened graph. Linked-document expansion is cached by
+/// [`nodecraft_session::flat::FlatGraphCache`], so this function must not expand
+/// again.
+pub fn evaluate_flat_with_progress_comparison(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+) -> (Option<Evaluation>, EngineCache) {
+    let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
     let request = Request {
         request_id: 1,

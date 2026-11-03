@@ -15,6 +15,7 @@ mesher-upstream = ["nodecraft-mesh/mesher-upstream", "nodecraft-solidcore/mesher
 
 [dependencies]
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 nodecraft-mesh = { path = "../nodecraft-mesh", default-features = false }
 nodecraft-kernel = { path = "../nodecraft-kernel" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore", default-features = false }

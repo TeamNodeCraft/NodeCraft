@@ -124,6 +124,12 @@ impl DocumentStore {
         self.documents.iter()
     }
 
+    /// Publish the current graph of an open document so linked roots evaluate
+    /// against the editor's live revision, not the last tab-switch snapshot.
+    pub fn publish_document(&mut self, id: &str, document: &GraphDocument) {
+        self.documents.insert(id.to_owned(), document.clone());
+    }
+
     #[must_use]
     pub fn session(&self, id: &str) -> Option<&Session> { self.sessions.get(id) }
 
@@ -358,6 +364,24 @@ mod tests {
         assert!(store.session("doc").is_none());
         assert!(store.get("doc").is_none());
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn published_document_is_visible_to_linked_roots_immediately() {
+        let mut store = DocumentStore::new();
+        let mut document = GraphDocument::new("child");
+        document.nodes.push(crate::GraphNode {
+            id: "n".into(),
+            node_type: "primitive".into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 1.0,
+            y: 0.0,
+        });
+        store.set_session("child", Session::new(document.clone())).expect("set session");
+        document.nodes[0].x = 42.0;
+        store.publish_document("child", &document);
+        assert_eq!(store.get("child").expect("document").nodes[0].x, 42.0);
     }
 
     #[test]

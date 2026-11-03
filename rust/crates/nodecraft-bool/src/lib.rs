@@ -559,15 +559,47 @@ pub fn shell_brep_solid(brep: Brep, thickness: f64, openings: &[FaceId]) -> Resu
     )
 }
 
+pub fn shell_brep_solid_with_kernel(
+    kernel: &mut Kernel,
+    brep: Brep,
+    thickness: f64,
+    openings: &[FaceId],
+) -> Result<Brep, String> {
+    shell_brep_with_options_with_kernel(
+        kernel,
+        brep,
+        ShellOptions {
+            offset: OffsetOptions {
+                distance: thickness,
+                extend_convex_edges: true,
+                merge_results: true,
+            },
+            create_offset_solid: true,
+            merge_sheet_side_walls: false,
+        },
+        openings,
+    )
+}
+
 pub fn shell_brep_with_options(
     brep: Brep,
     options: ShellOptions,
     openings: &[FaceId],
 ) -> Result<Brep, String> {
     let mut kernel = Kernel::default();
+    shell_brep_with_options_with_kernel(&mut kernel, brep, options, openings)
+}
+
+/// [`shell_brep_with_options`] on a caller-owned (worker) kernel.
+pub fn shell_brep_with_options_with_kernel(
+    kernel: &mut Kernel,
+    brep: Brep,
+    options: ShellOptions,
+    openings: &[FaceId],
+) -> Result<Brep, String> {
     let mut notifications = ShellNotifications::new(&brep);
     let outcome = OffsetExecutive::shell_brep(
-        &mut kernel,
+        kernel,
         brep,
         options,
         openings,

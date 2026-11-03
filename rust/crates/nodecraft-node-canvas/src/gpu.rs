@@ -335,6 +335,7 @@ struct Instance {
   @location(4) radius: f32,
   @location(5) stroke_width: f32,
   @location(6) kind: f32,
+  @location(7) suppressed: f32,
 };
 
 struct Out {
@@ -347,6 +348,7 @@ struct Out {
   @location(5) radius: f32,
   @location(6) stroke_width: f32,
   @location(7) kind: f32,
+  @location(8) suppressed: f32,
 };
 
 fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
@@ -387,6 +389,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   out.radius = inst.radius;
   out.stroke_width = inst.stroke_width;
   out.kind = inst.kind;
+  out.suppressed = inst.suppressed;
   return out;
 }
 
@@ -419,8 +422,21 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     stroke_alpha = 0.0;
   }
   let stroke_mix = clamp(stroke_alpha, 0.0, 1.0);
-  let alpha = max(fill_alpha * in.fill.a, stroke_alpha * in.stroke.a);
-  return vec4<f32>(mix(in.fill.rgb, in.stroke.rgb, stroke_mix), alpha);
+  var alpha = max(fill_alpha * in.fill.a, stroke_alpha * in.stroke.a);
+  var colour = mix(in.fill.rgb, in.stroke.rgb, stroke_mix);
+  // Suppressed cards carry a 45-degree hatch overlay. It lives in the card
+  // shader so it follows the card transform without extra geometry.
+  if (in.kind < 0.5 && in.suppressed > 0.5) {
+    // Use card-local units, not screen pixels, so the hatch scales with the
+    // node like its border and text. One period is 36 graph units; the wide
+    // stripe is about 16 px at 100% zoom.
+    let diagonal = (in.local.x + in.local.y) / 36.0;
+    let stripe = abs(fract(diagonal) - 0.5) * 2.0;
+    let hatch = smoothstep(0.55, 0.85, stripe);
+    colour = mix(colour, in.stroke.rgb, hatch * 0.75);
+    alpha = max(alpha, hatch * 0.55 * fill_alpha);
+  }
+  return vec4<f32>(colour, alpha);
 }
 "#;
 
@@ -566,7 +582,8 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
                     3 => Float32x4,
                     4 => Float32,
                     5 => Float32,
-                    6 => Float32
+                    6 => Float32,
+                    7 => Float32
                 ],
             })],
         },

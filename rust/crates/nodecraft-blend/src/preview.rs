@@ -870,6 +870,15 @@ pub fn chamfer_brep_exact(
     brep: &solidcore::topology::Brep,
     values: &serde_json::Value,
 ) -> Result<solidcore::topology::Brep, String> {
+    let mut kernel = Kernel::default();
+    chamfer_brep_exact_with_kernel(&mut kernel, brep, values)
+}
+
+pub fn chamfer_brep_exact_with_kernel(
+    kernel: &mut Kernel,
+    brep: &solidcore::topology::Brep,
+    values: &serde_json::Value,
+) -> Result<solidcore::topology::Brep, String> {
     use solidcore::geom::axis2_placement::Axis2Placement;
     use solidcore::math::{Point3, Vec3};
     use solidcore::primitive::api_primitives as api;
@@ -878,13 +887,12 @@ pub fn chamfer_brep_exact(
     if treatment.mode != EdgeMode::Chamfer {
         return Err("exact chamfer requires chamfer mode".into());
     }
-    let mut kernel = Kernel::default();
-    let selections = crate::edge::select_edges_from_values(&kernel, brep, values)
+    let selections = crate::edge::select_edges_from_values(kernel, brep, values)
         .map_err(|error| error.to_string())?;
     if selections.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let interior = brep_center(&kernel, brep).map_err(|error| error.to_string())?;
+    let interior = brep_center(&*kernel, brep).map_err(|error| error.to_string())?;
     let (min, max) = brep_vertex_bounds(brep)?;
     let diagonal = length(sub(max, min)).max(1.0);
     // Conservative body-scale bound. This catches nonsensical distances before the
@@ -901,7 +909,7 @@ pub fn chamfer_brep_exact(
     let extent = diagonal * 4.0 + 100.0;
     let mut result = brep.clone();
     for selection in &selections {
-        let frame = edge_frame(&kernel, brep, selection, interior).map_err(|error| error.to_string())?;
+        let frame = edge_frame(&*kernel, brep, selection, interior).map_err(|error| error.to_string())?;
         let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| error.to_string())?;
         for plane in planes {
             let plane = plane.orient_towards(interior);
@@ -910,7 +918,7 @@ pub fn chamfer_brep_exact(
             let normal = Vec3::new(normal[0], normal[1], normal[2]);
             let x_axis = normal.cross(helper).unitize().map_err(|error| error.to_string())?;
             let y_axis = normal.cross(x_axis).unitize().map_err(|error| error.to_string())?;
-            let mut tool = api::create_box(&mut kernel, Point3::new(-extent, -extent, 0.0), 2.0 * extent, 2.0 * extent, extent)
+            let mut tool = api::create_box(kernel, Point3::new(-extent, -extent, 0.0), 2.0 * extent, 2.0 * extent, extent)
                 .map_err(|error| error.to_string())?;
             let placement = Axis2Placement::new(
                 Point3::new(plane.point[0], plane.point[1], plane.point[2]),
@@ -918,14 +926,14 @@ pub fn chamfer_brep_exact(
                 y_axis,
             );
             solidcore::topology::brep::p5::transform(
-                &mut kernel,
+                kernel,
                 &mut tool,
                 &placement,
                 None,
                 true,
             ).map_err(|error| error.to_string())?;
             result = nodecraft_bool::boolean_breps_with_kernel(
-                &mut kernel,
+                kernel,
                 nodecraft_bool::BooleanOp::Difference,
                 result,
                 tool,

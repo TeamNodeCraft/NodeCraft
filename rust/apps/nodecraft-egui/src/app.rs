@@ -283,6 +283,37 @@ fn paste_plan(
     (commands, selected, pasted_last)
 }
 
+/// Resolve a tab drag to a final insertion index and the active index after it.
+/// `to` is an insertion slot in the original ordering, so dragging right removes
+/// the source before inserting.
+fn reorder_tab_index(
+    len: usize,
+    from: usize,
+    to: usize,
+    active: usize,
+) -> Option<(usize, usize)> {
+    if from >= len {
+        return None;
+    }
+    let mut insert = to.min(len);
+    if from < insert {
+        insert -= 1;
+    }
+    if insert == from {
+        return None;
+    }
+    let active = if active == from {
+        insert
+    } else if from < active && insert >= active {
+        active - 1
+    } else if from > active && insert <= active {
+        active + 1
+    } else {
+        active
+    };
+    Some((insert, active))
+}
+
 fn document_id_for_path(path: &Path) -> String {
     std::fs::canonicalize(path)
         .unwrap_or_else(|_| path.to_path_buf())
@@ -884,6 +915,17 @@ impl NodeCraftApp {
         self.evaluate();
     }
 
+    fn move_tab(&mut self, from: usize, to: usize) {
+        let Some((insert, active)) =
+            reorder_tab_index(self.tabs.len(), from, to, self.active_tab)
+        else {
+            return;
+        };
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(insert, tab);
+        self.active_tab = active;
+    }
+
     fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
@@ -1141,15 +1183,9 @@ impl NodeCraftApp {
     /// The primary geometry input a newly-added node should use when inserted
     /// downstream of the selected node. Non-geometry nodes return `None`.
     fn primary_geometry_input(node_type: &str) -> Option<&'static str> {
-        match node_type {
-            "boolean" | "fuse" => Some("a"),
-            "combine" | "translate" | "mirror" | "shell" | "chamfer" | "fillet"
-            | "scatter" | "exporter" | "sceneTransform" => Some("shape"),
-            "extrude" => Some("profile"),
-            "loft" => Some("bottom"),
-            "surfaceloft" => Some("sections"),
-            _ => None,
-        }
+        nodecraft_session::node_descriptor::descriptor(node_type)
+            .and_then(|descriptor| descriptor.inputs.first())
+            .map(|port| port.name)
     }
 
     fn primary_output(node_type: &str) -> Option<&'static str> {
@@ -1677,6 +1713,15 @@ impl NodeCraftApp {
         })
     }
 
+    /// Make the active editor revision the canonical document that linked roots
+    /// flatten from. Tabs remain views; the document store is the shared source.
+    fn publish_active_document(&mut self) {
+        let Some(session) = &self.session else { return };
+        let Some(tab) = self.tabs.get(self.active_tab) else { return };
+        self.documents
+            .publish_document(&tab.document_id, session.document());
+    }
+
     fn apply_commands(&mut self, commands: &[Command], coalesce: Option<&str>) -> bool {
         let Some(session) = self.session.as_mut() else { return false };
         match session.apply_commands_coalesced(
@@ -1689,7 +1734,11 @@ impl NodeCraftApp {
                     self.pending_dirty.extend(change.dirty_nodes);
                     self.auto_eval_due = Some(Instant::now());
                 }
-                change.changed
+                let changed = change.changed;
+                if changed {
+                    self.publish_active_document();
+                }
+                changed
             }
             Err(error) => {
                 self.error = Some(format!("Graph edit failed: {error}"));
@@ -1705,6 +1754,7 @@ impl NodeCraftApp {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
             self.adopt_session_document();
+            self.publish_active_document();
             if let (Some(before), Some(after)) = (before, after) {
                 let (start, end) = moved_positions(&before, &after);
                 if !start.is_empty() {
@@ -1725,6 +1775,7 @@ impl NodeCraftApp {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
             self.adopt_session_document();
+            self.publish_active_document();
             if let (Some(before), Some(after)) = (before, after) {
                 let (start, end) = moved_positions(&before, &after);
                 if !start.is_empty() {
@@ -2097,6 +2148,7 @@ impl NodeCraftApp {
             comparison,
             clear_cache,
             run_exporters,
+            token: nodecraft_engine::kernel_pool::RevisionToken::new(),
         });
         self.egui_ctx.request_repaint();
     }
@@ -3087,6 +3139,7 @@ impl eframe::App for NodeCraftApp {
         let theme = crate::theme::get();
         let mut requested_tab: Option<usize> = None;
         let mut requested_close: Option<usize> = None;
+        let mut requested_move: Option<(usize, usize)> = None;
         egui::Panel::top("app-bar")
             .exact_size(50.0)
             .frame(
@@ -3314,8 +3367,9 @@ impl eframe::App for NodeCraftApp {
                         let tab_fill = theme.color(if active { theme.control } else { theme.window });
                         let (tab_rect, response) = ui.allocate_exact_size(
                             egui::vec2(galley.size().x + 42.0, 30.0),
-                            egui::Sense::click(),
+                            egui::Sense::click_and_drag(),
                         );
+                        response.dnd_set_drag_payload(index);
                         ui.painter().add(ui_shape::shape(
                             tab_rect,
                             tab_fill,
@@ -3383,7 +3437,29 @@ impl eframe::App for NodeCraftApp {
                                 stroke,
                             );
                         }
-                        if close.clicked() {
+                        // Drag a tab to reorder it. The insertion line follows the
+                        // pointer half so dropping on the left/right edge inserts
+                        // before/after the hovered tab.
+                        let mut insertion = None;
+                        if let Some(payload) = response.dnd_hover_payload::<usize>() {
+                            let after = ui
+                                .input(|input| input.pointer.interact_pos())
+                                .is_some_and(|pos| pos.x > tab_rect.center().x);
+                            insertion = Some((*payload, if after { index + 1 } else { index }));
+                        }
+                        if let Some((from, to)) = insertion {
+                            let x = if to == index { tab_rect.left() } else { tab_rect.right() };
+                            ui.painter().line_segment(
+                                [egui::pos2(x, tab_rect.top() + 3.0), egui::pos2(x, tab_rect.bottom() - 3.0)],
+                                egui::Stroke::new(2.0, theme.color(theme.accent)),
+                            );
+                        }
+                        if let Some(payload) = response.dnd_release_payload::<usize>() {
+                            let after = ui
+                                .input(|input| input.pointer.interact_pos())
+                                .is_some_and(|pos| pos.x > tab_rect.center().x);
+                            requested_move = Some((*payload, if after { index + 1 } else { index }));
+                        } else if close.clicked() {
                             requested_close = Some(index);
                         } else if response.clicked() {
                             requested_tab = Some(index);
@@ -3486,7 +3562,9 @@ impl eframe::App for NodeCraftApp {
                 });
             });
 
-        if let Some(index) = requested_close {
+        if let Some((from, to)) = requested_move {
+            self.move_tab(from, to);
+        } else if let Some(index) = requested_close {
             self.close_tab(index);
         } else if let Some(index) = requested_tab {
             self.activate_tab(index);
@@ -4248,6 +4326,20 @@ impl eframe::App for NodeCraftApp {
                         }
                     }
                 }
+                NodeEditorAction::ToggleSuppressed { id } => {
+                    let suppressed = self
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.document().nodes.iter().find(|node| node.id == id))
+                        .map(|node| node.suppressed)
+                        .unwrap_or(false);
+                    if self.apply_commands(
+                        &[Command::SetSuppressed { node: id, suppressed: !suppressed }],
+                        Some("suppress-node"),
+                    ) {
+                        self.evaluate();
+                    }
+                }
                 NodeEditorAction::SetViewerBreakpoint { id } => {
                     // The eye controls the viewer only; it never mutates selection.
                     self.viewer_breakpoint = Some(id);
@@ -4375,12 +4467,20 @@ struct EvalJob {
     comparison: Option<(String, String)>,
     clear_cache: bool,
     run_exporters: bool,
+    token: nodecraft_engine::kernel_pool::RevisionToken,
+}
+
+#[derive(Default)]
+struct TabEvalState {
+    cache: EngineCache,
+    flat: nodecraft_session::flat::FlatGraphCache,
 }
 
 struct EvalWorker {
     tx: Sender<EvalJob>,
     rx: Receiver<(u64, u64, engine_bridge::Evaluation)>,
     progress_rx: Receiver<(u64, u64, nodecraft_engine::ProgressEvent)>,
+    active_token: std::sync::Arc<std::sync::Mutex<Option<nodecraft_engine::kernel_pool::RevisionToken>>>,
 }
 
 impl EvalWorker {
@@ -4392,30 +4492,52 @@ impl EvalWorker {
             // Cache ownership follows the tab/document, not the worker. This keeps
             // per-document dirty/cache lifetimes aligned and prevents one tab from
             // evicting or reusing another tab's entries.
-            let mut caches: std::collections::HashMap<u64, EngineCache> =
+            let mut states: std::collections::HashMap<u64, TabEvalState> =
                 std::collections::HashMap::new();
             while let Ok(mut job) = job_rx.recv() {
                 // Only the newest request matters; discard queued stale work.
                 while let Ok(next) = job_rx.try_recv() {
                     job = next;
                 }
-                let mut cache = caches.remove(&job.tab_id).unwrap_or_default();
+                let mut state = states.remove(&job.tab_id).unwrap_or_default();
+                nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
                 if job.clear_cache {
                     // Re-evaluate is an explicit request for a fresh result: do
                     // not let mesh/BRep/failure/import entries answer it.
-                    cache = EngineCache::new();
+                    state.cache = EngineCache::new();
                 }
                 let target = engine_bridge::target_for(&job.document, job.selected.as_deref());
+                let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
+                    Ok(flat) => flat.clone(),
+                    Err(error) => {
+                        let evaluation = target.map(|target| engine_bridge::Evaluation {
+                            target,
+                            mesh: None,
+                            comparison: None,
+                            difference: None,
+                            difference_error: None,
+                            node_errors: Default::default(),
+                            error: Some(error.to_string()),
+                            elapsed_ms: 0.0,
+                            cache_hits: 0,
+                            cache_misses: 0,
+                        });
+                        states.insert(job.tab_id, state);
+                        if let Some(evaluation) = evaluation
+                            && result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
+                        continue;
+                    }
+                };
                 let progress_tx = progress_tx.clone();
                 let mut on_progress = |event: nodecraft_engine::ProgressEvent| {
                     let _ = progress_tx.send((job.id, job.tab_id, event));
                 };
+                let mut cache = state.cache;
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    engine_bridge::evaluate_with_linked_progress_comparison(
-                        &job.document,
+                    engine_bridge::evaluate_flat_with_progress_comparison(
+                        flat.document(),
+                        target.clone().unwrap_or_default(),
                         cache,
-                        job.selected.as_deref(),
-                        &job.linked_documents,
                         Some(&mut on_progress),
                         job.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
                         job.run_exporters,
@@ -4444,11 +4566,12 @@ impl EvalWorker {
                         })
                     }
                 };
-                caches.insert(job.tab_id, cache);
-                if caches.len() > 16
-                    && let Some(oldest) = caches.keys().next().copied()
+                state.cache = cache;
+                states.insert(job.tab_id, state);
+                if states.len() > 16
+                    && let Some(oldest) = states.keys().next().copied()
                 {
-                    caches.remove(&oldest);
+                    states.remove(&oldest);
                 }
                 if let Some(evaluation) = evaluation {
                     if result_tx.send((job.id, job.tab_id, evaluation)).is_err() {
@@ -4457,10 +4580,21 @@ impl EvalWorker {
                 }
             }
         });
-        Self { tx: job_tx, rx: result_rx, progress_rx }
+        Self {
+            tx: job_tx,
+            rx: result_rx,
+            progress_rx,
+            active_token: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     fn send(&self, job: EvalJob) {
+        if let Ok(mut active) = self.active_token.lock() {
+            if let Some(previous) = active.take() {
+                previous.cancel();
+            }
+            *active = Some(job.token.clone());
+        }
         let _ = self.tx.send(job);
     }
 
@@ -5283,6 +5417,16 @@ fn configure_style(ctx: &egui::Context) {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn tab_drag_reorders_and_preserves_active_tab() {
+        assert_eq!(reorder_tab_index(4, 0, 3, 0), Some((2, 2)));
+        assert_eq!(reorder_tab_index(4, 3, 0, 1), Some((0, 2)));
+        assert_eq!(reorder_tab_index(4, 1, 4, 1), Some((3, 3)));
+        assert_eq!(reorder_tab_index(4, 1, 3, 0), Some((2, 0)));
+        assert_eq!(reorder_tab_index(4, 2, 2, 2), None);
+        assert_eq!(reorder_tab_index(4, 9, 0, 0), None);
+    }
 
     #[test]
     fn menu_rows_keep_stable_metrics_across_states() {

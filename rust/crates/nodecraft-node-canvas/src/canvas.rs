@@ -89,6 +89,7 @@ pub enum NodeEditorAction {
     Connect { from: String, to: String, input: String, out: String },
     InsertNodeOnCable { node: String, connection: ConnectionKey, input: String, out: String },
     SetViewerBreakpoint { id: String },
+    ToggleSuppressed { id: String },
     SetLassoSelection { nodes: HashSet<String>, live: bool },
     MoveNodes { positions: Vec<(String, f64, f64)> },
     SetPositions(Vec<(String, f64, f64)>),
@@ -1115,19 +1116,51 @@ impl NodeEditor {
                             if rect.contains(pointer) {
                                 return true;
                             }
-                            let (_, view_center) = button_centers(rect);
-                            Rect::from_center_size(
+                            let (suppress_center, view_center) = button_centers(rect);
+                            round_button_hit(
+                                suppress_center,
+                                pointer,
+                                BUTTON_RADIUS * self.zoom,
+                            ) || round_button_hit(
                                 view_center,
-                                Vec2::splat(VIEW_BUTTON_RADIUS * 2.0 * self.zoom),
+                                pointer,
+                                VIEW_BUTTON_RADIUS * self.zoom,
                             )
-                            .contains(pointer)
                         })
                         .collect(),
                     _ => Vec::new(),
                 };
                 for node in &interactive_nodes {
                     let rect = node_rect(node, canvas, self.pan, self.zoom);
-                    let (_, view_center) = button_centers(rect);
+                    let (suppress_center, view_center) = button_centers(rect);
+                    let power_rect = round_button_rect(
+                        suppress_center,
+                        BUTTON_RADIUS * self.zoom,
+                    )
+                    .intersect(panel);
+                    if pointer.is_some_and(|pointer| {
+                        round_button_hit(
+                            suppress_center,
+                            pointer,
+                            BUTTON_RADIUS * self.zoom,
+                        )
+                    }) {
+                        let power = ui.interact(
+                            power_rect,
+                            egui::Id::new(("node-power", &node.id)),
+                            Sense::click(),
+                        );
+                        if power.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if power.clicked() {
+                            actions.push(NodeEditorAction::ToggleSuppressed { id: node.id.clone() });
+                        }
+                        // The power control sits above the card. Do not register
+                        // the node drag/click region underneath it, otherwise the
+                        // card steals the button hit.
+                        continue;
+                    }
                     let eye_rect = Rect::from_center_size(
                         view_center,
                         Vec2::splat(VIEW_BUTTON_RADIUS * 2.0 * self.zoom),
@@ -2681,6 +2714,9 @@ fn geometry_key(
         node.node_type.hash(&mut hasher);
         node.x.to_bits().hash(&mut hasher);
         node.y.to_bits().hash(&mut hasher);
+        // Suppression changes the shader hatch flag, so it must invalidate the
+        // cached shape instances just like selection does.
+        node.suppressed.hash(&mut hasher);
     }
     for connection in &document.connections {
         connection.from.hash(&mut hasher);
@@ -2880,7 +2916,7 @@ fn build_shape_instances(
             radius: 26.0,
             stroke_width: if selected_here { 3.0 } else { 2.0 },
             kind: 0.0,
-            _pad: 0.0,
+            _pad: if node.suppressed { 1.0 } else { 0.0 },
         });
 
         let (suppress_center, view_center) = button_centers(rect);
@@ -3094,6 +3130,19 @@ fn zoom_percent(zoom: f32) -> i32 {
 
 fn hex_colour(rgba: [u8; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2])
+}
+
+/// Minimum screen-space hit radius for the small power control. At low zoom the
+/// drawn circle is only a few pixels wide; the hit target stays a full round
+/// area so the button remains usable without pixel hunting.
+const POWER_MIN_HIT_RADIUS: f32 = 11.0;
+
+fn round_button_hit(center: Pos2, pointer: Pos2, radius: f32) -> bool {
+    pointer.distance(center) <= radius.max(POWER_MIN_HIT_RADIUS)
+}
+
+fn round_button_rect(center: Pos2, radius: f32) -> Rect {
+    Rect::from_center_size(center, Vec2::splat(radius.max(POWER_MIN_HIT_RADIUS) * 2.0))
 }
 
 fn button_centers(rect: Rect) -> (Pos2, Pos2) {
@@ -3902,6 +3951,44 @@ mod tests {
         assert!(!inlet_is_data("profile"));
         assert!(!inlet_is_data("a"));
         assert!(!inlet_is_data("bottom"));
+    }
+
+    #[test]
+    fn power_button_hit_is_a_round_minimum_area() {
+        let center = Pos2::new(100.0, 100.0);
+        assert!(round_button_hit(center, Pos2::new(100.0, 100.0), 0.01));
+        assert!(round_button_hit(center, Pos2::new(108.0, 100.0), 0.01));
+        assert!(!round_button_hit(center, Pos2::new(100.0, 113.0), 0.01));
+        assert!(!round_button_hit(center, Pos2::new(113.0, 113.0), 0.01));
+        assert_eq!(round_button_rect(center, 0.01).size(), Vec2::splat(22.0));
+    }
+
+    #[test]
+    fn suppression_invalidates_cached_shape_instances() {
+        use nodecraft_session::{GraphDocument, GraphInterface};
+        let mut node = nodecraft_session::GraphNode {
+            id: "n".into(),
+            node_type: "primitive".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 10.0,
+            y: 20.0,
+        };
+        let document = GraphDocument {
+            schema_version: 1,
+            id: "d".into(),
+            nodes: vec![node.clone()],
+            connections: Vec::new(),
+            interface: GraphInterface::default(),
+        };
+        let theme = crate::theme::CanvasTheme::default();
+        let selected = HashSet::new();
+        let first = geometry_key(&document, &selected, &HashSet::new(), &[], None, &theme);
+        node.suppressed = true;
+        let mut document = document;
+        document.nodes[0] = node;
+        let second = geometry_key(&document, &selected, &HashSet::new(), &[], None, &theme);
+        assert_ne!(first, second);
     }
 
     #[test]

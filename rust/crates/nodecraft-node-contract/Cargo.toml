@@ -1,0 +1,13 @@
+[package]
+name = "nodecraft-node-contract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "nodecraft_node_contract"
+path = "src/lib.rs"
+
+[dependencies]
+serde_json.workspace = true
+nodecraft-protocol = { path = "../nodecraft-protocol" }

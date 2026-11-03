@@ -11,6 +11,8 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 mod defaults;
+pub mod flat;
+pub mod node_descriptor;
 pub mod placement;
 mod runtime;
 pub mod store;

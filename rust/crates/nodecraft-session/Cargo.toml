@@ -18,3 +18,4 @@ serde = { workspace = true }
 serde_json.workspace = true
 nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-node-contract = { path = "../nodecraft-node-contract" }

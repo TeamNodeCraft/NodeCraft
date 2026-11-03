@@ -56,8 +56,8 @@ pub use edge::{
     select_edges_by_ordinals, select_edges_from_values,
 };
 pub use error::BlendError;
-pub use exact::{apply_edge_treatment_brep, chamfer_brep, fillet_brep, fillet_brep_exact, missing_calls, port_units};
-pub use preview::{FILLET_SEGMENTS, apply_edge_treatment, chamfer_brep_exact, edge_treatment_preview};
+pub use exact::{apply_edge_treatment_brep, chamfer_brep, fillet_brep, fillet_brep_exact, fillet_brep_exact_with_kernel, missing_calls, port_units};
+pub use preview::{FILLET_SEGMENTS, apply_edge_treatment, chamfer_brep_exact, chamfer_brep_exact_with_kernel, edge_treatment_preview};
 pub use treatment::{ChamferType, Continuity, EdgeMode, EdgeTreatment};
 
 use solidcore::kernel::Kernel;

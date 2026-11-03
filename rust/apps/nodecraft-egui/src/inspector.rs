@@ -77,6 +77,27 @@ fn slider(key: &'static str, label: &'static str, default: f64, min: f64, max: f
     )
 }
 
+/// A CAD length. Upper bound is intentionally open: the engine and document
+/// format use f64 model units, so the inspector must not cap real-world sizes.
+fn dimension(key: &'static str, label: &'static str, default: f64) -> FieldSpec {
+    field(
+        key,
+        label,
+        Value::from(default),
+        Widget::Number { min: Some(0.0), max: None, step: 0.1 },
+    )
+}
+
+/// A signed CAD length/offset with no upper bound.
+fn measurement(key: &'static str, label: &'static str, default: f64, step: f64) -> FieldSpec {
+    field(
+        key,
+        label,
+        Value::from(default),
+        Widget::Number { min: None, max: None, step },
+    )
+}
+
 fn choice(
     key: &'static str,
     label: &'static str,
@@ -109,19 +130,19 @@ fn primitive_specs(node: &GraphNode) -> Vec<FieldSpec> {
         ],
     )];
     match kind {
-        "sphere" => specs.push(slider("radius", "Radius", 20.0, 0.0, 500.0, 0.1)),
+        "sphere" => specs.push(dimension("radius", "Radius", 20.0)),
         "cylinder" => {
-            specs.push(slider("radius", "Radius", 20.0, 0.0, 500.0, 0.1));
-            specs.push(slider("height", "Height", 40.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("radius", "Radius", 20.0));
+            specs.push(dimension("height", "Height", 40.0));
         }
         "cone" => {
-            specs.push(slider("bottomRadius", "Bottom radius", 20.0, 0.0, 500.0, 0.1));
-            specs.push(slider("topRadius", "Top radius", 0.0, 0.0, 500.0, 0.1));
-            specs.push(slider("height", "Height", 40.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("bottomRadius", "Bottom radius", 20.0));
+            specs.push(dimension("topRadius", "Top radius", 0.0));
+            specs.push(dimension("height", "Height", 40.0));
         }
         "torus" => {
-            specs.push(slider("majorRadius", "Major radius", 15.0, 0.0, 500.0, 0.1));
-            specs.push(slider("minorRadius", "Minor radius", 5.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("majorRadius", "Major radius", 15.0));
+            specs.push(dimension("minorRadius", "Minor radius", 5.0));
         }
         "wedge" => {
             for (key, label, default) in [
@@ -130,21 +151,21 @@ fn primitive_specs(node: &GraphNode) -> Vec<FieldSpec> {
                 ("height", "Height", 25.0),
                 ("topLength", "Top length", 0.0),
             ] {
-                specs.push(slider(key, label, default, 0.0, 500.0, 0.1));
+                specs.push(dimension(key, label, default));
             }
         }
         "pyramid" => {
-            specs.push(slider("length", "Base length", 40.0, 0.0, 500.0, 0.1));
-            specs.push(slider("height", "Height", 40.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("length", "Base length", 40.0));
+            specs.push(dimension("height", "Height", 40.0));
         }
         "partialSphere" => {
-            specs.push(slider("radius", "Radius", 20.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("radius", "Radius", 20.0));
             specs.push(slider("startAngle", "Start angle°", 0.0, -180.0, 180.0, 1.0));
             specs.push(slider("endAngle", "End angle°", 90.0, -180.0, 180.0, 1.0));
         }
         "partialTorus" => {
-            specs.push(slider("majorRadius", "Major radius", 15.0, 0.0, 500.0, 0.1));
-            specs.push(slider("minorRadius", "Minor radius", 5.0, 0.0, 500.0, 0.1));
+            specs.push(dimension("majorRadius", "Major radius", 15.0));
+            specs.push(dimension("minorRadius", "Minor radius", 5.0));
             specs.push(slider("startAngle", "Start angle°", 0.0, -180.0, 180.0, 1.0));
             specs.push(slider("endAngle", "End angle°", 90.0, -180.0, 180.0, 1.0));
         }
@@ -154,7 +175,7 @@ fn primitive_specs(node: &GraphNode) -> Vec<FieldSpec> {
                 ("width", "Width", 40.0),
                 ("height", "Height", 40.0),
             ] {
-                specs.push(slider(key, label, default, 0.0, 500.0, 0.1));
+                specs.push(dimension(key, label, default));
             }
         }
     }
@@ -393,9 +414,9 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
         ],
         "translate" => vec![
             choice("space", "Space", "world", &[("world", "World"), ("local", "Local")]),
-            slider("x", "Position X", 0.0, -500.0, 500.0, 0.01),
-            slider("y", "Position Y", 0.0, -500.0, 500.0, 0.01),
-            slider("z", "Position Z", 0.0, -500.0, 500.0, 0.01),
+            measurement("x", "Position X", 0.0, 0.01),
+            measurement("y", "Position Y", 0.0, 0.01),
+            measurement("z", "Position Z", 0.0, 0.01),
             slider("rx", "Rotation X°", 0.0, -180.0, 180.0, 0.1),
             slider("ry", "Rotation Y°", 0.0, -180.0, 180.0, 0.1),
             slider("rz", "Rotation Z°", 0.0, -180.0, 180.0, 0.1),
@@ -412,7 +433,7 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
             ],
         )],
         "extrude" => vec![
-            slider("amount", "Amount", 10.0, 0.0, 500.0, 0.1),
+            dimension("amount", "Amount", 10.0),
             choice(
                 "operation",
                 "Operation",
@@ -422,17 +443,17 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
         ],
         "loft" | "surfaceloft" => vec![slider("ruled", "Ruled", 0.0, 0.0, 1.0, 1.0)],
         "chamfer" => vec![
-            slider("length", "Distance", 2.0, 0.0, 100.0, 0.01),
+            dimension("length", "Distance", 2.0),
             choice("chamferType", "Type", "equal", &[
                 ("equal", "Equal distance"),
                 ("two-distance", "Two distances"),
                 ("distance-angle", "Distance + angle"),
             ]),
-            slider("distance2", "Distance 2", 2.0, 0.0, 100.0, 0.01),
+            dimension("distance2", "Distance 2", 2.0),
             slider("angle", "Angle°", 45.0, 0.1, 179.9, 0.1),
         ],
         "fillet" => vec![
-            slider("length", "Radius", 2.0, 0.0, 100.0, 0.01),
+            dimension("length", "Radius", 2.0),
             choice("continuity", "Continuity", "", &[
                 ("", "Circular (G1)"),
                 ("G2", "Curvature (G2)"),
@@ -440,12 +461,12 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
             ]),
         ],
         "shell" => vec![
-            slider("thickness", "Thickness", 2.0, 0.0, 100.0, 0.01),
+            dimension("thickness", "Thickness", 2.0),
             choice("direction", "Direction", "inward", &[("inward", "Inward"), ("outward", "Outward")]),
         ],
         "mirror" => vec![
             choice("plane", "Plane", "xz", &[("xy", "XY"), ("xz", "XZ"), ("yz", "YZ")]),
-            slider("offset", "Offset", 0.0, -500.0, 500.0, 0.01),
+            measurement("offset", "Offset", 0.0, 0.01),
             switch("combine", "Combine", true),
         ],
         "scatter" => vec![
@@ -1032,6 +1053,22 @@ mod tests {
             x: 0.0,
             y: 0.0,
         }
+    }
+
+    #[test]
+    fn cad_dimensions_have_no_inspector_upper_bound() {
+        let specs = known_specs(&node(
+            "primitive",
+            serde_json::json!({ "primitiveType": "box", "length": 5000.0 }),
+        ));
+        let length = specs.iter().find(|spec| spec.key == "length").expect("length");
+        assert!(matches!(
+            length.widget,
+            Widget::Number { max: None, .. }
+        ));
+        let translate = known_specs(&node("translate", Value::Null));
+        let x = translate.iter().find(|spec| spec.key == "x").expect("x");
+        assert!(matches!(x.widget, Widget::Number { min: None, max: None, .. }));
     }
 
     #[test]

@@ -76,6 +76,16 @@ pub const fn port_units() -> &'static [&'static str] {
 /// Uses solidcore's public `fillet_edges` entry point; this is the modeling
 /// path, not the display-mesh preview.
 pub fn fillet_brep_exact(brep: &Brep, values: &serde_json::Value) -> Result<Brep, String> {
+    let mut kernel = Kernel::default();
+    fillet_brep_exact_with_kernel(&mut kernel, brep, values)
+}
+
+/// [`fillet_brep_exact`] on a caller-owned (worker) kernel.
+pub fn fillet_brep_exact_with_kernel(
+    kernel: &mut Kernel,
+    brep: &Brep,
+    values: &serde_json::Value,
+) -> Result<Brep, String> {
     let treatment = EdgeTreatment::from_node_values(values).map_err(|error| error.to_string())?;
     treatment.validate().map_err(|error| error.to_string())?;
     if treatment.mode != EdgeMode::Fillet {
@@ -84,17 +94,16 @@ pub fn fillet_brep_exact(brep: &Brep, values: &serde_json::Value) -> Result<Brep
     if treatment.continuity != Continuity::Circular {
         return Err("G2/G3 fillets need a B-spline fillet law; only circular G1 is exact here".into());
     }
-    let kernel = Kernel::default();
-    let selections = crate::edge::select_edges_from_values(&kernel, brep, values)
+    let selections = crate::edge::select_edges_from_values(kernel, brep, values)
         .map_err(|error| error.to_string())?;
     if selections.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
     let edges: Vec<solidcore::topology::EdgeId> = selections.iter().map(|selection| selection.edge).collect();
-    let mut kernel = Kernel::default();
-    let mut result = brep.clone_standing_for_self().map_err(|error| error.to_string())?;
+    let mut result = solidcore::topology::brep::p3::brep_copy(kernel, brep)
+        .map_err(|error| error.to_string())?;
     solidcore::blend::fillet_executive::api::fillet_edges(
-        &mut kernel,
+        kernel,
         &mut result,
         &edges,
         treatment.length,

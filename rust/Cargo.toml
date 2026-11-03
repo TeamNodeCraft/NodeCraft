@@ -2,6 +2,7 @@
 members = [
   "apps/nodecraft-egui",
   "crates/nodecraft-protocol",
+  "crates/nodecraft-node-contract",
   "crates/nodecraft-kernel",
   "crates/nodecraft-worker",
   "crates/nodecraft-engine",

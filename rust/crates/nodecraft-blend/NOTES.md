@@ -13,10 +13,10 @@ solidcore revision: git `main`, `Cargo.lock` rev `6ecdaaa`.
 > `create_offset_solid` and returns a closed manifold hollow solid, and
 > `solidcore::blend::fillet_executive::api::fillet_edges` completes for a box.
 >
-> The exact fillet integration must clone the input with
-> `Brep::clone_standing_for_self()` before calling the kernel; a plain `clone()`
-> loses the standing context and fails at
-> `merge_curve_on_surfaces: upstream status 1006`.
+> The exact fillet integration copies the input with SolidCore's owning
+> `brep::p3::brep_copy()` before calling the kernel. It replaced the former
+> `clone_standing_for_self()` workaround; the owning copy is safe to edit and
+> does not share geometry owners with the input.
 >
 > `fillet_brep_exact` now routes through that API, and the engine evaluates
 > fillet as a Part. Mesh preview remains display-only.
