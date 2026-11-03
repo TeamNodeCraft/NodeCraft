@@ -4,16 +4,6 @@ NodeCraft is a native node-based CAD editor built with Rust, egui and wgpu.
 It uses SolidCore/SMLib B-reps for exact geometry and a node canvas for
 constructive modelling.
 
-## What's new
-
-- Inspector-driven topology selection for chamfer, fillet and shell features.
-- Exact chamfer evaluation, including chained chamfer operations.
-- Feature comparison overlay showing removed and added material around a
-  selected operation; display-only and excluded from picking.
-- Viewer breakpoint controls with explicit downstream stepping.
-- Auto-placement and fade-in for tool-dock nodes, with cable-aware spacing.
-- Persisted editing-overlay setting under Viewport preferences.
-
 ## Requirements
 
 - Rust toolchain (stable)
