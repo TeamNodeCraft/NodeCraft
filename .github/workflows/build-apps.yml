@@ -1,0 +1,65 @@
+name: Build desktop apps
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  macos:
+    name: macOS universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Build both architectures
+        run: |
+          cargo build --release --locked --manifest-path rust/Cargo.toml \
+            -p nodecraft-egui --target aarch64-apple-darwin
+          cargo build --release --locked --manifest-path rust/Cargo.toml \
+            -p nodecraft-egui --target x86_64-apple-darwin
+      - name: Bundle universal app
+        run: |
+          APP="NodeCraft.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS"
+          cp macos/Info.plist "$APP/Contents/Info.plist"
+          sed -i '' 's/<string>NodeCraft<\/string>/<string>nodecraft-egui<\/string>/g' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Delete :CFBundleDisplayName' "$APP/Contents/Info.plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Add :CFBundleDisplayName string NodeCraft' "$APP/Contents/Info.plist" 2>/dev/null || true
+          printf 'APPL????' > "$APP/Contents/PkgInfo"
+          lipo -create \
+            rust/target/aarch64-apple-darwin/release/nodecraft-egui \
+            rust/target/x86_64-apple-darwin/release/nodecraft-egui \
+            -output "$APP/Contents/MacOS/nodecraft-egui"
+          chmod +x "$APP/Contents/MacOS/nodecraft-egui"
+          codesign --force --deep --sign - "$APP"
+          ditto -c -k --keepParent "$APP" NodeCraft-macos-universal.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NodeCraft-macos-universal
+          path: NodeCraft-macos-universal.zip
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked --manifest-path rust/Cargo.toml -p nodecraft-egui
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item rust/target/release/nodecraft-egui.exe dist/NodeCraft.exe
+          Compress-Archive -Path dist/NodeCraft.exe -DestinationPath NodeCraft-windows-x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NodeCraft-windows-x64
+          path: NodeCraft-windows-x64.zip
+          if-no-files-found: error

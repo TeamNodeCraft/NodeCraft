@@ -834,6 +834,17 @@ pub fn chamfer_brep_exact(
     let interior = brep_center(&kernel, brep).map_err(|error| error.to_string())?;
     let (min, max) = brep_vertex_bounds(brep)?;
     let diagonal = length(sub(max, min)).max(1.0);
+    // Conservative body-scale bound. This catches nonsensical distances before the
+    // kernel is asked to cut with a tool larger than the whole body.
+    let (distance_a, distance_b) = treatment
+        .chamfer_distances()
+        .map_err(|error| error.to_string())?;
+    if distance_a > diagonal || distance_b > diagonal {
+        return Err(format!(
+            "chamfer distance {:.4}/{:.4} exceeds the body diagonal {:.4}; reduce the distance",
+            distance_a, distance_b, diagonal
+        ));
+    }
     let extent = diagonal * 4.0 + 100.0;
     let mut result = brep.clone();
     for selection in &selections {
@@ -867,6 +878,9 @@ pub fn chamfer_brep_exact(
                 tool,
             )?;
         }
+    }
+    if result.face_list().is_empty() || result.vertex_list().is_empty() {
+        return Err("chamfer removed the whole body; reduce the chamfer distance".into());
     }
     Ok(result)
 }
