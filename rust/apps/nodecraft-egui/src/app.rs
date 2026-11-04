@@ -590,6 +590,8 @@ pub struct NodeCraftApp {
     difference_error: Option<String>,
     feature_overlay: bool,
     engine_threads: usize,
+    mesher_threads: usize,
+    workload_profiler: bool,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -700,7 +702,9 @@ impl NodeCraftApp {
         }
         let persisted_view = settings.view;
         let activity = settings.activity;
-        nodecraft_engine::kernel_pool::configure_threads(settings.engine_threads);
+        nodecraft_engine::kernel_pool::configure_exact_threads(settings.engine_threads);
+        nodecraft_engine::kernel_pool::configure_mesh_threads(settings.mesher_threads);
+        nodecraft_engine::configure_workload_profiler(settings.workload_profiler);
         node_editor.set_activity_timings(
             u64::from(activity.fade_in_ms),
             u64::from(activity.hold_ms),
@@ -734,6 +738,8 @@ impl NodeCraftApp {
             difference_error: None,
             feature_overlay: settings.feature_overlay,
             engine_threads: settings.engine_threads,
+            mesher_threads: settings.mesher_threads,
+            workload_profiler: settings.workload_profiler,
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
@@ -2289,6 +2295,8 @@ impl NodeCraftApp {
         let mut view = self.viewport.view();
         let mut show_view_matrix = self.viewport.show_view_matrix();
         let mut engine_threads = self.engine_threads;
+        let mut mesher_threads = self.mesher_threads;
+        let mut workload_profiler = self.workload_profiler;
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
         let mut close = false;
@@ -2609,13 +2617,28 @@ impl NodeCraftApp {
                         let mut threads = engine_threads as u32;
                         content.add(
                             egui::Slider::new(&mut threads, 0..=64)
-                                .text("Kernel threads (0 = auto)")
+                                .text("Exact kernel threads (0 = auto)")
                                 .integer(),
                         );
                         engine_threads = threads as usize;
+                        let mut mesher = mesher_threads as u32;
+                        content.add(
+                            egui::Slider::new(&mut mesher, 0..=64)
+                                .text("Mesher threads (0 = auto)")
+                                .integer(),
+                        );
+                        mesher_threads = mesher as usize;
                         content.monospace(format!(
-                            "Active pool: {}",
-                            if nodecraft_engine::kernel_pool::shared_pool_initialized() {
+                            "Exact pool: {}",
+                            if nodecraft_engine::kernel_pool::exact_pool_initialized() {
+                                "already started"
+                            } else {
+                                "lazy"
+                            }
+                        ));
+                        content.monospace(format!(
+                            "Mesh pool: {}",
+                            if nodecraft_engine::kernel_pool::mesh_pool_initialized() {
                                 "already started"
                             } else {
                                 "lazy"
@@ -2627,6 +2650,15 @@ impl NodeCraftApp {
                                 .map(|count| count.get())
                                 .unwrap_or(1)
                         ));
+                        content.add_space(8.0);
+                        content.checkbox(
+                            &mut workload_profiler,
+                            "Adaptive workload dispatch (profiler)",
+                        );
+                        content.small(
+                            "Automatically chooses how much of the current graph to run in parallel. \
+                             Simple chains run normally; wide graphs use more worker threads.",
+                        );
                     }
                     SettingsTab::Diagnostics => {
                         content.heading("Diagnostics");
@@ -2693,7 +2725,19 @@ impl NodeCraftApp {
         }
         if engine_threads != self.engine_threads {
             self.engine_threads = engine_threads;
-            nodecraft_engine::kernel_pool::configure_threads(engine_threads);
+            nodecraft_engine::kernel_pool::configure_exact_threads(engine_threads);
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
+        }
+        if mesher_threads != self.mesher_threads {
+            self.mesher_threads = mesher_threads;
+            nodecraft_engine::kernel_pool::configure_mesh_threads(mesher_threads);
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
+        }
+        if workload_profiler != self.workload_profiler {
+            self.workload_profiler = workload_profiler;
+            nodecraft_engine::configure_workload_profiler(workload_profiler);
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
@@ -3108,6 +3152,8 @@ impl eframe::App for NodeCraftApp {
                 self.activity,
                 self.feature_overlay,
                 self.engine_threads,
+                self.mesher_threads,
+                self.workload_profiler,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -4850,7 +4896,15 @@ struct AppSettings {
     #[serde(default)]
     engine_threads: usize,
     #[serde(default)]
+    mesher_threads: usize,
+    #[serde(default = "default_workload_profiler")]
+    workload_profiler: bool,
+    #[serde(default)]
     recent_files: Vec<String>,
+}
+
+fn default_workload_profiler() -> bool {
+    true
 }
 
 fn default_feature_overlay() -> bool {
@@ -4868,6 +4922,8 @@ fn save_app_settings(
     activity: ActivitySettings,
     feature_overlay: bool,
     engine_threads: usize,
+    mesher_threads: usize,
+    workload_profiler: bool,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -4880,6 +4936,8 @@ fn save_app_settings(
         activity,
         feature_overlay,
         engine_threads,
+        mesher_threads,
+        workload_profiler,
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -5770,6 +5828,8 @@ mod tests {
             activity: ActivitySettings::default(),
             feature_overlay: true,
             engine_threads: 0,
+            mesher_threads: 0,
+            workload_profiler: true,
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");

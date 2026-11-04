@@ -6,7 +6,7 @@
 
 use crate::kernel_pool::{KernelPool, RevisionToken};
 use nodecraft_solidcore::solidcore::kernel::Kernel;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub type TaskJob<T> = Box<dyn FnOnce(&mut Kernel) -> Result<T, String> + Send + 'static>;
 pub type TaskBuilder<T> = Box<
@@ -61,6 +61,7 @@ pub enum ScheduleError {
     Cycle,
     WorkerStopped,
     Task(String),
+    Cancelled,
 }
 
 impl std::fmt::Display for ScheduleError {
@@ -73,6 +74,7 @@ impl std::fmt::Display for ScheduleError {
             Self::Cycle => f.write_str("scheduled task graph has a cycle"),
             Self::WorkerStopped => f.write_str("kernel worker stopped during scheduling"),
             Self::Task(error) => write!(f, "scheduled task failed: {error}"),
+            Self::Cancelled => f.write_str("scheduled task group was cancelled"),
         }
     }
 }
@@ -85,6 +87,18 @@ pub fn run_levels<T: Send + 'static>(
     pool: &KernelPool,
     tasks: Vec<ScheduledTask<T>>,
     token: RevisionToken,
+) -> Result<BTreeMap<String, Result<T, String>>, ScheduleError> {
+    run_levels_with_limit(pool, tasks, token, usize::MAX)
+}
+
+/// Like [`run_levels`], but keeps at most `max_in_flight` jobs submitted at
+/// once. This prevents a very wide level from flooding the pool/queue and is
+/// the dispatch cap selected from the workload profile.
+pub fn run_levels_with_limit<T: Send + 'static>(
+    pool: &KernelPool,
+    tasks: Vec<ScheduledTask<T>>,
+    token: RevisionToken,
+    max_in_flight: usize,
 ) -> Result<BTreeMap<String, Result<T, String>>, ScheduleError> {
     let mut by_id = BTreeMap::new();
     for task in tasks {
@@ -106,24 +120,37 @@ pub fn run_levels<T: Send + 'static>(
     }
     let levels = dependency_levels(&by_id)?;
     let mut results = BTreeMap::new();
+    let limit = max_in_flight.max(1);
     for level in levels {
-        let mut running = Vec::new();
-        for id in level {
-            let task = by_id.remove(&id).expect("level task exists");
-            let job = match (task.build)(&results) {
-                Ok(job) => job,
-                Err(error) => {
-                    results.insert(id, Err(error));
-                    continue;
-                }
-            };
-            let receiver = pool.submit(task.seed, token.clone(), job);
-            running.push((id, receiver));
+        if token.is_cancelled() {
+            return Err(ScheduleError::Cancelled);
         }
-        for (id, receiver) in running {
+        let mut pending: VecDeque<String> = level.into();
+        let mut running: VecDeque<(String, std::sync::mpsc::Receiver<_>)> = VecDeque::new();
+        while !pending.is_empty() || !running.is_empty() {
+            while running.len() < limit {
+                let Some(id) = pending.pop_front() else { break };
+                let task = by_id.remove(&id).expect("level task exists");
+                let job = match (task.build)(&results) {
+                    Ok(job) => job,
+                    Err(error) => {
+                        results.insert(id, Err(error));
+                        continue;
+                    }
+                };
+                let receiver = pool.submit(task.seed, token.clone(), job);
+                running.push_back((id, receiver));
+            }
+            let Some((id, receiver)) = running.pop_front() else { break };
             let result = receiver.recv().map_err(|_| ScheduleError::WorkerStopped)?;
             let result = result.map_err(ScheduleError::Task)?;
             results.insert(id, result);
+            if token.is_cancelled() {
+                return Err(ScheduleError::Cancelled);
+            }
+        }
+        if token.is_cancelled() {
+            return Err(ScheduleError::Cancelled);
         }
     }
     Ok(results)
@@ -198,6 +225,41 @@ mod tests {
         assert_eq!(results["b"], Ok(2));
         assert_eq!(results["c"], Ok(4));
         assert_eq!(order.lock().unwrap().last().copied(), Some("c"));
+    }
+
+    #[test]
+    fn dispatch_limit_bounds_concurrent_jobs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pool = KernelPool::new(2);
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for index in 0..4 {
+            let active = active.clone();
+            let maximum = maximum.clone();
+            tasks.push(ScheduledTask::leaf(index.to_string(), index, move |_| {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(15));
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(index as u32)
+            }));
+        }
+        let results = run_levels_with_limit(&pool, tasks, RevisionToken::new(), 1).expect("schedule");
+        assert_eq!(results.len(), 4);
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cancelled_schedule_does_not_dispatch_dependents() {
+        let pool = KernelPool::new(2);
+        let token = RevisionToken::new();
+        token.cancel();
+        let task = ScheduledTask::leaf("a", 1, |_| Ok(1u32));
+        assert_eq!(
+            run_levels(&pool, vec![task], token),
+            Err(ScheduleError::Cancelled)
+        );
     }
 
     #[test]

@@ -18,8 +18,22 @@ use std::time::Instant;
 /// Upstream SolidCraft sketch model: points, curves, constraints, solver and
 /// profile detection. This replaces the retired JS/Python sketch implementation.
 mod node_task;
+pub mod workload;
 pub mod scheduler;
 pub mod kernel_pool;
+
+static WORKLOAD_PROFILER_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Enable or disable analysis-driven dispatch. Default is enabled.
+pub fn configure_workload_profiler(enabled: bool) {
+    WORKLOAD_PROFILER_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn workload_profiler_enabled() -> bool {
+    WORKLOAD_PROFILER_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
 pub mod node_plugin;
 
 pub mod sketch {
@@ -2133,6 +2147,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         // for the entire graph.
         let scope: std::collections::HashSet<String> =
             evaluation_order_for_targets(self.request).into_iter().collect();
+        let profile = crate::workload::profile_request(self.request);
+        if crate::workload_profiler_enabled() && !profile.exact_dispatch_is_worthwhile() {
+            return;
+        }
         let mut tasks = Vec::new();
         let mut keys = std::collections::BTreeMap::new();
         let mut warmable = std::collections::BTreeSet::new();
@@ -2355,10 +2373,17 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
         }
         if tasks.is_empty() { return; }
-        let Ok(results) = run_levels(
-            crate::kernel_pool::shared_pool(),
+        let pool = crate::kernel_pool::shared_pool();
+        let max_in_flight = if crate::workload_profiler_enabled() {
+            profile.recommended_exact_in_flight(pool.workers())
+        } else {
+            usize::MAX
+        };
+        let Ok(results) = crate::scheduler::run_levels_with_limit(
+            pool,
             tasks,
-            crate::kernel_pool::RevisionToken::new(),
+            crate::kernel_pool::current_revision_token(),
+            max_in_flight,
         ) else { return; };
         for (id, result) in results {
             let Ok(brep) = result else { continue };
@@ -2844,7 +2869,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
         } else {
             // Independent body meshes run on the engine's persistent kernel pool.
-            let pool = crate::kernel_pool::shared_pool();
+            let pool = crate::kernel_pool::shared_mesh_pool();
             let mut results = Vec::with_capacity(part.bodies.len());
             for (index, body) in part.bodies.iter().enumerate() {
                 let body = body.body.clone();

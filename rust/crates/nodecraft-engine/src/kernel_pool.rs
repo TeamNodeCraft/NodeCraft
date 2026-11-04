@@ -19,7 +19,7 @@ pub fn set_current_revision_token(token: CancelToken) {
     CURRENT_REVISION_TOKEN.with(|current| *current.borrow_mut() = token);
 }
 
-fn current_revision_token() -> CancelToken {
+pub(crate) fn current_revision_token() -> CancelToken {
     CURRENT_REVISION_TOKEN.with(|current| current.borrow().clone())
 }
 
@@ -74,6 +74,11 @@ impl KernelPool {
             workers.push(worker);
         }
         Self { tx, workers }
+    }
+
+    #[must_use]
+    pub fn workers(&self) -> usize {
+        self.workers.len()
     }
 
     /// Run one job synchronously on a pool worker. This is the convenience
@@ -147,37 +152,74 @@ impl Drop for KernelPool {
     }
 }
 
-static SHARED_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
-static REQUESTED_THREADS: std::sync::atomic::AtomicUsize =
+static EXACT_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
+static MESH_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
+static REQUESTED_EXACT_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+static REQUESTED_MESH_THREADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-/// Configure the shared pool before its first use. `0` means auto-detect.
-/// The pool is created lazily, so changing this after evaluation has started
-/// does not resize the existing workers.
-pub fn configure_threads(threads: usize) {
-    REQUESTED_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
+/// Configure the exact-evaluation pool before its first use. `0` means auto.
+pub fn configure_exact_threads(threads: usize) {
+    REQUESTED_EXACT_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether the shared pool has already been created.
+/// Configure the display-meshing pool before its first use. `0` means auto.
+pub fn configure_mesh_threads(threads: usize) {
+    REQUESTED_MESH_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Backwards-compatible alias for configuring exact kernel threads.
+pub fn configure_threads(threads: usize) {
+    configure_exact_threads(threads);
+}
+
+fn pool_threads(requested: &std::sync::atomic::AtomicUsize) -> usize {
+    let requested = requested.load(std::sync::atomic::Ordering::Relaxed);
+    if requested == 0 {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+    } else {
+        requested
+    }
+}
+
+/// Whether the exact-evaluation pool has already been created.
+#[must_use]
+pub fn exact_pool_initialized() -> bool {
+    EXACT_POOL.get().is_some()
+}
+
+/// Whether the meshing pool has already been created.
+#[must_use]
+pub fn mesh_pool_initialized() -> bool {
+    MESH_POOL.get().is_some()
+}
+
+/// Backwards-compatible alias for exact-pool initialisation.
 #[must_use]
 pub fn shared_pool_initialized() -> bool {
-    SHARED_POOL.get().is_some()
+    exact_pool_initialized()
 }
 
-/// Shared engine pool. Workers own persistent kernels across evaluations.
+/// Exact-evaluation pool. Workers own persistent kernels and RNG state.
+#[must_use]
+pub fn shared_exact_pool() -> &'static KernelPool {
+    EXACT_POOL.get_or_init(|| KernelPool::new(pool_threads(&REQUESTED_EXACT_THREADS)))
+}
+
+/// Display-meshing pool. Separate from exact work so large mesh batches do not
+/// delay modeling tasks.
+#[must_use]
+pub fn shared_mesh_pool() -> &'static KernelPool {
+    MESH_POOL.get_or_init(|| KernelPool::new(pool_threads(&REQUESTED_MESH_THREADS)))
+}
+
+/// Backwards-compatible alias for the exact-evaluation pool.
 #[must_use]
 pub fn shared_pool() -> &'static KernelPool {
-    SHARED_POOL.get_or_init(|| {
-        let requested = REQUESTED_THREADS.load(std::sync::atomic::Ordering::Relaxed);
-        let threads = if requested == 0 {
-            std::thread::available_parallelism()
-                .map(|count| count.get())
-                .unwrap_or(1)
-        } else {
-            requested
-        };
-        KernelPool::new(threads)
-    })
+    shared_exact_pool()
 }
 
 #[cfg(test)]
