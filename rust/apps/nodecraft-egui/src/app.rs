@@ -62,12 +62,20 @@ pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
 }
 
 const TOOL_DOCK_WIDTH: f32 = 44.0;
+const TOOL_DOCK_RADIUS: f32 = 20.0;
 const TOOL_DOCK_GAP: f32 = 8.0;
 
-fn tool_dock_rect(workspace: egui::Rect) -> egui::Rect {
+fn tool_dock_rect(panel: egui::Rect) -> egui::Rect {
+    const PADDING: f32 = 12.0;
+    const SECTION_GAP: f32 = 6.0;
+    const VERTICAL_PADDING: f32 = 8.0;
+    let sections = ToolSection::ALL.len() as f32;
+    let height = sections * TOOL_DOCK_WIDTH
+        + (sections - 1.0) * SECTION_GAP
+        + VERTICAL_PADDING * 2.0;
     egui::Rect::from_min_size(
-        egui::Pos2::new(workspace.min.x + 12.0, workspace.min.y + 12.0),
-        egui::Vec2::new(TOOL_DOCK_WIDTH, (workspace.height() - 24.0).max(80.0)),
+        egui::Pos2::new(panel.min.x + PADDING, panel.center().y - height * 0.5),
+        egui::Vec2::new(TOOL_DOCK_WIDTH, height),
     )
 }
 
@@ -131,6 +139,7 @@ impl ToolSection {
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
             ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None },
+            ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None },
             ToolItem { label: "Extrude", node_type: "extrude", primitive: None },
             ToolItem { label: "Loft", node_type: "loft", primitive: None },
             ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None },
@@ -773,7 +782,7 @@ impl NodeCraftApp {
         let initial_theme = crate::theme::get();
         node_editor.set_theme(canvas_theme(&initial_theme));
         viewport.set_theme(&initial_theme);
-        node_editor.set_left_dock_width(TOOL_DOCK_WIDTH + TOOL_DOCK_GAP);
+        node_editor.set_left_dock_width(0.0);
         if let Some(render_state) = &cc.wgpu_render_state {
             viewport.install_gpu(render_state);
             #[cfg(feature = "gpu-viewport")]
@@ -1966,25 +1975,36 @@ impl NodeCraftApp {
         &mut self,
         ctx: &egui::Context,
         workspace: egui::Rect,
-        backdrop: Option<(egui::TextureId, egui::Rect)>,
         connect_source: Option<String>,
     ) {
         let theme = crate::theme::get();
-        let dock = tool_dock_rect(workspace);
+        let panel = self.node_editor.panel_rect(workspace);
+        let dock = tool_dock_rect(panel);
         let background = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
+            egui::Order::Foreground,
             egui::Id::new("node-tool-dock-background"),
         ));
-        if let Some((texture, uv)) = backdrop {
-            ui_shape::image(&background, texture, dock, uv);
-        } else {
-            ui_shape::fill(&background, dock, theme.color(theme.blur_tint));
-        }
-        ui_shape::outline(
-            &background,
-            dock,
-            egui::Stroke::new(1.0, theme.color(theme.border)),
+        background.add(
+            egui::epaint::Shadow {
+                offset: [0, 0],
+                blur: 32,
+                spread: 0,
+                color: egui::Color32::from_black_alpha(120),
+            }
+            .as_shape(dock, egui::CornerRadius::same(TOOL_DOCK_RADIUS as u8)),
         );
+        background.add(nodecraft_node_canvas::squircle::shape(
+            dock,
+            TOOL_DOCK_RADIUS,
+            theme.color(theme.dock),
+            egui::Stroke::NONE,
+        ));
+        background.add(nodecraft_node_canvas::squircle::shape(
+            dock,
+            TOOL_DOCK_RADIUS,
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0, theme.color(theme.dock_border)),
+        ));
 
         let mut clicked_section = None;
         let mut section_rects = Vec::new();
@@ -2772,9 +2792,8 @@ impl NodeCraftApp {
             Some(tag),
         );
         if changed {
-            self.face_pick_target = None;
-            self.viewport
-                .set_selection_mode(crate::viewport::SelectionMode::Object);
+            // Keep the topology selection session active so a user can click
+            // several faces without re-entering edit mode after each one.
             self.evaluate();
         }
         changed
@@ -4496,17 +4515,11 @@ impl eframe::App for NodeCraftApp {
             ),
         );
         let node_panel_rect = self.node_editor.panel_rect(workspace_rect);
-        let tool_dock_rect = tool_dock_rect(workspace_rect);
-        let backdrop_rect = node_panel_rect
-            .union(inspector_rect)
-            .union(tool_dock_rect);
+        let backdrop_rect = node_panel_rect.union(inspector_rect);
         let node_backdrop = self.viewport.backdrop_view_for(node_panel_rect, backdrop_rect);
         let inspector_backdrop = self
             .viewport
             .backdrop_view_for(inspector_rect, backdrop_rect);
-        let tool_dock_backdrop = self
-            .viewport
-            .backdrop_view_for(tool_dock_rect, backdrop_rect);
         // The inspector now sits in the bottom-right corner, so the axis chrome
         // can reclaim the top-right corner of the window.
         self.viewport.chrome_right_inset = 0.0;
@@ -4556,6 +4569,8 @@ impl eframe::App for NodeCraftApp {
         self.sync_face_pick_target();
         let face_picks = self.viewport.take_face_picks();
         if !face_picks.is_empty()
+            && self.eval_target.is_some()
+            && self.eval_target == self.face_pick_target
             && let Some(node) = selected_node.as_ref()
             && let Some((field, mode)) = Self::selection_spec(&node.node_type)
             && mode == crate::viewport::SelectionMode::Face
@@ -5201,12 +5216,7 @@ impl eframe::App for NodeCraftApp {
                 }
             }
         }
-        self.show_tool_dock(
-            ui.ctx(),
-            workspace_rect,
-            tool_dock_backdrop,
-            tool_connect_source,
-        );
+        self.show_tool_dock(ui.ctx(), workspace_rect, tool_connect_source);
     }
 }
 

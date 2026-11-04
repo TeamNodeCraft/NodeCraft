@@ -20,7 +20,11 @@ pub struct Theme {
     pub grid_major: [u8; 4],
     pub panel: [u8; 4],
     pub control: [u8; 4],
+    #[serde(default = "default_dock")]
+    pub dock: [u8; 4],
     pub border: [u8; 4],
+    #[serde(default = "default_dock_border")]
+    pub dock_border: [u8; 4],
     pub border_strong: [u8; 4],
     pub text: [u8; 4],
     pub muted: [u8; 4],
@@ -67,6 +71,14 @@ pub struct Theme {
     pub preview_add: [u8; 4],
     #[serde(default = "default_preview_cut")]
     pub preview_cut: [u8; 4],
+}
+
+fn default_dock() -> [u8; 4] {
+    [45, 45, 47, 255]
+}
+
+fn default_dock_border() -> [u8; 4] {
+    [58, 58, 60, 255]
 }
 
 fn default_node_activity() -> [u8; 4] {
@@ -336,7 +348,9 @@ impl Theme {
             "grid_major" => self.grid_major = value,
             "panel" => self.panel = value,
             "control" => self.control = value,
+            "dock" => self.dock = value,
             "border" => self.border = value,
+            "dock_border" => self.dock_border = value,
             "border_strong" => self.border_strong = value,
             "text" => self.text = value,
             "muted" => self.muted = value,
@@ -1144,7 +1158,9 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("window", "Window", "Main application background", theme.window),
                 color("panel", "Panel", "Standard panel background", theme.panel),
                 color("control", "Control", "Buttons and inset controls", theme.control),
+                color("dock", "Dock background", "Floating tool dock fill", theme.dock),
                 color("border", "Border", "Default dividers and outlines", theme.border),
+                color("dock_border", "Dock border", "Floating tool dock outline", theme.dock_border),
                 color("border_strong", "Strong border", "Selected and emphasized outlines", theme.border_strong),
                 color("popup", "Popup", "Menus and floating popup background", theme.popup),
                 color("blur_tint", "Blur tint", "Tint applied to the blurred backdrop", theme.blur_tint),

@@ -55,6 +55,56 @@ fn upstream_tess_meshes_a_record_box() {
 }
 
 #[test]
+fn ops_shell_round_trips_a_kernel_box() {
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+
+    let mut kernel = solidcore::kernel::Kernel::default();
+    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
+        .expect("box");
+    let shelled = nodecraft_layers::shell_kernel(&mut kernel, &mut brep, &[], -1.0)
+        .expect("ops shell");
+    let mut record_kernel = solidcore::kernel::Kernel::default();
+    let mut shelled = shelled;
+    let (record, _order) = solidcore_convert::brep::to_record(&mut record_kernel, &mut shelled)
+        .expect("shelled record");
+    assert!(record.faces.len() > 6, "shell should add inner faces");
+}
+
+#[test]
+fn ops_offset_faces_round_trips_a_kernel_box() {
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+
+    let mut kernel = solidcore::kernel::Kernel::default();
+    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
+        .expect("box");
+    let face = brep.faces().ids().next().expect("face");
+    let offset = nodecraft_layers::offset_faces_kernel(&mut kernel, &mut brep, &[face], 1.0)
+        .expect("ops offset_faces");
+    assert!(!offset.faces().ids().next().is_none());
+}
+
+#[test]
+fn display_lod_levels_reduce_triangles_with_a_finite_error() {
+    let record = fixture_record("box_10x6x4.json.gz");
+    let display = nodecraft_layers::tessellate_record(
+        &record,
+        &MeshTolerance::display(0.05),
+        12.33,
+    )
+    .expect("tessellate");
+    let full = display.mesh.faces.len();
+    let levels = nodecraft_layers::simplify_display(&display, &[full / 2, full / 4]);
+    assert!(!levels.is_empty());
+    for level in &levels {
+        assert!(level.error.is_finite());
+        assert!(!level.triangles.is_empty());
+        assert!(level.triangles.len() < full);
+    }
+}
+
+#[test]
 fn upstream_ops_primitives_round_trip() {
     let body = solidcore_ops::make_box([0.0, 0.0, 0.0], [10.0, 6.0, 4.0]).expect("box");
     assert_eq!(body.counts().expect("counts"), [6, 12, 8]);
@@ -66,9 +116,20 @@ fn upstream_ops_primitives_round_trip() {
 }
 
 #[test]
-fn record_bridge_is_still_missing() {
+fn kernel_brep_converts_to_record_and_tessellates() {
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+
     assert_eq!(
         nodecraft_layers::record_bridge(),
-        nodecraft_layers::RecordBridge::Missing
+        nodecraft_layers::RecordBridge::Available
     );
+    let mut kernel = solidcore::kernel::Kernel::default();
+    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
+        .expect("box");
+    let display = nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05)
+        .expect("kernel tessellation");
+    assert_eq!(display.stats.faces, 6);
+    assert!(!display.mesh.faces.is_empty());
+    assert_eq!(display.edge_polylines.len(), 12);
 }

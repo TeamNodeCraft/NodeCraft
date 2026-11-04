@@ -82,6 +82,7 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
     descriptor!("chamfer", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("fillet", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("shell", GEOMETRY, ValueKind::Geometry, true, true),
+    descriptor!("offsetfaces", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!(
         "extrude",
         &[

@@ -13,7 +13,12 @@
 //! NodeCraft engine still holds kernel B-reps.
 
 use nodecraft_protocol::Mesh;
-use solidcore_record::brep::Brep;
+use solidcore::kernel::Kernel;
+use solidcore::topology::FaceId;
+use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
+use solidcore::topology::Brep as KernelBrep;
+use solidcore_record::brep::Brep as RecordBrep;
+use solidcore_record::Vec3;
 use solidcore_tess::MeshTolerance;
 
 /// A tessellated record in the shape NodeCraft needs: protocol triangle data
@@ -28,6 +33,40 @@ pub struct TessDisplay {
     pub seam_edges: Vec<bool>,
     pub smooth_edges: Vec<bool>,
     pub stats: TessStats,
+}
+
+/// One display-only simplification level.
+#[derive(Debug)]
+pub struct TessLevel {
+    pub positions: Vec<[f32; 3]>,
+    pub triangles: Vec<[u32; 3]>,
+    /// Maximum distance from the original surface, in mm.
+    pub error: f64,
+}
+
+/// Build display LOD levels from a tessellation. These carry positions, triangles
+/// and an error bound only; face provenance, edges and picking stay on the full
+/// mesh.
+#[must_use]
+pub fn simplify_display(display: &TessDisplay, targets: &[usize]) -> Vec<TessLevel> {
+    let positions: Vec<Vec3> = display
+        .mesh
+        .vertices
+        .iter()
+        .map(|p| Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
+        .collect();
+    solidcore_tess::simplify::levels(&positions, &display.mesh.faces, targets)
+        .into_iter()
+        .map(|level| TessLevel {
+            positions: level
+                .positions
+                .iter()
+                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                .collect(),
+            triangles: level.triangles,
+            error: level.error,
+        })
+        .collect()
 }
 
 /// The tessellation's planning report, reduced to what an application logs.
@@ -47,7 +86,7 @@ pub struct TessStats {
 /// `tolerance` is the tessellation tolerance; `size` is the body's box diagonal
 /// (the planner uses it for its display/edge rules).
 pub fn tessellate_record(
-    record: &Brep,
+    record: &RecordBrep,
     tolerance: &MeshTolerance,
     size: f64,
 ) -> Result<TessDisplay, String> {
@@ -60,12 +99,12 @@ pub fn tessellate_record(
         .map(|face| (face.face, face.reason.clone()))
         .collect();
     unmeshed_faces.extend(refused.iter().map(|face| (face.face, face.reason.clone())));
-    let mesh = protocol_mesh(&tess);
-    let edge_polylines = tess
+    let edge_polylines: Vec<Vec<[f32; 3]>> = tess
         .edges
         .iter()
         .map(|polyline| polyline.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect())
         .collect();
+    let mesh = protocol_mesh(&tess, &edge_polylines);
     Ok(TessDisplay {
         mesh,
         edge_polylines,
@@ -82,7 +121,7 @@ pub fn tessellate_record(
     })
 }
 
-fn protocol_mesh(tess: &solidcore_tess::Mesh) -> Mesh {
+fn protocol_mesh(tess: &solidcore_tess::Mesh, edge_polylines: &[Vec<[f32; 3]>]) -> Mesh {
     let mut mesh = Mesh::default();
     mesh.vertices = tess
         .positions
@@ -100,20 +139,149 @@ fn protocol_mesh(tess: &solidcore_tess::Mesh) -> Mesh {
         .iter()
         .map(|face| format!("face:{face}"))
         .collect();
+    let vertex_key = |v: [f32; 3]| [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()];
+    let mut vertex_at = std::collections::HashMap::new();
+    for (index, vertex) in mesh.vertices.iter().enumerate() {
+        vertex_at.entry(vertex_key(*vertex)).or_insert(index as u32);
+    }
+    for (edge_index, polyline) in edge_polylines.iter().enumerate() {
+        let mut segments = Vec::with_capacity(polyline.len().saturating_sub(1));
+        for pair in polyline.windows(2) {
+            let (Some(a), Some(b)) = (vertex_at.get(&vertex_key(pair[0])), vertex_at.get(&vertex_key(pair[1]))) else { continue };
+            segments.push([*a, *b]);
+        }
+        if !segments.is_empty() {
+            mesh.brep_edges.push(nodecraft_protocol::BrepEdge {
+                id: format!("edge:{edge_index}"),
+                kind: "edge".into(),
+                segments,
+            });
+        }
+    }
     mesh
 }
 
-/// Why the current engine cannot drive `solidcore-tess` yet. This is the upstream
-/// contribution tracked in `docs/upstream-solidcore-layers.md` §7.1: a whole-Brep
-/// record -> kernel (and back) conversion, exposed through `solidcore-ops`.
+/// The kernel Brep <-> record bridge is now provided by `solidcore-convert`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordBridge {
-    Missing,
+    Available,
 }
 
-/// The engine holds kernel B-reps today; there is no conversion into the record
-/// `solidcore-tess::plan` takes. Kept explicit so callers cannot accidentally
-/// assume a bridge exists.
+#[must_use]
 pub fn record_bridge() -> RecordBridge {
-    RecordBridge::Missing
+    RecordBridge::Available
+}
+
+fn record_face_indices(order: &solidcore_convert::brep::Order, faces: &[FaceId]) -> Result<Vec<usize>, String> {
+    faces
+        .iter()
+        .map(|face| {
+            order
+                .faces
+                .iter()
+                .position(|candidate| candidate == face)
+                .ok_or_else(|| format!("face {face:?} is missing from the record order"))
+        })
+        .collect()
+}
+
+fn kernel_body_edit(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    edit: impl FnOnce(&solidcore_ops::Body, &solidcore_convert::brep::Order) -> Result<(), String>,
+) -> Result<KernelBrep, String> {
+    let (record, _order) = solidcore_convert::brep::to_record(kernel, brep)
+        .map_err(|error| format!("kernel to record: {error}"))?;
+    let (body, order) = solidcore_ops::Body::from_record(&record, true)
+        .map_err(|error| format!("record to ops body: {error}"))?;
+    edit(&body, &order)?;
+    let (record, _order) = body
+        .to_record()
+        .map_err(|error| format!("ops body to record: {error}"))?;
+    solidcore_convert::brep::to_kernel(kernel, &record, true)
+        .map(|(brep, _)| brep)
+        .map_err(|error| format!("record to kernel: {error}"))
+}
+
+/// Shell an exact kernel B-rep through `solidcore-ops`, opening record face
+/// indices directly (the same order `solidcore-tess` reports as `face:N`).
+pub fn shell_record_faces(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    open: &[usize],
+    thickness: f64,
+) -> Result<KernelBrep, String> {
+    kernel_body_edit(kernel, brep, |body, order| {
+        solidcore_ops::shell(body, order, open, thickness)
+            .map_err(|error| format!("solidcore-ops shell: {error}"))
+    })
+}
+
+/// Offset record faces directly, by record face index.
+pub fn offset_faces_record_faces(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    faces: &[usize],
+    distance: f64,
+) -> Result<KernelBrep, String> {
+    kernel_body_edit(kernel, brep, |body, order| {
+        solidcore_ops::offset_faces(body, order, faces, distance)
+            .map_err(|error| format!("solidcore-ops offset_faces: {error}"))
+    })
+}
+
+/// Shell an exact kernel B-rep through `solidcore-ops`, opening the given kernel
+/// faces. The faces are mapped into the record order first.
+pub fn shell_kernel(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    open: &[FaceId],
+    thickness: f64,
+) -> Result<KernelBrep, String> {
+    let open = record_face_indices(&solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1, open)?;
+    kernel_body_edit(kernel, brep, |body, order| {
+        solidcore_ops::shell(body, order, &open, thickness)
+            .map_err(|error| format!("solidcore-ops shell: {error}"))
+    })
+}
+
+/// Offset exact kernel faces through `solidcore-ops`, by kernel face ids.
+pub fn offset_faces_kernel(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    faces: &[FaceId],
+    distance: f64,
+) -> Result<KernelBrep, String> {
+    let faces = record_face_indices(&solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1, faces)?;
+    kernel_body_edit(kernel, brep, |body, order| {
+        solidcore_ops::offset_faces(body, order, &faces, distance)
+            .map_err(|error| format!("solidcore-ops offset_faces: {error}"))
+    })
+}
+
+/// Convert a kernel B-rep to the record form, then plan and evaluate its display
+/// mesh with the single upstream mesher.
+pub fn tessellate_kernel(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    tolerance: f64,
+) -> Result<TessDisplay, String> {
+    let extent = calculate_bounding_box(
+        kernel,
+        &*brep,
+        BoundingBoxOptions {
+            approx: false,
+            tight: true,
+            expand_by_zone_tol_3d: false,
+        },
+    )
+    .map_err(|error| format!("kernel bounding box: {error}"))?;
+    let mut diagonal = 0.0;
+    for axis in 0..3 {
+        diagonal += (extent.max_at(axis) - extent.min_at(axis)).powi(2);
+    }
+    let size = diagonal.sqrt().max(1.0);
+    let (record, _order) = solidcore_convert::brep::to_record(kernel, brep)
+        .map_err(|error| format!("kernel to record: {error}"))?;
+    tessellate_record(&record, &MeshTolerance::display(tolerance.max(1.0e-5)), size)
 }

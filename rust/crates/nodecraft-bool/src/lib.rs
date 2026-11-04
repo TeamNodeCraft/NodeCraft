@@ -179,6 +179,49 @@ pub fn brep_faces(brep: &Brep) -> Result<Vec<FaceId>, String> {
 ///
 /// A message from solidcore. An unported merge dependency is reported with
 /// [`UNPORTED_PREFIX`]; see [`is_unported_error`].
+/// N-ary Boolean over lists of B-reps, using SolidCore's `boolean_lists`.
+/// This avoids chaining hundreds of pairwise Booleans through intermediate
+/// topology, which is where long difference chains fail with status 1001.
+pub fn boolean_lists_breps(
+    kernel: &mut Kernel,
+    a: &[Brep],
+    b: &[Brep],
+    op: BooleanOp,
+) -> Result<Vec<Brep>, String> {
+    let operation = match op {
+        BooleanOp::Union => 1,
+        BooleanOp::Intersection => 0,
+        BooleanOp::Difference => 3,
+    };
+    let result = solidcore::boolean::api_brep::boolean_lists(kernel, a, &[], b, &[], operation)
+        .map_err(|error| map_error("solidcore boolean lists", &error))?;
+    Ok(result.breps)
+}
+
+/// Batched list Boolean. One huge list can exceed the merge's intermediate
+/// topology budget; chunks of a modest size keep every merge in the range the
+/// kernel handles reliably while still avoiding pairwise chaining.
+pub fn boolean_lists_batched(
+    kernel: &mut Kernel,
+    a: &[Brep],
+    b: &[Brep],
+    op: BooleanOp,
+) -> Result<Vec<Brep>, String> {
+    const BATCH: usize = 4;
+    if b.len() <= BATCH {
+        return boolean_lists_breps(kernel, a, b, op);
+    }
+    let mut current = a.to_vec();
+    for (index, chunk) in b.chunks(BATCH).enumerate() {
+        current = boolean_lists_breps(kernel, &current, chunk, op)
+            .map_err(|error| format!("Boolean batch {index} ({} tools): {error}", chunk.len()))?;
+        if current.is_empty() {
+            break;
+        }
+    }
+    Ok(current)
+}
+
 pub fn boolean_breps(op: BooleanOp, a: Brep, b: Brep) -> Result<Brep, String> {
     let mut kernel = Kernel::default();
     boolean_breps_with_kernel(&mut kernel, op, a, b)

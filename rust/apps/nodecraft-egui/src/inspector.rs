@@ -460,6 +460,9 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
                 ("G3", "Curvature (G3)"),
             ]),
         ],
+        "offsetfaces" => vec![
+            dimension("distance", "Distance", 1.0),
+        ],
         "shell" => vec![
             dimension("thickness", "Thickness", 2.0),
             choice("direction", "Direction", "inward", &[("inward", "Inward"), ("outward", "Outward")]),
@@ -643,6 +646,7 @@ pub fn node_title(node: &GraphNode) -> String {
         "exporter" => "Export STEP".to_owned(),
         "translate" => "Transform".to_owned(),
         "group" => "Group".to_owned(),
+        "offsetfaces" => "Offset Faces".to_owned(),
         "groupinput" => "Group Input".to_owned(),
         "groupoutput" => "Group Output".to_owned(),
         "boolean" => "Boolean".to_owned(),
@@ -672,6 +676,7 @@ pub fn node_badge(node: &GraphNode) -> String {
         "stepimporter" => "Import",
         "exporter" | "linkedpart" => "Output",
         "group" => "Subpatch",
+        "offsetfaces" => "Feature",
         "groupinput" | "groupoutput" => "Interface",
         "translate" => "Transform",
         "boolean" | "fuse" => "Boolean",
@@ -704,6 +709,7 @@ fn section_title(node: &GraphNode) -> &'static str {
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
         "group" => "SUBPATCH",
+        "offsetfaces" => "OFFSET",
         "groupinput" | "groupoutput" => "GROUP INTERFACE",
         _ => "VALUES",
     }
@@ -729,6 +735,7 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "chamfer" => "Cuts selected edges of the incoming shape.".to_owned(),
         "fillet" => "Rounds selected edges of the incoming shape.".to_owned(),
         "shell" => "Hollows the incoming shape by removing selected faces.".to_owned(),
+        "offsetfaces" => "Moves the selected faces along their normals.".to_owned(),
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
         "scatter" => "Repeats a shape across a seeded area.".to_owned(),
         "group" => {
@@ -964,6 +971,21 @@ pub fn show(
         }
         if node.node_type == "surfaceloft" {
             surface_loft_sections(ui, sections, &mut output);
+            ui.add_space(6.0);
+        }
+        if node.node_type == "offsetfaces" {
+            topology_references(
+                ui,
+                node,
+                &mut output,
+                "faces",
+                "OFFSET FACES",
+                "No faces selected. Select the Face filter in the viewport, then click faces to offset.",
+                "Remove face",
+                "Clear faces",
+                "Clear faces",
+                active_selection == Some("faces"),
+            );
             ui.add_space(6.0);
         }
         if node.node_type == "shell" {

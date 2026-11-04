@@ -8,6 +8,7 @@ description = "Adapters onto the upstream solidcore record/ops/tess layers"
 [dependencies]
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 solidcore = { workspace = true }
+solidcore-convert = { workspace = true }
 solidcore-record = { workspace = true }
 solidcore-ops = { workspace = true }
 solidcore-tess = { workspace = true }

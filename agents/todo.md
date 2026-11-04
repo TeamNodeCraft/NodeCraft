@@ -256,3 +256,47 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
       record which invariants are practical to prove.
 - [ ] Keep Lean out of the build and runtime until a concrete, bounded proof
       target justifies the tooling cost.
+
+## Display LOD and solidcore-tess
+
+- [x] Bridge kernel B-reps to `solidcore-tess` through `solidcore-convert`
+      (`to_record`/`to_kernel`) and use the upstream planner/evaluator in the
+      mesher workers.
+- [x] Add a legacy-vs-tess parity harness
+      (`nodecraft-engine --test tess_parity`) comparing bounds, face groups,
+      edge counts and triangle counts for box, cylinder and sphere.
+- [ ] Choose a display tolerance/angle target: the upstream tessellator currently
+      produces 10–20× more triangles than the legacy bridge on the same
+      primitives while matching bounds, faces and edges.
+- [ ] Treat `solidcore-tess` as still under active upstream development. Review
+      the pinned revision's planner and changelog before deleting the legacy
+      mesher; the upstream API/behaviour may still change between pins.
+- [ ] Find out why the density is unchanged: scaling the NodeCraft chord
+      tolerance by 2×, 4× and 8× left box/cylinder/sphere triangle counts at
+      124/672/960. Inspect `TessPlan`/`PlanStats` and the planner's display
+      rules to identify whether there is an internal floor, a planar-face
+      subdivision rule, or a missing plan option.
+- [x] Check whether the density comes from the kernel→record conversion:
+      upstream's own `box_10x6x4` fixture record and the converted kernel box
+      both tessellate to 124 triangles, so conversion is faithful and the
+      density is the upstream planner's own display output.
+- [ ] Ask upstream (or inspect the planner changelog) whether a coarser display
+      plan is intended for planar faces; do not treat the 124-triangle box as a
+      NodeCraft conversion bug.
+- [ ] Do not compensate for that density with LOD alone; fix the display plan
+      first, then use LOD for distance/screen-size reduction.
+- [ ] Add the upstream commit/date to the pin review so a change in tessellator
+      behaviour is visible when updating SolidCore.
+- [ ] Wire `solidcore_tess::simplify::levels` into the display path for LOD
+      tiers, keyed by full-mesh key plus screen-size targets.
+- [ ] Keep simplified levels display-only: they carry positions, triangles and a
+      maximum surface error, but no `tri_face`, face groups, edge polylines or
+      seam/smooth flags.
+- [ ] Keep picking, selection, edge rendering and export on the full
+      tessellation until upstream preserves face provenance through
+      simplification, or simplify per face group.
+- [ ] Add LOD regression coverage: each level must report finite error, stay
+      within its deviation budget, and never be used for exact output.
+- [ ] Delete the legacy `nodecraft-mesh` display path only after the STEP,
+      primitive and sketch/spline mesh-only paths are measured against the
+      parity harness.

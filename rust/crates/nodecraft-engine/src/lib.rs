@@ -1454,6 +1454,10 @@ pub struct ProgressEvent {
 
 const MESH_CACHE_BYTES: usize = 256 << 20;
 const BREP_CACHE_BYTES: usize = 256 << 20;
+/// Exact booleans are pairwise kernel operations. Refuse huge instance sets
+/// before materialising every BRep so a 100k scatter cannot poison the worker.
+const MAX_BOOLEAN_SOLIDS: usize = 256;
+
 const DEFAULT_PART_CACHE_ENTRIES: usize = 8192;
 const MAX_PART_CACHE_ENTRIES: usize = 65_536;
 const BODY_MESH_CACHE_BYTES: usize = 256 << 20;
@@ -2428,10 +2432,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             let Some(reference) = face.get("id").and_then(serde_json::Value::as_str) else { continue };
                             let Some((body, index)) = face_reference_body_and_index(reference) else { continue };
                             if body.unwrap_or(0) != 0 { continue; }
-                            if let Some(face) = source.faces().ids().nth(index) { openings.push(face); }
+                            openings.push(index);
                         }
                         Ok(Box::new(move |kernel| {
-                            nodecraft_bool::shell_brep_solid_with_kernel(kernel, (*source).clone(), signed, &openings)
+                            let mut brep = (*source).clone();
+                            nodecraft_layers::shell_record_faces(kernel, &mut brep, &openings, signed)
                                 .map(std::sync::Arc::new)
                         }))
                     }));
@@ -2619,17 +2624,39 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         (Some(a), Some(b)) => {
                             let (op, reverse) = boolean_mode(&node.values)?;
                             let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
-                            let a_parts = self.evaluate_part(&a)?.realized_solids()?;
-                            let b_parts = self.evaluate_part(&b)?.realized_solids()?;
-                            let mut iter = a_parts.into_iter();
-                            let mut result = iter.next().ok_or("Part Boolean A is empty")?;
-                            for brep in iter {
-                                result = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, result, brep)?;
+                            let a_part = self.evaluate_part(&a)?;
+                            let b_part = self.evaluate_part(&b)?;
+                            for (operand, part) in [("A", a_part.as_ref()), ("B", b_part.as_ref())] {
+                                if part.bodies.len() > MAX_BOOLEAN_SOLIDS {
+                                    return Err(format!(
+                                        "Boolean operand {operand} contains {} solids (for example a Scatter with Combine on). Combine groups the instances into one Part; a Boolean still needs an exact union of every solid, and supports at most {}. Reduce the scatter count or boolean a smaller Part.",
+                                        part.bodies.len(),
+                                        MAX_BOOLEAN_SOLIDS
+                                    ));
+                                }
                             }
-                            for brep in b_parts {
-                                result = nodecraft_bool::boolean_breps(op.clone(), result, brep)?;
+                            let a_parts = a_part.realized_solids()?;
+                            let b_parts = b_part.realized_solids()?;
+                            // N-ary list Boolean: one kernel operation instead of
+                            // chaining hundreds of pairwise merges through
+                            // intermediate topology.
+                            let mut boolean_kernel = nodecraft_solidcore::kernel::kernel();
+                            let breps = nodecraft_bool::boolean_lists_batched(
+                                &mut boolean_kernel,
+                                &a_parts,
+                                &b_parts,
+                                op.clone(),
+                            )?;
+                            if breps.is_empty() {
+                                return Err("Boolean produced no solids".into());
                             }
-                            Ok(Part::from_brep(result))
+                            Ok(Part {
+                                bodies: breps.into_iter().map(|brep| BodyInstance {
+                                    body: Arc::new(brep),
+                                    transforms: Vec::new(),
+                                }).collect(),
+                                sketches: Vec::new(),
+                            })
                         }
                     }
                 }
@@ -2748,6 +2775,41 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         .map(Part::from_brep)
                         .map_err(|error| format!("Edge fillet: {error}"))
                 }
+                "offsetfaces" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Offset Faces has no shape input")?;
+                    let source = self.evaluate_part(&link.from)?;
+                    let references: Vec<&str> = node.values.get("faces").and_then(serde_json::Value::as_array).map(|faces| {
+                        faces.iter().filter_map(|face| face.get("id").and_then(serde_json::Value::as_str)).collect()
+                    }).unwrap_or_default();
+                    if references.is_empty() {
+                        return Ok(source.as_ref().clone());
+                    }
+                    let distance = node.values.get("distance").and_then(serde_json::Value::as_f64).unwrap_or(1.0);
+                    let solids = source.realized_solids()?;
+                    let mut bodies = Vec::with_capacity(solids.len());
+                    for (body_index, brep) in solids.into_iter().enumerate() {
+                        let mut faces = Vec::new();
+                        for reference in &references {
+                            let Some((body, face_index)) = face_reference_body_and_index(reference) else { continue };
+                            if body.is_some_and(|body| body != body_index) { continue };
+                            faces.push(face_index);
+                        }
+                        if faces.is_empty() {
+                            bodies.push(BodyInstance { body: Arc::new(brep), transforms: Vec::new() });
+                            continue;
+                        }
+                        let mut brep = brep;
+                        let mut offset_kernel = nodecraft_solidcore::kernel::kernel();
+                        let offset = nodecraft_layers::offset_faces_record_faces(
+                            &mut offset_kernel,
+                            &mut brep,
+                            &faces,
+                            distance,
+                        ).map_err(|error| format!("Offset Faces: {error}"))?;
+                        bodies.push(BodyInstance { body: Arc::new(offset), transforms: Vec::new() });
+                    }
+                    Ok(Part { bodies, ..Part::empty() })
+                }
                 "shell" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Shell has no shape input")?;
                     let source = self.evaluate_part(&link.from)?;
@@ -2766,9 +2828,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         for reference in &references {
                             let Some((body, face_index)) = face_reference_body_and_index(reference) else { continue };
                             if body.is_some_and(|body| body != body_index) { continue; }
-                            if let Some(face) = brep.faces().ids().nth(face_index) { openings.push(face); }
+                            openings.push(face_index);
                         }
-                        let shelled = nodecraft_bool::shell_brep_solid(brep, signed, &openings)?;
+                        let mut brep = brep;
+                        let mut shell_kernel = nodecraft_solidcore::kernel::kernel();
+                        let shelled = nodecraft_layers::shell_record_faces(
+                            &mut shell_kernel,
+                            &mut brep,
+                            &openings,
+                            signed,
+                        ).map_err(|error| format!("Shell: {error}"))?;
                         bodies.push(BodyInstance { body: Arc::new(shelled), transforms: Vec::new() });
                     }
                     Ok(Part { bodies, ..Part::empty() })
@@ -3743,7 +3812,7 @@ pub fn part_display_supported(node_type: &str) -> bool {
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
-        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "scatter" | "chamfer" | "fillet"
+        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "offsetfaces" | "scatter" | "chamfer" | "fillet"
     )
 }
 
@@ -5875,7 +5944,10 @@ mod tests {
         let json = summarised.to_json();
         assert_eq!(json["kind"], "solidcore-brep");
         assert_eq!(json["brepFaces"], 6);
-        assert_eq!(json["meshTriangles"], response.meshes["step"].mesh.faces.len());
+        // The STEP reader's diagnostics report its own import mesh; the display
+        // mesh now comes from solidcore-tess, so only require the reported
+        // diagnostic count to be present, not equal to the new mesher's count.
+        assert!(json["meshTriangles"].as_u64().unwrap_or(0) > 0);
     }
     #[test]
     fn cache_evicts_oldest_mesh_over_budget() {

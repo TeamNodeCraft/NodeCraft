@@ -87,11 +87,10 @@ impl MesherPool {
                             continue;
                         }
                         let outcome = catch_unwind(AssertUnwindSafe(|| {
-                            nodecraft_solidcore::curved::brep_display_mesh(
-                                &kernel,
-                                &work.request.body.brep,
-                                &nodecraft_solidcore::curved::CurvedTessOptions::default(),
-                            )
+                            let tolerance = f64::from_bits(work.request.key.tolerance_bits);
+                            let mut brep = (*work.request.body.brep).clone();
+                            nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, tolerance)
+                                .map(|display| display.mesh)
                         }));
                         let asset = match outcome {
                             Ok(Ok(mesh)) => {
