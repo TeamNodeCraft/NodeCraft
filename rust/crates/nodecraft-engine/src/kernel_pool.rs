@@ -147,16 +147,36 @@ impl Drop for KernelPool {
     }
 }
 
+static SHARED_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
+static REQUESTED_THREADS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Configure the shared pool before its first use. `0` means auto-detect.
+/// The pool is created lazily, so changing this after evaluation has started
+/// does not resize the existing workers.
+pub fn configure_threads(threads: usize) {
+    REQUESTED_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether the shared pool has already been created.
+#[must_use]
+pub fn shared_pool_initialized() -> bool {
+    SHARED_POOL.get().is_some()
+}
+
 /// Shared engine pool. Workers own persistent kernels across evaluations.
 #[must_use]
 pub fn shared_pool() -> &'static KernelPool {
-    static POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        KernelPool::new(
+    SHARED_POOL.get_or_init(|| {
+        let requested = REQUESTED_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if requested == 0 {
             std::thread::available_parallelism()
                 .map(|count| count.get())
-                .unwrap_or(1),
-        )
+                .unwrap_or(1)
+        } else {
+            requested
+        };
+        KernelPool::new(threads)
     })
 }
 

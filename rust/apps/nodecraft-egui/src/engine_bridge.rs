@@ -86,7 +86,9 @@ pub fn evaluate_with_linked_progress_comparison(
         return (None, cache);
     };
     let started = Instant::now();
-    let expanded = match nodecraft_session::expand_linked_parts_with(document, linked_documents) {
+    let expanded = match nodecraft_session::expand_groups(document)
+        .and_then(|grouped| nodecraft_session::expand_linked_parts_with(&grouped, linked_documents))
+    {
         Ok(expanded) => expanded,
         Err(error) => {
             return (

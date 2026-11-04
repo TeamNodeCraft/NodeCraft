@@ -12,10 +12,12 @@ use std::time::{Duration, Instant};
 
 mod defaults;
 pub mod flat;
+pub mod groups;
 pub mod node_descriptor;
 pub mod placement;
 mod runtime;
 pub mod store;
+pub use groups::expand_groups;
 pub use runtime::{GraphRuntime, RuntimeEvaluation};
 
 /// Resolve every `linkedpart` node into the flattened evaluation graph.

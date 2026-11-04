@@ -202,16 +202,9 @@ fn vs(@builtin(vertex_index) index: u32) -> VsOut {
 }
 
 fn line_mask(coord: vec2<f32>, thickness: f32) -> f32 {
-    let derivative = fwidth(coord);
-    let width = max(derivative, vec2<f32>(1.0e-6));
+    let width = max(fwidth(coord), vec2<f32>(1.0e-6));
     let distance = abs(fract(coord - 0.5) - 0.5) / width;
-    let line = 1.0 - smoothstep(thickness, thickness + 1.0, min(distance.x, distance.y));
-    // When a grid cell shrinks below a few pixels the fract/derivative mask
-    // saturates to 1 and floods the whole floor. Fade that level out instead;
-    // the coarser crossfade levels remain resolvable and take over.
-    let density = max(derivative.x, derivative.y);
-    let resolvable = 1.0 - smoothstep(0.18, 0.5, density);
-    return line * resolvable;
+    return 1.0 - smoothstep(thickness, thickness + 1.0, min(distance.x, distance.y));
 }
 
 struct FragOut {
@@ -568,7 +561,13 @@ impl ObjectRenderer {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                // Closed solids only need their front faces. The transparent
+                // pipeline stays two-sided so glass/open previews remain visible.
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth,
                 depth_write_enabled: Some(true),
@@ -1566,10 +1565,6 @@ impl CallbackTrait for GpuCallback {
                     pass.set_pipeline(&clear.pipeline);
                     pass.set_bind_group(0, &clear.bind_group, &[]);
                     pass.draw(0..3, 0..1);
-                    // The grid is a background layer: draw it before the model so a
-                    // model face coplanar with z=0 (such as a ground slab) occludes it
-                    // cleanly instead of z-fighting with it.
-                    grid.paint(&mut pass);
                     if let Ok(object) = object.lock() {
                         object.paint(&mut pass, self.view.translucent);
                     }
@@ -1578,6 +1573,7 @@ impl CallbackTrait for GpuCallback {
                         &mut pass,
                         [0.0, 0.0, size[0] as f32, size[1] as f32],
                     );
+                    grid.paint(&mut pass);
                 }
             }
         }

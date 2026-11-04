@@ -642,6 +642,9 @@ pub fn node_title(node: &GraphNode) -> String {
         "surfaceloft" => "Surface Loft".to_owned(),
         "exporter" => "Export STEP".to_owned(),
         "translate" => "Transform".to_owned(),
+        "group" => "Group".to_owned(),
+        "groupinput" => "Group Input".to_owned(),
+        "groupoutput" => "Group Output".to_owned(),
         "boolean" => "Boolean".to_owned(),
         "combine" => "Combine to Part".to_owned(),
         "fuse" => "Fuse".to_owned(),
@@ -668,6 +671,8 @@ pub fn node_badge(node: &GraphNode) -> String {
     match node.node_type.as_str() {
         "stepimporter" => "Import",
         "exporter" | "linkedpart" => "Output",
+        "group" => "Subpatch",
+        "groupinput" | "groupoutput" => "Interface",
         "translate" => "Transform",
         "boolean" | "fuse" => "Boolean",
         "combine" => "Part",
@@ -698,6 +703,8 @@ fn section_title(node: &GraphNode) -> &'static str {
         "shell" => "SHELL",
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
+        "group" => "SUBPATCH",
+        "groupinput" | "groupoutput" => "GROUP INTERFACE",
         _ => "VALUES",
     }
 }
@@ -724,6 +731,15 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "shell" => "Hollows the incoming shape by removing selected faces.".to_owned(),
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
         "scatter" => "Repeats a shape across a seeded area.".to_owned(),
+        "group" => {
+            let count = node.values.get("nodes").and_then(Value::as_array).map_or(0, Vec::len);
+            let inputs = node.values.get("inputs").and_then(Value::as_array).map_or(0, Vec::len);
+            let outputs = node.values.get("outputs").and_then(Value::as_array).map_or(0, Vec::len);
+            format!(
+                "Subpatch with {count} child node(s), {inputs} input(s) and {outputs} output(s). \
+                 It is flattened into the parent graph during evaluation."
+            )
+        }
         _ => return None,
     };
     Some(text)

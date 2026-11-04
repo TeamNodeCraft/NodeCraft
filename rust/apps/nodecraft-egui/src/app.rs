@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use nodecraft_engine::EngineCache;
 use nodecraft_protocol::Mesh;
 use serde::{Deserialize, Serialize};
+use nodecraft_session::groups::{group_values, read_group, GroupPayload, GroupPort};
 use nodecraft_session::store::DocumentStore;
 use nodecraft_session::{Command, GraphConnection, GraphDocument, GraphNode, Session};
 
@@ -132,6 +133,7 @@ impl ToolSection {
             ToolItem { label: "Loft", node_type: "loft", primitive: None },
             ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None },
             ToolItem { label: "Scatter", node_type: "scatter", primitive: None },
+            ToolItem { label: "Group", node_type: "group", primitive: None },
         ];
         const IO: &[ToolItem] = &[
             ToolItem { label: "Import STEP", node_type: "stepimporter", primitive: None },
@@ -460,6 +462,7 @@ struct DocumentTab {
 enum SettingsTab {
     Appearance,
     Viewport,
+    Engine,
     Diagnostics,
 }
 
@@ -468,6 +471,7 @@ impl SettingsTab {
         match self {
             Self::Appearance => "Appearance",
             Self::Viewport => "Viewport",
+            Self::Engine => "Engine",
             Self::Diagnostics => "Diagnostics",
         }
     }
@@ -556,6 +560,15 @@ fn initial_viewer_target(document: &GraphDocument) -> Option<String> {
         .map(|node| node.id.clone())
 }
 
+#[derive(Clone)]
+struct GroupTab {
+    parent_document_id: String,
+    group_id: String,
+    inputs: Vec<GroupPort>,
+    outputs: Vec<GroupPort>,
+    collapsed: bool,
+}
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     path: Option<PathBuf>,
@@ -576,6 +589,7 @@ pub struct NodeCraftApp {
     node_errors: HashSet<String>,
     difference_error: Option<String>,
     feature_overlay: bool,
+    engine_threads: usize,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -606,6 +620,7 @@ pub struct NodeCraftApp {
     layout_animation: Option<LayoutAnimation>,
     node_position_animation: Option<NodePositionAnimation>,
     tabs: Vec<DocumentTab>,
+    group_tabs: HashMap<u64, GroupTab>,
     active_tab: usize,
     next_tab_id: u64,
     inspector_width: f32,
@@ -685,6 +700,7 @@ impl NodeCraftApp {
         }
         let persisted_view = settings.view;
         let activity = settings.activity;
+        nodecraft_engine::kernel_pool::configure_threads(settings.engine_threads);
         node_editor.set_activity_timings(
             u64::from(activity.fade_in_ms),
             u64::from(activity.hold_ms),
@@ -717,6 +733,7 @@ impl NodeCraftApp {
             node_errors: HashSet::new(),
             difference_error: None,
             feature_overlay: settings.feature_overlay,
+            engine_threads: settings.engine_threads,
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
@@ -748,6 +765,7 @@ impl NodeCraftApp {
             layout_animation: None,
             node_position_animation: None,
             tabs: Vec::new(),
+            group_tabs: HashMap::new(),
             active_tab: 0,
             next_tab_id: 1,
             inspector_width: 280.0,
@@ -818,6 +836,70 @@ impl NodeCraftApp {
 
     fn clear_recent_documents(&mut self) {
         self.recent_files.clear();
+    }
+
+    fn enter_group(&mut self, group_id: &str) {
+        let Some(parent_session) = &self.session else { return };
+        let Some(node) = parent_session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == group_id && node.node_type == "group")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(parent_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else { return };
+        let Ok(payload) = read_group(&node) else {
+            self.error = Some(format!("Group {group_id} has invalid subpatch data"));
+            return;
+        };
+        let child_document = GraphDocument {
+            schema_version: 1,
+            id: format!("{group_id}::group"),
+            nodes: payload.nodes,
+            connections: payload.connections,
+            interface: nodecraft_session::GraphInterface::default(),
+        };
+        let tab_id = self.next_tab_id;
+        let inputs = payload.inputs;
+        let outputs = payload.outputs;
+        let collapsed = payload.collapsed;
+        self.open_session(
+            Session::new(child_document),
+            None,
+            format!("Editing group {group_id}"),
+        );
+        self.group_tabs.insert(
+            tab_id,
+            GroupTab { parent_document_id, group_id: group_id.to_owned(), inputs, outputs, collapsed },
+        );
+    }
+
+    fn sync_group_tab(&mut self, tab_id: u64) {
+        let Some(meta) = self.group_tabs.get(&tab_id).cloned() else { return };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else { return };
+        let Some(child) = self.documents.session(&tab.document_id) else { return };
+        let payload = GroupPayload {
+            collapsed: meta.collapsed,
+            nodes: child.document().nodes.clone(),
+            connections: child.document().connections.clone(),
+            inputs: meta.inputs.clone(),
+            outputs: meta.outputs.clone(),
+        };
+        let Ok(values) = group_values(&payload) else { return };
+        let Some(mut parent) = self.documents.session(&meta.parent_document_id).cloned() else { return };
+        let fields = ["nodes", "connections", "inputs", "outputs", "collapsed"];
+        let commands: Vec<Command> = fields
+            .iter()
+            .filter_map(|field| {
+                let value = values.get(*field)?.clone();
+                Some(Command::SetValue { node: meta.group_id.clone(), field: (*field).to_owned(), value })
+            })
+            .collect();
+        if parent.apply_commands(&commands).is_ok() {
+            let _ = self.documents.set_session(meta.parent_document_id.clone(), parent);
+        }
     }
 
     fn save_active_tab(&mut self) {
@@ -927,6 +1009,11 @@ impl NodeCraftApp {
     }
 
     fn close_tab(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get(index) {
+            let tab_id = tab.id;
+            self.sync_group_tab(tab_id);
+            self.group_tabs.remove(&tab_id);
+        }
         if index >= self.tabs.len() {
             return;
         }
@@ -1088,6 +1175,9 @@ impl NodeCraftApp {
             return;
         }
         self.save_active_tab();
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            self.sync_group_tab(tab.id);
+        }
         self.active_tab = index;
         self.restore_active_tab();
         // Linked documents are evaluated from the open-tab set. Re-evaluate when
@@ -1345,6 +1435,16 @@ impl NodeCraftApp {
         let id = unique_node_id(tool.node_type, &mut used);
         let values = match tool.primitive {
             Some(primitive) => serde_json::json!({ "primitiveType": primitive }),
+            None if tool.node_type == "group" => serde_json::json!({
+                "collapsed": false,
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"port":"shape"},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"port":"shape"},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections": [{"from":"in","to":"out","in":"shape","out":"shape"}],
+                "inputs": [{"port":"shape","node":"in"}],
+                "outputs": [{"port":"shape","node":"out"}]
+            }),
             None => serde_json::json!({}),
         };
         let mut node = GraphNode {
@@ -2188,6 +2288,7 @@ impl NodeCraftApp {
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
         let mut show_view_matrix = self.viewport.show_view_matrix();
+        let mut engine_threads = self.engine_threads;
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
         let mut close = false;
@@ -2261,6 +2362,7 @@ impl NodeCraftApp {
                 let tabs = [
                     SettingsTab::Appearance,
                     SettingsTab::Viewport,
+                    SettingsTab::Engine,
                     SettingsTab::Diagnostics,
                 ];
                 let mut tab_y = left.min.y + 12.0;
@@ -2499,6 +2601,33 @@ impl NodeCraftApp {
                         );
                         content.small("Show translucent added/removed surfaces while a feature node is selected.");
                     }
+                    SettingsTab::Engine => {
+                        content.heading("Engine");
+                        content.small(
+                            "Worker threads used by the SolidCore kernel pool.                              0 uses the available CPU parallelism. Changes apply on restart.",
+                        );
+                        let mut threads = engine_threads as u32;
+                        content.add(
+                            egui::Slider::new(&mut threads, 0..=64)
+                                .text("Kernel threads (0 = auto)")
+                                .integer(),
+                        );
+                        engine_threads = threads as usize;
+                        content.monospace(format!(
+                            "Active pool: {}",
+                            if nodecraft_engine::kernel_pool::shared_pool_initialized() {
+                                "already started"
+                            } else {
+                                "lazy"
+                            }
+                        ));
+                        content.monospace(format!(
+                            "Available CPU parallelism: {}",
+                            std::thread::available_parallelism()
+                                .map(|count| count.get())
+                                .unwrap_or(1)
+                        ));
+                    }
                     SettingsTab::Diagnostics => {
                         content.heading("Diagnostics");
                         content.monospace(format!("NodeCraft {}", env!("CARGO_PKG_VERSION")));
@@ -2521,8 +2650,8 @@ impl NodeCraftApp {
                                 .text("Fade in (ms)"),
                         );
                         content.add(
-                            egui::Slider::new(&mut activity.hold_ms, 500..=5000)
-                                .text("Hold (ms, min 500)"),
+                            egui::Slider::new(&mut activity.hold_ms, 16..=160)
+                                .text("Hold (ms, 16–160)"),
                         );
                         content.add(
                             egui::Slider::new(&mut activity.fade_out_ms, 0..=500)
@@ -2559,6 +2688,12 @@ impl NodeCraftApp {
         self.viewport.set_show_view_matrix(show_view_matrix);
         if feature_overlay != self.feature_overlay {
             self.feature_overlay = feature_overlay;
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
+        }
+        if engine_threads != self.engine_threads {
+            self.engine_threads = engine_threads;
+            nodecraft_engine::kernel_pool::configure_threads(engine_threads);
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
@@ -2972,6 +3107,7 @@ impl eframe::App for NodeCraftApp {
                 self.last_saved_theme.clone(),
                 self.activity,
                 self.feature_overlay,
+                self.engine_threads,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -4340,6 +4476,9 @@ impl eframe::App for NodeCraftApp {
                         self.evaluate();
                     }
                 }
+                NodeEditorAction::EnterGroup { id } => {
+                    self.enter_group(&id);
+                }
                 NodeEditorAction::SetViewerBreakpoint { id } => {
                     // The eye controls the viewer only; it never mutates selection.
                     self.viewer_breakpoint = Some(id);
@@ -4694,7 +4833,7 @@ struct ActivitySettings {
 
 impl Default for ActivitySettings {
     fn default() -> Self {
-        Self { fade_in_ms: 40, hold_ms: 500, fade_out_ms: 40 }
+        Self { fade_in_ms: 40, hold_ms: 40, fade_out_ms: 40 }
     }
 }
 
@@ -4708,6 +4847,8 @@ struct AppSettings {
     activity: ActivitySettings,
     #[serde(default = "default_feature_overlay")]
     feature_overlay: bool,
+    #[serde(default)]
+    engine_threads: usize,
     #[serde(default)]
     recent_files: Vec<String>,
 }
@@ -4726,6 +4867,7 @@ fn save_app_settings(
     theme: Option<String>,
     activity: ActivitySettings,
     feature_overlay: bool,
+    engine_threads: usize,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -4737,6 +4879,7 @@ fn save_app_settings(
         theme,
         activity,
         feature_overlay,
+        engine_threads,
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -5626,6 +5769,7 @@ mod tests {
             theme: Some("punk".to_owned()),
             activity: ActivitySettings::default(),
             feature_overlay: true,
+            engine_threads: 0,
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");

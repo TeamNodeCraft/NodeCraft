@@ -2128,11 +2128,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     /// other node types remain on the lazy evaluator path for now.
     fn prewarm_primitives(&mut self) {
         use crate::scheduler::{run_levels, ScheduledTask};
+        // Only warm the target closure. A request carries the whole document;
+        // scheduling every primitive/translate in it makes a one-node drag pay
+        // for the entire graph.
+        let scope: std::collections::HashSet<String> =
+            evaluation_order_for_targets(self.request).into_iter().collect();
         let mut tasks = Vec::new();
         let mut keys = std::collections::BTreeMap::new();
         let mut warmable = std::collections::BTreeSet::new();
         for node in self.request.nodes.iter() {
-            if node.node_type == "primitive" && !node.suppressed {
+            if node.node_type == "primitive" && !node.suppressed && scope.contains(&node.id) {
                 warmable.insert(node.id.clone());
             }
         }
@@ -2140,7 +2145,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         loop {
             let mut grew = false;
             for node in self.request.nodes.iter() {
-                if node.suppressed || warmable.contains(&node.id) {
+                if node.suppressed || warmable.contains(&node.id) || !scope.contains(&node.id) {
                     continue;
                 }
                 let connected = |input: &str| {
@@ -2440,6 +2445,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         self.part_visiting.push(start.to_owned());
         let result = (|| -> Result<Part, String> {
             match node.node_type.as_str() {
+                "groupinput" => Ok(Part::empty()),
+                "groupoutput" => {
+                    let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Group output has no connected input")?;
+                    self.evaluate_part(&link.from).map(|part| part.as_ref().clone())
+                }
                 "primitive" => Ok(Part::from_arc(self.cached_primitive_brep_arc(&node)?)),
                 "translate" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Part translate has no input")?;
@@ -3350,6 +3360,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 display.feature_preview_operation = Some(operation.to_string());
                 Ok(display)
             })(),
+            "groupinput" => Ok(Mesh::default()),
+            "groupoutput" => source(self.request, node_id)
+                .and_then(|link| self.evaluate(&link.from))
+                .ok_or_else(|| "Group output has no connected input.".into()),
             "scatter" => (|| -> Result<Mesh, String> {
                 // Scatter is an exact Part generator: produce placed BRep
                 // instances through the Part path, then tessellate them. The

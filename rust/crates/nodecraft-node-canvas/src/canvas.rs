@@ -90,6 +90,7 @@ pub enum NodeEditorAction {
     InsertNodeOnCable { node: String, connection: ConnectionKey, input: String, out: String },
     SetViewerBreakpoint { id: String },
     ToggleSuppressed { id: String },
+    EnterGroup { id: String },
     SetLassoSelection { nodes: HashSet<String>, live: bool },
     MoveNodes { positions: Vec<(String, f64, f64)> },
     SetPositions(Vec<(String, f64, f64)>),
@@ -204,6 +205,7 @@ pub struct NodeEditor {
     wire_drag: Option<WireDrag>,
     insert_target: Option<InsertCandidate>,
     insert_preview: Option<InsertPreview>,
+    context_menu: Option<(String, Pos2)>,
     icons: HashMap<String, egui::TextureHandle>,
     theme: crate::theme::CanvasTheme,
     last_viewport: Option<Rect>,
@@ -250,6 +252,7 @@ impl Default for NodeEditor {
             wire_drag: None,
             insert_target: None,
             insert_preview: None,
+            context_menu: None,
             icons: HashMap::new(),
             theme: crate::theme::CanvasTheme::default(),
             last_viewport: None,
@@ -691,7 +694,7 @@ impl NodeEditor {
 
     pub fn set_activity_timings(&mut self, fade_in_ms: u64, hold_ms: u64, fade_out_ms: u64) {
         self.activity_fade_in = Duration::from_millis(fade_in_ms);
-        self.activity_hold = Duration::from_millis(hold_ms.max(500));
+        self.activity_hold = Duration::from_millis(hold_ms.clamp(16, 160));
         self.activity_fade_out = Duration::from_millis(fade_out_ms);
     }
 
@@ -1081,8 +1084,22 @@ impl NodeEditor {
                             self.insert_preview = None;
                         }
                     } else if let Some(pointer) = ui.ctx().pointer_latest_pos() {
-                        let delta = pointer - drag.last_pointer;
+                        let pointer_delta = pointer - drag.last_pointer;
                         drag.last_pointer = pointer;
+                        // While dragging near an edge, pan the canvas smoothly and
+                        // move the dragged nodes by the same amount, keeping them
+                        // under the pointer as the graph scrolls.
+                        // Keep panning at full speed no matter how far the pointer
+                        // travels outside the panel. The drag is captured by the
+                        // LMB state, not by the pointer remaining over the canvas.
+                        let autoscroll = drag_autoscroll(canvas, pointer);
+                        if autoscroll != Vec2::ZERO {
+                            self.pan_animation = None;
+                            // The canvas scrolls opposite the node's drag direction:
+                            // dragging right reveals graph to the right.
+                            self.pan -= autoscroll;
+                        }
+                        let delta = pointer_delta + autoscroll;
                         if delta != Vec2::ZERO {
                             let positions: Vec<(String, f64, f64)> = drag
                                 .ids
@@ -1099,6 +1116,9 @@ impl NodeEditor {
                             if !positions.is_empty() {
                                 moved_nodes = Some(positions);
                             }
+                        }
+                        if autoscroll != Vec2::ZERO {
+                            ui.ctx().request_repaint();
                         }
                     }
                 }
@@ -1223,6 +1243,43 @@ impl NodeEditor {
                     }
                     if response.clicked() {
                         clicked = Some(node.id.clone());
+                    }
+                    if node.node_type == "group"
+                        && response.secondary_clicked()
+                        && let Some(pointer) = pointer
+                    {
+                        self.context_menu = Some((node.id.clone(), pointer));
+                    }
+                }
+                if let Some((group_id, position)) = self.context_menu.clone() {
+                    let mut enter = false;
+                    let mut dismiss = false;
+                    let area = egui::Area::new(egui::Id::new("node-context-menu"))
+                        .order(egui::Order::Foreground)
+                        .fixed_pos(position)
+                        .show(ui.ctx(), |ui| {
+                            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                                if ui.button("Enter Group").clicked() {
+                                    enter = true;
+                                    ui.close();
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    dismiss = true;
+                                    ui.close();
+                                }
+                            });
+                        });
+                    if enter {
+                        actions.push(NodeEditorAction::EnterGroup { id: group_id });
+                        self.context_menu = None;
+                    } else if dismiss
+                        || (ui.ctx().input(|input| input.pointer.any_click())
+                            && ui
+                                .ctx()
+                                .pointer_latest_pos()
+                                .is_some_and(|pointer| !area.response.rect.contains(pointer)))
+                    {
+                        self.context_menu = None;
                     }
                 }
 
@@ -2286,6 +2343,9 @@ fn node_title(node_type: &str) -> &'static str {
         "loft" => "Loft",
         "surfaceloft" => "Surface Loft",
         "mirror" => "Mirror",
+        "group" => "Group",
+        "groupinput" => "Group Input",
+        "groupoutput" => "Group Output",
         _ => "Node",
     }
 }
@@ -2465,6 +2525,10 @@ fn port_index(ports: &[&str], name: &str) -> usize {
 }
 
 pub fn node_width(node: &nodecraft_session::GraphNode) -> f32 {
+    if node.node_type == "group" {
+        // Subpatch cards are intentionally wider than operation cards.
+        return 280.0;
+    }
     let title = node_title(&node.node_type).chars().count() as f32;
     let ports = node_input_count(node).max(node_outputs(node).len()) as f32;
     NODE_MIN_WIDTH
@@ -3145,6 +3209,34 @@ fn round_button_rect(center: Pos2, radius: f32) -> Rect {
     Rect::from_center_size(center, Vec2::splat(radius.max(POWER_MIN_HIT_RADIUS) * 2.0))
 }
 
+/// Edge distance that starts drag auto-panning.
+const AUTOSCROLL_EDGE: f32 = 32.0;
+/// Maximum auto-pan speed in screen pixels per frame.
+const AUTOSCROLL_MAX: f32 = 14.0;
+
+/// Auto-pan velocity while dragging near the canvas edge. The speed ramps
+/// smoothly from zero at the dead-zone boundary to `AUTOSCROLL_MAX` at/past
+/// the edge, so the canvas keeps moving while the pointer is held outside.
+fn drag_autoscroll(canvas: Rect, pointer: Pos2) -> Vec2 {
+    let ramp = |low: f32, high: f32, position: f32| {
+        if position < low + AUTOSCROLL_EDGE {
+            -(((low + AUTOSCROLL_EDGE) - position) / AUTOSCROLL_EDGE)
+                .clamp(0.0, 1.0)
+                * AUTOSCROLL_MAX
+        } else if position > high - AUTOSCROLL_EDGE {
+            ((position - (high - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE)
+                .clamp(0.0, 1.0)
+                * AUTOSCROLL_MAX
+        } else {
+            0.0
+        }
+    };
+    Vec2::new(
+        ramp(canvas.left(), canvas.right(), pointer.x),
+        ramp(canvas.top(), canvas.bottom(), pointer.y),
+    )
+}
+
 fn button_centers(rect: Rect) -> (Pos2, Pos2) {
     let y = rect.center().y;
     (Pos2::new(rect.min.x, y), Pos2::new(rect.max.x, y))
@@ -3750,6 +3842,34 @@ mod tests {
                 cables.len(),
             );
         }
+    }
+
+    #[test]
+    fn drag_autoscroll_ramps_at_the_canvas_edges() {
+        let canvas = Rect::from_min_max(Pos2::new(100.0, 100.0), Pos2::new(900.0, 700.0));
+        assert_eq!(drag_autoscroll(canvas, Pos2::new(500.0, 400.0)), Vec2::ZERO);
+        let right = drag_autoscroll(canvas, Pos2::new(899.0, 400.0));
+        assert!(right.x > 0.0 && right.y == 0.0);
+        let far_right = drag_autoscroll(canvas, Pos2::new(1_000.0, 400.0));
+        assert!(far_right.x > right.x);
+        assert!(far_right.x <= AUTOSCROLL_MAX + 0.001);
+        let left = drag_autoscroll(canvas, Pos2::new(101.0, 400.0));
+        assert!(left.x < 0.0);
+        let top = drag_autoscroll(canvas, Pos2::new(500.0, 101.0));
+        assert!(top.y < 0.0);
+        let bottom = drag_autoscroll(canvas, Pos2::new(500.0, 699.0));
+        assert!(bottom.y > 0.0);
+    }
+
+    #[test]
+    fn activity_hold_is_clamped_to_one_frame_through_160ms() {
+        let mut editor = NodeEditor::default();
+        editor.set_activity_timings(40, 5, 40);
+        assert_eq!(editor.activity_hold, Duration::from_millis(16));
+        editor.set_activity_timings(40, 500, 40);
+        assert_eq!(editor.activity_hold, Duration::from_millis(160));
+        editor.set_activity_timings(40, 80, 40);
+        assert_eq!(editor.activity_hold, Duration::from_millis(80));
     }
 
     #[test]

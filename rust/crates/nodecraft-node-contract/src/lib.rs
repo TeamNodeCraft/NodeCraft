@@ -115,6 +115,9 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
     descriptor!("spline", NO_PORTS, ValueKind::Sketch, true, true),
     descriptor!("exporter", GEOMETRY, ValueKind::Empty, true, false),
     descriptor!("linkedpart", NO_PORTS, ValueKind::Empty, false, false),
+    descriptor!("group", GEOMETRY, ValueKind::Geometry, true, true),
+    descriptor!("groupinput", NO_PORTS, ValueKind::Geometry, true, true),
+    descriptor!("groupoutput", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("time", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("sceneTransform", GEOMETRY, ValueKind::Geometry, true, true),
 ];

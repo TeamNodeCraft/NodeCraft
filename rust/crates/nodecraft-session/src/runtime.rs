@@ -121,7 +121,8 @@ impl GraphRuntime {
             .map(|(id, _)| id.clone())
             .collect();
         let mut stack = Vec::new();
-        let expanded = expand_linked_parts(&document, &mut stack)?;
+        let grouped = crate::expand_groups(&document)?;
+        let expanded = expand_linked_parts(&grouped, &mut stack)?;
         let expanded_hashes = expanded.node_hashes()?;
         let nodes: Vec<Node> = expanded.nodes.iter().map(|node| {
             let original = document.nodes.iter().find(|original| original.id == node.id);
