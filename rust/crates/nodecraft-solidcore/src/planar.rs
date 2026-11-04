@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn box_becomes_planar_body() {
-        let mut kernel = Kernel::default();
+        let mut kernel = crate::kernel::kernel();
         let brep = create_box(&mut kernel, solidcore::math::Point3::new(-5.0, -2.0, -10.0), 10.0, 4.0, 20.0).unwrap();
         let body = planar_body(&kernel, &brep).unwrap();
         assert_eq!(body.faces.len(), 6);

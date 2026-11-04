@@ -71,6 +71,7 @@ fn main() -> eframe::Result {
         .with_title("NodeCraft");
     #[cfg(target_os = "macos")]
     let viewport = viewport
+        .with_decorations(false)
         .with_fullsize_content_view(true)
         .with_title_shown(false)
         .with_titlebar_buttons_shown(false)

@@ -243,7 +243,7 @@ pub fn brep_from_bspline_uv_rectangle(
         );
     }
 
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let mut data = BrepData::new(1, solidcore::topology::brep_data::DataSourceType::Unknown);
     data.healer_version = HEALER_VERSION;
     data.regions.push(RegionData { start_shell: 0, num_shells: 1, is_void: 0, ..RegionData::zeroed() });
@@ -327,7 +327,7 @@ pub fn brep_from_bspline_uv_rectangle(
     }
 
     data.surfaces.push(Keyed { key: ObjectKey(700), object: converted });
-    let mut kernel = Kernel::default();
+    let mut kernel = crate::kernel::kernel();
     let mut brep = Brep::new_with_infinite_region().map_err(|error| error.to_string())?;
     let mut store = AttributeStore::new();
     let mut records = solidcore::topology::topology::NotifyRecords::new();
@@ -773,7 +773,7 @@ mod tests {
 
     fn area(brep: &Brep) -> f64 {
         let mut copy = brep.clone();
-        brep_area(&Kernel::default(), &mut copy, 1e-6).unwrap()
+        brep_area(&crate::kernel::kernel(), &mut copy, 1e-6).unwrap()
     }
 
     #[test]

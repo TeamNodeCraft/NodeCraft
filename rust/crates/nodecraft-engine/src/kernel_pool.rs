@@ -3,10 +3,13 @@
 //! One persistent [`Kernel`] per worker. Jobs receive a deterministic RNG seed
 //! and a cancellation token; no kernel is shared between threads.
 
-use nodecraft_solidcore::solidcore::kernel::{CancelToken, Kernel, KernelOptions};
+use nodecraft_solidcore::solidcore::kernel::{CancelToken, Kernel};
 use std::any::Any;
+use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
 
 pub use nodecraft_solidcore::solidcore::kernel::CancelToken as RevisionToken;
 
@@ -23,16 +26,68 @@ pub(crate) fn current_revision_token() -> CancelToken {
     CURRENT_REVISION_TOKEN.with(|current| current.borrow().clone())
 }
 
-type Job = Box<dyn FnOnce(&mut Kernel) -> Box<dyn Any + Send> + Send + 'static>;
+/// Result of one job. The pool uses this to reset a kernel after a panic
+/// without losing the panic message sent to the caller.
+struct JobOutcome {
+    panicked: bool,
+}
 
-enum Message {
-    Job { seed: u64, token: CancelToken, job: Job },
-    Shutdown,
+type Job = Box<dyn FnOnce(&mut Kernel) -> JobOutcome + Send + 'static>;
+
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else {
+        "non-string panic payload".to_owned()
+    }
+}
+
+struct Work {
+    seed: u64,
+    token: CancelToken,
+    job: Job,
+}
+
+struct Shared {
+    queue: Mutex<VecDeque<Work>>,
+    ready: Condvar,
+    shutdown: AtomicBool,
+}
+
+impl Shared {
+    fn next(&self) -> Option<Work> {
+        let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if let Some(work) = queue.pop_front() {
+                return Some(work);
+            }
+            if self.shutdown.load(Ordering::Acquire) {
+                return None;
+            }
+            queue = self
+                .ready
+                .wait(queue)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn push(&self, work: Work) -> bool {
+        if self.shutdown.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut queue = self.queue.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        queue.push_back(work);
+        drop(queue);
+        self.ready.notify_one();
+        true
+    }
 }
 
 /// Pool of worker threads, each owning one persistent kernel.
 pub struct KernelPool {
-    tx: Sender<Message>,
+    shared: Arc<Shared>,
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
@@ -41,39 +96,36 @@ impl KernelPool {
     #[must_use]
     pub fn new(threads: usize) -> Self {
         let threads = threads.max(1);
-        let (tx, rx) = channel::<Message>();
-        let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(VecDeque::new()),
+            ready: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        });
         let mut workers = Vec::with_capacity(threads);
         for index in 0..threads {
-            let rx = rx.clone();
+            let shared = Arc::clone(&shared);
             let worker = std::thread::Builder::new()
                 .name(format!("solidcore-kernel-{index}"))
                 .spawn(move || {
-                    let mut kernel = Kernel::new(&KernelOptions::default());
-                    loop {
-                        let message = match rx.lock() {
-                            Ok(receiver) => receiver.recv(),
-                            Err(_) => return,
+                    let mut kernel = nodecraft_solidcore::kernel::kernel();
+                    while let Some(work) = shared.next() {
+                        kernel.rng = nodecraft_solidcore::solidcore::kernel::Rng::new(work.seed);
+                        kernel.set_cancel_token(work.token);
+                        let outcome = catch_unwind(AssertUnwindSafe(|| (work.job)(&mut kernel)));
+                        let reset = match outcome {
+                            Ok(outcome) => outcome.panicked,
+                            Err(_) => true,
                         };
-                        let Ok(message) = message else { return };
-                        match message {
-                            Message::Shutdown => return,
-                            Message::Job { seed, token, job } => {
-                                kernel.rng = nodecraft_solidcore::solidcore::kernel::Rng::new(seed);
-                                kernel.set_cancel_token(token);
-                                let outcome = catch_unwind(AssertUnwindSafe(|| job(&mut kernel)));
-                                if outcome.is_err() {
-                                    // A panicking kernel is not trusted for later jobs.
-                                    kernel = Kernel::new(&KernelOptions::default());
-                                }
-                            }
+                        if reset {
+                            // A panicking kernel is not trusted for later jobs.
+                            kernel = nodecraft_solidcore::kernel::kernel();
                         }
                     }
                 })
                 .expect("spawn SolidCore kernel worker");
             workers.push(worker);
         }
-        Self { tx, workers }
+        Self { shared, workers }
     }
 
     #[must_use]
@@ -128,11 +180,19 @@ impl KernelPool {
     {
         let (result_tx, result_rx) = channel();
         let erased: Job = Box::new(move |kernel: &mut Kernel| {
-            let value = job(kernel);
-            let _ = result_tx.send(Ok(value));
-            Box::new(())
+            match catch_unwind(AssertUnwindSafe(|| job(kernel))) {
+                Ok(value) => {
+                    let _ = result_tx.send(Ok(value));
+                    JobOutcome { panicked: false }
+                }
+                Err(payload) => {
+                    let message = panic_message(payload);
+                    let _ = result_tx.send(Err(format!("kernel job panicked: {message}")));
+                    JobOutcome { panicked: true }
+                }
+            }
         });
-        if self.tx.send(Message::Job { seed, token, job: erased }).is_err() {
+        if !self.shared.push(Work { seed, token, job: erased }) {
             let (tx, rx) = channel();
             let _ = tx.send(Err("kernel pool is shut down".to_owned()));
             return rx;
@@ -143,9 +203,8 @@ impl KernelPool {
 
 impl Drop for KernelPool {
     fn drop(&mut self) {
-        for _ in &self.workers {
-            let _ = self.tx.send(Message::Shutdown);
-        }
+        self.shared.shutdown.store(true, Ordering::Release);
+        self.shared.ready.notify_all();
         for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
@@ -225,6 +284,16 @@ pub fn shared_pool() -> &'static KernelPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn panicking_job_reports_an_error_and_pool_stays_usable() {
+        let pool = KernelPool::new(1);
+        let error = pool
+            .execute(1, |_| -> Result<u32, String> { panic!("boom") })
+            .expect_err("panic should become an error");
+        assert!(error.contains("panicked"), "{error}");
+        assert_eq!(pool.execute(2, |_| Ok(7u32)), Ok(7));
+    }
 
     #[test]
     fn rng_seed_is_injected_per_job() {

@@ -4,6 +4,9 @@
 //! `lib.rs` (that file is owned elsewhere), so this test includes the source directly.
 //! Wiring it in is one line: `pub mod step_curved;`.
 
+#[path = "../src/kernel.rs"]
+mod kernel;
+
 #[path = "../src/step_curved.rs"]
 mod step_curved;
 

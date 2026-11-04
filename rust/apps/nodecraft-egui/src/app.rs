@@ -442,6 +442,12 @@ fn progress_fraction(progress: &EvalProgress) -> f32 {
 }
 
 #[derive(Clone)]
+struct TabDrag {
+    id: u64,
+    grab_offset: f32,
+}
+
+#[derive(Clone)]
 struct DocumentTab {
     id: u64,
     document_id: String,
@@ -571,6 +577,7 @@ struct GroupTab {
 
 pub struct NodeCraftApp {
     session: Option<Session>,
+    active_session_revision: u64,
     path: Option<PathBuf>,
     documents: DocumentStore,
     next_document_id: u64,
@@ -592,6 +599,7 @@ pub struct NodeCraftApp {
     engine_threads: usize,
     mesher_threads: usize,
     workload_profiler: bool,
+    kernel_fixes: bool,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -623,6 +631,9 @@ pub struct NodeCraftApp {
     node_position_animation: Option<NodePositionAnimation>,
     tabs: Vec<DocumentTab>,
     group_tabs: HashMap<u64, GroupTab>,
+    tab_positions: HashMap<u64, f32>,
+    tab_drag: Option<TabDrag>,
+    tab_strip: Option<egui::Rect>,
     active_tab: usize,
     next_tab_id: u64,
     inspector_width: f32,
@@ -642,6 +653,31 @@ pub struct NodeCraftApp {
     sketch_gui: SketchGui,
     control_requests: Receiver<control_server::Request>,
     last_pointer: Option<egui::Pos2>,
+}
+
+#[cfg(target_os = "macos")]
+fn round_main_window() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSColor};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != "NodeCraft" {
+            continue;
+        }
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        let Some(view) = window.contentView() else { continue };
+        view.setWantsLayer(true);
+        if let Some(layer) = view.layer() {
+            let radius = 16.0_f64;
+            let _: () = unsafe { objc2::msg_send![&layer, setCornerRadius: radius] };
+            let _: () = unsafe { objc2::msg_send![&layer, setMasksToBounds: true] };
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -705,6 +741,7 @@ impl NodeCraftApp {
         nodecraft_engine::kernel_pool::configure_exact_threads(settings.engine_threads);
         nodecraft_engine::kernel_pool::configure_mesh_threads(settings.mesher_threads);
         nodecraft_engine::configure_workload_profiler(settings.workload_profiler);
+        nodecraft_engine::configure_solidcore_fixes(settings.kernel_fixes);
         node_editor.set_activity_timings(
             u64::from(activity.fade_in_ms),
             u64::from(activity.hold_ms),
@@ -721,8 +758,11 @@ impl NodeCraftApp {
         let startup_recent = recent_files.first().cloned();
         viewport.set_view(persisted_view);
         let persisted_recent = recent_files.clone();
+        #[cfg(target_os = "macos")]
+        round_main_window();
         let mut app = Self {
             session: None,
+            active_session_revision: 0,
             path: None,
             documents: DocumentStore::new(),
             next_document_id: 1,
@@ -740,6 +780,7 @@ impl NodeCraftApp {
             engine_threads: settings.engine_threads,
             mesher_threads: settings.mesher_threads,
             workload_profiler: settings.workload_profiler,
+            kernel_fixes: settings.kernel_fixes,
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
@@ -772,6 +813,9 @@ impl NodeCraftApp {
             node_position_animation: None,
             tabs: Vec::new(),
             group_tabs: HashMap::new(),
+            tab_positions: HashMap::new(),
+            tab_drag: None,
+            tab_strip: None,
             active_tab: 0,
             next_tab_id: 1,
             inspector_width: 280.0,
@@ -909,18 +953,26 @@ impl NodeCraftApp {
     }
 
     fn save_active_tab(&mut self) {
+        self.save_active_tab_impl(false);
+    }
+
+    fn save_active_tab_impl(&mut self, move_mesh: bool) {
         let Some(session) = self.session.clone() else { return };
         let Some(document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else { return };
-        let _ = self.documents.set_session(document_id.clone(), session);
+        if session.revision() != self.active_session_revision {
+            let _ = self.documents.set_session(document_id.clone(), session);
+            self.active_session_revision = self.session.as_ref().map_or(0, Session::revision);
+        }
         if let Some(path) = &self.path {
             self.documents.set_path(&document_id, path);
         }
+        let mesh = if move_mesh { self.mesh.take() } else { self.mesh.clone() };
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         tab.path = self.path.clone();
         tab.selected_nodes = self.selected_nodes.clone();
         tab.selected_connections = self.selected_connections.clone();
         tab.viewer_breakpoint = self.viewer_breakpoint.clone();
-        tab.mesh = self.mesh.clone();
+        tab.mesh = mesh;
         tab.status = self.status.clone();
         tab.error = self.error.clone();
         tab.evaluation_ms = self.evaluation_ms;
@@ -967,25 +1019,36 @@ impl NodeCraftApp {
     fn restore_active_tab(&mut self) {
         self.pending_dirty.clear();
         self.eval_progress = None;
-        let Some(tab) = self.tabs.get(self.active_tab).cloned() else { return };
-        let Some(session) = self.documents.session(&tab.document_id).cloned() else {
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        let document_id = tab.document_id.clone();
+        let path = tab.path.clone();
+        let selected_nodes = std::mem::take(&mut tab.selected_nodes);
+        let selected_connections = std::mem::take(&mut tab.selected_connections);
+        let viewer_breakpoint = tab.viewer_breakpoint.take();
+        let mesh = tab.mesh.take();
+        let status = tab.status.clone();
+        let error = tab.error.clone();
+        let evaluation_ms = tab.evaluation_ms;
+        let cache_hits = tab.cache_hits;
+        let cache_misses = tab.cache_misses;
+        let camera = tab.camera;
+        let Some(session) = self.documents.session(&document_id).cloned() else {
             self.session = None;
             return;
         };
+        self.active_session_revision = session.revision();
         self.session = Some(session);
-        self.pending_dirty.clear();
-        self.eval_progress = None;
-        self.path = tab.path;
-        self.selected_nodes = tab.selected_nodes;
-        self.selected_connections = tab.selected_connections;
-        self.viewer_breakpoint = tab.viewer_breakpoint;
-        self.mesh = tab.mesh;
-        self.status = tab.status;
-        self.error = tab.error;
-        self.evaluation_ms = tab.evaluation_ms;
-        self.cache_hits = tab.cache_hits;
-        self.cache_misses = tab.cache_misses;
-        if let Some(camera) = tab.camera {
+        self.path = path;
+        self.selected_nodes = selected_nodes;
+        self.selected_connections = selected_connections;
+        self.viewer_breakpoint = viewer_breakpoint;
+        self.mesh = mesh;
+        self.status = status;
+        self.error = error;
+        self.evaluation_ms = evaluation_ms;
+        self.cache_hits = cache_hits;
+        self.cache_misses = cache_misses;
+        if let Some(camera) = camera {
             self.viewport.camera = camera;
             self.camera_initialized = true;
             self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
@@ -1001,6 +1064,265 @@ impl NodeCraftApp {
         self.layout_animation = None;
         self.node_position_animation = None;
         self.evaluate();
+    }
+
+    fn document_tabs(
+        &mut self,
+        ui: &mut egui::Ui,
+        theme: &crate::theme::Theme,
+    ) -> (Option<usize>, Option<usize>, Option<(usize, usize)>) {
+        struct TabMeta {
+            id: u64,
+            title: String,
+            width: f32,
+            active: bool,
+        }
+        let meta: Vec<TabMeta> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let title = tab
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.file_stem().and_then(|name| name.to_str()))
+                    .unwrap_or("Untitled")
+                    .to_owned();
+                let width = ui
+                    .painter()
+                    .layout_no_wrap(title.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE)
+                    .size()
+                    .x
+                    + 42.0;
+                TabMeta { id: tab.id, title, width, active: index == self.active_tab }
+            })
+            .collect();
+        if meta.is_empty() {
+            self.tab_drag = None;
+            self.tab_strip = None;
+            return (None, None, None);
+        }
+        let gap = 4.0;
+        let mut total = meta.iter().map(|tab| tab.width + gap).sum::<f32>();
+        if let Some(drag) = &self.tab_drag
+            && let Some(tab) = meta.iter().find(|tab| tab.id == drag.id)
+        {
+            total += tab.width + gap;
+        }
+        let (strip, _) = ui.allocate_exact_size(egui::vec2(total, 30.0), egui::Sense::hover());
+        self.tab_strip = Some(strip);
+        // Tabs live in a foreground layer so they sit above the title-bar drag
+        // interaction. Otherwise the bar's drag sense can win the press before
+        // the tab sees it, and dragging a tab moves the window.
+        let mut tab_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(strip)
+                .layer_id(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("document-tabs-layer"),
+                )),
+        );
+        let ui = &mut tab_ui;
+        let start = strip.min.x;
+        let dragging_id = self.tab_drag.as_ref().map(|drag| drag.id);
+        let drag_index = dragging_id.and_then(|id| meta.iter().position(|tab| tab.id == id));
+        let pointer = ui.ctx().pointer_latest_pos();
+        let dragged_centre = match (drag_index, self.tab_drag.as_ref(), pointer) {
+            (Some(index), Some(drag), Some(pointer)) => {
+                Some(pointer.x - drag.grab_offset + meta[index].width * 0.5)
+            }
+            _ => None,
+        };
+        let insertion = drag_index
+            .map(|index| {
+                let mut count = 0;
+                let mut x = start;
+                for (other, tab) in meta.iter().enumerate() {
+                    if other == index {
+                        continue;
+                    }
+                    if dragged_centre.is_some_and(|centre| centre < x + tab.width * 0.5) {
+                        break;
+                    }
+                    x += tab.width + gap;
+                    count += 1;
+                }
+                count
+            })
+            .unwrap_or(0);
+
+        let mut targets = vec![start; meta.len()];
+        if let (Some(index), Some(_)) = (drag_index, dragging_id) {
+            let dragged_width = meta[index].width + gap;
+            let mut x = start;
+            let mut seen = 0;
+            for (slot, tab) in meta.iter().enumerate() {
+                if slot == index {
+                    continue;
+                }
+                if seen == insertion {
+                    x += dragged_width;
+                }
+                targets[slot] = x;
+                x += tab.width + gap;
+                seen += 1;
+            }
+        } else {
+            let mut x = start;
+            for (slot, tab) in meta.iter().enumerate() {
+                targets[slot] = x;
+                x += tab.width + gap;
+            }
+        }
+
+        let dt = ui.input(|input| input.stable_dt).clamp(0.0, 0.1);
+        let blend = 1.0 - (-18.0 * dt).exp();
+        let mut animating = false;
+        let mut drag = self.tab_drag.clone();
+        for (index, tab) in meta.iter().enumerate() {
+            let current = self.tab_positions.entry(tab.id).or_insert(targets[index]);
+            if drag.as_ref().is_some_and(|drag| drag.id == tab.id) {
+                if let (Some(pointer), Some(drag)) = (pointer, drag.as_ref()) {
+                    *current = pointer.x - drag.grab_offset;
+                }
+            } else {
+                let delta = targets[index] - *current;
+                if delta.abs() < 0.35 {
+                    *current = targets[index];
+                } else {
+                    *current += delta * blend;
+                    animating = true;
+                }
+            }
+        }
+        if animating && self.tab_drag.is_none() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+        }
+
+        let mut requested_tab = None;
+        let mut requested_close = None;
+        let mut requested_move = None;
+        let reorderable = meta.len() > 1;
+        let pressed = ui.input(|input| input.pointer.primary_pressed());
+        for (index, tab) in meta.iter().enumerate() {
+            if dragging_id == Some(tab.id) {
+                continue;
+            }
+            let x = *self.tab_positions.get(&tab.id).unwrap_or(&targets[index]);
+            let rect = egui::Rect::from_min_size(egui::pos2(x, strip.min.y), egui::vec2(tab.width, 30.0));
+            let fill = theme.color(if tab.active { theme.control } else { theme.window });
+            let response = ui.interact(
+                rect,
+                egui::Id::new(("document-tab", tab.id)),
+                egui::Sense::click_and_drag(),
+            );
+            ui.painter().add(ui_shape::shape(rect, fill, egui::Stroke::NONE));
+            let galley = ui.painter().layout_no_wrap(
+                tab.title.clone(),
+                egui::FontId::proportional(13.0),
+                theme.color(if tab.active { theme.text } else { theme.muted }),
+            );
+            let text_colour = theme.color(if tab.active { theme.text } else { theme.muted });
+            ui.painter().galley(rect.center() - galley.size() * 0.5, galley, text_colour);
+            let close_rect = egui::Rect::from_center_size(
+                egui::Pos2::new(rect.right() - 14.0, rect.center().y),
+                egui::Vec2::splat(20.0),
+            );
+            let close = ui.interact(
+                close_rect,
+                egui::Id::new(("close-document-tab", tab.id)),
+                egui::Sense::click(),
+            );
+            if close.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if response.hovered() || close.hovered() {
+                let centre = close_rect.center();
+                let arm = 4.0;
+                let stroke = egui::Stroke::new(
+                    1.4,
+                    if close.hovered() { theme.color(theme.text) } else { theme.color(theme.muted) },
+                );
+                ui.painter().line_segment([centre + egui::vec2(-arm, -arm), centre + egui::vec2(arm, arm)], stroke);
+                ui.painter().line_segment([centre + egui::vec2(arm, -arm), centre + egui::vec2(-arm, arm)], stroke);
+            }
+            if reorderable
+                && response.drag_started()
+                && let Some(pointer) = pointer
+            {
+                drag = Some(TabDrag { id: tab.id, grab_offset: pointer.x - x });
+            } else if !reorderable
+                && cfg!(target_os = "macos")
+                && response.drag_started()
+            {
+                // A lone tab has no reorder destination; its drag is a window
+                // drag. Start it directly so the foreground tab layer cannot
+                // swallow the gesture before the title-bar interaction sees it.
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+            if close.clicked() {
+                requested_close = Some(index);
+                drag = None;
+            } else if pressed && response.hovered() && !close.hovered() {
+                // Chrome-style selection happens on press, so a drag begins
+                // from an already-active tab.
+                requested_tab = Some(index);
+            }
+        }
+        self.tab_drag = drag;
+        if let Some(drag) = &self.tab_drag
+            && !ui.input(|input| input.pointer.primary_down())
+            && let Some(from) = self.tabs.iter().position(|tab| tab.id == drag.id)
+            && let Some(drag_index) = meta.iter().position(|tab| tab.id == drag.id)
+        {
+            let mut k = 0;
+            let mut x = start;
+            let centre = meta[drag_index].width * 0.5
+                + pointer.map_or(0.0, |pointer| pointer.x - drag.grab_offset);
+            for (index, tab) in meta.iter().enumerate() {
+                if index == drag_index {
+                    continue;
+                }
+                if centre < x + tab.width * 0.5 {
+                    break;
+                }
+                x += tab.width + gap;
+                k += 1;
+            }
+            let to = if k <= from { k } else { k + 1 };
+            requested_move = Some((from, to));
+            self.tab_drag = None;
+        }
+        if self.tab_drag.is_some() {
+            ui.ctx().request_repaint();
+        }
+
+        if let Some(drag) = &self.tab_drag
+            && let Some(index) = meta.iter().position(|tab| tab.id == drag.id)
+            && let Some(pointer) = pointer
+        {
+            let tab = &meta[index];
+            let x = pointer.x - drag.grab_offset;
+            let rect = egui::Rect::from_min_size(egui::pos2(x, strip.min.y - 3.0), egui::vec2(tab.width, 32.0));
+            ui.painter().rect_filled(
+                rect.translate(egui::vec2(0.0, 3.0)),
+                egui::CornerRadius::same(8),
+                egui::Color32::from_black_alpha(90),
+            );
+            ui.painter().add(ui_shape::shape(
+                rect,
+                theme.color(theme.control),
+                egui::Stroke::new(1.0, theme.with_alpha(theme.border_strong, 220)),
+            ));
+            let galley = ui.painter().layout_no_wrap(
+                tab.title.clone(),
+                egui::FontId::proportional(13.0),
+                theme.color(theme.text),
+            );
+            ui.painter().galley(rect.center() - galley.size() * 0.5, galley, theme.color(theme.text));
+        }
+
+        (requested_tab, requested_close, requested_move)
     }
 
     fn move_tab(&mut self, from: usize, to: usize) {
@@ -1157,6 +1479,7 @@ impl NodeCraftApp {
         };
         self.tabs.push(tab);
         self.active_tab = self.tabs.len().saturating_sub(1);
+        self.active_session_revision = session.revision();
         self.session = Some(session);
         self.pending_dirty.clear();
         self.eval_progress = None;
@@ -1180,15 +1503,12 @@ impl NodeCraftApp {
         if index >= self.tabs.len() || index == self.active_tab {
             return;
         }
-        self.save_active_tab();
+        self.save_active_tab_impl(true);
         if let Some(tab) = self.tabs.get(self.active_tab) {
             self.sync_group_tab(tab.id);
         }
         self.active_tab = index;
         self.restore_active_tab();
-        // Linked documents are evaluated from the open-tab set. Re-evaluate when
-        // activating a tab so edits in a shared subpatch are reflected here.
-        self.evaluate();
     }
 
     fn remap_selection(&mut self) {
@@ -2239,9 +2559,11 @@ impl NodeCraftApp {
         self.node_editor.clear_activity();
         self.status = "Evaluating…".to_owned();
         let mut linked_documents = std::collections::BTreeMap::new();
-        for (document_id, document) in self.documents.documents() {
-            if let Some(path) = self.documents.path(document_id) {
-                linked_documents.insert(path.to_path_buf(), document.clone());
+        if session.document().nodes.iter().any(|node| node.node_type == "linkedpart") {
+            for (document_id, document) in self.documents.documents() {
+                if let Some(path) = self.documents.path(document_id) {
+                    linked_documents.insert(path.to_path_buf(), document.clone());
+                }
             }
         }
         self.comparison_pair = comparison.clone();
@@ -2297,6 +2619,7 @@ impl NodeCraftApp {
         let mut engine_threads = self.engine_threads;
         let mut mesher_threads = self.mesher_threads;
         let mut workload_profiler = self.workload_profiler;
+        let mut kernel_fixes = self.kernel_fixes;
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
         let mut close = false;
@@ -2656,8 +2979,18 @@ impl NodeCraftApp {
                             "Adaptive workload dispatch (profiler)",
                         );
                         content.small(
-                            "Automatically chooses how much of the current graph to run in parallel. \
-                             Simple chains run normally; wide graphs use more worker threads.",
+                            "Chooses how many worker threads each evaluation uses. Narrow graphs use \
+                             fewer threads to avoid overhead, so it can be slower than using every \
+                             configured thread. Turn off for maximum throughput on complex graphs.",
+                        );
+                        content.add_space(8.0);
+                        content.checkbox(
+                            &mut kernel_fixes,
+                            "Latest SolidCore kernel fixes",
+                        );
+                        content.small(
+                            "Enables the newer offset, fillet and B-rep classification fixes. \
+                             Applies when the kernel workers start; restart to change an existing pool.",
                         );
                     }
                     SettingsTab::Diagnostics => {
@@ -2738,6 +3071,12 @@ impl NodeCraftApp {
         if workload_profiler != self.workload_profiler {
             self.workload_profiler = workload_profiler;
             nodecraft_engine::configure_workload_profiler(workload_profiler);
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
+        }
+        if kernel_fixes != self.kernel_fixes {
+            self.kernel_fixes = kernel_fixes;
+            nodecraft_engine::configure_solidcore_fixes(kernel_fixes);
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
@@ -3154,6 +3493,7 @@ impl eframe::App for NodeCraftApp {
                 self.engine_threads,
                 self.mesher_threads,
                 self.workload_profiler,
+                self.kernel_fixes,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -3334,21 +3674,41 @@ impl eframe::App for NodeCraftApp {
                 ui.horizontal_centered(|ui| {
                     // The 40 px bar is the window title bar. Buttons/widgets added
                     // below take precedence; dragging empty bar space starts a
-                    // native window drag.
-                    let bar_drag = ui.interact(
-                        ui.max_rect(),
-                        egui::Id::new("app-bar-drag"),
-                        egui::Sense::drag(),
-                    );
+                    // native window drag. The tab strip is excluded from the
+                    // drag rects entirely so a tab press can never reach this
+                    // layer, regardless of egui's interaction resolution.
+                    let bar_rect = ui.max_rect();
+                    let reorderable_tabs = self.tabs.len() > 1;
+                    let (bar_drag, bar_drag_right) = match self
+                        .tab_strip
+                        .filter(|strip| reorderable_tabs && strip.intersects(bar_rect))
+                    {
+                        Some(strip) => {
+                            let left = egui::Rect::from_min_max(
+                                bar_rect.min,
+                                egui::pos2(strip.min.x, bar_rect.max.y),
+                            );
+                            let right = egui::Rect::from_min_max(
+                                egui::pos2(strip.max.x, bar_rect.min.y),
+                                bar_rect.max,
+                            );
+                            (
+                                ui.interact(left, egui::Id::new("app-bar-drag-left"), egui::Sense::drag()),
+                                Some(ui.interact(right, egui::Id::new("app-bar-drag-right"), egui::Sense::drag())),
+                            )
+                        }
+                        None => (
+                            ui.interact(bar_rect, egui::Id::new("app-bar-drag"), egui::Sense::drag()),
+                            None,
+                        ),
+                    };
                     // The custom title bar owns dragging on macOS. Other
                     // platforms keep their native title bar, so empty space in
                     // this toolbar must not start a second window drag.
-                    if cfg!(target_os = "macos")
-                        && bar_drag.drag_started()
-                        && window_resize_direction(ui.ctx()).is_none()
-                    {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
+                    let bar_drag_started = cfg!(target_os = "macos")
+                        && (bar_drag.drag_started()
+                            || bar_drag_right.is_some_and(|response| response.drag_started()))
+                        && window_resize_direction(ui.ctx()).is_none();
 
                     #[cfg(target_os = "macos")]
                     {
@@ -3531,122 +3891,28 @@ impl eframe::App for NodeCraftApp {
                     ui.spacing_mut().item_spacing.x = spacing;
                     ui.add_space(14.0);
 
-                    // Document tabs. The active tab is the session currently
-                    // displayed by the viewport, inspector and node canvas.
-                    for index in 0..self.tabs.len() {
-                        let title = self.tabs[index]
-                            .path
-                            .as_ref()
-                            .and_then(|path| path.file_stem().and_then(|name| name.to_str()))
-                            .unwrap_or("Untitled")
-                            .to_owned();
-                        let active = index == self.active_tab;
-                        let galley = ui.painter().layout_no_wrap(
-                            title,
-                            egui::FontId::proportional(13.0),
-                            theme.color(if active { theme.text } else { theme.muted }),
-                        );
-                        let tab_fill = theme.color(if active { theme.control } else { theme.window });
-                        let (tab_rect, response) = ui.allocate_exact_size(
-                            egui::vec2(galley.size().x + 42.0, 30.0),
-                            egui::Sense::click_and_drag(),
-                        );
-                        response.dnd_set_drag_payload(index);
-                        ui.painter().add(ui_shape::shape(
-                            tab_rect,
-                            tab_fill,
-                            egui::Stroke::NONE,
-                        ));
-                        ui.painter().galley(
-                            tab_rect.center() - galley.size() * 0.5,
-                            galley,
-                            theme.color(if active { theme.text } else { theme.muted }),
-                        );
-                        let close_rect = egui::Rect::from_center_size(
-                            egui::Pos2::new(tab_rect.right() - 14.0, tab_rect.center().y),
-                            egui::Vec2::splat(20.0),
-                        );
-                        let close = ui.interact(
-                            close_rect,
-                            egui::Id::new(("close-document-tab", &self.tabs[index].id)),
-                            egui::Sense::click(),
-                        );
-                        if close.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if response.hovered() || close.hovered() {
-                            let gradient = egui::Rect::from_min_max(
-                                egui::Pos2::new(tab_rect.right() - 34.0, tab_rect.min.y + 2.0),
-                                egui::Pos2::new(tab_rect.right() - 2.0, tab_rect.max.y - 2.0),
-                            );
-                            const STEPS: usize = 14;
-                            for step in 0..STEPS {
-                                let t = step as f32 / (STEPS - 1) as f32;
-                                let x0 = gradient.left() + gradient.width() * t
-                                    - gradient.width() / STEPS as f32;
-                                let x1 = gradient.left() + gradient.width() * (step + 1) as f32
-                                    / STEPS as f32;
-                                // Reach full opacity before the close hit area.
-                                let alpha = ((t / 0.55).min(1.0) * 255.0) as u8;
-                                ui.painter().rect_filled(
-                                    egui::Rect::from_min_max(
-                                        egui::Pos2::new(x0.max(gradient.left()), gradient.top()),
-                                        egui::Pos2::new(x1, gradient.bottom()),
-                                    ),
-                                    egui::CornerRadius::ZERO,
-                                    egui::Color32::from_rgba_unmultiplied(
-                                        tab_fill.r(),
-                                        tab_fill.g(),
-                                        tab_fill.b(),
-                                        alpha,
-                                    ),
-                                );
-                            }
-                            let cross_colour = if close.hovered() {
-                                theme.color(theme.text)
-                            } else {
-                                theme.color(theme.muted)
-                            };
-                            let centre = close_rect.center();
-                            let arm = 4.0;
-                            let stroke = egui::Stroke::new(1.4, cross_colour);
-                            ui.painter().line_segment(
-                                [centre + egui::vec2(-arm, -arm), centre + egui::vec2(arm, arm)],
-                                stroke,
-                            );
-                            ui.painter().line_segment(
-                                [centre + egui::vec2(arm, -arm), centre + egui::vec2(-arm, arm)],
-                                stroke,
-                            );
-                        }
-                        // Drag a tab to reorder it. The insertion line follows the
-                        // pointer half so dropping on the left/right edge inserts
-                        // before/after the hovered tab.
-                        let mut insertion = None;
-                        if let Some(payload) = response.dnd_hover_payload::<usize>() {
-                            let after = ui
-                                .input(|input| input.pointer.interact_pos())
-                                .is_some_and(|pos| pos.x > tab_rect.center().x);
-                            insertion = Some((*payload, if after { index + 1 } else { index }));
-                        }
-                        if let Some((from, to)) = insertion {
-                            let x = if to == index { tab_rect.left() } else { tab_rect.right() };
-                            ui.painter().line_segment(
-                                [egui::pos2(x, tab_rect.top() + 3.0), egui::pos2(x, tab_rect.bottom() - 3.0)],
-                                egui::Stroke::new(2.0, theme.color(theme.accent)),
-                            );
-                        }
-                        if let Some(payload) = response.dnd_release_payload::<usize>() {
-                            let after = ui
-                                .input(|input| input.pointer.interact_pos())
-                                .is_some_and(|pos| pos.x > tab_rect.center().x);
-                            requested_move = Some((*payload, if after { index + 1 } else { index }));
-                        } else if close.clicked() {
-                            requested_close = Some(index);
-                        } else if response.clicked() {
-                            requested_tab = Some(index);
-                        }
-                        ui.add_space(4.0);
+                    // Document tabs are laid out manually so dragging can lift a
+                    // tab and animate the others into their new slots.
+                    let (tab_click, tab_close, tab_move) = self.document_tabs(ui, &theme);
+                    if tab_click.is_some() {
+                        requested_tab = tab_click;
+                    }
+                    if tab_close.is_some() {
+                        requested_close = tab_close;
+                    }
+                    if tab_move.is_some() {
+                        requested_move = tab_move;
+                    }
+                    // Tabs own drags inside their strip; only empty title-bar
+                    // space starts a native window drag. Use the press origin:
+                    // egui reports drag_started after the pointer has already
+                    // moved, which may be outside the strip by then.
+                    let press = ui.ctx().input(|input| input.pointer.press_origin());
+                    let started_on_tabs = press.is_some_and(|press| {
+                        self.tab_strip.is_some_and(|tab_strip| tab_strip.contains(press))
+                    });
+                    if bar_drag_started && !started_on_tabs && self.tab_drag.is_none() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
                     let new_tab = ui
                         .add(
@@ -4899,11 +5165,17 @@ struct AppSettings {
     mesher_threads: usize,
     #[serde(default = "default_workload_profiler")]
     workload_profiler: bool,
+    #[serde(default = "default_kernel_fixes")]
+    kernel_fixes: bool,
     #[serde(default)]
     recent_files: Vec<String>,
 }
 
 fn default_workload_profiler() -> bool {
+    true
+}
+
+fn default_kernel_fixes() -> bool {
     true
 }
 
@@ -4924,6 +5196,7 @@ fn save_app_settings(
     engine_threads: usize,
     mesher_threads: usize,
     workload_profiler: bool,
+    kernel_fixes: bool,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -4938,6 +5211,7 @@ fn save_app_settings(
         engine_threads,
         mesher_threads,
         workload_profiler,
+        kernel_fixes,
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -5830,6 +6104,7 @@ mod tests {
             engine_threads: 0,
             mesher_threads: 0,
             workload_profiler: true,
+            kernel_fixes: true,
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");

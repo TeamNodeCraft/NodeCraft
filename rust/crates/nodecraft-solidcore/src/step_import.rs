@@ -158,7 +158,7 @@ pub fn step_display_mesh_with_options(
     options: &CurvedTessOptions,
 ) -> Result<StepMeshImport, String> {
     let import = brep_from_step(path)?;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let mesh = brep_display_mesh(&kernel, &import.brep, options).map_err(|error| {
         format!(
             "{} STEP B-rep imported from {path}, but display tessellation failed: {error}",
@@ -260,7 +260,7 @@ mod tests {
         use solidcore::geom::attribute::{AttributeStore, ObjectKey};
         use solidcore::kernel::Kernel;
         use solidcore::mass::integrator::properties::{PropertyAttributes, brep_mass_properties};
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let key = |_| ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };

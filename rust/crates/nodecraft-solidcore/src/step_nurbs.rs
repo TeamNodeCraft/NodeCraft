@@ -321,7 +321,7 @@ mod tests {
         assert!((domain.max().x - 1.0).abs() < TOLERANCE);
         assert!((domain.max().y - 1.0).abs() < TOLERANCE);
 
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for (u, v) in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.5), (0.25, 0.75), (1.0, 0.0)] {
             let expected = ::step_nurbs::surface_point(&source, u, v).unwrap();
             let actual = converted
@@ -342,7 +342,7 @@ mod tests {
         assert!(kernel.is_rational().unwrap());
         assert_eq!(kernel.degree().unwrap(), 2);
 
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for t in [0.0, 0.125, 0.25, 0.5, 0.75, 1.0] {
             let expected = ::step_nurbs::curve_point(&source, t).unwrap();
             let actual = converted.evaluate_point(&kernel_ctx, t).unwrap();
@@ -376,7 +376,7 @@ mod tests {
             }
         }
 
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for (u, v) in [(0.0, 1.0), (1.0, 0.0), (0.5, 0.5)] {
             let expected = ::step_nurbs::surface_point(&source, u, v).unwrap();
             let actual = converted
@@ -413,7 +413,7 @@ mod tests {
         assert!((domain.max().x - 1.0).abs() < TOLERANCE);
         assert!((domain.max().y - 1.0).abs() < TOLERANCE);
 
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for (u, v) in [(0.0, 0.0), (1.0, 1.0), (0.5, 0.5), (0.25, 0.75)] {
             let expected = ::step_nurbs::surface_point(&source, u, v).unwrap();
             let actual = converted
@@ -446,7 +446,7 @@ mod tests {
             self_intersect: false,
         };
         let converted = bspline_curve_to_solidcore(&source).unwrap();
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for t in [0.0, 0.5, 1.0] {
             let expected = ::step_nurbs::curve_point(&source, t).unwrap();
             let actual = converted.evaluate_point(&kernel_ctx, t).unwrap();
@@ -532,7 +532,7 @@ mod tests {
         assert!(source.is_rational());
 
         let converted = bspline_curve_to_solidcore(&source).unwrap();
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
             let expected = ::step_nurbs::curve_point(&source, t).unwrap();
             let actual = converted.evaluate_point(&kernel_ctx, t).unwrap();
@@ -553,7 +553,7 @@ mod tests {
         let file = nodecraft_step::StepFile::parse(&exchange(body)).unwrap();
         let source = ::step_nurbs::parse_surface(&file, 10).unwrap();
         let converted = bspline_surface_to_solidcore(&source).unwrap();
-        let kernel_ctx = Kernel::default();
+        let kernel_ctx = crate::kernel::kernel();
         for (u, v) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] {
             let expected = ::step_nurbs::surface_point(&source, u, v).unwrap();
             let actual = converted

@@ -870,7 +870,7 @@ pub fn chamfer_brep_exact(
     brep: &solidcore::topology::Brep,
     values: &serde_json::Value,
 ) -> Result<solidcore::topology::Brep, String> {
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     chamfer_brep_exact_with_kernel(&mut kernel, brep, values)
 }
 
@@ -882,24 +882,24 @@ pub fn chamfer_brep_exact_with_kernel(
     use solidcore::geom::axis2_placement::Axis2Placement;
     use solidcore::math::{Point3, Vec3};
     use solidcore::primitive::api_primitives as api;
-    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| error.to_string())?;
-    treatment.validate().map_err(|error| error.to_string())?;
+    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if treatment.mode != EdgeMode::Chamfer {
         return Err("exact chamfer requires chamfer mode".into());
     }
     let selections = crate::edge::select_edges_from_values(kernel, brep, values)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if selections.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let interior = brep_center(&*kernel, brep).map_err(|error| error.to_string())?;
+    let interior = brep_center(&*kernel, brep).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     let (min, max) = brep_vertex_bounds(brep)?;
     let diagonal = length(sub(max, min)).max(1.0);
     // Conservative body-scale bound. This catches nonsensical distances before the
     // kernel is asked to cut with a tool larger than the whole body.
     let (distance_a, distance_b) = treatment
         .chamfer_distances()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if distance_a > diagonal || distance_b > diagonal {
         return Err(format!(
             "chamfer distance {:.4}/{:.4} exceeds the body diagonal {:.4}; reduce the distance",
@@ -909,17 +909,17 @@ pub fn chamfer_brep_exact_with_kernel(
     let extent = diagonal * 4.0 + 100.0;
     let mut result = brep.clone();
     for selection in &selections {
-        let frame = edge_frame(&*kernel, brep, selection, interior).map_err(|error| error.to_string())?;
-        let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| error.to_string())?;
+        let frame = edge_frame(&*kernel, brep, selection, interior).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+        let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
         for plane in planes {
             let plane = plane.orient_towards(interior);
             let normal = normalize(plane.normal).ok_or("chamfer plane has no normal")?;
             let helper = if normal[2].abs() < 0.9 { Vec3::new(0.0, 0.0, 1.0) } else { Vec3::new(1.0, 0.0, 0.0) };
             let normal = Vec3::new(normal[0], normal[1], normal[2]);
-            let x_axis = normal.cross(helper).unitize().map_err(|error| error.to_string())?;
-            let y_axis = normal.cross(x_axis).unitize().map_err(|error| error.to_string())?;
+            let x_axis = normal.cross(helper).unitize().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+            let y_axis = normal.cross(x_axis).unitize().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
             let mut tool = api::create_box(kernel, Point3::new(-extent, -extent, 0.0), 2.0 * extent, 2.0 * extent, extent)
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
             let placement = Axis2Placement::new(
                 Point3::new(plane.point[0], plane.point[1], plane.point[2]),
                 x_axis,
@@ -931,7 +931,7 @@ pub fn chamfer_brep_exact_with_kernel(
                 &placement,
                 None,
                 true,
-            ).map_err(|error| error.to_string())?;
+            ).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
             result = nodecraft_bool::boolean_breps_with_kernel(
                 kernel,
                 nodecraft_bool::BooleanOp::Difference,
@@ -950,7 +950,7 @@ fn brep_vertex_bounds(brep: &solidcore::topology::Brep) -> Result<([f64; 3], [f6
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for id in brep.vertex_list() {
-        let point = brep.vertex(*id).map_err(|error| error.to_string())?.point;
+        let point = brep.vertex(*id).map_err(|error| nodecraft_solidcore::error::user_message(error))?.point;
         min = [min[0].min(point.x), min[1].min(point.y), min[2].min(point.z)];
         max = [max[0].max(point.x), max[1].max(point.y), max[2].max(point.z)];
     }
@@ -1140,7 +1140,7 @@ mod tests {
 
     #[test]
     fn exact_chamfer_cuts_a_box_edge() {
-        let mut kernel = Kernel::default();
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
         let brep = api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
             .expect("box");
         let values = serde_json::json!({
@@ -1156,7 +1156,7 @@ mod tests {
 
     #[test]
     fn top_edge_frames_use_the_horizontal_face_as_reference() {
-        let mut kernel = Kernel::default();
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
         let brep = api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
             .expect("box");
         let interior = brep_center(&kernel, &brep).expect("center");

@@ -79,7 +79,7 @@ pub fn box_brep(length: f64, width: f64, height: f64) -> Result<(Kernel, Brep), 
             "box dimensions must be positive finite numbers, got ({length}, {width}, {height})"
         )));
     }
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     let brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), length, width, height)
         .map_err(|error| BlendError::Kernel(format!("create_box: {error}")))?;
     Ok((kernel, brep))

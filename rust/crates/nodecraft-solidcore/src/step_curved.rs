@@ -22,7 +22,6 @@
 //! Entry point: [`analytic_surface_from_step`].
 
 use solidcore::geom::axis2_placement::Axis2Placement;
-use solidcore::kernel::Kernel;
 use solidcore::math::{Point3, Vec3};
 use solidcore::surface::cone::Cone;
 use solidcore::surface::sphere::Sphere;
@@ -62,7 +61,7 @@ pub fn analytic_surface_from_step(file: &StepFile, surface_id: u32) -> Result<Su
         )
     })?;
     let placement = surface_placement(file, args, surface_id)?;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let surface = match kind {
         "CYLINDRICAL_SURFACE" => {
             let radius = number_arg(args, 2, surface_id, "radius")?;

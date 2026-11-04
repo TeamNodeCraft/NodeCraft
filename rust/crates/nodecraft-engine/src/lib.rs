@@ -26,6 +26,16 @@ static WORKLOAD_PROFILER_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
 
 /// Enable or disable analysis-driven dispatch. Default is enabled.
+/// Configure the opt-in SolidCore kernel fixes used by new worker kernels.
+pub fn configure_solidcore_fixes(enabled: bool) {
+    nodecraft_solidcore::kernel::configure_experimental_fixes(enabled);
+}
+
+#[must_use]
+pub fn solidcore_fixes_enabled() -> bool {
+    nodecraft_solidcore::kernel::experimental_fixes_enabled()
+}
+
 pub fn configure_workload_profiler(enabled: bool) {
     WORKLOAD_PROFILER_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
@@ -685,7 +695,7 @@ fn export_extrude_exact(request: &Request, extrude_id: &str, path: &str) -> Resu
     let index: usize = face_reference_index(reference).ok_or("extrude needs face:N selection")?;
     let face = imported.faces().ids().nth(index).ok_or_else(|| format!("extrude face {index} missing"))?;
     let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     let result = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, &imported, face, amount).map_err(|error| format!("extrude: {error}"))?;
     nodecraft_extrude::write_planar_brep_step(&kernel, &result, path).map_err(|error| format!("{error}"))
 }
@@ -771,7 +781,7 @@ fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::Pla
         let index: usize = face_reference_index(reference).ok_or("extrude needs face:N")?;
         let face = imported.faces().ids().nth(index).ok_or("extrude face missing")?;
         let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-        let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
         let result = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, &imported, face, amount).map_err(|error| error.to_string())?;
         return nodecraft_extrude::planar_brep_to_planar_body(&kernel, &result).map_err(|error| error.to_string());
     }
@@ -781,7 +791,7 @@ fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::Pla
         let (op, reverse) = boolean_mode(&node.values)?;
         let (brep_a, brep_b) = if reverse { (exact_operand_brep(request, &b.from)?, exact_operand_brep(request, &a.from)?) } else { (exact_operand_brep(request, &a.from)?, exact_operand_brep(request, &b.from)?) };
         let result = nodecraft_bool::boolean_breps(op, brep_a, brep_b)?;
-        let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+        let kernel = nodecraft_solidcore::kernel::kernel();
         return nodecraft_extrude::planar_brep_to_planar_body(&kernel, &result).map_err(|error| error.to_string());
     }
     Err("unsupported assembly part type".into())
@@ -827,7 +837,7 @@ fn apply_brep_placement(
     offset: [f64; 3],
     rotation: [f64; 3],
 ) -> Result<(), String> {
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     apply_brep_placement_with_kernel(&mut kernel, brep, offset, rotation)
 }
 
@@ -852,7 +862,7 @@ fn apply_brep_placement_with_kernel(
 }
 
 fn primitive_brep(node: &Node) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     primitive_brep_with_kernel(&mut kernel, node)
 }
 
@@ -890,7 +900,7 @@ fn primitive_brep_with_kernel(
 }
 
 fn snapshot_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(&mut kernel, brep)
         .map_err(|error| error.to_string())
 }
@@ -1385,7 +1395,7 @@ fn mirror_combine(values: &serde_json::Value) -> bool {
 }
 
 fn mirror_brep(brep: &mut nodecraft_solidcore::solidcore::topology::Brep, values: &serde_json::Value) -> Result<(), String> {
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     mirror_brep_with_kernel(&mut kernel, brep, values)
 }
 
@@ -1737,7 +1747,7 @@ impl Part {
     /// geometry (Boolean, exact export).
     fn realized_solids(&self) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
         let mut solids = Vec::with_capacity(self.bodies.len());
-        let mut copy_kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+        let mut copy_kernel = nodecraft_solidcore::kernel::kernel();
         for body in &self.bodies {
             let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
                 &mut copy_kernel,
@@ -1772,7 +1782,7 @@ fn scale_brep(
 ) -> Result<(), String> {
     use nodecraft_solidcore::solidcore::geom::axis2_placement::Axis2Placement;
     use nodecraft_solidcore::solidcore::math::{Point3, Vec3};
-    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
     let placement = Axis2Placement::new(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
     nodecraft_solidcore::solidcore::topology::brep::p5::transform(
         &mut kernel,
@@ -2560,7 +2570,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let profile = source_solids.first().ok_or("Extrude source Part is empty")?;
                     let face = profile.faces().ids().nth(index).ok_or_else(|| format!("Extrude face {index} does not exist"))?;
                     let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let mut kernel = nodecraft_solidcore::kernel::kernel();
                     let tool = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, profile, face, amount)
                         .map_err(|error| format!("extrude: {error}"))?;
                     let operation = node.values.get("operation").and_then(serde_json::Value::as_str).unwrap_or("new");
@@ -2596,7 +2606,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 "loft" => {
                     let bottom = input_source(self.request, node.id.as_str(), "bottom").ok_or("Loft has no bottom section")?.from.clone();
                     let top = input_source(self.request, node.id.as_str(), "top").ok_or("Loft has no top section")?.from.clone();
-                    let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let mut kernel = nodecraft_solidcore::kernel::kernel();
                     let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                     let bottom_output = self.sketch_output_for(&bottom);
                     let top_output = self.sketch_output_for(&top);
@@ -2831,76 +2841,68 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         self.emit_progress(node_id, ProgressPhase::Complete);
     }
 
-    /// Tessellate one exact body with SolidCore's CPU mesher.
-    ///
-    /// This is the engine's mesher boundary: it reads an immutable B-rep and
-    /// returns a display mesh, with no exact evaluation or mutation. A future
-    /// independent CPU/GPU mesher can call this same boundary.
-    fn mesh_body(
-        &self,
-        kernel: &nodecraft_solidcore::solidcore::kernel::Kernel,
-        brep: &nodecraft_solidcore::solidcore::topology::Brep,
-    ) -> Result<Mesh, String> {
-        nodecraft_solidcore::curved::brep_display_mesh(
-            kernel,
-            brep,
-            &nodecraft_solidcore::curved::CurvedTessOptions::default(),
-        )
-    }
-
     /// Tessellate the final exact Part once, using standard display density.
     fn part_display_mesh(&self, part: &Part) -> Result<Mesh, String> {
         if part.bodies.is_empty() && part.sketches.is_empty() {
             return Err("Part has no geometry to display".into());
         }
+        let token = crate::kernel_pool::current_revision_token();
+        if token.is_cancelled() {
+            return Err("evaluation cancelled".into());
+        }
         let mut meshes = Vec::with_capacity(part.bodies.len() + part.sketches.len());
-        if part.bodies.len() <= 1 {
-            for body in &part.bodies {
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
-                let mut mesh = self.mesh_body(&kernel, &body.body)?;
-                for transform in &body.transforms {
-                    mesh = match transform {
-                        BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
-                        BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
-                        BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
-                    };
-                }
-                meshes.push(mesh);
-            }
-        } else {
-            // Independent body meshes run on the engine's persistent kernel pool.
+        if !part.bodies.is_empty() {
+            // One meshing path for one or many bodies. Keep only a few jobs in
+            // flight so a large Part cannot flood the queue or clone every body
+            // at once.
             let pool = crate::kernel_pool::shared_mesh_pool();
-            let mut results = Vec::with_capacity(part.bodies.len());
-            for (index, body) in part.bodies.iter().enumerate() {
-                let body = body.body.clone();
-                let transforms = body_transforms(body.as_ref(), part, index);
-                results.push(pool.submit(
-                    index as u64,
-                    nodecraft_solidcore::solidcore::kernel::CancelToken::new(),
-                    move |kernel| -> Result<Mesh, String> {
-                        let mut mesh = nodecraft_solidcore::curved::brep_display_mesh(
-                            kernel,
-                            &body,
-                            &nodecraft_solidcore::curved::CurvedTessOptions::default(),
-                        )?;
-                        for transform in &transforms {
-                            mesh = match transform {
-                                BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
-                                BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
-                                BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
-                            };
-                        }
-                        Ok(mesh)
-                    },
-                ));
+            let limit = if crate::workload_profiler_enabled() {
+                crate::workload::profile_request(self.request)
+                    .mesh_bodies
+                    .max(1)
+                    .min(pool.workers().max(1) * 2)
+            } else {
+                pool.workers().max(1) * 2
+            };
+            let mut pending = part.bodies.iter().enumerate();
+            let mut running: std::collections::VecDeque<(usize, std::sync::mpsc::Receiver<Result<Result<Mesh, String>, String>>)> =
+                std::collections::VecDeque::new();
+            let mut outputs = BTreeMap::new();
+            loop {
+                if token.is_cancelled() {
+                    return Err("evaluation cancelled".into());
+                }
+                while running.len() < limit {
+                    let Some((index, body)) = pending.next() else { break };
+                    let body = body.body.clone();
+                    let transforms = body_transforms(body.as_ref(), part, index);
+                    running.push_back((index, pool.submit(
+                        index as u64,
+                        token.clone(),
+                        move |kernel| -> Result<Mesh, String> {
+                            let mut mesh = nodecraft_solidcore::curved::brep_display_mesh(
+                                kernel,
+                                &body,
+                                &nodecraft_solidcore::curved::CurvedTessOptions::default(),
+                            )?;
+                            for transform in &transforms {
+                                mesh = match transform {
+                                    BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
+                                    BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
+                                    BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
+                                };
+                            }
+                            Ok(mesh)
+                        },
+                    )));
+                }
+                let Some((index, receiver)) = running.pop_front() else { break };
+                let mesh = receiver
+                    .recv()
+                    .map_err(|_| "mesher worker stopped".to_owned())??;
+                outputs.insert(index, mesh?);
             }
-            for result in results {
-                meshes.push(
-                    result
-                        .recv()
-                        .map_err(|_| "mesher worker stopped".to_owned())???
-                );
-            }
+            meshes.extend(outputs.into_values());
         }
         for sketch in &part.sketches {
             // Sketch and spline profiles display as their boundary curves.
@@ -3168,7 +3170,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         && let Some(brep) = self.cached_exact_brep(&link.from)
                     {
                         let mut brep = brep;
-                        let mut heal_kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                        let mut heal_kernel = nodecraft_solidcore::kernel::kernel();
                         if nodecraft_solidcore::solidcore::heal::heal_data::p1::api_heal_brep(
                             &mut heal_kernel,
                             Some(&mut brep),
@@ -3337,7 +3339,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 )?
                 .into_shape()
                 .ok_or("boolean task returned no shape")?;
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_solidcore::kernel::kernel();
                 self.breps.insert(node_id.into(), result.clone());
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
@@ -3367,7 +3369,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 )?
                 .into_brep()
                 .ok_or_else(|| "extrude task returned no shape".to_owned())?;
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_solidcore::kernel::kernel();
                 let preview = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &tool, &display_options()).ok();
                 let result = match operation {
                     "new" => tool,
@@ -3416,7 +3418,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     return self.evaluate(&link.from).ok_or_else(|| "Edge source did not evaluate".to_owned());
                 }
                 let brep = self.operand_brep(&link.from)?;
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_solidcore::kernel::kernel();
                 let mut values = node.values.clone();
                 values["mode"] = serde_json::json!(if node.node_type == "fillet" { "fillet" } else { "chamfer" });
                 nodecraft_blend::edge_treatment_preview(&kernel, &brep, &values)
@@ -3465,7 +3467,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let top = input_source(self.request, node_id, "top").ok_or("Loft has no top section")?.from.clone();
                 let _ = self.evaluate(&bottom);
                 let _ = self.evaluate(&top);
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_solidcore::kernel::kernel();
                 let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                 let bottom_output = self.sketch_output_for(&bottom);
                 let top_output = self.sketch_output_for(&top);
@@ -3478,7 +3480,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     .into_shape()
                     .ok_or_else(|| "Loft task returned no shape".to_owned())?
                 } else {
-                    let mut oracle = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                    let mut oracle = nodecraft_solidcore::kernel::kernel();
                     Arc::new(loft_exact(self.request, &mut oracle, &bottom, &top, ruled, true)?)
                 };
                 self.breps.insert(node_id.into(), result.clone());
@@ -3506,7 +3508,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         .ok_or_else(|| format!("Surface Loft section {section_id} must be a sketch or spline curve"))?;
                     sections.push(output);
                 }
-                let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_solidcore::kernel::kernel();
                 let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                 let result = crate::node_task::execute_exact(
                     crate::node_task::ExactNodeTask::SurfaceLoft { sections, ruled },

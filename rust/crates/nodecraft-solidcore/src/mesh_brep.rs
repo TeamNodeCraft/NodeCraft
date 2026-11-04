@@ -76,7 +76,7 @@ pub fn brep_from_triangles(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> Resul
             data.edgeuses.push(EuData { eu_type: 0, edge: edge as u64, loop_: face_index as u64, orientation: i32::from(a < b), uv_curve: 999_999, ..EuData::zeroed() });
         }
     }
-    let mut kernel = Kernel::default();
+    let mut kernel = crate::kernel::kernel();
     let mut brep = Brep::new_with_infinite_region().map_err(|e| e.to_string())?;
     let mut store = AttributeStore::new();
     let mut records = solidcore::topology::topology::NotifyRecords::new();
@@ -107,7 +107,7 @@ mod tests {
     fn faceted_box_has_volume_and_area() {
         let (points, triangles) = box_mesh();
         let mut brep = brep_from_triangles(&points, &triangles).unwrap();
-        let mut kernel = Kernel::default();
+        let mut kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| key_of(entity).key };
         let volume = brep_volume(&kernel, &mut brep, 1e-6, &attrs).unwrap();
@@ -147,7 +147,7 @@ mod planar_tests {
         if !std::path::Path::new(path).exists() { return; }
         let bodies = nodecraft_step::read_planar_solids(path).unwrap();
         let mut brep = brep_from_planar_body(&bodies[0]).unwrap();
-        let mut kernel = Kernel::default();
+        let mut kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| key_of(entity).key };
         let volume = brep_volume(&kernel, &mut brep, 1e-6, &attrs).unwrap();
@@ -163,7 +163,7 @@ mod planar_tests {
 /// Builds a solidcore Brep from a STEP planar body and tessellates it for display.
 pub fn planar_body_display_mesh(body: &nodecraft_step::PlanarBody) -> Result<nodecraft_protocol::Mesh, String> {
     let brep = brep_from_planar_body_exact(body).or_else(|_| brep_from_planar_body(body))?;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     crate::curved::brep_display_mesh(&kernel, &brep, &crate::curved::CurvedTessOptions::default())
 }
 
@@ -267,7 +267,7 @@ pub fn brep_from_planar_body_exact(body: &nodecraft_step::PlanarBody) -> Result<
             }
         }
     }
-    let mut kernel = Kernel::default();
+    let mut kernel = crate::kernel::kernel();
     let mut brep = Brep::new_with_infinite_region().map_err(|e| e.to_string())?;
     let mut store = AttributeStore::new();
     let mut records = solidcore::topology::topology::NotifyRecords::new();
@@ -289,7 +289,7 @@ mod exact_planar_tests {
             holes: vec![vec![vec![4,5,6,7]]],
         };
         let mut brep = brep_from_planar_body_exact(&body).unwrap();
-        let mut kernel = Kernel::default();
+        let mut kernel = crate::kernel::kernel();
         let area = brep_area(&kernel, &mut brep, 1e-6).unwrap();
         assert!((area - 12.0).abs() < 1e-4, "area {area}");
     }
@@ -300,7 +300,7 @@ mod exact_planar_tests {
         if !std::path::Path::new(path).exists() { return; }
         let bodies = nodecraft_step::read_planar_solids(path).unwrap();
         let mut brep = brep_from_planar_body_exact(&bodies[0]).unwrap();
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| key_of(entity).key };
         let volume = brep_volume(&kernel, &mut brep, 1e-6, &attrs).unwrap().abs();

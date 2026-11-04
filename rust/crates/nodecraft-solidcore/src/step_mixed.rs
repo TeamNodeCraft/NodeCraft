@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 
 use solidcore::curve::curve::Curve;
+use solidcore::curve::step_edge::{EdgeVertices, edge_interval};
 use solidcore::error::{EntityRef, SolidError};
 use solidcore::geom::attribute::ObjectKey;
 use solidcore::geom::axis2_placement::Axis2Placement;
@@ -449,10 +450,30 @@ fn curve_from_step(file: &StepFile, edge: &nodecraft_step::topology::StepEdge, b
             let interval = if let Some((trim_start, trim_end, _sense)) = resolved.trim {
                 Extent1d::from_raw(trim_start.min(trim_end), trim_start.max(trim_end))
             } else {
-                let parsed = step_nurbs::parse_curve(file, resolved.id).map_err(|error| format!("B-spline #{}: {error}", resolved.id))?;
-                let start_t = nearest_curve_parameter(&parsed, start);
-                let end_t = nearest_curve_parameter(&parsed, end);
-                Extent1d::from_raw(start_t.min(end_t), start_t.max(end_t))
+                // SolidCore's STEP edge interval API handles open and closed
+                // B-splines, including a vertex on a closed curve's seam. Fall
+                // back to the sampled nearest parameter only if the vertices
+                // are too far from the curve to be recognised.
+                let kernel = crate::kernel::kernel();
+                let vertices = if (start - end).length() < 1e-9 {
+                    EdgeVertices::Single(start)
+                } else {
+                    EdgeVertices::Pair { start, end }
+                };
+                match edge_interval(&kernel, &curve, vertices, edge.same_sense, 1e-5 * scale.abs().max(1.0)) {
+                    Ok(step) if step.start_gap <= 1e-4 * scale.abs().max(1.0)
+                        && step.end_gap <= 1e-4 * scale.abs().max(1.0) =>
+                    {
+                        step.interval()
+                    }
+                    _ => {
+                        let parsed = step_nurbs::parse_curve(file, resolved.id)
+                            .map_err(|error| format!("B-spline #{}: {error}", resolved.id))?;
+                        let start_t = nearest_curve_parameter(&parsed, start);
+                        let end_t = nearest_curve_parameter(&parsed, end);
+                        Extent1d::from_raw(start_t.min(end_t), start_t.max(end_t))
+                    }
+                }
             };
             let _ = domain;
             Ok((curve, interval))
@@ -580,7 +601,7 @@ fn cylinder_loop_step_window(
     let (origin, _, x, y, _) = cylinder_frame_parts(file, surface, scale)?;
     let loop_id = face.bounds.first().map(|(id, _)| *id).ok_or("cylinder face has no loop")?;
     let loop_ = body.loops.get(&loop_id).ok_or("mixed loop missing")?;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let mut previous: Option<f64> = None;
     let (mut min_u, mut max_u) = (f64::INFINITY, f64::NEG_INFINITY);
     for use_ in &loop_.oriented_edges {
@@ -767,7 +788,7 @@ fn face_surface(file: &StepFile, face: &nodecraft_step::topology::StepFace, kern
 pub fn build_mixed(file: &StepFile, body: &nodecraft_step::StepBrep, solid_id: u32, scale: f64) -> Result<(Brep, BrepData, Vec<u32>), String> {
     let solid = body.solids.get(&solid_id).ok_or("mixed solid missing")?;
     let shell = body.shells.get(&solid.shell).ok_or("mixed shell missing")?;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let mut data = BrepData::new(1, DataSourceType::Unknown);
     data.healer_version = HEALER_VERSION;
     // The healer's tolerances are lengths too; keep the same relative tolerance by
@@ -997,7 +1018,7 @@ pub fn build_mixed(file: &StepFile, body: &nodecraft_step::StepBrep, solid_id: u
         let _ = next_key;
         next_key += 1;
     }
-    let mut kernel = Kernel::default();
+    let mut kernel = crate::kernel::kernel();
     let mut brep = Brep::new_with_infinite_region().map_err(|error| error.to_string())?;
     let mut store = solidcore::geom::attribute::AttributeStore::new();
     let mut records = solidcore::topology::topology::NotifyRecords::new();
@@ -1084,7 +1105,7 @@ pub fn brep_from_mixed_step_file_experimental_scaled(
 fn validate_mixed_brep(brep: &mut Brep, label: &str) -> Result<(f64, f64), String> {
     use solidcore::geom::attribute::{AttributeStore, ObjectKey};
     use solidcore::mass::integrator::properties::{brep_mass_properties, PropertyAttributes};
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let store = AttributeStore::new();
     let key = |_| ObjectKey(2_000_000);
     let attributes = PropertyAttributes { store: &store, key_of: &key };
@@ -1231,7 +1252,7 @@ fn validate_mixed_extents(brep: &mut Brep, path: &str) -> Result<(), String> {
     let Ok((step_min, step_max)) = nodecraft_step::read_step_bounds(path) else { return Ok(()) };
     let expected_min = step_min;
     let expected_max = step_max;
-    let kernel = Kernel::default();
+    let kernel = crate::kernel::kernel();
     let bbox = solidcore::query::brep::calculate_bounding_box(&kernel, &mut *brep, solidcore::query::brep::BoundingBoxOptions::default())
         .map_err(|error| format!("mixed STEP validation failed: bounding box: {error}"))?;
     let extent = (0..3).map(|axis| (expected_max[axis] - expected_min[axis]).abs()).fold(0.0f64, f64::max).max(1.0);
@@ -1305,7 +1326,7 @@ mod tests {
         nodecraft_step::write_cylinder(path.to_str().unwrap(), 5.0, 10.0).unwrap();
         let brep = brep_from_mixed_step_experimental(path.to_str().unwrap()).expect("mixed cylinder");
         use solidcore::mass::integrator::properties::brep_volume;
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attrs = solidcore::mass::integrator::properties::PropertyAttributes { store: &store, key_of: &key };
@@ -1331,7 +1352,7 @@ mod tests {
         assert_eq!(brep.face_list().len(), 32);
         assert_eq!(brep.edge_list().len(), 87);
         assert_eq!(brep.vertex_list().len(), 58);
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let mesh = crate::curved::brep_display_mesh(&kernel, &brep, &crate::curved::CurvedTessOptions::default());
         assert!(mesh.is_ok(), "{mesh:?}");
         assert!(!mesh.unwrap().faces.is_empty());
@@ -1341,7 +1362,7 @@ mod tests {
     /// (which requires a manifold solid), cloned because the API takes `&mut Brep`.
     fn experimental_mass_at(brep: &Brep, origin: Point3) -> Result<(f64, f64), String> {
         use solidcore::mass::integrator::properties::{brep_mass_properties, PropertyAttributes};
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };
@@ -1357,7 +1378,7 @@ mod tests {
 
     fn experimental_volume(brep: &Brep) -> f64 {
         use solidcore::mass::integrator::properties::{brep_volume, PropertyAttributes};
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };
@@ -1515,7 +1536,7 @@ mod tests {
         // Radius and origin are scaled, not just the volume: the mm bounding box is
         // 10 mm across in X/Y and 10 mm tall in Z.
         let extent = solidcore::query::brep::calculate_bounding_box(
-            &Kernel::default(),
+            &crate::kernel::kernel(),
             &brep,
             solidcore::query::brep::BoundingBoxOptions {
                 approx: false,

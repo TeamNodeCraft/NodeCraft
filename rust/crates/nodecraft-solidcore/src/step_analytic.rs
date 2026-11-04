@@ -14,7 +14,7 @@ pub fn brep_from_analytic_step(path: &str) -> Result<Brep, String> {
     let solid = nodecraft_step::detect_analytic_solid(path)?
         .ok_or_else(|| "STEP file is not a single analytic primitive".to_string())?;
     validate_primitive(&solid)?;
-    let mut kernel = Kernel::default();
+    let mut kernel = crate::kernel::kernel();
     match solid {
         nodecraft_step::AnalyticSolid::Cylinder { radius, height, center } => {
             api::create_cylinder(&mut kernel, Point3::new(center[0], center[1], center[2] - height / 2.0), radius, height).map_err(|e| format!("solidcore cylinder: {e}"))
@@ -93,7 +93,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("sn-analytic-{}.step", std::process::id()));
         nodecraft_step::write_cylinder(path.to_str().unwrap(), 5.0, 10.0).unwrap();
         let mut brep = brep_from_analytic_step(path.to_str().unwrap()).unwrap();
-        let kernel = Kernel::default();
+        let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| solidcore::geom::attribute::ObjectKey(1_000_000 + entity_type(entity)) };
         let volume = brep_volume(&kernel, &mut brep, 1e-7, &attrs).unwrap().abs();

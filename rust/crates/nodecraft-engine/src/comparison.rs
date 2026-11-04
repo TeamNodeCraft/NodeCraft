@@ -22,7 +22,7 @@ pub struct DifferenceMeshes {
 pub fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
     let before = union_solids(before.realized_solids()?)?;
     let after = union_solids(after.realized_solids()?)?;
-    let kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+    let kernel = nodecraft_solidcore::kernel::kernel();
     let options = nodecraft_solidcore::curved::CurvedTessOptions::default();
     // Identical (or rigid-equivalent) bodies have no material difference. Boolean
     // difference of coincident solids is both pointless and numerically hostile.
