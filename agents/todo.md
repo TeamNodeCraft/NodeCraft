@@ -4,6 +4,12 @@ Priority order is approximate.
 
 ## Recently completed
 
+- [x] Prepare the upstream layer adoption locally: delete the unused
+      `crates/solidcore-mesh` port, add the pinned `nodecraft-layers` crate with a
+      record -> `solidcore-tess` adapter and a copied record fixture test, and an
+      ops primitive/smb smoke test. The kernel B-rep <-> record bridge is still
+      missing upstream, so `record_bridge()` stays `Missing` and the engine is
+      untouched.
 - [x] Scope engine caches per tab instead of one global worker cache.
 - [x] Cache the flattened linked-document graph per tab.
 - [x] Publish live document revisions from tabs into the shared document store.
@@ -25,6 +31,119 @@ Priority order is approximate.
 - [x] Add tab drag-and-drop reordering.
 - [x] Reduce viewport edge width to 1 px.
 - [x] Document the presentation scene graph and MeshAsset boundary.
+- [x] Add GPU instance transforms for viewport objects (`660ae76`), with a
+      display-only drag preview that re-evaluates only on release (`35d3401`).
+- [x] Scope drag previews to the exact Part body branch (`0a6e149`).
+- [x] Make whole-mesh previews a GPU-only scene projection change (`225f4cb`).
+- [x] Run native file dialogs off the winit event handler (`b3b8151`).
+- [x] Render open surfaces (Surface Loft and similar) two-sided instead of
+      culling their winding-away back faces.
+- [x] Route upward node cables as a subway-map wrap: straight drops and runs
+      joined by geometry that reads smoothly — each corner is a cubic
+      approximation of a circular quarter arc (0.5523 * radius controls) between
+      exact straight segments, and the wrap picks its horizontal side from the
+      lane helper. Normal downward cables keep vertical port tangents with
+      clamped handles so short aligned drops no longer cusp.
+- [x] Skip the GPU transform preview when a transform has a sketch/spline
+      upstream: those nodes have no exact Part body layout, so the preview scope
+      fell back to the whole display mesh and moved unrelated geometry. Without
+      a GPU preview the drag now lets the kernel evaluate the edit live instead.
+- [x] Recover the node-canvas cable performance lost during the routing work:
+      hit testing now uses the routed cubic control hull for its broad phase and
+      an allocation-free sampled distance instead of building a 64-point Vec per
+      cable, and the GPU cable vertex budget follows the style (288 vertices for
+      a single-cubic bezier cable instead of always issuing 1152). Hit testing
+      also follows the selected style now.
+- [x] Add an app setting (persisted in settings.json, not the theme) for cable
+      routing: `j-routing` (horizontal/vertical rounded corners) and
+      `bezier-routing` (the original smooth single-cubic curves). It is exposed
+      in Settings > Appearance and threaded through the retained cable geometry,
+      hit testing, drag previews and auto-placement so every consumer agrees.
+- [x] Prefer horizontal and vertical cable connectors that turn the input from
+      the source-facing side: an upward route bends just outside the target
+      card's near edge plus padding, runs along the card top and drops into the
+      port, so it does not wind around the whole card. The route is deterministic
+      and shared by CPU hit testing, placement and the GPU instance.
+- [x] Snap cable shapes deterministically when a structured corner would be too
+      sharp: downward corner radii below the stroke-safe threshold and cramped
+      upward wraps fall back to one smooth cubic (vertical port tangents, with a
+      small bow when the ports are nearly aligned). The decision is pure port and
+      card geometry, so the CPU hit-test route and the GPU control points always
+      agree.
+- [x] Make cable routing node-size aware through one shared maths function:
+      `route_nodes` takes the source and target card rects, places the wrap lane
+      outside the wider card on the target's side, and `arc_handle` supplies the
+      same quarter-arc control distance to every corner. CPU hit testing, the CPU
+      fallback, placement paths and the GPU cable instance all consume the
+      resulting control points, and the near-zero-drop fade lets cables pass
+      under the cards so the up/down shapes transition continuously.
+- [x] Keep the final cable ribbon vertex on the routed end point: the GPU
+      segment index is clamped before computing the local `t`, so `t == 1` no
+      longer snaps the last quad back to the segment start and leaves a stray
+      vertex.
+- [x] Give downward node cables the same subway-map vocabulary: straight drops
+      and runs joined by quarter-circle corner cubics. Aligned drops stay
+      straight vertical lines, and small drops blend the corners away so the
+      cable does not snap when a node crosses the source.
+- [x] Smooth corners that are too tight for the stroke: when the quarter-arc
+      radius is below a threshold the path blends towards one smooth cubic
+      split into the same number of segments, and the GPU derives a tangent from
+      the neighbouring segments when a degenerate segment's analytic tangent is
+      zero, preventing the ribbon from pinching into a notch.
+
+## Viewport transform-gizmo preview
+
+- [ ] Move partial-body preview edge lines onto the GPU. Scoped drags still
+      rebuild the SolidCraft edge scene and re-upload its buffers every frame,
+      because a `GpuScene` has no per-body line instances. Either add instance
+      transforms to the SolidCraft line path or render the moved bodies' edges
+      with an app-owned GPU line renderer.
+      Acceptance: dragging one tree in `samples/gigatest-forest-5000-2.nodecraft`
+      performs no per-frame scene rebuild and stays interactive.
+- [ ] Make face picking respect the active preview. `pick_face` and
+      `pointer_hits_body` raycast the un-previewed CPU display mesh, so clicks
+      during a drag (or while the release evaluation runs) can hit the stale
+      position. Transform the ray by the inverse preview matrix for affected
+      bodies, or disable face picking while a preview is active. Add a
+      regression test.
+- [ ] Exact scoped preview for merged-body targets. Boolean/fuse,
+      fillet/chamfer with edges, shell and similar nodes collapse provenance into
+      one body, so the preview moves that whole body. Decide between the
+      documented proxy ghost (`docs/viewer-gizmo-proxy.md`) and per-body source
+      provenance in the engine display payload; document the approximation until
+      then.
+- [ ] Cover the remaining `preview_body_scope` layout cases with tests: STEP
+      importer, Scatter nested inside a Combine, sketch/spline curve instances,
+      group/linked-part expansion (currently falls back to whole mesh), and
+      suppressed nodes. The flattened body-index map must stay in lockstep with
+      the engine's Part display ordering.
+- [ ] Coalesce a whole gizmo drag into one undo entry. The 700 ms value
+      coalescing window splits a slow drag with pauses into multiple undo steps.
+- [ ] Verify deferred document publishing. Publishing is skipped during a drag
+      and flushed on release; confirm linked-part roots, backdrop readers and
+      other tabs stay consistent, and add a test around tab switches mid-drag.
+- [ ] Verify preview rendering in every view mode: transparent, zebra, face
+      colours, orthographic, and the new world-Z-axis renderer (colour, fade and
+      depth behaviour must match the old scene axis).
+- [ ] Add performance guards. Expose counters for scene uploads and cached
+      preview scopes/ranges, assert that a whole-mesh preview performs zero scene
+      uploads, and keep a small drag benchmark so the fast path cannot regress.
+- [ ] Cache the downstream placement chain used by `selected_transform_gizmo`.
+      It still recomputes the `transform_chain` BFS and rebuilds the triad every
+      frame; cache the chain per selection/target.
+- [ ] Regression-test the async file dialogs. Only Save As has been exercised
+      live; verify Open, linked-part picker, STEP file and STEP folder dialogs
+      (open, cancel and complete) so the winit event-handler re-entrancy crash
+      cannot reappear through another call site.
+- [ ] Update `docs/viewer-gizmo-proxy.md` for the egui implementation: exact Part
+      body flattening, preview scopes, the GPU projection fast path, the
+      partial-preview limitation and non-blocking dialogs.
+- [ ] Housekeeping: remove or fix the untracked, non-compiling
+      `rust/crates/nodecraft-engine/src/bin/step_report_mesh.rs` (it breaks
+      full-workspace builds), decide on the untracked
+      `samples/gigatest-forest-5000-2.nodecraft` and the long-modified
+      `samples/gigatest-forest-5000.nodecraft`, and confirm no preview debug hooks
+      remain.
 
 ## Next: remove tessellation from node branches
 
@@ -115,6 +234,9 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
 - [ ] Fix grid zoom crossfade with a hierarchical line model.
 - [ ] Fix single-downstream cable insertion jumps.
 - [ ] Finish explicit LOD tiers without corrupting topology.
+- [ ] Add a closedness flag to display meshes so back-face culling can be
+      restored for bodies known to be closed; open surfaces (Surface Loft,
+      open shells) must stay two-sided.
 - [ ] Add parity/regression coverage for tab reordering and linked-document tabs.
 
 ## Cross-platform and release

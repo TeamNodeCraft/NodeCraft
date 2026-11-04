@@ -101,6 +101,19 @@ impl GizmoState {
     }
 }
 
+/// What one frame of the transform triad produced.
+#[derive(Clone, Debug, Default)]
+pub struct GizmoUpdate {
+    /// Absolute field values to write onto the Translate node.
+    pub changes: Vec<(String, f64)>,
+    /// The drag started this frame; the values still hold their pre-drag state.
+    pub started: bool,
+    /// A drag is in progress after this frame.
+    pub dragging: bool,
+    /// The drag was released this frame.
+    pub ended: bool,
+}
+
 /// Draw the SolidCraft triad and map its drag changes onto the Translate node.
 pub fn show(
     ui: &mut egui::Ui,
@@ -110,13 +123,14 @@ pub fn show(
     radius: f64,
     gizmo: &mut Gizmo,
     state: &mut GizmoState,
-) -> Vec<(String, f64)> {
+) -> GizmoUpdate {
     if state.node_id.as_deref() != Some(gizmo.node_id.as_str()) {
         state.node_id = Some(gizmo.node_id.clone());
         state.start_values = None;
         state.start_rotation = None;
         state.dragging = false;
     }
+    let was_dragging = state.dragging;
     let proj = Proj { camera: *camera, rect, radius, shift };
     let triad = Triad {
         center: Vec3::new(gizmo.pivot[0], gizmo.pivot[1], gizmo.pivot[2]),
@@ -134,7 +148,9 @@ pub fn show(
     let painter = ui.painter().with_clip_rect(rect);
     let Some(drag) = solid_show(ui, &painter, &proj, id, &triad, 1.0) else {
         state.dragging = false;
-        return Vec::new();
+        // The pointer can vanish between frames (release outside the window);
+        // report that as the end of the drag so previews can be retired.
+        return GizmoUpdate { ended: was_dragging, ..GizmoUpdate::default() };
     };
     if drag.started || state.start_values.is_none() {
         state.start_values = Some([gizmo.x, gizmo.y, gizmo.z]);
@@ -181,7 +197,12 @@ pub fn show(
         state.start_rotation = None;
         state.dragging = false;
     }
-    changes
+    GizmoUpdate {
+        changes,
+        started: drag.started,
+        dragging: state.dragging,
+        ended: drag.done,
+    }
 }
 
 /// A part of the triad.

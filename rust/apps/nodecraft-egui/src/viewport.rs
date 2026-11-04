@@ -66,6 +66,34 @@ impl ViewSettings {
     }
 }
 
+/// Which display bodies a gizmo drag preview moves.
+///
+/// Combine/Part results namespace their inputs as `body:{index}:` (nested
+/// combines nest prefixes), so an edit deep in one branch can preview without
+/// dragging the unrelated bodies it is assembled with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreviewScope {
+    /// Every body in the display mesh is downstream of the edited node.
+    All,
+    /// Only bodies whose namespaced ids start with one of these prefixes.
+    Bodies(Vec<String>),
+}
+
+impl Default for PreviewScope {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+impl PreviewScope {
+    pub fn is_affected(&self, body_id: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Bodies(prefixes) => prefixes.iter().any(|prefix| body_id.starts_with(prefix)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SelectionMode {
     #[default]
@@ -181,7 +209,12 @@ pub struct Viewport {
     dock_rect: Option<egui::Rect>,
     transform_gizmo: Option<Gizmo>,
     gizmo_state: GizmoState,
-    gizmo_changes: Vec<(String, f64)>,
+    gizmo_update: Option<viewer_gizmo::GizmoUpdate>,
+    /// Display-only drag preview applied to the GPU instances and scene edges
+    /// until the kernel result for the edited values arrives.
+    preview_transform: Option<[[f32; 4]; 4]>,
+    /// Display bodies the preview moves (see [`PreviewScope`]).
+    preview_scope: PreviewScope,
     #[cfg(feature = "gpu-viewport")]
     gpu: Option<GpuViewport>,
 }
@@ -212,7 +245,9 @@ impl Default for Viewport {
             dock_rect: None,
             transform_gizmo: None,
             gizmo_state: GizmoState::default(),
-            gizmo_changes: Vec::new(),
+            gizmo_update: None,
+            preview_transform: None,
+            preview_scope: PreviewScope::All,
             #[cfg(feature = "gpu-viewport")]
             gpu: None,
         }
@@ -340,6 +375,10 @@ impl Viewport {
         // node/document.
         self.selected_edges.clear();
         self.hovered_edge = None;
+        // A new display mesh is authoritative: it already sits at the edited
+        // placement, so the drag preview has done its job.
+        self.preview_transform = None;
+        self.preview_scope = PreviewScope::All;
         self.display = mesh.map(adapter::display_mesh);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
@@ -556,18 +595,59 @@ impl Viewport {
             != gizmo.as_ref().map(|next| next.node_id.as_str())
         {
             self.gizmo_state.reset();
+            // A selection change mid-drag must not leave the previewed geometry
+            // displaced after the triad disappears.
+            self.set_preview_transform(None, PreviewScope::All);
         }
         self.transform_gizmo = gizmo;
     }
 
-    pub fn take_gizmo_changes(&mut self) -> Vec<(String, f64)> {
-        std::mem::take(&mut self.gizmo_changes)
+    pub fn take_gizmo_update(&mut self) -> Option<viewer_gizmo::GizmoUpdate> {
+        self.gizmo_update.take()
+    }
+
+    /// Move the display geometry by `transform` without re-uploading the merged
+    /// mesh: the object renderer updates the instances of the bodies in `scope`
+    /// and the scene edge lines are rebuilt at the previewed placement.
+    pub fn set_preview_transform(&mut self, transform: Option<[[f32; 4]; 4]>, scope: PreviewScope) {
+        // A scoped preview only works when the display mesh actually carries
+        // those body names; otherwise fall back to moving the whole mesh rather
+        // than freezing the preview.
+        let scope = self.resolve_preview_scope(scope);
+        if self.preview_transform == transform && self.preview_scope == scope {
+            return;
+        }
+        self.preview_transform = transform;
+        self.preview_scope = scope.clone();
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_preview_transform(transform, self.display.as_ref(), scope);
+        }
+        self.dirty = true;
+    }
+
+    fn resolve_preview_scope(&self, scope: PreviewScope) -> PreviewScope {
+        let PreviewScope::Bodies(_) = &scope else { return scope };
+        let Some(display) = self.display.as_ref() else { return PreviewScope::All };
+        // Fall back only when the display mesh carries no `body:N:` provenance
+        // at all. A scope that simply matches no body legitimately means
+        // "nothing moves" and must not be widened to the whole mesh.
+        let namespaced = if display.mesh.triangles.is_empty() {
+            display.edges.iter().any(|edge| edge.id.starts_with("body:"))
+        } else {
+            display.face_ids.iter().any(|id| id.starts_with("body:"))
+        };
+        if namespaced {
+            scope
+        } else {
+            PreviewScope::All
+        }
     }
 
     fn draw_transform_gizmo(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let Some(display) = self.display.as_ref() else { return };
         let Some(gizmo) = self.transform_gizmo.as_mut() else { return };
-        let changes = viewer_gizmo::show(
+        let update = viewer_gizmo::show(
             ui,
             rect,
             &self.camera,
@@ -576,7 +656,15 @@ impl Viewport {
             gizmo,
             &mut self.gizmo_state,
         );
-        self.gizmo_changes.extend(changes);
+        match self.gizmo_update.as_mut() {
+            Some(pending) => {
+                pending.changes.extend(update.changes);
+                pending.started |= update.started;
+                pending.dragging = update.dragging;
+                pending.ended |= update.ended;
+            }
+            None => self.gizmo_update = Some(update),
+        }
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, overlay: egui::Rect) {
@@ -815,7 +903,7 @@ impl Viewport {
             let points: Vec<egui::Pos2> = edge
                 .points
                 .iter()
-                .filter_map(|point| self.project_to_viewport(*point, viewport))
+                .filter_map(|point| self.project_to_viewport_body(*point, viewport, &edge.id))
                 .collect();
             for pair in points.windows(2) {
                 let distance = distance_to_segment(pointer, pair[0], pair[1]);
@@ -829,9 +917,35 @@ impl Viewport {
     }
 
     fn project_to_viewport(&self, point: solidcraft_geom::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+        // Unclassified overlay geometry follows the preview only when the whole
+        // display is downstream of the edit.
+        self.project_to_viewport_body(point, viewport, "")
+    }
+
+    /// Project an overlay point belonging to `body_id`, applying the preview
+    /// transform only when that body moves. Mesh-derived overlays (edge
+    /// highlights, face hover) use this so they cannot drift from the shaded
+    /// solid during a partial-body drag.
+    fn project_to_viewport_body(
+        &self,
+        point: solidcraft_geom::Vec3,
+        viewport: egui::Rect,
+        body_id: &str,
+    ) -> Option<egui::Pos2> {
         let display = self.display.as_ref()?;
         let width = f64::from(viewport.width()).max(1.0);
         let height = f64::from(viewport.height()).max(1.0);
+        let transform = self
+            .preview_transform
+            .filter(|_| self.preview_scope.is_affected(body_id));
+        let point = transform.map_or(point, |matrix| {
+            let m = matrix.map(|column| column.map(f64::from));
+            solidcraft_geom::Vec3::new(
+                m[0][0] * point.x + m[1][0] * point.y + m[2][0] * point.z + m[3][0],
+                m[0][1] * point.x + m[1][1] * point.y + m[2][1] * point.z + m[3][1],
+                m[0][2] * point.x + m[1][2] * point.y + m[2][2] * point.z + m[3][2],
+            )
+        });
         let (x, y, _) = self.camera.to_screen(point, width, height, display.radius)?;
         Some(egui::pos2(
             viewport.min.x + x as f32 + self.lens_shift[0] * viewport.width() * 0.5,
@@ -901,11 +1015,12 @@ impl Viewport {
             if display.face_ids.get(face).map(String::as_str) != Some(hovered) {
                 continue;
             }
+            let body = display.face_ids.get(face).map(String::as_str).unwrap_or("");
             let points: Vec<egui::Pos2> = triangle
                 .iter()
                 .filter_map(|corner| {
                     let point = display.mesh.positions.get(*corner as usize)?;
-                    self.project_to_viewport(*point, viewport)
+                    self.project_to_viewport_body(*point, viewport, body)
                 })
                 .collect();
             if points.len() != 3 { continue; }
@@ -978,7 +1093,7 @@ impl Viewport {
             let points: Vec<egui::Pos2> = edge
                 .points
                 .iter()
-                .filter_map(|point| self.project_to_viewport(*point, viewport))
+                .filter_map(|point| self.project_to_viewport_body(*point, viewport, id))
                 .collect();
             for pair in points.windows(2) {
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, colour));
@@ -1609,6 +1724,33 @@ mod tests {
     }
 
     #[test]
+    fn overlays_follow_the_preview_transform_and_retire_it_with_new_meshes() {
+        let mut viewport = Viewport::default();
+        viewport.set_mesh(Some(&NodeMesh::default()));
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let point = solidcraft_geom::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcraft_geom::Vec3::new(4.0, 0.0, 0.0);
+        let shifted = viewport
+            .project_to_viewport(point + shift, rect)
+            .expect("shifted point projects");
+        let mut preview = [[0.0f32; 4]; 4];
+        for (axis, column) in preview.iter_mut().enumerate() {
+            column[axis] = 1.0;
+        }
+        preview[3][0] = shift.x as f32;
+        viewport.preview_transform = Some(preview);
+        let previewed = viewport
+            .project_to_viewport(point, rect)
+            .expect("previewed point projects");
+        // Drawing a previewed point must equal drawing the moved point, so mesh
+        // overlays cannot drift away from the shaded solid during a drag.
+        assert!((previewed - shifted).length() < 1.0e-3, "{previewed:?} {shifted:?}");
+        // The kernel result is authoritative and retires the preview.
+        viewport.set_mesh(Some(&NodeMesh::default()));
+        assert!(viewport.preview_transform.is_none());
+    }
+
+    #[test]
     fn edge_pick_distance_is_screen_space() {
         let a = egui::pos2(0.0, 0.0);
         let b = egui::pos2(20.0, 0.0);
@@ -1665,5 +1807,35 @@ mod tests {
             viewport.camera.pitch,
         );
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn preview_scope_only_moves_overlays_of_affected_bodies() {
+        let mut viewport = Viewport::default();
+        viewport.set_mesh(Some(&NodeMesh::default()));
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let point = solidcraft_geom::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcraft_geom::Vec3::new(4.0, 0.0, 0.0);
+        let plain = viewport
+            .project_to_viewport_body(point, rect, "body:1:face:0")
+            .expect("point projects");
+        let moved = viewport
+            .project_to_viewport_body(point + shift, rect, "body:0:face:0")
+            .expect("moved point projects");
+        let mut preview = [[0.0f32; 4]; 4];
+        for (axis, column) in preview.iter_mut().enumerate() {
+            column[axis] = 1.0;
+        }
+        preview[3][0] = shift.x as f32;
+        viewport.preview_transform = Some(preview);
+        viewport.preview_scope = PreviewScope::Bodies(vec!["body:0:".to_owned()]);
+        let affected = viewport
+            .project_to_viewport_body(point, rect, "body:0:face:0")
+            .expect("affected point projects");
+        let stationary = viewport
+            .project_to_viewport_body(point, rect, "body:1:face:0")
+            .expect("stationary point projects");
+        assert!((affected - moved).length() < 1.0e-3, "{affected:?} {moved:?}");
+        assert!((stationary - plain).length() < 1.0e-3, "{stationary:?} {plain:?}");
     }
 }

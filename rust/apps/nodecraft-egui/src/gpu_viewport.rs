@@ -12,7 +12,7 @@ use wgpu::util::DeviceExt as _;
 use egui_wgpu::{wgpu, CallbackTrait, RenderState};
 use solidcraft_geom::{Aabb3, Mesh as CraftMesh, Vec3};
 
-use crate::viewport::ViewSettings;
+use crate::viewport::{PreviewScope, ViewSettings};
 use solidcraft_gpu::depth_format;
 use solidcraft_gpu::view::{gpu_view_proj, reversed_depth};
 use solidcraft_gpu::view::{Frame, GpuScene, GpuTarget, Palette, PaletteIndex, Renderer, SceneSlot};
@@ -20,7 +20,7 @@ use solidcraft_render::surface::OpaqueSurface;
 use solidcraft_render::Camera;
 
 use crate::adapter::DisplayMesh;
-use crate::viewport_grid::{grid_lines, grid_step, GridKind};
+use crate::viewport_grid::grid_step;
 use crate::gpu_backdrop::BackdropRenderer;
 
 const EMPTY_GRID_RADIUS: f64 = 100.0;
@@ -344,6 +344,17 @@ struct In {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) colour: vec3<f32>,
+    // Per-instance transform, supplied as four column vectors because WGSL
+    // vertex inputs are scalars/vectors. Locations 3..6 are the model matrix
+    // (column-major) and 7..10 the inverse-transpose normal matrix.
+    @location(3) model_0: vec4<f32>,
+    @location(4) model_1: vec4<f32>,
+    @location(5) model_2: vec4<f32>,
+    @location(6) model_3: vec4<f32>,
+    @location(7) normal_0: vec4<f32>,
+    @location(8) normal_1: vec4<f32>,
+    @location(9) normal_2: vec4<f32>,
+    @location(10) normal_3: vec4<f32>,
 };
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -354,10 +365,13 @@ struct Out {
 
 @vertex
 fn vs(in: In) -> Out {
+    let model = mat4x4<f32>(in.model_0, in.model_1, in.model_2, in.model_3);
+    let normal_matrix = mat4x4<f32>(in.normal_0, in.normal_1, in.normal_2, in.normal_3);
+    let world = model * vec4<f32>(in.position, 1.0);
     var out: Out;
-    out.position = u.view_proj * vec4<f32>(in.position, 1.0);
-    out.normal = in.normal;
-    out.world = in.position;
+    out.position = u.view_proj * world;
+    out.normal = (normal_matrix * vec4<f32>(in.normal, 0.0)).xyz;
+    out.world = world.xyz;
     out.colour = in.colour;
     return out;
 }
@@ -490,15 +504,98 @@ fn face_colour(face: u32) -> [f32; 3] {
     PALETTE[(face as usize) % PALETTE.len()]
 }
 
+struct GpuMeshAsset {
+    key: u64,
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    index_count: u32,
+}
+
+struct GpuDrawItem {
+    asset_key: u64,
+    /// Column-major model matrix. Identity until the display scene supplies
+    /// per-instance placement.
+    transform: [[f32; 4]; 4],
+    /// Index range within the asset. A gizmo preview splits the merged mesh into
+    /// moved and stationary body ranges.
+    index_start: u32,
+    index_count: u32,
+}
+
+impl GpuDrawItem {
+    /// GPU instance payload for this draw: model matrix plus the
+    /// inverse-transpose normal matrix that keeps lighting correct under
+    /// non-uniform scale.
+    fn instance(&self) -> GpuInstance {
+        GpuInstance::from_model(self.transform)
+    }
+}
+
+/// Per-draw instance data uploaded to the object renderer's instance buffer.
+///
+/// Both matrices are column-major `[[f32; 4]; 4]`, matching WGSL `mat4x4<f32>`
+/// constructor order. `normal` is the inverse transpose of `model`'s upper-left
+/// 3x3 with an identity translation, so it transforms directions, not points.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GpuInstance {
+    model: [[f32; 4]; 4],
+    normal: [[f32; 4]; 4],
+}
+
+impl GpuInstance {
+    fn from_model(model: [[f32; 4]; 4]) -> Self {
+        Self { model, normal: normal_matrix(model) }
+    }
+}
+
+/// Vertex-buffer layout for `GpuInstance`, shared by the opaque and transparent
+/// object pipelines. Attribute locations 3 through 10 follow the vertex
+/// attributes (0..=2) so the same WGSL `In` struct feeds both pipelines.
+const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 6 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 7 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 8 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 9 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 10 },
+];
+
+fn object_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<GpuInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &OBJECT_INSTANCE_ATTRIBUTES,
+    }
+}
+
+fn object_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<ObjectVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
+        ],
+    }
+}
+
 struct ObjectRenderer {
     pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
-    vertices: Option<wgpu::Buffer>,
-    indices: Option<wgpu::Buffer>,
-    index_count: u32,
-    pending: Option<(Vec<ObjectVertex>, Vec<u32>)>,
+    assets: Vec<GpuMeshAsset>,
+    draws: Vec<GpuDrawItem>,
+    /// One `GpuInstance` per draw, in draw order. Rebuilt in `prepare` whenever
+    /// the draw list changes.
+    instances: Option<wgpu::Buffer>,
+    instances_dirty: bool,
+    pending: Option<(u64, Vec<ObjectVertex>, Vec<u32>)>,
+    next_key: u64,
 }
 
 impl ObjectRenderer {
@@ -545,15 +642,7 @@ impl ObjectRenderer {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ObjectVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
-                    ],
-                })],
+                buffers: &[Some(object_vertex_layout()), Some(object_instance_layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -563,9 +652,12 @@ impl ObjectRenderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                // Closed solids only need their front faces. The transparent
-                // pipeline stays two-sided so glass/open previews remain visible.
-                cull_mode: Some(wgpu::Face::Back),
+                // Surfaces are two-sided. An open sheet (Surface Loft, etc.) can
+                // wind away from the camera, and back-face culling would make it
+                // disappear; closed solids are unaffected because their back
+                // faces are hidden by depth. The fragment shader flips the
+                // normal for back-facing fragments.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -590,15 +682,7 @@ impl ObjectRenderer {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<ObjectVertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
-                    ],
-                })],
+                buffers: &[Some(object_vertex_layout()), Some(object_instance_layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -626,50 +710,324 @@ impl ObjectRenderer {
             multiview_mask: None,
             cache: None,
         });
-        Self { pipeline, transparent_pipeline, bind_group, uniforms, vertices: None, indices: None, index_count: 0, pending: None }
+        Self {
+            pipeline,
+            transparent_pipeline,
+            bind_group,
+            uniforms,
+            assets: Vec::new(),
+            draws: Vec::new(),
+            instances: None,
+            instances_dirty: false,
+            pending: None,
+            next_key: 1,
+        }
     }
 
     fn set_mesh(&mut self, vertices: Vec<ObjectVertex>, indices: Vec<u32>) {
-        self.pending = Some((vertices, indices));
+        // A full display mesh arrives as one GPU asset for now, with a single
+        // identity instance. The draw list is already separate so per-instance
+        // assets and transforms can be added without changing the upload path.
+        let key = self.next_key;
+        self.next_key = self.next_key.wrapping_add(1).max(1);
+        let index_count = indices.len() as u32;
+        self.pending = Some((key, vertices, indices));
+        self.draws = vec![GpuDrawItem {
+            asset_key: key,
+            transform: identity_matrix(),
+            index_start: 0,
+            index_count,
+        }];
+        self.instances_dirty = true;
+    }
+
+    /// Displace the existing draw list without touching the uploaded mesh. The
+    /// instance buffer is re-uploaded in `prepare`; vertex/index buffers stay.
+    fn set_transform(&mut self, transform: Option<[[f32; 4]; 4]>, affected: Option<&[(u32, u32)]>) {
+        let Some(asset_key) = self.draws.first().map(|draw| draw.asset_key) else { return };
+        // Before `prepare` uploads a freshly queued mesh the asset is still
+        // pending; fall back to the draw's declared range for this frame.
+        let triangles = self
+            .assets
+            .iter()
+            .find(|asset| asset.key == asset_key)
+            .map_or_else(
+                || self.draws.first().map_or(0, |draw| draw.index_count / 3),
+                |asset| asset.index_count / 3,
+            );
+        self.draws = match (transform, affected) {
+            (Some(matrix), Some(affected)) => {
+                let (moved, stationary) = preview_draw_ranges(affected, triangles);
+                let mut draws = Vec::with_capacity(moved.len() + stationary.len());
+                for range in moved {
+                    let (index_start, index_count) = draw_index_range(range);
+                    draws.push(GpuDrawItem { asset_key, transform: matrix, index_start, index_count });
+                }
+                for range in stationary {
+                    let (index_start, index_count) = draw_index_range(range);
+                    draws.push(GpuDrawItem { asset_key, transform: identity_matrix(), index_start, index_count });
+                }
+                draws
+            }
+            (transform, _) => vec![GpuDrawItem {
+                asset_key,
+                transform: transform.unwrap_or_else(identity_matrix),
+                index_start: 0,
+                index_count: triangles * 3,
+            }],
+        };
+        self.instances_dirty = true;
     }
 
     fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &ObjectUniforms) {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
-        if let Some((vertices, indices)) = self.pending.take() {
+        if let Some((key, vertices, indices)) = self.pending.take() {
             if vertices.is_empty() || indices.is_empty() {
-                self.vertices = None;
-                self.indices = None;
-                self.index_count = 0;
-                return;
+                self.assets.clear();
+                self.draws.clear();
+            } else {
+                let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("viewport-object-vertices"),
+                    size: (vertices.len() * std::mem::size_of::<ObjectVertex>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+                let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("viewport-object-indices"),
+                    size: (indices.len() * std::mem::size_of::<u32>()) as u64,
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
+                // Upload is the only CPU-side copy; the vertex/index vectors are
+                // dropped at the end of this block.
+                self.assets.clear();
+                self.assets.push(GpuMeshAsset {
+                    key,
+                    vertices: vertex_buffer,
+                    indices: index_buffer,
+                    index_count: indices.len() as u32,
+                });
             }
-            let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("viewport-object-vertices"),
-                size: (vertices.len() * std::mem::size_of::<ObjectVertex>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&vertices));
-            let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("viewport-object-indices"),
-                size: (indices.len() * std::mem::size_of::<u32>()) as u64,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
-            self.vertices = Some(vertex_buffer);
-            self.indices = Some(index_buffer);
-            self.index_count = indices.len() as u32;
+        }
+        if self.instances_dirty {
+            self.instances_dirty = false;
+            self.instances = if self.draws.is_empty() {
+                None
+            } else {
+                let instances: Vec<GpuInstance> = self.draws.iter().map(GpuDrawItem::instance).collect();
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("viewport-object-instances"),
+                    size: (instances.len() * std::mem::size_of::<GpuInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&instances));
+                Some(buffer)
+            };
         }
     }
 
     fn paint(&self, pass: &mut wgpu::RenderPass<'static>, transparent: bool) {
-        let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
+        let Some(instances) = self.instances.as_ref() else { return };
         pass.set_pipeline(if transparent { &self.transparent_pipeline } else { &self.pipeline });
         pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, vertices.slice(..));
-        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..self.index_count, 0, 0..1);
+        pass.set_vertex_buffer(1, instances.slice(..));
+        for (index, draw) in self.draws.iter().enumerate() {
+            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { continue };
+            pass.set_vertex_buffer(0, asset.vertices.slice(..));
+            pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
+            // Each draw reads its own slot in the shared instance buffer.
+            pass.draw_indexed(
+                draw.index_start..draw.index_start + draw.index_count,
+                0,
+                index as u32..index as u32 + 1,
+            );
+        }
     }
+}
+
+fn identity_matrix() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+/// Inverse transpose of the upper-left 3x3 of a column-major model matrix.
+///
+/// Normals transform by `(M^-1)^T` so lighting stays correct under non-uniform
+/// scale. The translation column is dropped (normals are directions) and a
+/// degenerate model falls back to identity rather than poisoning the shader
+/// with NaNs.
+fn normal_matrix(model: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    // Row-major copy of the upper-left 3x3.
+    let m = [
+        [model[0][0], model[1][0], model[2][0]],
+        [model[0][1], model[1][1], model[2][1]],
+        [model[0][2], model[1][2], model[2][2]],
+    ];
+    let cofactor = [
+        [
+            m[1][1] * m[2][2] - m[1][2] * m[2][1],
+            m[1][2] * m[2][0] - m[1][0] * m[2][2],
+            m[1][0] * m[2][1] - m[1][1] * m[2][0],
+        ],
+        [
+            m[0][2] * m[2][1] - m[0][1] * m[2][2],
+            m[0][0] * m[2][2] - m[0][2] * m[2][0],
+            m[0][1] * m[2][0] - m[0][0] * m[2][1],
+        ],
+        [
+            m[0][1] * m[1][2] - m[0][2] * m[1][1],
+            m[0][2] * m[1][0] - m[0][0] * m[1][2],
+            m[0][0] * m[1][1] - m[0][1] * m[1][0],
+        ],
+    ];
+    let determinant = m[0][0] * cofactor[0][0] + m[0][1] * cofactor[0][1] + m[0][2] * cofactor[0][2];
+    if !determinant.is_finite() || determinant.abs() <= 1.0e-12 {
+        return identity_matrix();
+    }
+    let inverse_determinant = 1.0 / determinant;
+    let mut out = identity_matrix();
+    // (M^-1)^T = cofactor(M) / det, stored column-major like the model.
+    for row in 0..3 {
+        for column in 0..3 {
+            out[column][row] = cofactor[row][column] * inverse_determinant;
+        }
+    }
+    out
+}
+
+/// `matrix * point` for a column-major affine matrix.
+fn transform_point(matrix: [[f32; 4]; 4], point: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * point[0] + matrix[1][0] * point[1] + matrix[2][0] * point[2] + matrix[3][0],
+        matrix[0][1] * point[0] + matrix[1][1] * point[1] + matrix[2][1] * point[2] + matrix[3][1],
+        matrix[0][2] * point[0] + matrix[1][2] * point[1] + matrix[2][2] * point[2] + matrix[3][2],
+    ]
+}
+
+/// `matrix * direction` for a column-major matrix, ignoring translation.
+fn transform_direction(matrix: [[f32; 4]; 4], direction: [f32; 3]) -> [f32; 3] {
+    [
+        matrix[0][0] * direction[0] + matrix[1][0] * direction[1] + matrix[2][0] * direction[2],
+        matrix[0][1] * direction[0] + matrix[1][1] * direction[1] + matrix[2][1] * direction[2],
+        matrix[0][2] * direction[0] + matrix[1][2] * direction[1] + matrix[2][2] * direction[2],
+    ]
+}
+
+/// Axis-aligned bounds of a box after an affine transform.
+fn transform_bounds(bounds: Aabb3, matrix: [[f32; 4]; 4]) -> Aabb3 {
+    let corners = [
+        [bounds.min.x, bounds.min.y, bounds.min.z],
+        [bounds.max.x, bounds.min.y, bounds.min.z],
+        [bounds.min.x, bounds.max.y, bounds.min.z],
+        [bounds.max.x, bounds.max.y, bounds.min.z],
+        [bounds.min.x, bounds.min.y, bounds.max.z],
+        [bounds.max.x, bounds.min.y, bounds.max.z],
+        [bounds.min.x, bounds.max.y, bounds.max.z],
+        [bounds.max.x, bounds.max.y, bounds.max.z],
+    ];
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for corner in corners {
+        let point = transform_point(
+            matrix,
+            [corner[0] as f32, corner[1] as f32, corner[2] as f32],
+        );
+        for axis in 0..3 {
+            let value = f64::from(point[axis]);
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+    Aabb3 {
+        min: Vec3::new(min[0], min[1], min[2]),
+        max: Vec3::new(max[0], max[1], max[2]),
+    }
+}
+
+/// Smallest box containing both inputs.
+fn union_bounds(a: Aabb3, b: Aabb3) -> Aabb3 {
+    Aabb3 {
+        min: Vec3::new(a.min.x.min(b.min.x), a.min.y.min(b.min.y), a.min.z.min(b.min.z)),
+        max: Vec3::new(a.max.x.max(b.max.x), a.max.y.max(b.max.y), a.max.z.max(b.max.z)),
+    }
+}
+
+/// `a * b` for column-major 4x4 matrices (apply `b` first, then `a`).
+fn multiply_matrix(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut out = [[0.0f32; 4]; 4];
+    for column in 0..4 {
+        for row in 0..4 {
+            out[column][row] = (0..4).map(|k| a[k][row] * b[column][k]).sum();
+        }
+    }
+    out
+}
+
+/// Split triangle ranges into moved and stationary draw ranges. Affected ranges
+/// may arrive unsorted or overlapping; they are clipped to `total` and the
+/// complement is emitted for the bodies that stay put.
+fn preview_draw_ranges(affected: &[(u32, u32)], total: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+    let mut clipped: Vec<(u32, u32)> = affected
+        .iter()
+        .map(|&(start, end)| (start.min(total), end.min(total)))
+        .filter(|(start, end)| end > start)
+        .collect();
+    clipped.sort_unstable();
+    let mut moved: Vec<(u32, u32)> = Vec::with_capacity(clipped.len());
+    for (start, end) in clipped {
+        match moved.last_mut() {
+            Some((_, last_end)) if start <= *last_end => *last_end = (*last_end).max(end),
+            _ => moved.push((start, end)),
+        }
+    }
+    let mut stationary = Vec::new();
+    let mut cursor = 0;
+    for (start, end) in &moved {
+        if *start > cursor {
+            stationary.push((cursor, *start));
+        }
+        cursor = *end;
+    }
+    if cursor < total {
+        stationary.push((cursor, total));
+    }
+    (moved, stationary)
+}
+
+/// Convert a half-open triangle range into an index-buffer draw range.
+fn draw_index_range((start, end): (u32, u32)) -> (u32, u32) {
+    (start * 3, (end - start) * 3)
+}
+
+/// Triangle ranges of the display bodies a preview scope moves.
+///
+/// The object renderer emits one triangle per display triangle in order, so a
+/// display triangle index maps directly to its index-buffer range.
+fn affected_triangle_ranges(display: &DisplayMesh, scope: &PreviewScope) -> Option<Vec<(u32, u32)>> {
+    if matches!(scope, PreviewScope::All) {
+        return None;
+    }
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for index in 0..display.mesh.triangles.len() {
+        let face = display.mesh.tri_face.get(index).copied().unwrap_or(0) as usize;
+        let moves = display.face_ids.get(face).is_some_and(|id| scope.is_affected(id));
+        if !moves {
+            continue;
+        }
+        let index = index as u32;
+        match ranges.last_mut() {
+            Some((_, end)) if *end == index => *end = index + 1,
+            _ => ranges.push((index, index + 1)),
+        }
+    }
+    Some(ranges)
 }
 
 struct GridRenderer {
@@ -762,6 +1120,138 @@ impl GridRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+const AXIS_SHADER: &str = r#"
+struct A {
+    view_proj: mat4x4<f32>,
+    start: vec4<f32>,
+    end: vec4<f32>,
+    colour: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> a: A;
+
+struct V {
+    @builtin(position) position: vec4<f32>,
+};
+
+@vertex
+fn vs(@builtin(vertex_index) vertex: u32) -> V {
+    let point = select(a.start, a.end, vertex == 1u);
+    var out: V;
+    out.position = a.view_proj * point;
+    return out;
+}
+
+@fragment
+fn fs() -> @location(0) vec4<f32> {
+    return a.colour;
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct AxisUniforms {
+    view_proj: [[f32; 4]; 4],
+    start: [f32; 4],
+    end: [f32; 4],
+    colour: [f32; 4],
+}
+
+/// The world Z axis. It is drawn from two uniform points so it never has to be
+/// baked into the mesh scene: the scene's projection can then be transformed on
+/// the GPU for whole-mesh previews while the world frame stays fixed.
+struct AxisRenderer {
+    pipeline: wgpu::RenderPipeline,
+    bind_group: wgpu::BindGroup,
+    buffer: wgpu::Buffer,
+}
+
+impl AxisRenderer {
+    fn install(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32, depth: wgpu::TextureFormat) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("viewport-axis"),
+            source: wgpu::ShaderSource::Wgsl(AXIS_SHADER.into()),
+        });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport-axis-uniforms"),
+            size: std::mem::size_of::<AxisUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewport-axis-bind-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport-axis-bind-group"),
+            layout: &bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("viewport-axis-layout"),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("viewport-axis-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multiview_mask: None,
+            cache: None,
+        });
+        Self { pipeline, bind_group, buffer }
+    }
+
+    fn prepare(&self, queue: &wgpu::Queue, uniforms: &AxisUniforms) {
+        queue.write_buffer(&self.buffer, 0, bytemuck::bytes_of(uniforms));
+    }
+
+    fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.draw(0..2, 0..1);
     }
 }
 
@@ -950,6 +1440,14 @@ impl SceneTarget {
     }
 }
 
+/// Display-only drag preview state: the world transform plus which display
+/// bodies it applies to.
+#[derive(Clone, Debug, PartialEq)]
+struct PreviewState {
+    transform: [[f32; 4]; 4],
+    scope: PreviewScope,
+}
+
 pub struct GpuViewport {
     slot: SceneSlot,
     key: u64,
@@ -957,7 +1455,11 @@ pub struct GpuViewport {
     backdrop_id: egui::TextureId,
     grid_extent: f64,
     grid_step: f32,
-    grid_center: [f32; 3],
+    /// Display radius of the current mesh, used for the world axis extent.
+    display_radius: f64,
+    /// Bounds of the uploaded display mesh. Preview frames reuse this instead of
+    /// walking every vertex again.
+    display_bounds: Aabb3,
     bounds: Aabb3,
     device: wgpu::Device,
     object: Arc<Mutex<ObjectRenderer>>,
@@ -967,6 +1469,13 @@ pub struct GpuViewport {
     background: [u8; 4],
     target_format: wgpu::TextureFormat,
     reversed_depth: bool,
+    /// Display-only drag preview for gizmo edits. Applied to the object
+    /// instances and the scene edges of the affected bodies; the merged mesh
+    /// stays uploaded.
+    preview: Option<PreviewState>,
+    /// Cached triangle ranges for a partial-body preview. The scan runs once per
+    /// scope, not once per drag frame.
+    preview_ranges: Option<(PreviewScope, Option<Vec<(u32, u32)>>)>,
 }
 
 impl GpuViewport {
@@ -1084,6 +1593,12 @@ impl GpuViewport {
             msaa_samples(),
             depth_format(&rs.device, true),
         ));
+        rs.renderer.write().callback_resources.insert(AxisRenderer::install(
+            &rs.device,
+            rs.target_format,
+            msaa_samples(),
+            depth_format(&rs.device, true),
+        ));
         let reversed_depth = reversed_depth(Some(depth_format(&rs.device, true)));
         let object = Arc::new(Mutex::new(ObjectRenderer::install(
             &rs.device,
@@ -1100,7 +1615,11 @@ impl GpuViewport {
             backdrop_id,
             grid_extent: 0.0,
             grid_step: 1.0,
-            grid_center: [0.0; 3],
+            display_radius: EMPTY_GRID_RADIUS,
+            display_bounds: Aabb3 {
+                min: Vec3::new(-EMPTY_GRID_RADIUS, -EMPTY_GRID_RADIUS, -EMPTY_GRID_RADIUS),
+                max: Vec3::new(EMPTY_GRID_RADIUS, EMPTY_GRID_RADIUS, EMPTY_GRID_RADIUS),
+            },
             bounds: Aabb3 {
                 min: Vec3::new(-EMPTY_GRID_RADIUS, -EMPTY_GRID_RADIUS, -EMPTY_GRID_RADIUS),
                 max: Vec3::new(EMPTY_GRID_RADIUS, EMPTY_GRID_RADIUS, EMPTY_GRID_RADIUS),
@@ -1113,6 +1632,8 @@ impl GpuViewport {
             background: crate::theme::get().viewport_background,
             target_format: rs.target_format,
             reversed_depth,
+            preview: None,
+            preview_ranges: None,
         })
     }
 
@@ -1143,17 +1664,191 @@ impl GpuViewport {
     }
 
     pub fn set_mesh(&mut self, display: Option<&DisplayMesh>) {
+        // A full display mesh is authoritative geometry: it already sits at the
+        // edited placement, so any drag preview is retired here.
+        self.preview = None;
+        self.preview_ranges = None;
         self.key = self.key.wrapping_add(1);
         let radius = display.map_or(EMPTY_GRID_RADIUS, |display| display.radius);
+        self.display_radius = radius;
         self.grid_extent = crate::viewport_grid::grid_extent(radius);
         self.grid_step = grid_step(radius) as f32;
-        self.bounds = display.map_or_else(
+        self.display_bounds = display.map_or_else(
             || Aabb3 {
                 min: Vec3::new(-radius, -radius, -radius),
                 max: Vec3::new(radius, radius, radius),
             },
             |display| display.mesh.bounds(),
         );
+        self.bounds = self.display_bounds;
+        let mut object_vertices = Vec::new();
+        let mut object_indices = Vec::new();
+        if let Some(display) = display {
+            let mesh: &CraftMesh = &display.mesh;
+            // The app draws the solid material itself (see ObjectRenderer) so it can use
+            // the Swift viewer's light rig and tone mapping. The SolidCraft scene keeps
+            // only the edges; the blurred backdrop keeps a PBR copy for defocused colour.
+            for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                let [a, b, c] = triangle.map(|index| index as usize);
+                let (Some(pa), Some(pb), Some(pc)) =
+                    (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+                else {
+                    continue;
+                };
+                let fallback = (*pb - *pa).cross(*pc - *pa);
+                let fallback = fallback.normalized().unwrap_or(solidcraft_geom::Vec3::Z);
+                let colour = if self.view.face_colours {
+                    face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
+                } else {
+                    [0.17, 0.18, 0.195]
+                };
+                for (index, point) in [(a, pa), (b, pb), (c, pc)] {
+                    let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
+                    object_indices.push(object_vertices.len() as u32);
+                    object_vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
+                }
+            }
+        }
+        if let Ok(mut renderer) = self.object.lock() {
+            renderer.set_mesh(object_vertices, object_indices);
+        }
+        let mut scene = self.build_scene(display, None, &PreviewScope::All, true);
+        if let Ok(mut backdrop) = self.backdrop.lock() {
+            backdrop.set_scene(scene.clone());
+        }
+        // The custom object renderer owns the main solid; SolidCraft only draws the
+        // edges/grid over it.
+        scene.pbr.clear();
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(scene);
+        }
+    }
+
+    /// Preview a transform edit without touching the merged mesh or the scene
+    /// geometry.
+    ///
+    /// A whole-mesh preview is applied by transforming the scene projection in
+    /// `frame()`, so a drag frame only updates the object instance matrix and a
+    /// 128-byte uniform — no CPU geometry work and no GPU re-upload. Only a
+    /// partial-body preview rebuilds the edge scene, and the affected triangle
+    /// ranges are cached per scope.
+    pub fn set_preview_transform(
+        &mut self,
+        transform: Option<[[f32; 4]; 4]>,
+        display: Option<&DisplayMesh>,
+        scope: PreviewScope,
+    ) {
+        let Some(display) = display else {
+            self.preview = transform.map(|transform| PreviewState { transform, scope });
+            if let Ok(mut renderer) = self.object.lock() {
+                renderer.set_transform(transform, None);
+            }
+            return;
+        };
+        // A body scope that happens to cover every triangle can use the
+        // whole-mesh path as well.
+        let scope = self.scope_for_display(display, scope);
+        let next = transform.map(|transform| PreviewState { transform, scope });
+        if self.preview == next {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.preview, next);
+        let previous_scoped = previous
+            .as_ref()
+            .is_some_and(|preview| !matches!(preview.scope, PreviewScope::All));
+        let scoped = self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| !matches!(preview.scope, PreviewScope::All));
+        let preview_scope = self.preview.as_ref().map(|preview| preview.scope.clone());
+        let affected = preview_scope
+            .as_ref()
+            .and_then(|scope| self.affected_ranges(display, scope));
+        if let Ok(mut renderer) = self.object.lock() {
+            renderer.set_transform(transform, affected.as_deref());
+        }
+        let base_bounds = self.display_bounds;
+        self.bounds = match &self.preview {
+            Some(preview) if matches!(preview.scope, PreviewScope::All) => {
+                transform_bounds(base_bounds, preview.transform)
+            }
+            Some(preview) => union_bounds(
+                base_bounds,
+                transform_bounds(base_bounds, preview.transform),
+            ),
+            None => base_bounds,
+        };
+        if scoped {
+            let (transform, scope) = match &self.preview {
+                Some(preview) => (Some(preview.transform), preview.scope.clone()),
+                None => (None, PreviewScope::All),
+            };
+            self.upload_scene(display, transform, &scope);
+        } else if previous_scoped {
+            // Leaving a partial preview: put the static edges back once.
+            self.upload_scene(display, None, &PreviewScope::All);
+        }
+    }
+
+    /// Cached triangle ranges for a scoped preview.
+    fn affected_ranges(
+        &mut self,
+        display: &DisplayMesh,
+        scope: &PreviewScope,
+    ) -> Option<Vec<(u32, u32)>> {
+        if matches!(scope, PreviewScope::All) {
+            return None;
+        }
+        if let Some((cached_scope, ranges)) = &self.preview_ranges {
+            if cached_scope == scope {
+                return ranges.clone();
+            }
+        }
+        let ranges = affected_triangle_ranges(display, scope);
+        self.preview_ranges = Some((scope.clone(), ranges.clone()));
+        ranges
+    }
+
+    /// Collapse a body scope that covers the whole mesh into the zero-rebuild
+    /// whole-mesh path.
+    fn scope_for_display(&mut self, display: &DisplayMesh, scope: PreviewScope) -> PreviewScope {
+        let triangles = display.mesh.triangles.len() as u32;
+        let PreviewScope::Bodies(_) = &scope else { return scope };
+        if triangles == 0 {
+            return PreviewScope::All;
+        }
+        match self.affected_ranges(display, &scope) {
+            Some(ranges) if ranges.len() == 1 && ranges[0] == (0, triangles) => PreviewScope::All,
+            _ => scope,
+        }
+    }
+
+    /// Replace the scene slot. Only used when entering/leaving a partial-body
+    /// preview or when the display mesh changes.
+    fn upload_scene(
+        &mut self,
+        display: &DisplayMesh,
+        transform: Option<[[f32; 4]; 4]>,
+        scope: &PreviewScope,
+    ) {
+        let mut scene = self.build_scene(Some(display), transform, scope, false);
+        scene.pbr.clear();
+        self.key = self.key.wrapping_add(1);
+        if let Ok(mut slot) = self.slot.lock() {
+            *slot = Some(scene);
+        }
+    }
+
+    /// Edges and analysis overlays for the current display mesh. `transform`
+    /// moves geometry for a drag preview; the world-space Z axis marker stays put
+    /// because it belongs to the world frame, not to the edited body.
+    fn build_scene(
+        &self,
+        display: Option<&DisplayMesh>,
+        transform: Option<[[f32; 4]; 4]>,
+        scope: &PreviewScope,
+        include_pbr: bool,
+    ) -> GpuScene {
         let theme = crate::theme::get();
         let palette = Palette::with_stable(vec![
             [151, 162, 176, 255],
@@ -1163,23 +1858,43 @@ impl GpuViewport {
             [76, 201, 245, 230],
         ]);
         let mut scene = GpuScene::with_palette(palette);
-        let _body = PaletteIndex(0);
         let edge = PaletteIndex(1);
         let edge_width = 1.0;
         let triangle_edge = PaletteIndex(3);
         let face_normal = PaletteIndex(4);
-        let mut object_vertices = Vec::new();
-        let mut object_indices = Vec::new();
+        // Normals follow the inverse transpose so a mirrored or non-uniform
+        // preview chain cannot flip the edge lighting offsets.
+        let normal_transform = transform.map(normal_matrix);
+        let moves = |body: &str| transform.is_some() && scope.is_affected(body);
+        let world = |point: Vec3, moves: bool| {
+            if !moves {
+                return point;
+            }
+            transform.map_or(point, |matrix| {
+                let moved = transform_point(matrix, point.to_f32());
+                Vec3::new(f64::from(moved[0]), f64::from(moved[1]), f64::from(moved[2]))
+            })
+        };
+        let direction = |normal: [f32; 3], moves: bool| {
+            if !moves {
+                return normal;
+            }
+            normal_transform.map_or(normal, |matrix| {
+                let moved = transform_direction(matrix, normal);
+                let length = (moved[0] * moved[0] + moved[1] * moved[1] + moved[2] * moved[2]).sqrt();
+                if length > 1.0e-12 {
+                    [moved[0] / length, moved[1] / length, moved[2] / length]
+                } else {
+                    normal
+                }
+            })
+        };
         if let Some(display) = display {
             let mesh: &CraftMesh = &display.mesh;
-            let draw_object = true;
-            // The app draws the solid material itself (see ObjectRenderer) so it can use
-            // the Swift viewer's light rig and tone mapping. The SolidCraft scene keeps
-            // only the edges; the blurred backdrop keeps a PBR copy for defocused colour.
-            let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
-                .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
-            if draw_object {
-                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+            if include_pbr {
+                let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
+                    .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
+                for triangle in &mesh.triangles {
                     let [a, b, c] = triangle.map(|index| index as usize);
                     let (Some(pa), Some(pb), Some(pc)) =
                         (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
@@ -1188,16 +1903,6 @@ impl GpuViewport {
                     };
                     let fallback = (*pb - *pa).cross(*pc - *pa);
                     let fallback = fallback.normalized().unwrap_or(solidcraft_geom::Vec3::Z);
-                    let colour = if self.view.face_colours {
-                        face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
-                    } else {
-                        [0.17, 0.18, 0.195]
-                    };
-                    for (index, point) in [(a, pa), (b, pb), (c, pc)] {
-                        let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
-                        object_indices.push(object_vertices.len() as u32);
-                        object_vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
-                    }
                     scene.pbr_tri(pa.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pb.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pc.to_f32(), fallback.to_f32(), surface);
@@ -1205,24 +1910,33 @@ impl GpuViewport {
             }
             if self.view.edges {
                 for display_edge in &display.edges {
+                    let moved = moves(&display_edge.id);
                     for (index, pair) in display_edge.points.windows(2).enumerate() {
                         let [a, b] = [pair[0], pair[1]];
                         let normals = [
-                            display_edge.normals.get(index).copied().unwrap_or([0.0; 3]),
-                            display_edge.normals.get(index + 1).copied().unwrap_or([0.0; 3]),
+                            direction(display_edge.normals.get(index).copied().unwrap_or([0.0; 3]), moved),
+                            direction(display_edge.normals.get(index + 1).copied().unwrap_or([0.0; 3]), moved),
                         ];
-                        scene.lifted_line(a.to_f32(), b.to_f32(), edge, edge_width, normals);
+                        scene.lifted_line(
+                            world(a, moved).to_f32(),
+                            world(b, moved).to_f32(),
+                            edge,
+                            edge_width,
+                            normals,
+                        );
                     }
                 }
             }
             if self.view.triangles {
                 let mut seen = std::collections::HashSet::new();
-                for triangle in &mesh.triangles {
+                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                    let face = mesh.tri_face.get(triangle_index).copied().unwrap_or(0) as usize;
+                    let moved = display.face_ids.get(face).is_some_and(|id| scope.is_affected(id));
                     for pair in [[triangle[0], triangle[1]], [triangle[1], triangle[2]], [triangle[2], triangle[0]]] {
                         let key = (pair[0].min(pair[1]), pair[0].max(pair[1]));
                         if !seen.insert(key) { continue; }
                         let (Some(a), Some(b)) = (mesh.positions.get(pair[0] as usize), mesh.positions.get(pair[1] as usize)) else { continue };
-                        scene.line(a.to_f32(), b.to_f32(), triangle_edge, 0.7, false);
+                        scene.line(world(*a, moved).to_f32(), world(*b, moved).to_f32(), triangle_edge, 0.7, false);
                     }
                 }
             }
@@ -1245,45 +1959,17 @@ impl GpuViewport {
                     entry.2 += area;
                 }
                 let length = display.radius * 0.075;
-                for (_, (normal, centroid, area)) in faces {
+                for (face, (normal, centroid, area)) in faces {
                     if area <= 1.0e-12 { continue; }
                     let Some(normal) = normal.normalized() else { continue };
-                    let center = centroid / area;
-                    scene.line(center.to_f32(), (center + normal * length).to_f32(), face_normal, 1.5, false);
+                    let moved = display.face_ids.get(face as usize).is_some_and(|id| scope.is_affected(id));
+                    let center = world(centroid / area, moved);
+                    let tip = world(centroid / area + normal * length, moved);
+                    scene.line(center.to_f32(), tip.to_f32(), face_normal, 1.5, false);
                 }
             }
         }
-        if let Ok(mut renderer) = self.object.lock() {
-            renderer.set_mesh(object_vertices, object_indices);
-        }
-        if let Some(axis) = grid_lines(radius)
-            .into_iter()
-            .find(|line| line.kind == GridKind::AxisZ)
-        {
-            scene.under_line(
-                [
-                    self.grid_center[0] + axis.start[0],
-                    self.grid_center[1] + axis.start[1],
-                    self.grid_center[2] + axis.start[2],
-                ],
-                [
-                    self.grid_center[0] + axis.end[0],
-                    self.grid_center[1] + axis.end[1],
-                    self.grid_center[2] + axis.end[2],
-                ],
-                PaletteIndex(2),
-                2.2,
-            );
-        }
-        if let Ok(mut backdrop) = self.backdrop.lock() {
-            backdrop.set_scene(scene.clone());
-        }
-        // The custom object renderer owns the main solid; SolidCraft only draws the
-        // edges/grid over it.
-        scene.pbr.clear();
-        if let Ok(mut slot) = self.slot.lock() {
-            *slot = Some(scene);
-        }
+        scene
     }
 
     pub fn backdrop_texture_id(&self) -> egui::TextureId {
@@ -1329,7 +2015,24 @@ impl GpuViewport {
             camera.view_proj_bounds(aspect, bounds).to_f32(),
             lens_shift,
         );
-        let backdrop_view_proj = crop_view_proj(view_proj, backdrop_crop);
+        // A whole-mesh preview transforms the scene projection instead of
+        // rebuilding edge geometry: the scene buffers stay uploaded and the GPU
+        // does all the work per frame.
+        let scene_view_proj = match &self.preview {
+            Some(preview) if matches!(preview.scope, PreviewScope::All) => {
+                multiply_matrix(view_proj, preview.transform)
+            }
+            _ => view_proj,
+        };
+        // The backdrop keeps its last scene while a preview is active; moving
+        // the projection keeps the defocused copy under the previewed geometry.
+        let backdrop_view_proj = {
+            let cropped = crop_view_proj(view_proj, backdrop_crop);
+            match &self.preview {
+                Some(preview) => multiply_matrix(cropped, preview.transform),
+                None => cropped,
+            }
+        };
         let eye = camera.eye().to_f32();
         let back = camera.back().to_f32();
         let (right, up, _) = camera.basis();
@@ -1389,6 +2092,12 @@ impl GpuViewport {
                 grid_fine_weight,
             ],
         };
+        let axis = AxisUniforms {
+            view_proj,
+            start: [0.0, 0.0, 0.0, 1.0],
+            end: [0.0, 0.0, self.grid_extent as f32, 1.0],
+            colour: colour(theme.axis_z, 230.0 / 255.0),
+        };
         let object = ObjectUniforms {
             view_proj: gpu_view_proj(view_proj, self.reversed_depth),
             back: [back[0], back[1], back[2], 0.0],
@@ -1416,7 +2125,7 @@ impl GpuViewport {
             pv_key: 0,
             pv_slot: Arc::new(Mutex::new(None)),
             pv_hide: false,
-            view_proj,
+            view_proj: scene_view_proj,
             back,
             size_px: [width * pixels_per_point, height * pixels_per_point],
             clip: [0.0; 4],
@@ -1439,6 +2148,7 @@ impl GpuViewport {
             target_format: self.target_format,
             scene: self.scene.clone(),
             grid,
+            axis,
         }
     }
 }
@@ -1460,13 +2170,7 @@ fn crop_view_proj(vp: [[f32; 4]; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
         [0.0, 0.0, 1.0, 0.0],
         [tx, ty, 0.0, 1.0],
     ];
-    let mut out = [[0.0f32; 4]; 4];
-    for col in 0..4 {
-        for row in 0..4 {
-            out[col][row] = (0..4).map(|k| m[k][row] * vp[col][k]).sum();
-        }
-    }
-    out
+    multiply_matrix(m, vp)
 }
 
 /// One viewport draw as an egui paint callback.
@@ -1482,6 +2186,7 @@ pub struct GpuCallback {
     pub target_format: wgpu::TextureFormat,
     pub scene: Arc<Mutex<Option<SceneTarget>>>,
     pub grid: GridUniforms,
+    pub axis: AxisUniforms,
 }
 
 impl CallbackTrait for GpuCallback {
@@ -1498,6 +2203,9 @@ impl CallbackTrait for GpuCallback {
         }
         if let Some(grid) = resources.get::<GridRenderer>() {
             grid.prepare(queue, &self.grid);
+        }
+        if let Some(axis) = resources.get::<AxisRenderer>() {
+            axis.prepare(queue, &self.axis);
         }
         if let Some(object) = resources.get::<Arc<Mutex<ObjectRenderer>>>() {
             if let Ok(mut object) = object.lock() {
@@ -1519,9 +2227,10 @@ impl CallbackTrait for GpuCallback {
         let object = resources.get::<Arc<Mutex<ObjectRenderer>>>();
         let renderer = resources.get::<Renderer>();
         let grid = resources.get::<GridRenderer>();
+        let axis = resources.get::<AxisRenderer>();
         let mut external_view = None;
-        if let (Some(clear), Some(object), Some(renderer), Some(grid)) =
-            (clear, object, renderer, grid)
+        if let (Some(clear), Some(object), Some(renderer), Some(grid), Some(axis)) =
+            (clear, object, renderer, grid, axis)
         {
             if let Ok(mut scene) = self.scene.lock() {
                 if scene.as_ref().is_none_or(|target| target.size != size) {
@@ -1574,6 +2283,7 @@ impl CallbackTrait for GpuCallback {
                         [0.0, 0.0, size[0] as f32, size[1] as f32],
                     );
                     grid.paint(&mut pass);
+                    axis.paint(&mut pass);
                 }
             }
         }
@@ -1644,5 +2354,131 @@ mod tests {
         let (color, resolve) = ("color", "resolve");
         assert_eq!(scene_color_attachment(4, &color, &resolve), (&color, Some(&resolve)));
         assert_eq!(scene_color_attachment(1, &color, &resolve), (&resolve, None));
+    }
+
+    #[test]
+    fn identity_draw_uploads_identity_model_and_normal_matrix() {
+        let draw = GpuDrawItem {
+            asset_key: 1,
+            transform: identity_matrix(),
+            index_start: 0,
+            index_count: 3,
+        };
+        let instance = draw.instance();
+        assert_eq!(instance.model, identity_matrix());
+        assert_eq!(instance.normal, identity_matrix());
+    }
+
+    #[test]
+    fn instance_payload_is_two_column_major_matrices() {
+        // Pod-derived and attribute offsets assume exactly 128 bytes with the
+        // normal matrix starting at offset 64.
+        assert_eq!(std::mem::size_of::<GpuInstance>(), 128);
+        assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[4].offset, 64);
+        assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[7].offset, 112);
+        for attribute in &OBJECT_INSTANCE_ATTRIBUTES {
+            assert_eq!(attribute.format, wgpu::VertexFormat::Float32x4);
+        }
+        assert_eq!(object_instance_layout().step_mode, wgpu::VertexStepMode::Instance);
+    }
+
+    #[test]
+    fn normal_matrix_inverts_non_uniform_scale() {
+        let mut model = identity_matrix();
+        model[0][0] = 2.0;
+        model[1][1] = 4.0;
+        model[2][2] = 0.5;
+        let normal = normal_matrix(model);
+        assert!((normal[0][0] - 0.5).abs() < 1.0e-6);
+        assert!((normal[1][1] - 0.25).abs() < 1.0e-6);
+        assert!((normal[2][2] - 2.0).abs() < 1.0e-6);
+        assert_eq!(normal[3], [0.0, 0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn normal_matrix_of_rotation_is_the_rotation() {
+        // 90 degrees about Z: orthogonal, so (M^-1)^T = M.
+        let model = [
+            [0.0, 1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let normal = normal_matrix(model);
+        for column in 0..4 {
+            for row in 0..4 {
+                assert!((normal[column][row] - model[column][row]).abs() < 1.0e-6, "{column} {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn normal_matrix_ignores_translation_and_falls_back_on_degenerate_models() {
+        let mut translated = identity_matrix();
+        translated[3] = [5.0, -3.0, 2.0, 1.0];
+        assert_eq!(normal_matrix(translated), identity_matrix());
+
+        // Zero scale would make the inverse explode; identity is the safe fallback.
+        let degenerate = [[0.0; 4]; 4];
+        assert_eq!(normal_matrix(degenerate), identity_matrix());
+    }
+
+    #[test]
+    fn preview_draw_ranges_split_moved_and_stationary_bodies() {
+        // Affected ranges arrive unsorted and overlapping; the stationary ranges
+        // are the complement clipped to the mesh.
+        assert_eq!(
+            preview_draw_ranges(&[(4, 6), (1, 3), (2, 5)], 8),
+            (vec![(1, 6)], vec![(0, 1), (6, 8)])
+        );
+        assert_eq!(preview_draw_ranges(&[(2, 4)], 6), (vec![(2, 4)], vec![(0, 2), (4, 6)]));
+        assert_eq!(preview_draw_ranges(&[], 5), (vec![], vec![(0, 5)]));
+        assert_eq!(preview_draw_ranges(&[(0, 99)], 5), (vec![(0, 5)], vec![]));
+    }
+
+    #[test]
+    fn affected_triangle_ranges_follow_display_body_prefixes() {
+        use nodecraft_protocol::Mesh as NodeMesh;
+        let mesh = NodeMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [2.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            face_groups: vec!["body:0:face:0".to_owned(), "body:1:face:0".to_owned()],
+            ..NodeMesh::default()
+        };
+        let display = crate::adapter::display_mesh(&mesh);
+        let first = PreviewScope::Bodies(vec!["body:0:".to_owned()]);
+        assert_eq!(affected_triangle_ranges(&display, &first), Some(vec![(0, 1)]));
+        let second = PreviewScope::Bodies(vec!["body:1:".to_owned()]);
+        assert_eq!(affected_triangle_ranges(&display, &second), Some(vec![(1, 2)]));
+        assert_eq!(affected_triangle_ranges(&display, &PreviewScope::All), None);
+    }
+
+    #[test]
+    fn preview_draw_ranges_cover_each_index_once_and_stay_in_bounds() {
+        // Regression: the stationary range must use (end - start) as its
+        // triangle count, not the end index, or the draw reads past the index
+        // buffer (a wgpu validation panic).
+        let total = 972;
+        let (moved, stationary) = preview_draw_ranges(&[(0, 12)], total);
+        let mut index_ranges: Vec<(u32, u32)> = moved
+            .into_iter()
+            .chain(stationary)
+            .map(draw_index_range)
+            .collect();
+        index_ranges.sort_unstable();
+        let mut cursor = 0;
+        for (start, count) in index_ranges {
+            assert_eq!(start, cursor, "ranges must tile the index buffer");
+            assert!(count > 0, "empty draw");
+            cursor += count;
+        }
+        assert_eq!(cursor, total * 3);
     }
 }

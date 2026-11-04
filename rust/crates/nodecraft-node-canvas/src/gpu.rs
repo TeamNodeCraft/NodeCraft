@@ -36,19 +36,55 @@ pub struct NodeGeometry {
     pub indices: Vec<u32>,
 }
 
-/// One cable instance: endpoints in graph space, colours, and graph-space
-/// outline width. The vertex shader routes and expands the ribbon; no CPU
-/// tessellation is needed per cable.
+/// One cable instance: up to four routed cubic segments in graph space, packed
+/// as thirteen shared points (one vertex attribute pair per point), colours and
+/// graph-space outline width. The vertex shader only evaluates the supplied
+/// cubics: routing and hit testing share `crate::routing`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CableVertex {
-    pub a: [f32; 2],
-    pub b: [f32; 2],
+    /// Thirteen `vec4<f32>` vertex attributes hold the twenty-five points of
+    /// the eight straight/arc segments.
+    pub points: [[f32; 4]; 13],
     pub core: [f32; 4],
     pub outline: [f32; 4],
-    pub width: f32,
-    pub core_ratio: f32,
-    pub _pad: [f32; 2],
+    /// `x`: outline width, `y`: core ratio, `z`: segment count.
+    pub params: [f32; 4],
+}
+
+impl CableVertex {
+    pub fn new(
+        routing: &crate::routing::WireRouting,
+        core: [f32; 4],
+        outline: [f32; 4],
+        width: f32,
+        core_ratio: f32,
+    ) -> Self {
+        // Segments share their join points, so segment `i` starts at point
+        // `3 * i`. Twenty-five points cover eight segments.
+        // 25 points = 50 floats; two padding slots complete thirteen vec4s.
+        let mut flat = [0.0_f32; 52];
+        for (index, cubic) in routing.segments.iter().take(routing.count).enumerate() {
+            let base = index * 3;
+            for (offset, point) in [cubic.p0, cubic.p1, cubic.p2, cubic.p3].iter().enumerate() {
+                let at = (base + offset) * 2;
+                flat[at] = point.x;
+                flat[at + 1] = point.y;
+            }
+        }
+        let mut points = [[0.0_f32; 4]; 13];
+        for (index, packed) in points.iter_mut().enumerate() {
+            for (lane, value) in packed.iter_mut().enumerate() {
+                *value = flat[index * 4 + lane];
+            }
+        }
+        Self {
+            points,
+            core,
+            outline,
+            params: [width, core_ratio, routing.count as f32, 0.0],
+        }
+    }
 }
 
 /// One SDF card/port/button instance in graph space.
@@ -85,6 +121,10 @@ pub struct NodeDraw {
     pub shapes: Option<Arc<Vec<ShapeInstance>>>,
     pub glows: Vec<ShapeInstance>,
     pub cables: Option<Arc<Vec<CableVertex>>>,
+    /// Vertex count issued per cable instance. The cable shader can evaluate up
+    /// to `CABLE_MAX_PATH_SEGMENTS`, but shorter routes should not pay for
+    /// vertices they never use.
+    pub cable_vertex_budget: u32,
     pub transform: [f32; 4], // scale, offset x, offset y, unused
     pub clip: [f32; 4],
     pub clip_radius: f32,
@@ -172,12 +212,23 @@ fn inside_rounded(p: vec2<f32>) -> bool {
 @group(0) @binding(0) var<uniform> globals: Globals;
 
 struct Instance {
-  @location(0) a: vec2<f32>,
-  @location(1) b: vec2<f32>,
-  @location(2) core: vec4<f32>,
-  @location(3) outline: vec4<f32>,
-  @location(4) width: f32,
-  @location(5) core_ratio: f32,
+  @location(0) v0: vec4<f32>,
+  @location(1) v1: vec4<f32>,
+  @location(2) v2: vec4<f32>,
+  @location(3) v3: vec4<f32>,
+  @location(4) v4: vec4<f32>,
+  @location(5) v5: vec4<f32>,
+  @location(6) v6: vec4<f32>,
+  @location(7) v7: vec4<f32>,
+  @location(8) v8: vec4<f32>,
+  @location(9) v9: vec4<f32>,
+  @location(10) v10: vec4<f32>,
+  @location(11) v11: vec4<f32>,
+  @location(12) v12: vec4<f32>,
+  @location(13) core: vec4<f32>,
+  @location(14) outline: vec4<f32>,
+  // x: width, y: core ratio, z: segment count.
+  @location(15) params: vec4<f32>,
 };
 struct Out {
   @builtin(position) clip: vec4<f32>,
@@ -190,50 +241,23 @@ struct Out {
 
 const BASE_SEGMENTS: f32 = 12.0;
 const MAX_SEGMENTS: f32 = 48.0;
+const MAX_PATH_SEGMENTS: f32 = 192.0;
 const ANGULAR_RESOLUTION_FACTOR: f32 = 2.0;
 
-struct Control {
-  c1: vec2<f32>,
-  c2: vec2<f32>,
-};
-
-// Cables that arrive almost perpendicular to their chord need more samples
-// than the straight/vertical default. Compute this per instance so only sharp
-// bends pay for the extra vertices.
-fn segment_count(a: vec2<f32>, b: vec2<f32>, control: Control) -> f32 {
-  let chord = normalize(b - a + vec2<f32>(0.00001, 0.0));
-  let start_tangent = normalize(control.c1 - a + vec2<f32>(0.00001, 0.0));
-  let end_tangent = normalize(b - control.c2 + vec2<f32>(0.00001, 0.0));
-  let start_angle = acos(clamp(dot(chord, start_tangent), -1.0, 1.0));
-  let end_angle = acos(clamp(dot(chord, end_tangent), -1.0, 1.0));
-  let angle = max(start_angle, end_angle);
-  // Continuous angular factor: a small bend gets a small increase, 45 degrees
-  // gets a moderate increase, and stronger bends keep increasing. There is no
-  // single threshold where resolution suddenly jumps.
-  let angular_factor = 1.0 + (angle / 3.14159265) * ANGULAR_RESOLUTION_FACTOR;
-
-  // The chord length is a cheap screen-space upper bound on the arc length.
-  // At far zoom the curve is small, so fewer segments are enough. At close
-  // zoom spend more of the budget on smoothness and multiply by the angular
-  // factor.
-  let screen_chord = length(b - a) * globals.screen_scale.z;
-  let length_budget = max(BASE_SEGMENTS, screen_chord / 12.0 * globals.screen_scale.w);
-  let segments = clamp(length_budget * angular_factor, BASE_SEGMENTS, MAX_SEGMENTS);
-  return round(segments);
+fn packed(inst: Instance, index: u32) -> vec4<f32> {
+  var values = array<vec4<f32>, 13>(
+    inst.v0, inst.v1, inst.v2, inst.v3, inst.v4, inst.v5, inst.v6,
+    inst.v7, inst.v8, inst.v9, inst.v10, inst.v11, inst.v12
+  );
+  return values[index];
 }
 
-fn route(a: vec2<f32>, b: vec2<f32>) -> Control {
-  let dx = b.x - a.x;
-  let dy = b.y - a.y;
-  let distance = max(length(vec2<f32>(dx, dy)), 0.0001);
-  let length_factor = clamp(distance / 360.0, 0.0, 1.0);
-  let rise_factor = clamp(max(a.y - b.y, 0.0) / distance, 0.0, 1.0);
-  let base = 14.0 + 126.0 * length_factor;
-  let handle = clamp(base * (1.0 + 1.4 * rise_factor), 14.0, 220.0);
-  return Control(
-    vec2<f32>(a.x, a.y + handle),
-    vec2<f32>(b.x, b.y - handle),
-  );
+fn point_at(inst: Instance, index: u32) -> vec2<f32> {
+  let value = packed(inst, index / 2u);
+  if (index % 2u == 0u) {
+    return value.xy;
+  }
+  return value.zw;
 }
 
 fn bezier(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -> vec2<f32> {
@@ -246,24 +270,112 @@ fn tangent(p0: vec2<f32>, p1: vec2<f32>, p2: vec2<f32>, p3: vec2<f32>, t: f32) -
   return (p1 - p0) * (3.0*u*u) + (p2 - p1) * (6.0*u*t) + (p3 - p2) * (3.0*t*t);
 }
 
+fn segment_index(inst: Instance, t: f32) -> u32 {
+  let count = u32(inst.params.z);
+  let scaled = t * f32(count);
+  return min(u32(floor(scaled)), count - 1u);
+}
+
+fn segment_local(inst: Instance, t: f32) -> f32 {
+  let count = u32(inst.params.z);
+  let scaled = t * f32(count);
+  let index = min(u32(floor(scaled)), count - 1u);
+  // Use the clamped index: at t == 1 the unclamped floor would be `count`, which
+  // made the final ribbon vertex snap back to the segment start (a stray
+  // vertex at the cable end).
+  return scaled - f32(index);
+}
+
+// Evaluate the routed path. Normal cables are one cubic; upward wraps are four
+// joined cubics (straight runs and rounded corners).
+fn path_point(inst: Instance, t: f32) -> vec2<f32> {
+  let segment = segment_index(inst, t);
+  let local = segment_local(inst, t);
+  let base = segment * 3u;
+  return bezier(
+    point_at(inst, base),
+    point_at(inst, base + 1u),
+    point_at(inst, base + 2u),
+    point_at(inst, base + 3u),
+    local
+  );
+}
+
+fn path_tangent(inst: Instance, t: f32) -> vec2<f32> {
+  let segment = segment_index(inst, t);
+  let local = segment_local(inst, t);
+  let base = segment * 3u;
+  return tangent(
+    point_at(inst, base),
+    point_at(inst, base + 1u),
+    point_at(inst, base + 2u),
+    point_at(inst, base + 3u),
+    local
+  );
+}
+
+// A degenerate straight/arc segment (zero length, which rounding makes possible
+// when a turn needs almost no run) has a zero analytic tangent. Derive the
+// direction from the neighbouring segments instead of falling back to a fixed
+// axis, otherwise the ribbon pinches into a sharp notch at that point.
+fn path_normal_tangent(inst: Instance, t: f32) -> vec2<f32> {
+  let analytic = path_tangent(inst, t);
+  if (length(analytic) > 1.0e-5) {
+    return analytic;
+  }
+  let step = 0.5 / max(inst.params.z, 1.0);
+  let before = path_point(inst, max(t - step, 0.0));
+  let after = path_point(inst, min(t + step, 1.0));
+  let derived = after - before;
+  if (length(derived) > 1.0e-5) {
+    return derived;
+  }
+  return vec2<f32>(0.0, 1.0);
+}
+
+// Cables that arrive almost perpendicular to their chord need more samples
+// than the straight/vertical default. Compute this per instance so only sharp
+// bends pay for the extra vertices. Wrapped cables get the same budget per
+// cubic, multiplied by the segment count.
+fn segment_count(inst: Instance) -> f32 {
+  let start = point_at(inst, 0u);
+  let last = u32(inst.params.z) * 3u;
+  let end = point_at(inst, last);
+  let end_control = point_at(inst, last - 1u);
+  let chord = normalize(end - start + vec2<f32>(0.00001, 0.0));
+  let start_tangent = normalize(point_at(inst, 1u) - start + vec2<f32>(0.00001, 0.0));
+  let end_tangent = normalize(end - end_control + vec2<f32>(0.00001, 0.0));
+  let start_angle = acos(clamp(dot(chord, start_tangent), -1.0, 1.0));
+  let end_angle = acos(clamp(dot(chord, end_tangent), -1.0, 1.0));
+  let angle = max(start_angle, end_angle);
+  // Continuous angular factor: a small bend gets a small increase, 45 degrees
+  // gets a moderate increase, and stronger bends keep increasing. There is no
+  // single threshold where resolution suddenly jumps.
+  let angular_factor = 1.0 + (angle / 3.14159265) * ANGULAR_RESOLUTION_FACTOR;
+
+  // The chord length is a cheap screen-space upper bound on the arc length.
+  // At far zoom the curve is small, so fewer segments are enough. At close
+  // zoom spend more of the budget on smoothness and multiply by the angular
+  // factor.
+  let screen_chord = length(end - start) * globals.screen_scale.z;
+  let length_budget = max(BASE_SEGMENTS, screen_chord / 12.0 * globals.screen_scale.w);
+  let per_segment = round(clamp(length_budget * angular_factor, BASE_SEGMENTS, MAX_SEGMENTS));
+  return min(per_segment * inst.params.z, MAX_PATH_SEGMENTS);
+}
+
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: Instance) -> Out {
-  let control = route(inst.a, inst.b);
-  let p0 = inst.a;
-  let p1 = control.c1;
-  let p2 = control.c2;
-  let p3 = inst.b;
   let seg = f32(vi / 6u);
   let corner = vi % 6u;
   let at_end = corner == 2u || corner == 4u || corner == 5u;
-  let segments = segment_count(inst.a, inst.b, control);
+  let segments = segment_count(inst);
   let is_active = seg < segments;
   var t = (seg + select(0.0, 1.0, at_end)) / segments;
   if (!is_active) {
     t = 1.0;
   }
-  let p = bezier(p0, p1, p2, p3, t);
-  let d = tangent(p0, p1, p2, p3, t);
+  let p = path_point(inst, t);
+  let d = path_normal_tangent(inst, t);
   var n = vec2<f32>(-d.y, d.x);
   if (length(n) <= 0.000001) { n = vec2<f32>(0.0, 1.0); }
   n = normalize(n);
@@ -276,7 +388,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   // Keep cables from collapsing below one physical pixel when zoomed out.
   // MSAA smooths the edge, but a sub-pixel ribbon cannot be reconstructed by
   // multisampling alone.
-  let screen_width = max(inst.width * globals.screen_scale.z, 1.5);
+  let screen_width = max(inst.params.x * globals.screen_scale.z, 1.5);
   let half_width = screen_width * 0.5;
   let screen = base_screen + n * half_width * side;
   var out: Out;
@@ -290,7 +402,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   out.core = inst.core;
   out.outline = inst.outline;
   out.side = side;
-  out.core_ratio = inst.core_ratio;
+  out.core_ratio = inst.params.y;
   return out;
 }
 
@@ -428,13 +540,13 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
   // shader so it follows the card transform without extra geometry.
   if (in.kind < 0.5 && in.suppressed > 0.5) {
     // Use card-local units, not screen pixels, so the hatch scales with the
-    // node like its border and text. One period is 36 graph units; the wide
-    // stripe is about 16 px at 100% zoom.
+    // node like its border and text. One 36-unit period is split into an equal
+    // 18-unit stripe and 18-unit gap. The hard square wave keeps the edges
+    // crisp instead of feathering them with a smoothstep.
     let diagonal = (in.local.x + in.local.y) / 36.0;
-    let stripe = abs(fract(diagonal) - 0.5) * 2.0;
-    let hatch = smoothstep(0.55, 0.85, stripe);
-    colour = mix(colour, in.stroke.rgb, hatch * 0.75);
-    alpha = max(alpha, hatch * 0.55 * fill_alpha);
+    let hatch = select(0.0, 1.0, fract(diagonal) < 0.5);
+    colour = mix(colour, in.stroke.rgb, hatch * 0.9);
+    alpha = max(alpha, hatch * 0.7 * fill_alpha);
   }
   return vec4<f32>(colour, alpha);
 }
@@ -454,6 +566,7 @@ struct NodeRenderer {
     cable_buffer: Option<wgpu::Buffer>,
     cable_capacity: u64,
     cable_count: u32,
+    cable_vertex_budget: u32,
     cable_key: Option<u64>,
     shape_buffer: Option<wgpu::Buffer>,
     shape_capacity: u64,
@@ -466,6 +579,8 @@ struct NodeRenderer {
 }
 
 const CABLE_MAX_SEGMENTS: u32 = 48;
+/// Longest total path budget (see `MAX_PATH_SEGMENTS` in the shader).
+const CABLE_MAX_PATH_SEGMENTS: u32 = 192;
 
 struct GlyphonState {
     font_system: FontSystem,
@@ -619,12 +734,22 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
                 array_stride: std::mem::size_of::<CableVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &wgpu::vertex_attr_array![
-                    0 => Float32x2,
-                    1 => Float32x2,
+                    0 => Float32x4,
+                    1 => Float32x4,
                     2 => Float32x4,
                     3 => Float32x4,
-                    4 => Float32,
-                    5 => Float32
+                    4 => Float32x4,
+                    5 => Float32x4,
+                    6 => Float32x4,
+                    7 => Float32x4,
+                    8 => Float32x4,
+                    9 => Float32x4,
+                    10 => Float32x4,
+                    11 => Float32x4,
+                    12 => Float32x4,
+                    13 => Float32x4,
+                    14 => Float32x4,
+                    15 => Float32x4
                 ],
             })],
         },
@@ -673,6 +798,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
             cable_buffer: None,
             cable_capacity: 0,
             cable_count: 0,
+            cable_vertex_budget: 6,
             cable_key: None,
             shape_buffer: None,
             shape_capacity: 0,
@@ -804,6 +930,7 @@ impl CallbackTrait for NodeCallback {
             } else {
                 renderer.glow_count = 0;
             }
+            renderer.cable_vertex_budget = draw.cable_vertex_budget.max(6);
             if let Some(cables) = &draw.cables {
                 if renderer.cable_key != Some(draw.geometry_key) {
                     let bytes = bytemuck::cast_slice(cables.as_slice());
@@ -968,7 +1095,7 @@ impl CallbackTrait for NodeCallback {
                         pass.set_pipeline(&renderer.cable_pipeline);
                         pass.set_bind_group(0, &renderer.bind, &[]);
                         pass.set_vertex_buffer(0, cb.slice(..));
-                        pass.draw(0..CABLE_MAX_SEGMENTS * 6, 0..renderer.cable_count);
+                        pass.draw(0..renderer.cable_vertex_budget, 0..renderer.cable_count);
                     }
                 }
                 if let Some(sb) = &renderer.shape_buffer {
@@ -1061,14 +1188,13 @@ pub fn circle_path(cx: f32, cy: f32, radius: f32) -> Path {
 }
 
 pub fn wire_path(x0: f32, y0: f32, x1: f32, y1: f32) -> Path {
-    let route = crate::routing::route(x0, y0, x1, y1, 1.0);
+    let points = crate::routing::route(x0, y0, x1, y1, 1.0).polyline(32);
     let mut builder = Path::builder();
-    builder.begin(point(x0, y0));
-    builder.cubic_bezier_to(
-        point(route.control1.x, route.control1.y),
-        point(route.control2.x, route.control2.y),
-        point(x1, y1),
-    );
+    let Some(first) = points.first() else { return builder.build() };
+    builder.begin(point(first.x, first.y));
+    for next in &points[1..] {
+        builder.line_to(point(next.x, next.y));
+    }
     builder.end(false);
     builder.build()
 }

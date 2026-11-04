@@ -24,16 +24,18 @@ const BUILD_GIT_HASH: &str = match option_env!("NODECRAFT_GIT_HASH") {
 };
 
 use crate::engine_bridge;
+use crate::file_dialog::{FileDialogKind, FileDialogResult, PendingFileDialog};
 use crate::inspector;
 use nodecraft_node_canvas::canvas::{
     node_extent, node_width, ConnectionKey, LayoutMode, NodeEditor, NodeEditorAction, NODE_HEIGHT,
     NODE_LEFT_PADDING, NODE_RIGHT_PADDING,
 };
+use nodecraft_node_canvas::routing::CableRouting;
 use nodecraft_node_canvas::theme::CanvasTheme;
 use crate::ui_shape;
 use crate::control_server;
 use crate::sketch_gui::SketchGui;
-use crate::viewport::Viewport;
+use crate::viewport::{PreviewScope, Viewport};
 use crate::viewer_gizmo::Gizmo;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -575,6 +577,39 @@ struct GroupTab {
     collapsed: bool,
 }
 
+/// Node state captured when a transform-gizmo drag starts.
+struct GizmoDragPreview {
+    node_id: String,
+    /// Values before the drag; the preview maps the old evaluated geometry
+    /// through the placement delta onto the live values.
+    start_values: serde_json::Value,
+    /// Downstream placement chain from the edited node to the displayed target.
+    /// Topology does not change during a drag, so it is resolved once.
+    chain: nodecraft_session::placement::Affine3,
+    /// Display bodies the edit feeds, also resolved once at drag start.
+    scope: PreviewScope,
+}
+
+/// What to do once a native file dialog closes.
+enum DialogAction {
+    SaveDocument,
+    OpenDocument,
+    /// Write the chosen path into a node value (`path` or `directory`).
+    SetNodePath {
+        node: String,
+        field: &'static str,
+        open_linked_part: bool,
+    },
+}
+
+/// A native dialog running off the event loop, with the action to apply once it
+/// closes (see `file_dialog` for why dialogs must not run inline).
+struct PendingDialogState {
+    action: DialogAction,
+    dialog: PendingFileDialog,
+    status_before: String,
+}
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     active_session_revision: u64,
@@ -600,6 +635,7 @@ pub struct NodeCraftApp {
     mesher_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
+    cable_routing: CableRouting,
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -618,6 +654,20 @@ pub struct NodeCraftApp {
     screenshot: Option<(std::path::PathBuf, u32)>,
     render_model: bool,
     preserve_view_for_next_mesh: bool,
+    /// Values captured when a gizmo drag starts, driving the display-only
+    /// preview transform until the kernel re-evaluates on release.
+    gizmo_drag: Option<GizmoDragPreview>,
+    /// A triad drag is in progress: auto-evaluation is suspended so the preview
+    /// geometry is not replaced (and double-transformed) mid-drag.
+    gizmo_dragging: bool,
+    /// The drag wrote values that the kernel still has to evaluate.
+    gizmo_edited: bool,
+    /// A drag applied values while document publishing was deferred; publish
+    /// once when the drag releases instead of cloning the graph every frame.
+    gizmo_publish_pending: bool,
+    /// A native file dialog is open off the event thread; its action runs when
+    /// the result arrives (never synchronously inside the event handler).
+    pending_dialog: Option<PendingDialogState>,
     camera_initialized: bool,
     last_saved_view: crate::viewport::ViewSettings,
     last_saved_theme: Option<String>,
@@ -740,6 +790,7 @@ impl NodeCraftApp {
         let activity = settings.activity;
         nodecraft_engine::kernel_pool::configure_exact_threads(settings.engine_threads);
         nodecraft_engine::kernel_pool::configure_mesh_threads(settings.mesher_threads);
+        nodecraft_engine::mesher::configure_mesher_threads(settings.mesher_threads);
         nodecraft_engine::configure_workload_profiler(settings.workload_profiler);
         nodecraft_engine::configure_solidcore_fixes(settings.kernel_fixes);
         node_editor.set_activity_timings(
@@ -781,6 +832,7 @@ impl NodeCraftApp {
             mesher_threads: settings.mesher_threads,
             workload_profiler: settings.workload_profiler,
             kernel_fixes: settings.kernel_fixes,
+            cable_routing: CableRouting::from_setting(&settings.cable_routing),
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
@@ -800,6 +852,11 @@ impl NodeCraftApp {
             screenshot: screenshot.map(|path| (path, 0)),
             render_model,
             preserve_view_for_next_mesh: false,
+            gizmo_drag: None,
+            gizmo_dragging: false,
+            gizmo_edited: false,
+            gizmo_publish_pending: false,
+            pending_dialog: None,
             camera_initialized: false,
             last_saved_view: persisted_view,
             last_saved_theme: initial_theme_id,
@@ -836,6 +893,7 @@ impl NodeCraftApp {
             control_requests: control_server::start(cc.egui_ctx.clone()),
             last_pointer: None,
         };
+        app.node_editor.set_cable_routing(app.cable_routing);
         if let Some(path) = choose_startup_document(initial, startup_recent, default_document()) {
             app.open(path);
         } else {
@@ -981,23 +1039,37 @@ impl NodeCraftApp {
         tab.camera = Some(self.viewport.camera);
     }
 
-    fn save_document(&mut self, save_as: bool) {
+    fn save_document(&mut self, ctx: &egui::Context, save_as: bool) {
+        if self.session.is_none() {
+            self.error = Some("No document loaded to save".to_owned());
+            self.status = "Save failed".to_owned();
+            return;
+        }
+        if save_as || self.path.is_none() {
+            let suggested_name = self
+                .path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("untitled.nodecraft")
+                .to_owned();
+            self.start_dialog(
+                ctx,
+                DialogAction::SaveDocument,
+                FileDialogKind::SaveDocument { suggested_name },
+            );
+            return;
+        }
+        let path = self.path.clone().unwrap_or_default();
+        self.finish_save_document(path);
+    }
+
+    fn finish_save_document(&mut self, path: PathBuf) {
+        let path = normalize_document_path(path);
         let Some(session) = self.session.clone() else {
             self.error = Some("No document loaded to save".to_owned());
             self.status = "Save failed".to_owned();
             return;
-        };
-        let path = if save_as || self.path.is_none() {
-            let Some(path) = rfd::FileDialog::new()
-                .add_filter("NodeCraft graph", &["nodecraft"])
-                .set_file_name("untitled.nodecraft")
-                .save_file()
-            else {
-                return;
-            };
-            normalize_document_path(path)
-        } else {
-            self.path.clone().unwrap_or_default()
         };
         if let Err(error) = nodecraft_session::store::save_atomic(&path, session.document()) {
             self.error = Some(error);
@@ -1014,6 +1086,66 @@ impl NodeCraftApp {
         self.save_active_tab();
         self.status = format!("Saved {}", path.display());
         self.error = None;
+    }
+
+    /// Start a native dialog off the event thread. Ignored while another dialog
+    /// is already open.
+    fn start_dialog(&mut self, ctx: &egui::Context, action: DialogAction, kind: FileDialogKind) {
+        if self.pending_dialog.is_some() {
+            return;
+        }
+        self.pending_dialog = Some(PendingDialogState {
+            action,
+            dialog: PendingFileDialog::spawn(kind),
+            status_before: self.status.clone(),
+        });
+        self.status = "Choose a file…".to_owned();
+        ctx.request_repaint();
+    }
+
+    /// Fetch a finished dialog result and apply its action. Called once per frame.
+    fn poll_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_dialog.as_mut() else { return };
+        let Some(result) = pending.dialog.try_finish() else {
+            // Keep frames coming while the modal panel is up.
+            ctx.request_repaint_after(Duration::from_millis(50));
+            return;
+        };
+        let Some(state) = self.pending_dialog.take() else { return };
+        self.status = state.status_before;
+        match (state.action, result) {
+            (DialogAction::SaveDocument, FileDialogResult::Chosen(path)) => {
+                self.finish_save_document(path);
+            }
+            (DialogAction::OpenDocument, FileDialogResult::Chosen(path)) => {
+                self.open(path);
+            }
+            (
+                DialogAction::SetNodePath { node, field, open_linked_part },
+                FileDialogResult::Chosen(path),
+            ) => {
+                let coalesce = if open_linked_part {
+                    "linked-part-path"
+                } else if field == "directory" {
+                    "step-directory"
+                } else {
+                    "step-path"
+                };
+                let command = Command::SetValue {
+                    node: node.clone(),
+                    field: field.to_owned(),
+                    value: serde_json::Value::String(path.display().to_string()),
+                };
+                if self.apply_commands(&[command], Some(coalesce)) {
+                    if open_linked_part {
+                        self.open_linked_part_document(&node);
+                    }
+                    self.evaluate();
+                }
+            }
+            (_, FileDialogResult::Cancelled) => {}
+        }
+        ctx.request_repaint();
     }
 
     fn restore_active_tab(&mut self) {
@@ -1629,27 +1761,10 @@ impl NodeCraftApp {
         )
     }
 
-    fn cubic_cable_point(path: [egui::Pos2; 4], t: f32) -> egui::Pos2 {
-        let u = 1.0 - t;
-        let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
-        egui::pos2(
-            a * path[0].x + b * path[1].x + c * path[2].x + d * path[3].x,
-            a * path[0].y + b * path[1].y + c * path[2].y + d * path[3].y,
-        )
-    }
-
-    fn cable_intersects_rect(path: [egui::Pos2; 4], rect: egui::Rect, padding: f32) -> bool {
+    fn cable_intersects_rect(path: &[egui::Pos2], rect: egui::Rect, padding: f32) -> bool {
         let rect = rect.expand(padding);
-        let mut previous = path[0];
-        for step in 1..=16 {
-            let point = Self::cubic_cable_point(path, step as f32 / 16.0);
-            let segment = egui::Rect::from_two_pos(previous, point);
-            if rect.intersects(segment) {
-                return true;
-            }
-            previous = point;
-        }
-        false
+        path.windows(2)
+            .any(|pair| rect.intersects(egui::Rect::from_two_pos(pair[0], pair[1])))
     }
 
     fn auto_connect_placement(
@@ -1657,6 +1772,7 @@ impl NodeCraftApp {
         added: &GraphNode,
         source: &str,
         initial: (f64, f64),
+        cable_routing: CableRouting,
     ) -> (f64, f64, Vec<(String, f64, f64)>) {
         let added_extent = node_extent(added);
         let added_width = added_extent.width;
@@ -1677,12 +1793,12 @@ impl NodeCraftApp {
         let (mut x, mut y) = initial;
         for _ in 0..16 {
             let candidate = added_extent.padded_rect(x, y);
-            let cables = NodeEditor::connection_paths(document, &positions);
+            let cables = NodeEditor::connection_paths(document, &positions, cable_routing);
             let node_blocker = document.nodes.iter().find(|node| {
                 node.id != added.id && candidate.intersects(node_rect(node, &positions))
             });
             let cable_blocker = cables.iter().find_map(|(path, key)| {
-                Self::cable_intersects_rect(*path, candidate, 10.0).then(|| {
+                Self::cable_intersects_rect(path, candidate, 10.0).then(|| {
                     document
                         .nodes
                         .iter()
@@ -1706,7 +1822,7 @@ impl NodeCraftApp {
                     node.id != added.id && side.intersects(node_rect(node, &positions))
                 });
                 let clear_cables = !cables.iter().any(|(path, _)| {
-                    Self::cable_intersects_rect(*path, side, 10.0)
+                    Self::cable_intersects_rect(path, side, 10.0)
                 });
                 clear_nodes && clear_cables
             }) {
@@ -1799,7 +1915,7 @@ impl NodeCraftApp {
             let (x, y) = Self::auto_connect_position(x, y, source_width, node_width(&node));
             let session = self.session.as_ref().expect("session checked above");
             let (x, y, branch_moves) =
-                Self::auto_connect_placement(session.document(), &node, &selected, (x, y));
+                Self::auto_connect_placement(session.document(), &node, &selected, (x, y), self.cable_routing);
             node.x = x;
             node.y = y;
             moved = branch_moves;
@@ -2139,6 +2255,174 @@ impl NodeCraftApp {
         })
     }
 
+    /// Resolve the immutable parts of a drag preview — the downstream placement
+    /// chain and the display bodies it feeds — once, when the drag starts.
+    /// True when any upstream input of `node` resolves to a sketch/spline.
+    fn transform_input_contains_sketch(document: &GraphDocument, node: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![node.to_owned()];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(current) = document.nodes.iter().find(|node| node.id == id) else {
+                continue;
+            };
+            if matches!(current.node_type.as_str(), "sketch" | "spline") {
+                return true;
+            }
+            for link in document.connections.iter().filter(|link| link.to == id) {
+                stack.push(link.from.clone());
+            }
+        }
+        false
+    }
+
+    fn begin_gizmo_preview(&self, node: &GraphNode) -> Option<GizmoDragPreview> {
+        use nodecraft_session::placement::{
+            preview_body_scope, transform_chain, Affine3, PreviewBodyScope,
+        };
+        if node.node_type != "translate" {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        let document = session.document();
+        // Sketch/spline geometry has no exact Part body layout, so the GPU
+        // preview cannot scope it: the fallback transforms the whole display
+        // mesh (moving unrelated geometry). Let evaluation drive the drag
+        // instead of using a GPU preview for that topology.
+        if Self::transform_input_contains_sketch(document, &node.id) {
+            return None;
+        }
+        let target = self.eval_target.as_deref()?;
+        let chain = if target == node.id {
+            // The edited node is the displayed target: its own placement is the
+            // whole delta.
+            Affine3::identity()
+        } else {
+            transform_chain(document, &node.id, target)?
+        };
+        let scope = match preview_body_scope(document, &node.id, target) {
+            Some(PreviewBodyScope::All) => PreviewScope::All,
+            Some(PreviewBodyScope::Prefixes(prefixes)) => PreviewScope::Bodies(prefixes),
+            // The chain existed, so a missing scope is only an unexpected
+            // topology change; move the whole mesh rather than freezing.
+            None => PreviewScope::All,
+        };
+        Some(GizmoDragPreview {
+            node_id: node.id.clone(),
+            start_values: node.values.clone(),
+            chain,
+            scope,
+        })
+    }
+
+    /// Per-frame preview update: only the values change now. The chain, scope
+    /// and (for large meshes) the affected geometry are all cached.
+    fn refresh_gizmo_preview(&mut self) {
+        let resolved = match self.gizmo_drag.as_ref() {
+            Some(drag) => {
+                let current = self.session.as_ref().and_then(|session| {
+                    session
+                        .document()
+                        .nodes
+                        .iter()
+                        .find(|node| node.id == drag.node_id)
+                        .map(|node| node.values.clone())
+                });
+                current.map(|current| {
+                    (
+                        nodecraft_session::placement::preview_transform(
+                            drag.chain,
+                            &drag.start_values,
+                            &current,
+                        )
+                        .to_column_major_f32(),
+                        drag.scope.clone(),
+                    )
+                })
+            }
+            None => None,
+        };
+        let (matrix, scope) = resolved
+            .map(|(matrix, scope)| (Some(matrix), scope))
+            .unwrap_or((None, PreviewScope::All));
+        self.viewport.set_preview_transform(matrix, scope);
+    }
+
+    /// Consume one frame of transform-triad state: write the live values to the
+    /// document, move the display mesh with a preview transform, and re-evaluate
+    /// exactly once when the drag is released.
+    fn handle_gizmo_update(&mut self, selected_node: Option<&GraphNode>) {
+        let Some(update) = self.viewport.take_gizmo_update() else {
+            // Without a triad frame a drag cannot continue (selection changed,
+            // chrome hidden, or the document was replaced); retire its preview
+            // rather than leaving the display geometry displaced.
+            if self.gizmo_dragging || self.gizmo_drag.is_some() {
+                self.gizmo_dragging = false;
+                self.gizmo_drag = None;
+                self.gizmo_edited = false;
+                if self.gizmo_publish_pending {
+                    self.gizmo_publish_pending = false;
+                    self.publish_active_document();
+                }
+                self.viewport.set_preview_transform(None, PreviewScope::All);
+            }
+            return;
+        };
+        self.gizmo_dragging = update.dragging;
+        if update.started {
+            self.gizmo_drag = selected_node.and_then(|node| self.begin_gizmo_preview(node));
+            self.gizmo_edited = false;
+            self.gizmo_publish_pending = false;
+        }
+        if let Some(node) = selected_node
+            && node.node_type == "translate"
+            && !update.changes.is_empty()
+        {
+            // One command batch per frame: each separate apply would clone and
+            // dirty-walk the document again.
+            let commands: Vec<Command> = update
+                .changes
+                .into_iter()
+                .map(|(field, value)| Command::SetValue {
+                    node: node.id.clone(),
+                    field,
+                    value: serde_json::Value::from(value),
+                })
+                .collect();
+            let changed = self.apply_commands(&commands, Some(&format!("gizmo:{}", node.id)));
+            self.gizmo_edited |= changed;
+        }
+        if update.dragging || update.started || update.ended {
+            // The session now holds this frame's values, so the delta maps the
+            // last evaluated geometry onto the dragged placement.
+            self.refresh_gizmo_preview();
+        }
+        if update.ended {
+            self.gizmo_dragging = false;
+            self.gizmo_drag = None;
+            if self.gizmo_edited {
+                self.gizmo_edited = false;
+                if self.gizmo_publish_pending {
+                    self.gizmo_publish_pending = false;
+                    self.publish_active_document();
+                }
+                // Keep the preview on screen while the kernel catches up; the
+                // authoritative mesh retires it when it arrives.
+                self.preserve_view_for_next_mesh = true;
+                self.evaluate();
+                if self.eval_pending.is_none() {
+                    // Nothing started (the viewed target is unaffected), so no
+                    // new mesh will replace the preview.
+                    self.viewport.set_preview_transform(None, PreviewScope::All);
+                }
+            } else {
+                self.viewport.set_preview_transform(None, PreviewScope::All);
+            }
+        }
+    }
+
     /// Make the active editor revision the canonical document that linked roots
     /// flatten from. Tabs remain views; the document store is the shared source.
     fn publish_active_document(&mut self) {
@@ -2162,7 +2446,13 @@ impl NodeCraftApp {
                 }
                 let changed = change.changed;
                 if changed {
-                    self.publish_active_document();
+                    if self.gizmo_dragging {
+                        // A drag writes values every frame; publishing clones the
+                        // whole document, so defer it until the drag releases.
+                        self.gizmo_publish_pending = true;
+                    } else {
+                        self.publish_active_document();
+                    }
                 }
                 changed
             }
@@ -2622,6 +2912,7 @@ impl NodeCraftApp {
         let mut kernel_fixes = self.kernel_fixes;
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
+        let mut cable_routing = self.cable_routing;
         let mut close = false;
         let mut builder = egui::ViewportBuilder::default()
             .with_title("NodeCraft Settings")
@@ -2869,6 +3160,30 @@ impl NodeCraftApp {
                             "Click a colour dot to edit. Edits apply live and are saved as \
                              NodeCraft Dark (custom).",
                         );
+                        content.add_space(8.0);
+                        content.horizontal(|ui| {
+                            ui.label("Cable routing");
+                            egui::ComboBox::from_id_salt("cable-routing")
+                                .selected_text(match cable_routing {
+                                    CableRouting::J => "j-routing",
+                                    CableRouting::Bezier => "bezier-routing",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut cable_routing,
+                                        CableRouting::J,
+                                        "j-routing",
+                                    );
+                                    ui.selectable_value(
+                                        &mut cable_routing,
+                                        CableRouting::Bezier,
+                                        "bezier-routing",
+                                    );
+                                });
+                        });
+                        content.small(
+                            "Bezier routing keeps the original smooth cable curves.",
+                        );
                         content.add_space(6.0);
                         content.scope(|ui| {
                             ui.style_mut().spacing.scroll = crate::theme::scroll_style_general();
@@ -2961,7 +3276,7 @@ impl NodeCraftApp {
                         ));
                         content.monospace(format!(
                             "Mesh pool: {}",
-                            if nodecraft_engine::kernel_pool::mesh_pool_initialized() {
+                            if nodecraft_engine::mesher::mesher_initialized() {
                                 "already started"
                             } else {
                                 "lazy"
@@ -3051,6 +3366,12 @@ impl NodeCraftApp {
             self.viewport.set_view(view);
         }
         self.viewport.set_show_view_matrix(show_view_matrix);
+        if cable_routing != self.cable_routing {
+            self.cable_routing = cable_routing;
+            self.node_editor.set_cable_routing(cable_routing);
+            self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
+            ctx.request_repaint();
+        }
         if feature_overlay != self.feature_overlay {
             self.feature_overlay = feature_overlay;
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
@@ -3065,6 +3386,7 @@ impl NodeCraftApp {
         if mesher_threads != self.mesher_threads {
             self.mesher_threads = mesher_threads;
             nodecraft_engine::kernel_pool::configure_mesh_threads(mesher_threads);
+            nodecraft_engine::mesher::configure_mesher_threads(mesher_threads);
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
@@ -3452,6 +3774,8 @@ impl NodeCraftApp {
 
 impl eframe::App for NodeCraftApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_dialog(ctx);
+        self.node_editor.set_cable_routing(self.cable_routing);
         {
             let save_as = ctx.input_mut(|input| {
                 input.consume_shortcut(&egui::KeyboardShortcut::new(
@@ -3467,9 +3791,9 @@ impl eframe::App for NodeCraftApp {
                     ))
                 });
             if save_as {
-                self.save_document(true);
+                self.save_document(ctx, true);
             } else if save {
-                self.save_document(false);
+                self.save_document(ctx, false);
             }
         }
         let view = self.viewport.view();
@@ -3494,6 +3818,7 @@ impl eframe::App for NodeCraftApp {
                 self.mesher_threads,
                 self.workload_profiler,
                 self.kernel_fixes,
+                self.cable_routing,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -3505,6 +3830,9 @@ impl eframe::App for NodeCraftApp {
         }
         self.poll_evaluation();
         if self.eval_pending.is_none()
+            // A drag previews the placement on the GPU; evaluating mid-drag would
+            // replace that geometry and double-apply the transform.
+            && self.gizmo_drag.is_none()
             && self
                 .auto_eval_due
                 .is_some_and(|due| due.elapsed() >= std::time::Duration::from_millis(32))
@@ -3776,12 +4104,11 @@ impl eframe::App for NodeCraftApp {
                         }
                         if ui.button("Open…").clicked() {
                             ui.close();
-                            if let Some(path) = rfd::FileDialog::new()
-                                .add_filter("NodeCraft graph", &["nodecraft"])
-                                .pick_file()
-                            {
-                                self.open(path);
-                            }
+                            self.start_dialog(
+                                ui.ctx(),
+                                DialogAction::OpenDocument,
+                                FileDialogKind::OpenDocument,
+                            );
                         }
                         ui.menu_button("Open Recent", |ui| {
                             ui.set_min_width(230.0);
@@ -3819,11 +4146,11 @@ impl eframe::App for NodeCraftApp {
                         let has_document = self.session.is_some();
                         if ui.add_enabled(has_document, egui::Button::new("Save").shortcut_text("⌘S")).clicked() {
                             ui.close();
-                            self.save_document(false);
+                            self.save_document(ui.ctx(), false);
                         }
                         if ui.add_enabled(has_document, egui::Button::new("Save As…").shortcut_text("⇧⌘S")).clicked() {
                             ui.close();
-                            self.save_document(true);
+                            self.save_document(ui.ctx(), true);
                         }
                         if ui.add_enabled(has_document, egui::Button::new("Export STEP…")).clicked() {
                             ui.close();
@@ -4224,27 +4551,7 @@ impl eframe::App for NodeCraftApp {
             }
         });
         self.sync_comparison_target();
-        let gizmo_changes = self.viewport.take_gizmo_changes();
-        if let Some(node) = &selected_node {
-            if node.node_type == "translate" && !gizmo_changes.is_empty() {
-                let mut changed = false;
-                for (field, value) in gizmo_changes {
-                    let command = Command::SetValue {
-                        node: node.id.clone(),
-                        field,
-                        value: serde_json::Value::from(value),
-                    };
-                    changed |= self.apply_commands(
-                        &[command],
-                        Some(&format!("gizmo:{}", node.id)),
-                    );
-                }
-                if changed {
-                    self.preserve_view_for_next_mesh = true;
-                    self.evaluate();
-                }
-            }
-        }
+        self.handle_gizmo_update(selected_node.as_ref());
 
         self.sync_face_pick_target();
         let face_picks = self.viewport.take_face_picks();
@@ -4639,46 +4946,40 @@ impl eframe::App for NodeCraftApp {
                     changed |= self.apply_commands(&[command], Some(&coalesce));
                 }
                 if output.choose_linked_part {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("NodeCraft graph", &["nodecraft"])
-                        .pick_file()
-                    {
-                        let command = Command::SetValue {
+                    self.start_dialog(
+                        ui.ctx(),
+                        DialogAction::SetNodePath {
                             node: node.id.clone(),
-                            field: "path".to_owned(),
-                            value: serde_json::Value::String(path.display().to_string()),
-                        };
-                        changed |= self.apply_commands(&[command], Some("linked-part-path"));
-                        if changed {
-                            self.open_linked_part_document(&node.id);
-                        }
-                    }
+                            field: "path",
+                            open_linked_part: true,
+                        },
+                        FileDialogKind::OpenDocument,
+                    );
                 }
                 if output.open_linked_part {
                     self.open_linked_part_document(&node.id);
                 }
                 if output.choose_file {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("STEP model", &["step", "stp"])
-                        .pick_file()
-                    {
-                        let command = Command::SetValue {
+                    self.start_dialog(
+                        ui.ctx(),
+                        DialogAction::SetNodePath {
                             node: node.id.clone(),
-                            field: "path".to_owned(),
-                            value: serde_json::Value::String(path.display().to_string()),
-                        };
-                        changed |= self.apply_commands(&[command], Some("step-path"));
-                    }
+                            field: "path",
+                            open_linked_part: false,
+                        },
+                        FileDialogKind::OpenStepFile,
+                    );
                 }
                 if output.choose_directory {
-                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                        let command = Command::SetValue {
+                    self.start_dialog(
+                        ui.ctx(),
+                        DialogAction::SetNodePath {
                             node: node.id.clone(),
-                            field: "directory".to_owned(),
-                            value: serde_json::Value::String(path.display().to_string()),
-                        };
-                        changed |= self.apply_commands(&[command], Some("step-directory"));
-                    }
+                            field: "directory",
+                            open_linked_part: false,
+                        },
+                        FileDialogKind::ChooseDirectory,
+                    );
                 }
                 if output.toggle_suppressed {
                     let command = Command::SetSuppressed {
@@ -5167,8 +5468,15 @@ struct AppSettings {
     workload_profiler: bool,
     #[serde(default = "default_kernel_fixes")]
     kernel_fixes: bool,
+    /// Cable routing style: "j-routing" or "bezier-routing".
+    #[serde(default = "default_cable_routing")]
+    cable_routing: String,
     #[serde(default)]
     recent_files: Vec<String>,
+}
+
+fn default_cable_routing() -> String {
+    CableRouting::J.setting_id().to_owned()
 }
 
 fn default_workload_profiler() -> bool {
@@ -5197,6 +5505,7 @@ fn save_app_settings(
     mesher_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
+    cable_routing: CableRouting,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -5212,6 +5521,7 @@ fn save_app_settings(
         mesher_threads,
         workload_profiler,
         kernel_fixes,
+        cable_routing: cable_routing.setting_id().to_owned(),
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -6095,6 +6405,55 @@ mod tests {
     }
 
     #[test]
+    fn transform_preview_is_skipped_for_sketch_inputs() {
+        let node = |id: &str, node_type: &str| GraphNode {
+            id: id.into(),
+            node_type: node_type.into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut sketch_graph = GraphDocument::new("sketch-transform");
+        sketch_graph.nodes = vec![
+            node("s0", "spline"),
+            node("t0", "translate"),
+            node("roof", "surfaceloft"),
+        ];
+        sketch_graph.connections = vec![
+            GraphConnection {
+                from: "s0".into(),
+                to: "t0".into(),
+                input: "shape".into(),
+                out: "sketch".into(),
+            },
+            GraphConnection {
+                from: "t0".into(),
+                to: "roof".into(),
+                input: "sections".into(),
+                out: "shape".into(),
+            },
+        ];
+        assert!(NodeCraftApp::transform_input_contains_sketch(
+            &sketch_graph,
+            "t0"
+        ));
+
+        let mut solid_graph = GraphDocument::new("solid-transform");
+        solid_graph.nodes = vec![node("p", "primitive"), node("t", "translate")];
+        solid_graph.connections = vec![GraphConnection {
+            from: "p".into(),
+            to: "t".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        assert!(!NodeCraftApp::transform_input_contains_sketch(
+            &solid_graph,
+            "t"
+        ));
+    }
+
+    #[test]
     fn app_settings_round_trip_recent_files() {
         let settings = AppSettings {
             view: crate::viewport::ViewSettings::default(),
@@ -6105,6 +6464,7 @@ mod tests {
             mesher_threads: 0,
             workload_profiler: true,
             kernel_fixes: true,
+            cable_routing: "bezier-routing".to_owned(),
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");
@@ -6117,6 +6477,7 @@ mod tests {
         assert_eq!(parsed.view, crate::viewport::ViewSettings::default());
         assert_eq!(parsed.activity, ActivitySettings::default());
         assert!(parsed.feature_overlay);
+        assert_eq!(parsed.cable_routing, "bezier-routing");
     }
 
     #[test]
@@ -6341,7 +6702,7 @@ mod tests {
             node_width(&added),
         );
         let (x, y, moved) =
-            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial);
+            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial, CableRouting::J);
         let placed = egui::Rect::from_min_size(
             egui::pos2(x as f32, y as f32),
             egui::vec2(node_width(&added), NODE_HEIGHT),
@@ -6401,7 +6762,7 @@ mod tests {
             node_width(&added),
         );
         let (x, y, moved) =
-            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial);
+            NodeCraftApp::auto_connect_placement(&document, &added, "a", initial, CableRouting::J);
         let moved_ids: HashSet<&str> = moved.iter().map(|(id, _, _)| id.as_str()).collect();
         assert!(moved_ids.contains("blocker"), "{moved:?}");
         assert!(moved_ids.contains("child"), "{moved:?}");

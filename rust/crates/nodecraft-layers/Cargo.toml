@@ -1,0 +1,17 @@
+[package]
+name = "nodecraft-layers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adapters onto the upstream solidcore record/ops/tess layers"
+
+[dependencies]
+nodecraft-protocol = { path = "../nodecraft-protocol" }
+solidcore = { workspace = true }
+solidcore-record = { workspace = true }
+solidcore-ops = { workspace = true }
+solidcore-tess = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+flate2 = "1.1"

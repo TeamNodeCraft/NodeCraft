@@ -93,3 +93,14 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## SolidCore test fixture
+
+`crates/nodecraft-layers/tests/data/box_10x6x4.json.gz` is copied from the
+solidcore repository (`crates/solidcore-tess/tests/data/box_10x6x4.json.gz`,
+revision `bff1569a4c3347ed9af67faab71578cadf84fde2`) and used only as a test
+fixture for the record tessellation adapter.
+
+solidcore is licensed under the Apache License, Version 2.0. Copyright Tangency
+Labs. See https://github.com/tangency-labs/solidcore for the full license.
+

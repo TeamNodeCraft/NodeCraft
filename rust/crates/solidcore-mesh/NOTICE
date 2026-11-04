@@ -1,6 +1,0 @@
-The tessellation plan format and CPU evaluator in this crate are adapted from
-SolidCraft's `solidcraft-geom` crate (crates/geom/src/tess.rs).
-
-SolidCraft is Copyright its contributors and is licensed under either of
-Apache License, Version 2.0 or the MIT license, at your option.
-https://github.com/tangyixiao/solidcraft

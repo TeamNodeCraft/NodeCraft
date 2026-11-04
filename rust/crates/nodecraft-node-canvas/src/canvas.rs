@@ -17,6 +17,7 @@ use crate::gpu::{
     circle_path, squircle_rect_path, CableVertex, GeometryBuilder, NodeCallback, NodeDraw,
     NodeGeometry, NodeText, ShapeInstance,
 };
+use crate::routing::CableRouting;
 
 /// Minimum card width: room for the square operation icon between the small
 /// left suppress control and the large right eye control, with edge padding for
@@ -208,6 +209,7 @@ pub struct NodeEditor {
     context_menu: Option<(String, Pos2)>,
     icons: HashMap<String, egui::TextureHandle>,
     theme: crate::theme::CanvasTheme,
+    cable_routing: CableRouting,
     last_viewport: Option<Rect>,
     view_animation: Option<ViewAnimation>,
     pan_animation: Option<PanAnimation>,
@@ -255,6 +257,7 @@ impl Default for NodeEditor {
             context_menu: None,
             icons: HashMap::new(),
             theme: crate::theme::CanvasTheme::default(),
+            cable_routing: CableRouting::J,
             last_viewport: None,
             view_animation: None,
             pan_animation: None,
@@ -428,6 +431,14 @@ impl NodeEditor {
         self.geometry_key = None;
     }
 
+    /// App setting (not theme): smooth bezier cables or orthogonal J routing.
+    pub fn set_cable_routing(&mut self, routing: CableRouting) {
+        if self.cable_routing != routing {
+            self.cable_routing = routing;
+            self.geometry_key = None;
+        }
+    }
+
     pub fn reset_view(&mut self) {
         self.view_document = None;
         self.view_animation = None;
@@ -476,7 +487,8 @@ impl NodeEditor {
     pub fn connection_paths(
         document: &GraphDocument,
         positions: &HashMap<String, (f64, f64)>,
-    ) -> Vec<([Pos2; 4], ConnectionKey)> {
+        style: CableRouting,
+    ) -> Vec<(Vec<Pos2>, ConnectionKey)> {
         let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
             .nodes
             .iter()
@@ -502,16 +514,18 @@ impl NodeEditor {
             let y0 = source.max.y;
             let x1 = port_x(target, port_index(inputs, &connection.input), inputs.len(), 1.0);
             let y1 = target.min.y;
-            let route = crate::routing::route(x0, y0, x1, y1, 1.0);
-            paths.push((
-                [
-                    Pos2::new(x0, y0),
-                    route.control1,
-                    route.control2,
-                    Pos2::new(x1, y1),
-                ],
-                ConnectionKey::from_connection(connection),
-            ));
+            let points = crate::routing::route_nodes_for(
+                style,
+                source,
+                target,
+                x0,
+                y0,
+                x1,
+                y1,
+                1.0,
+            )
+            .polyline(32);
+            paths.push((points, ConnectionKey::from_connection(connection)));
         }
         paths
     }
@@ -544,7 +558,8 @@ impl NodeEditor {
         // does not drop out from under the pointer.
         let preview = self.preview_document(document);
         let hit_document = preview.as_ref().unwrap_or(document);
-        let connection = cable_hit_with_hold(
+        let connection = cable_hit_with_hold_for(
+            self.cable_routing,
             hit_document,
             panel,
             self.pan,
@@ -554,7 +569,8 @@ impl NodeEditor {
         )
         .or_else(|| {
             let held = held.as_ref()?;
-            (cable_hit_with_hold(
+            (cable_hit_with_hold_for(
+                self.cable_routing,
                 document,
                 panel,
                 self.pan,
@@ -824,7 +840,7 @@ impl NodeEditor {
         let mut chrome_clicked = false;
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>, f32)> = Vec::new();
-        let mut key = geometry_key(document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        let mut key = geometry_key_for(self.cable_routing, document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
         if !node_fades.is_empty() {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -850,7 +866,7 @@ impl NodeEditor {
                 self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme, &node_fades)));
                 self.shapes = None;
             }
-            self.cables = Some(Arc::new(build_cables(document, selected_nodes, selected_connections, &self.theme)));
+            self.cables = Some(Arc::new(build_cables_for(self.cable_routing, document, selected_nodes, selected_connections, &self.theme)));
             self.geometry_key = Some(key);
         }
         // Always carry the cached geometry into the callback. egui may prepare a
@@ -866,6 +882,10 @@ impl NodeEditor {
             shapes,
             glows: activity_glows,
             cables,
+            cable_vertex_budget: match self.cable_routing {
+                CableRouting::Bezier => 48 * 6,
+                CableRouting::J => 192 * 6,
+            },
             transform: [self.zoom, panel.min.x + self.pan.x, panel.min.y + CANVAS_TOP + self.pan.y, 0.0],
             clip: [
                 panel.min.x + 1.0,
@@ -1368,14 +1388,24 @@ impl NodeEditor {
                         let y0 = start.max.y;
                         let x1 = port_x(end, port_index(inputs, &connection.input), inputs.len(), self.zoom);
                         let y1 = end.min.y;
-                        let points = wire_points(x0, y0, x1, y1, self.zoom);
+                        let points = crate::routing::route_nodes_for(
+                            self.cable_routing,
+                            start,
+                            end,
+                            x0,
+                            y0,
+                            x1,
+                            y1,
+                            self.zoom,
+                        )
+                        .polyline(64);
                         let key = ConnectionKey::from_connection(connection);
                         painter.add(egui::Shape::line(
-                            points.to_vec(),
+                            points.clone(),
                             Stroke::new(18.0, self.theme.with_alpha(self.theme.window, 191)),
                         ));
                         painter.add(egui::Shape::line(
-                            points.to_vec(),
+                            points,
                             Stroke::new(
                                 7.0,
                                 self.theme.color(if selected_connections.contains(&key) {
@@ -1861,9 +1891,9 @@ impl NodeEditor {
                         // Cables are directed output → input even when the drag
                         // started at an input port; keep the preview in that
                         // direction.
-                        dashed_curve(&painter, end, drag.origin.position, self.zoom);
+                        dashed_curve(&painter, end, drag.origin.position, self.zoom, self.cable_routing);
                     } else {
-                        dashed_curve(&painter, drag.origin.position, end, self.zoom);
+                        dashed_curve(&painter, drag.origin.position, end, self.zoom, self.cable_routing);
                     }
                 }
                 if let Some(preview) = &self.insert_preview {
@@ -1895,8 +1925,8 @@ impl NodeEditor {
                             let alpha = (preview.progress * 255.0) as u8;
                             let colour = Color32::from_rgba_unmultiplied(124, 156, 255, alpha);
                             let phase = ui.ctx().input(|input| input.time) as f32 * 42.0;
-                            dashed_curve_with_colour(&painter, source_out, inserted_in, self.zoom, colour, phase);
-                            dashed_curve_with_colour(&painter, inserted_out, target_in, self.zoom, colour, phase);
+                            dashed_curve_with_colour(&painter, source_out, inserted_in, self.zoom, colour, phase, self.cable_routing);
+                            dashed_curve_with_colour(&painter, inserted_out, target_in, self.zoom, colour, phase, self.cable_routing);
                         }
                     }
                 }
@@ -1913,7 +1943,7 @@ impl NodeEditor {
         } else if let Some(pointer) = ctx.pointer_latest_pos() {
             if panel.contains(pointer) && ctx.input(|i| i.pointer.primary_clicked()) {
                 let additive = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
-                if let Some(key) = cable_hit(document, panel, self.pan, self.zoom, pointer) {
+                if let Some(key) = cable_hit_for(self.cable_routing, document, panel, self.pan, self.zoom, pointer) {
                     actions.push(NodeEditorAction::SelectCable { key, additive });
                 } else if empty_canvas_clicked {
                     actions.push(NodeEditorAction::Deselect);
@@ -2235,14 +2265,19 @@ fn lasso_selection(
     selection
 }
 
-fn wire_points(x0: f32, y0: f32, x1: f32, y1: f32, zoom: f32) -> [Pos2; 4] {
-    let route = crate::routing::route(x0, y0, x1, y1, zoom);
-    [
-        Pos2::new(x0, y0),
-        route.control1,
-        route.control2,
-        Pos2::new(x1, y1),
-    ]
+fn wire_points(x0: f32, y0: f32, x1: f32, y1: f32, zoom: f32) -> Vec<Pos2> {
+    crate::routing::route(x0, y0, x1, y1, zoom).polyline(64)
+}
+
+fn wire_points_for(
+    style: CableRouting,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    zoom: f32,
+) -> Vec<Pos2> {
+    crate::routing::route_for(style, x0, y0, x1, y1, zoom).polyline(64)
 }
 
 fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
@@ -2469,8 +2504,22 @@ fn cable_stroke(zoom: f32) -> Stroke {
     Stroke::new((3.2 * zoom).clamp(2.0, 4.5), Color32::from_rgba_unmultiplied(124, 156, 255, 230))
 }
 
-fn dashed_curve(painter: &egui::Painter, start: Pos2, end: Pos2, zoom: f32) {
-    dashed_curve_with_colour(painter, start, end, zoom, Color32::from_rgba_unmultiplied(124, 156, 255, 230), 0.0);
+fn dashed_curve(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    zoom: f32,
+    style: CableRouting,
+) {
+    dashed_curve_with_colour(
+        painter,
+        start,
+        end,
+        zoom,
+        Color32::from_rgba_unmultiplied(124, 156, 255, 230),
+        0.0,
+        style,
+    );
 }
 
 fn dashed_curve_with_colour(
@@ -2480,24 +2529,13 @@ fn dashed_curve_with_colour(
     zoom: f32,
     colour: Color32,
     phase: f32,
+    style: CableRouting,
 ) {
-    let points = wire_points(start.x, start.y, end.x, end.y, zoom);
+    let samples = wire_points_for(style, start.x, start.y, end.x, end.y, zoom);
     let stroke = Stroke::new(cable_stroke(zoom).width, colour);
     let dash = (8.0 * zoom).clamp(4.0, 11.0);
     let gap = (6.0 * zoom).clamp(3.0, 8.0);
     let cycle = dash + gap;
-    const SAMPLES: usize = 64;
-    let samples: Vec<Pos2> = (0..=SAMPLES)
-        .map(|sample| {
-            let t = sample as f32 / SAMPLES as f32;
-            let mt = 1.0 - t;
-            (points[0].to_vec2() * (mt * mt * mt)
-                + points[1].to_vec2() * (3.0 * mt * mt * t)
-                + points[2].to_vec2() * (3.0 * mt * t * t)
-                + points[3].to_vec2() * (t * t * t))
-                .to_pos2()
-        })
-        .collect();
     let mut travelled = 0.0_f32;
     for pair in samples.windows(2) {
         let (from, to) = (pair[0], pair[1]);
@@ -2606,13 +2644,36 @@ fn cable_hit(
     zoom: f32,
     pointer: Pos2,
 ) -> Option<ConnectionKey> {
-    cable_hit_with_hold(document, panel, pan, zoom, pointer, None)
+    cable_hit_for(CableRouting::J, document, panel, pan, zoom, pointer)
+}
+
+fn cable_hit_for(
+    style: CableRouting,
+    document: &GraphDocument,
+    panel: Rect,
+    pan: Vec2,
+    zoom: f32,
+    pointer: Pos2,
+) -> Option<ConnectionKey> {
+    cable_hit_with_hold_for(style, document, panel, pan, zoom, pointer, None)
+}
+
+fn cable_hit_with_hold(
+    document: &GraphDocument,
+    panel: Rect,
+    pan: Vec2,
+    zoom: f32,
+    pointer: Pos2,
+    held: Option<&ConnectionKey>,
+) -> Option<ConnectionKey> {
+    cable_hit_with_hold_for(CableRouting::J, document, panel, pan, zoom, pointer, held)
 }
 
 /// Hit-test the cable path reconstructed from the current node positions.
 /// `held` keeps an existing target while the pointer is still within the wider
 /// release band of its new path.
-fn cable_hit_with_hold(
+fn cable_hit_with_hold_for(
+    style: CableRouting,
     document: &GraphDocument,
     panel: Rect,
     pan: Vec2,
@@ -2642,40 +2703,22 @@ fn cable_hit_with_hold(
         let y0 = source_rect.max.y;
         let x1 = port_x(target_rect, port_index(inputs, &connection.input), inputs.len(), zoom);
         let y1 = target_rect.min.y;
-        let route = crate::routing::route(x0, y0, x1, y1, zoom);
-        let p0 = Pos2::new(x0, y0);
-        let p1 = route.control1;
-        let p2 = route.control2;
-        let p3 = Pos2::new(x1, y1);
-        // Broad phase: the cubic lies inside the bounding box of its four
-        // control points. This is exact for the routed path, so culling can
-        // never hide a cable near the pointer.
-        let hull = Rect::from_min_max(
-            Pos2::new(
-                p0.x.min(p1.x).min(p2.x).min(p3.x),
-                p0.y.min(p1.y).min(p2.y).min(p3.y),
-            ),
-            Pos2::new(
-                p0.x.max(p1.x).max(p2.x).max(p3.x),
-                p0.y.max(p1.y).max(p2.y).max(p3.y),
-            ),
-        )
-        .expand(CABLE_HIT_RELEASE);
-        if !hull.contains(pointer) {
+        let route = crate::routing::route_nodes_for(
+            style,
+            source_rect,
+            target_rect,
+            x0,
+            y0,
+            x1,
+            y1,
+            zoom,
+        );
+        // Broad phase: the cubic control hull always contains the curve.
+        if !route.control_bounds().expand(CABLE_HIT_RELEASE).contains(pointer) {
             continue;
         }
-        let mut distance = f32::INFINITY;
-        let mut previous = p0;
-        for step in 1..=24 {
-            let t = step as f32 / 24.0;
-            let u = 1.0 - t;
-            let point = Pos2::new(
-                u * u * u * p0.x + 3.0 * u * u * t * p1.x + 3.0 * u * t * t * p2.x + t * t * t * p3.x,
-                u * u * u * p0.y + 3.0 * u * u * t * p1.y + 3.0 * u * t * t * p2.y + t * t * t * p3.y,
-            );
-            distance = distance.min(distance_to_segment(pointer, previous, point));
-            previous = point;
-        }
+        let samples = (32 / route.count.max(1)).max(4);
+        let distance = route.distance_to(pointer, samples);
         let key = ConnectionKey::from_connection(connection);
         if held.is_some_and(|held| held == &key) {
             held_distance = distance;
@@ -2772,7 +2815,28 @@ fn geometry_key(
     viewer_breakpoint: Option<&str>,
     theme: &crate::theme::CanvasTheme,
 ) -> u64 {
+    geometry_key_for(
+        CableRouting::J,
+        document,
+        selected,
+        selected_connections,
+        z_order,
+        viewer_breakpoint,
+        theme,
+    )
+}
+
+fn geometry_key_for(
+    routing: CableRouting,
+    document: &GraphDocument,
+    selected: &HashSet<String>,
+    selected_connections: &HashSet<ConnectionKey>,
+    z_order: &[String],
+    viewer_breakpoint: Option<&str>,
+    theme: &crate::theme::CanvasTheme,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    routing.setting_id().hash(&mut hasher);
     for node in &document.nodes {
         node.id.hash(&mut hasher);
         node.node_type.hash(&mut hasher);
@@ -3096,6 +3160,16 @@ fn build_cables(
     selected_connections: &HashSet<ConnectionKey>,
     theme: &crate::theme::CanvasTheme,
 ) -> Vec<CableVertex> {
+    build_cables_for(CableRouting::J, document, selected, selected_connections, theme)
+}
+
+fn build_cables_for(
+    routing_style: CableRouting,
+    document: &GraphDocument,
+    selected: &HashSet<String>,
+    selected_connections: &HashSet<ConnectionKey>,
+    theme: &crate::theme::CanvasTheme,
+) -> Vec<CableVertex> {
     let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
         .nodes
         .iter()
@@ -3124,6 +3198,16 @@ fn build_cables(
         let inputs = node_inputs(to_node);
         let from_x = port_x(start, port_index(outputs, &connection.out), outputs.len(), 1.0);
         let to_x = port_x(end, port_index(inputs, &connection.input), inputs.len(), 1.0);
+        let routing = crate::routing::route_nodes_for(
+            routing_style,
+            start,
+            end,
+            from_x,
+            start.max.y,
+            to_x,
+            end.min.y,
+            1.0,
+        );
         let is_selected = selected_cables.as_ref().is_some_and(|keys| {
             keys.contains(&(
                 connection.from.as_str(),
@@ -3139,15 +3223,13 @@ fn build_cables(
             theme.f32(theme.cable)
         };
         let outline = if highlighted { selected_outline } else { outline };
-        cables.push(CableVertex {
-            a: [from_x, start.max.y],
-            b: [to_x, end.min.y],
+        cables.push(CableVertex::new(
+            &routing,
             core,
             outline,
-            width: total_width,
+            total_width,
             core_ratio,
-            _pad: [0.0; 2],
-        });
+        ));
     }
     cables
 }
@@ -3339,26 +3421,21 @@ mod tests {
         let inputs = node_inputs(to);
         let x0 = port_x(from_rect, port_index(outputs, &connection.out), outputs.len(), 1.0);
         let x1 = port_x(to_rect, port_index(inputs, &connection.input), inputs.len(), 1.0);
-        let route = crate::routing::route(x0, from_rect.max.y, x1, to_rect.min.y, 1.0);
+        let route = crate::routing::route_nodes(
+            from_rect,
+            to_rect,
+            x0,
+            from_rect.max.y,
+            x1,
+            to_rect.min.y,
+            1.0,
+        );
         let map = |point: Pos2| {
             Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP) + pan + point.to_vec2() * zoom
         };
-        let p0 = map(Pos2::new(x0, from_rect.max.y));
-        let p1 = map(route.control1);
-        let p2 = map(route.control2);
-        let p3 = map(Pos2::new(x1, to_rect.min.y));
-        let t = 0.5;
-        let u = 1.0 - t;
-        let point = Pos2::new(
-            u * u * u * p0.x + 3.0 * u * u * t * p1.x + 3.0 * u * t * t * p2.x + t * t * t * p3.x,
-            u * u * u * p0.y + 3.0 * u * u * t * p1.y + 3.0 * u * t * t * p2.y + t * t * t * p3.y,
-        );
-        let derivative = Vec2::new(
-            3.0 * (u * u * (p1.x - p0.x) + 2.0 * u * t * (p2.x - p1.x) + t * t * (p3.x - p2.x)),
-            3.0 * (u * u * (p1.y - p0.y) + 2.0 * u * t * (p2.y - p1.y) + t * t * (p3.y - p2.y)),
-        );
+        let (point, derivative) = route.sample(0.5);
         let normal = Vec2::new(-derivative.y, derivative.x).normalized();
-        (point, ConnectionKey::from_connection(connection), normal)
+        (map(point), ConnectionKey::from_connection(connection), normal)
     }
 
     #[test]
@@ -3461,9 +3538,128 @@ mod tests {
             &crate::theme::CanvasTheme::default(),
         );
         assert_eq!(cables.len(), 1);
-        assert!(cables[0].a[0] < cables[0].b[0]);
-        assert!(cables[0].a[1] < cables[0].b[1]);
-        assert_eq!(cables[0].width, 7.0);
+        let count = cables[0].params[2] as usize;
+        let point = |index: usize| -> [f32; 2] {
+            let packed = cables[0].points[index / 2];
+            if index % 2 == 0 {
+                [packed[0], packed[1]]
+            } else {
+                [packed[2], packed[3]]
+            }
+        };
+        let start = point(0);
+        let end = point(count * 3);
+        assert!(start[0] < end[0]);
+        assert!(start[1] < end[1]);
+        assert_eq!(cables[0].params[0], 7.0);
+    }
+
+    #[test]
+    fn upward_cable_instances_carry_the_wrap_and_clear_the_cards() {
+        let mut document = GraphDocument::new("cable-wrap");
+        let bottom = nodecraft_session::GraphNode {
+            id: "bottom".into(),
+            node_type: "primitive".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 300.0,
+        };
+        let top = nodecraft_session::GraphNode {
+            id: "top".into(),
+            node_type: "translate".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        document.nodes = vec![bottom.clone(), top.clone()];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "bottom".into(),
+            to: "top".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        let cables = build_cables(
+            &document,
+            &HashSet::new(),
+            &HashSet::new(),
+            &crate::theme::CanvasTheme::default(),
+        );
+        assert_eq!(cables.len(), 1);
+        let cable = cables[0];
+        // Match whatever the shared routing function chose for this geometry:
+        // the GPU instance must carry exactly that path.
+        let from = graph_rect(&document.nodes[0]);
+        let to = graph_rect(&document.nodes[1]);
+        let outputs = node_outputs(&document.nodes[0]);
+        let inputs = node_inputs(&document.nodes[1]);
+        let x0 = port_x(from, port_index(outputs, "shape"), outputs.len(), 1.0);
+        let x1 = port_x(to, port_index(inputs, "shape"), inputs.len(), 1.0);
+        let expected =
+            crate::routing::route_nodes(from, to, x0, from.max.y, x1, to.min.y, 1.0);
+        assert_eq!(cable.params[2], expected.count as f32);
+        let point = |index: usize| -> [f32; 2] {
+            let packed = cable.points[index / 2];
+            if index % 2 == 0 {
+                [packed[0], packed[1]]
+            } else {
+                [packed[2], packed[3]]
+            }
+        };
+        // Ports leave and enter vertically.
+        assert!((point(1)[0] - point(0)[0]).abs() < 1.0e-3);
+        assert!((point(24)[0] - point(23)[0]).abs() < 1.0e-3);
+        
+        // Ports leave and enter close to vertical regardless of the chosen shape.
+        let start = point(0);
+        let second = point(1);
+        assert!((second[0] - start[0]).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn cable_routing_style_changes_built_cables() {
+        let mut document = GraphDocument::new("routing-style");
+        let bottom = nodecraft_session::GraphNode {
+            id: "bottom".into(),
+            node_type: "primitive".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 300.0,
+        };
+        let top = nodecraft_session::GraphNode {
+            id: "top".into(),
+            node_type: "translate".into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        document.nodes = vec![bottom, top];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "bottom".into(),
+            to: "top".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        let theme = crate::theme::CanvasTheme::default();
+        let j = build_cables_for(
+            CableRouting::J,
+            &document,
+            &HashSet::new(),
+            &HashSet::new(),
+            &theme,
+        );
+        let bezier = build_cables_for(
+            CableRouting::Bezier,
+            &document,
+            &HashSet::new(),
+            &HashSet::new(),
+            &theme,
+        );
+        assert_eq!(j[0].params[2], 8.0);
+        assert_eq!(bezier[0].params[2], 1.0);
     }
 
     #[test]
@@ -3497,8 +3693,8 @@ mod tests {
         theme.cable_width = 24.0;
         theme.cable_outline_width = 6.0;
         let cables = build_cables(&document, &HashSet::new(), &HashSet::new(), &theme);
-        assert_eq!(cables[0].width, 30.0);
-        assert!((cables[0].core_ratio - 0.8).abs() < f32::EPSILON);
+        assert_eq!(cables[0].params[0], 30.0);
+        assert!((cables[0].params[1] - 0.8).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3623,6 +3819,77 @@ mod tests {
             println!(
                 "frame nodes={n:>6} avg_cpu_ms={:>8.2}",
                 total / f64::from(frames)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "performance baseline; run with --ignored --nocapture"]
+    fn baseline_cable_hit_scaling() {
+        use std::time::Instant;
+        for n in [100usize, 1_000, 5_000, 10_000] {
+            let mut document = GraphDocument::new("hit-baseline");
+            let columns = (n as f64).sqrt().ceil() as usize;
+            for index in 0..n {
+                document.nodes.push(nodecraft_session::GraphNode {
+                    id: format!("n{index}"),
+                    node_type: "translate".into(),
+                    values: Default::default(),
+                    suppressed: false,
+                    x: (index % columns) as f64 * 220.0,
+                    y: (index / columns) as f64 * 160.0,
+                });
+                if index > 0 {
+                    document.connections.push(nodecraft_session::GraphConnection {
+                        from: format!("n{}", index - 1),
+                        to: format!("n{index}"),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    });
+                }
+            }
+            let panel = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
+            let pointer = panel.center();
+            let _ = cable_hit(&document, panel, Vec2::ZERO, 1.0, pointer);
+            let samples = 20;
+            let start = Instant::now();
+            for _ in 0..samples {
+                let _ = cable_hit(&document, panel, Vec2::ZERO, 1.0, pointer);
+            }
+            let hit_ms = start.elapsed().as_secs_f64() * 1000.0 / samples as f64;
+            let node_lookup: HashMap<&str, &nodecraft_session::GraphNode> = document
+                .nodes
+                .iter()
+                .map(|node| (node.id.as_str(), node))
+                .collect();
+            let start = Instant::now();
+            for _ in 0..samples {
+                for connection in &document.connections {
+                    let from = node_lookup[connection.from.as_str()];
+                    let to = node_lookup[connection.to.as_str()];
+                    let from_rect = graph_rect(from);
+                    let to_rect = graph_rect(to);
+                    let outputs = node_outputs(from);
+                    let inputs = node_inputs(to);
+                    let x0 = port_x(from_rect, port_index(outputs, "shape"), outputs.len(), 1.0);
+                    let x1 = port_x(to_rect, port_index(inputs, "shape"), inputs.len(), 1.0);
+                    let _ = crate::routing::route_nodes_for(
+                        CableRouting::J,
+                        from_rect,
+                        to_rect,
+                        x0,
+                        from_rect.max.y,
+                        x1,
+                        to_rect.min.y,
+                        1.0,
+                    )
+                    .polyline(64);
+                }
+            }
+            let route_ms = start.elapsed().as_secs_f64() * 1000.0 / samples as f64;
+            println!(
+                "hit nodes={n:>6} avg_ms={hit_ms:8.3} route_polyline_ms={route_ms:8.3} cables={}",
+                document.connections.len()
             );
         }
     }
@@ -4171,29 +4438,22 @@ mod tests {
         let inputs = node_inputs(&to);
         let x0 = port_x(from_rect, port_index(outputs, "shape"), outputs.len(), 1.0);
         let x1 = port_x(to_rect, port_index(inputs, "shape"), inputs.len(), 1.0);
-        // This is the same world-space cubic the retained GPU geometry builds.
-        let world = crate::routing::route(x0, from_rect.max.y, x1, to_rect.min.y, 1.0);
+        // This is the same world-space path the retained GPU geometry builds.
+        let world = crate::routing::route_nodes(
+            from_rect,
+            to_rect,
+            x0,
+            from_rect.max.y,
+            x1,
+            to_rect.min.y,
+            1.0,
+        );
         let map = |point: Pos2| {
             Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP)
                 + pan
                 + point.to_vec2() * zoom
         };
-        let start = map(Pos2::new(x0, from_rect.max.y));
-        let c1 = map(world.control1);
-        let c2 = map(world.control2);
-        let end = map(Pos2::new(x1, to_rect.min.y));
-        let t = 0.5;
-        let mt = 1.0 - t;
-        let cursor = Pos2::new(
-            mt * mt * mt * start.x
-                + 3.0 * mt * mt * t * c1.x
-                + 3.0 * mt * t * t * c2.x
-                + t * t * t * end.x,
-            mt * mt * mt * start.y
-                + 3.0 * mt * mt * t * c1.y
-                + 3.0 * mt * t * t * c2.y
-                + t * t * t * end.y,
-        );
+        let cursor = map(world.sample(0.5).0);
         assert_eq!(
             cable_hit(&document, panel, pan, zoom, cursor),
             Some(ConnectionKey::from_connection(&connection))

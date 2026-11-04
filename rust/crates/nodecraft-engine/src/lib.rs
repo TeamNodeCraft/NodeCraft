@@ -15,9 +15,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Shared SolidCore kernel constructor for worker threads.
+#[must_use]
+pub fn nodecraft_solidcore_kernel() -> nodecraft_solidcore::solidcore::kernel::Kernel {
+    nodecraft_solidcore::kernel::kernel()
+}
+
 /// Upstream SolidCraft sketch model: points, curves, constraints, solver and
 /// profile detection. This replaces the retired JS/Python sketch implementation.
 mod node_task;
+pub mod display;
+pub mod mesher;
 pub mod workload;
 pub mod scheduler;
 pub mod kernel_pool;
@@ -1446,6 +1454,9 @@ pub struct ProgressEvent {
 
 const MESH_CACHE_BYTES: usize = 256 << 20;
 const BREP_CACHE_BYTES: usize = 256 << 20;
+const DEFAULT_PART_CACHE_ENTRIES: usize = 8192;
+const MAX_PART_CACHE_ENTRIES: usize = 65_536;
+const BODY_MESH_CACHE_BYTES: usize = 256 << 20;
 
 #[derive(Clone, Debug)]
 pub struct EngineCache {
@@ -1463,7 +1474,14 @@ pub struct EngineCache {
     /// exact export data.
     parts: HashMap<(String, String), Arc<Part>>,
     part_order: std::collections::VecDeque<(String, String)>,
+    part_limit: usize,
     parts_hits: u64,
+    /// Display meshes keyed by the identity of the immutable body B-rep and
+    /// tessellation tolerance. A transform only changes placement, so reusing
+    /// the body's local mesh avoids retessellating a large Part on every drag.
+    body_meshes: HashMap<(usize, u64), (Arc<nodecraft_solidcore::solidcore::topology::Brep>, Arc<Mesh>)>,
+    body_mesh_order: std::collections::VecDeque<(usize, u64)>,
+    body_mesh_bytes: usize,
     failures: HashMap<(String, String), String>,
     failure_order: std::collections::VecDeque<(String, String)>,
     failure_hits: u64,
@@ -1481,7 +1499,7 @@ impl Default for EngineCache {
 impl EngineCache {
     #[must_use]
     pub fn new() -> Self {
-        Self { meshes: HashMap::new(), mesh_order: std::collections::VecDeque::new(), mesh_bytes: 0, mesh_limit: MESH_CACHE_BYTES, breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), parts_hits: 0, failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
+        Self { meshes: HashMap::new(), mesh_order: std::collections::VecDeque::new(), mesh_bytes: 0, mesh_limit: MESH_CACHE_BYTES, breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, body_meshes: HashMap::new(), body_mesh_order: std::collections::VecDeque::new(), body_mesh_bytes: 0, failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
     }
 
     #[must_use]
@@ -1540,12 +1558,59 @@ impl EngineCache {
         self.parts.get(key).cloned()
     }
 
+    #[must_use]
+    pub fn body_mesh(
+        &self,
+        brep: &Arc<nodecraft_solidcore::solidcore::topology::Brep>,
+        tolerance: f64,
+    ) -> Option<Arc<Mesh>> {
+        let key = (Arc::as_ptr(brep) as usize, tolerance.to_bits());
+        let (stored, mesh) = self.body_meshes.get(&key)?;
+        // The allocator can reuse a pointer after a B-rep is dropped; keep the
+        // Arc in the entry and verify identity before trusting the mesh.
+        Arc::ptr_eq(stored, brep).then(|| Arc::clone(mesh))
+    }
+
+    pub fn insert_body_mesh(
+        &mut self,
+        brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
+        tolerance: f64,
+        mesh: Arc<Mesh>,
+    ) {
+        let key = (Arc::as_ptr(&brep) as usize, tolerance.to_bits());
+        let bytes = mesh_bytes(&mesh);
+        if let Some((_, old)) = self.body_meshes.insert(key, (brep, mesh)) {
+            self.body_mesh_bytes = self.body_mesh_bytes.saturating_sub(mesh_bytes(&old));
+        } else {
+            self.body_mesh_order.push_back(key);
+        }
+        self.body_mesh_bytes = self.body_mesh_bytes.saturating_add(bytes);
+        while self.body_mesh_bytes > BODY_MESH_CACHE_BYTES {
+            let Some(oldest) = self.body_mesh_order.pop_front() else { break; };
+            if let Some((_, mesh)) = self.body_meshes.remove(&oldest) {
+                self.body_mesh_bytes = self.body_mesh_bytes.saturating_sub(mesh_bytes(&mesh));
+            }
+        }
+    }
+
+    /// Size the Part cache for the current graph. A large flat forest can have
+    /// more Part-producing nodes than the default budget; evicting them between
+    /// transform edits makes upstream combines recompute on every drag.
+    pub fn ensure_part_capacity(&mut self, node_count: usize) {
+        self.part_limit = node_count
+            .saturating_add(2048)
+            .clamp(DEFAULT_PART_CACHE_ENTRIES, MAX_PART_CACHE_ENTRIES);
+        while self.parts.len() > self.part_limit {
+            let Some(oldest) = self.part_order.pop_front() else { break; };
+            self.parts.remove(&oldest);
+        }
+    }
+
     pub fn insert_part(&mut self, key: (String, String), part: Arc<Part>) {
-        const PART_CACHE_ENTRIES: usize = 8192;
         if self.parts.insert(key.clone(), part).is_none() {
             self.part_order.push_back(key);
         }
-        while self.parts.len() > PART_CACHE_ENTRIES {
+        while self.parts.len() > self.part_limit {
             let Some(oldest) = self.part_order.pop_front() else { break; };
             self.parts.remove(&oldest);
         }
@@ -1704,6 +1769,17 @@ enum BodyTransform {
     Mirror { plane: &'static str, offset: f64 },
     Scale { factor: f64 },
 }
+
+impl From<&BodyTransform> for crate::display::DisplayTransform {
+    fn from(transform: &BodyTransform) -> Self {
+        match transform {
+            BodyTransform::Place { offset, rotation } => Self::Place { offset: *offset, rotation: *rotation },
+            BodyTransform::Mirror { plane, offset } => Self::Mirror { plane, offset: *offset },
+            BodyTransform::Scale { factor } => Self::Scale { factor: *factor },
+        }
+    }
+}
+
 
 #[derive(Clone, Debug)]
 struct SketchInstance {
@@ -2794,7 +2870,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             .evaluate_part(node_id)
             .and_then(|part| {
                 self.brep_timings.insert(node_id.into(), part_started.elapsed().as_secs_f64() * 1000.0);
-                self.part_display_mesh(&part)
+                self.part_display_mesh(node_id, &part)
             });
         match result {
             Ok(mesh) => {
@@ -2842,7 +2918,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     }
 
     /// Tessellate the final exact Part once, using standard display density.
-    fn part_display_mesh(&self, part: &Part) -> Result<Mesh, String> {
+    fn part_display_mesh(&mut self, node_id: &str, part: &Part) -> Result<Mesh, String> {
+        self.part_mesh_asset(node_id, part).map(|asset| asset.merged())
+    }
+
+    fn part_mesh_asset(&mut self, node_id: &str, part: &Part) -> Result<crate::display::MeshAsset, String> {
         if part.bodies.is_empty() && part.sketches.is_empty() {
             return Err("Part has no geometry to display".into());
         }
@@ -2850,78 +2930,97 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if token.is_cancelled() {
             return Err("evaluation cancelled".into());
         }
-        let mut meshes = Vec::with_capacity(part.bodies.len() + part.sketches.len());
+        let mut asset = crate::display::MeshAsset::default();
+        asset.instances.reserve(part.bodies.len() + part.sketches.len());
         if !part.bodies.is_empty() {
-            // One meshing path for one or many bodies. Keep only a few jobs in
-            // flight so a large Part cannot flood the queue or clone every body
-            // at once.
-            let pool = crate::kernel_pool::shared_mesh_pool();
-            let limit = if crate::workload_profiler_enabled() {
-                crate::workload::profile_request(self.request)
-                    .mesh_bodies
-                    .max(1)
-                    .min(pool.workers().max(1) * 2)
-            } else {
-                pool.workers().max(1) * 2
-            };
-            let mut pending = part.bodies.iter().enumerate();
-            let mut running: std::collections::VecDeque<(usize, std::sync::mpsc::Receiver<Result<Result<Mesh, String>, String>>)> =
-                std::collections::VecDeque::new();
+            let tolerance = nodecraft_mesh::display_tolerance();
+            let content_hash = self.request.nodes.iter()
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.cache.as_ref()?.key.clone())
+                .unwrap_or_default();
+            let key = crate::display::MeshKey::new(node_id, content_hash, tolerance);
             let mut outputs = BTreeMap::new();
-            loop {
-                if token.is_cancelled() {
-                    return Err("evaluation cancelled".into());
+            let mut pending = Vec::new();
+            // Placement-only edits reuse each body's local tessellation. Only
+            // the transform is reapplied; the B-rep is not tessellated again.
+            for (index, body) in part.bodies.iter().enumerate() {
+                let transforms = body_transforms(body.body.as_ref(), part, index);
+                if let Some(local) = self.cache.body_mesh(&body.body, tolerance) {
+                    outputs.insert(index, crate::display::MeshInstance {
+                        mesh: local,
+                        transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
+                    });
+                } else {
+                    pending.push((index, body.body.clone(), transforms));
                 }
-                while running.len() < limit {
-                    let Some((index, body)) = pending.next() else { break };
-                    let body = body.body.clone();
-                    let transforms = body_transforms(body.as_ref(), part, index);
-                    running.push_back((index, pool.submit(
-                        index as u64,
-                        token.clone(),
-                        move |kernel| -> Result<Mesh, String> {
-                            let mut mesh = nodecraft_solidcore::curved::brep_display_mesh(
-                                kernel,
-                                &body,
-                                &nodecraft_solidcore::curved::CurvedTessOptions::default(),
-                            )?;
-                            for transform in &transforms {
-                                mesh = match transform {
-                                    BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
-                                    BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
-                                    BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
-                                };
-                            }
-                            Ok(mesh)
-                        },
-                    )));
-                }
-                let Some((index, receiver)) = running.pop_front() else { break };
-                let mesh = receiver
-                    .recv()
-                    .map_err(|_| "mesher worker stopped".to_owned())??;
-                outputs.insert(index, mesh?);
             }
-            meshes.extend(outputs.into_values());
+            if !pending.is_empty() {
+                let mesher = crate::mesher::shared_mesher();
+                let limit = if crate::workload_profiler_enabled() {
+                    crate::workload::profile_request(self.request)
+                        .mesh_bodies
+                        .max(1)
+                        .min(mesher.workers().max(1) * 2)
+                } else {
+                    mesher.workers().max(1) * 2
+                };
+                let mut pending = pending.into_iter();
+                let mut running: std::collections::VecDeque<(
+                    usize,
+                    Arc<nodecraft_solidcore::solidcore::topology::Brep>,
+                    Vec<BodyTransform>,
+                    std::sync::mpsc::Receiver<crate::mesher::MeshResult>,
+                )> = std::collections::VecDeque::new();
+                loop {
+                    if token.is_cancelled() {
+                        return Err("evaluation cancelled".into());
+                    }
+                    while running.len() < limit {
+                        let Some((index, body, transforms)) = pending.next() else { break };
+                        let revision = crate::display::MeshRevision::new(self.request.request_id, token.clone());
+                        let request = crate::display::MeshRequest {
+                            key: key.clone(),
+                            revision: self.request.request_id,
+                            body: crate::display::MeshBody {
+                                brep: body.clone(),
+                                transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
+                            },
+                        };
+                        running.push_back((index, body, transforms, mesher.submit(request, revision)));
+                    }
+                    let Some((index, body, transforms, receiver)) = running.pop_front() else { break };
+                    let result = receiver.recv().map_err(|_| "mesher worker stopped".to_owned())?;
+                    if result.revision != self.request.request_id {
+                        continue;
+                    }
+                    let mut result_asset = result.asset?;
+                    let Some(instance) = result_asset.instances.pop() else {
+                        return Err("mesher returned no instance".into());
+                    };
+                    self.cache.insert_body_mesh(body, tolerance, instance.mesh.clone());
+                    outputs.insert(index, crate::display::MeshInstance {
+                        mesh: instance.mesh,
+                        transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
+                    });
+                }
+            }
+            asset.instances.extend(outputs.into_values());
         }
         for sketch in &part.sketches {
             // Sketch and spline profiles display as their boundary curves.
             let mut mesh = spline_display_mesh(&sketch.output.sketch);
-            mesh = mesh_placement(&mesh, sketch.output.offset, [0.0; 3]);
-            for transform in &sketch.transforms {
-                mesh = match transform {
-                    BodyTransform::Place { offset, rotation } => mesh_placement(&mesh, *offset, *rotation),
-                    BodyTransform::Mirror { plane, offset } => mesh_mirror(&mesh, plane, *offset),
-                    BodyTransform::Scale { factor } => mesh_scale(&mesh, *factor),
-                };
-            }
-            meshes.push(mesh);
+            let mut transforms = Vec::with_capacity(sketch.transforms.len() + 1);
+            transforms.push(crate::display::DisplayTransform::Place { offset: sketch.output.offset, rotation: [0.0; 3] });
+            transforms.extend(sketch.transforms.iter().map(crate::display::DisplayTransform::from));
+            mesh = crate::display::MeshAsset {
+                instances: vec![crate::display::MeshInstance { mesh: std::sync::Arc::new(mesh), transforms }],
+            }.merged();
+            asset.instances.push(crate::display::MeshInstance {
+                mesh: std::sync::Arc::new(mesh),
+                transforms: Vec::new(),
+            });
         }
-        if meshes.len() == 1 {
-            Ok(meshes.pop().expect("one mesh"))
-        } else {
-            Ok(nodecraft_mesh::merge_meshes(meshes))
-        }
+        Ok(asset)
     }
 
     fn evaluate(&mut self, node_id: &str) -> Option<Mesh> {
@@ -2983,7 +3082,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if !self.request.mesh_targets.as_ref().is_some_and(Vec::is_empty)
             && part_supported(&node.node_type)
             && let Ok(part) = self.evaluate_part(node_id)
-            && let Ok(mesh) = self.part_display_mesh(&part)
+            && let Ok(mesh) = self.part_display_mesh(node_id, &part)
         {
             self.emit_progress(node_id, ProgressPhase::Start);
             self.objects.insert(node_id.into(), mesh.clone());
@@ -3396,7 +3495,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 // instances through the Part path, then tessellate them. The
                 // display path must not maintain a separate mesh-only scatter.
                 let part = self.evaluate_part(node_id)?;
-                self.part_display_mesh(&part)
+                self.part_display_mesh(node_id, &part)
                     .map_err(|error| format!("Scatter display mesh: {error}"))
             })(),
             "combine" => {
@@ -3631,6 +3730,16 @@ fn ancestors_of(request: &Request, target: &str) -> HashSet<String> {
     seen
 }
 
+/// Whether display meshes for this node type come from the exact Part path.
+///
+/// Part-path targets flatten their solids into one merged mesh with
+/// `body:{index}:` names in Part body order. Callers that need to map display
+/// bodies back to graph nodes must mirror this decision.
+#[must_use]
+pub fn part_display_supported(node_type: &str) -> bool {
+    part_supported(node_type)
+}
+
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
@@ -3726,6 +3835,7 @@ pub fn evaluate(
     let (request_id, tab_id, graph_revision) = (request.request_id, request.tab_id.clone(), request.graph_revision.clone());
     let mut eval = Eval::new(&request, progress);
     eval.cache = cache;
+    eval.cache.ensure_part_capacity(request.nodes.len());
     eval.prewarm_primitives();
     // Evaluate the target closure once in topological order. Downstream nodes only
     // consume already-computed outputs; no branch/target can re-enter a node.
@@ -3836,6 +3946,15 @@ pub fn evaluate(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn part_cache_capacity_grows_for_large_graphs() {
+        let mut cache = EngineCache::new();
+        cache.ensure_part_capacity(10_000);
+        assert!(cache.part_limit >= 10_000, "large graph should size the Part cache");
+        cache.ensure_part_capacity(1);
+        assert_eq!(cache.part_limit, DEFAULT_PART_CACHE_ENTRIES);
+    }
+
     use super::*;
     use std::sync::mpsc;
 
