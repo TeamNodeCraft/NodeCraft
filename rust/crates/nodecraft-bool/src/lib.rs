@@ -211,7 +211,11 @@ pub fn boolean_lists_batched(
     if b.len() <= BATCH {
         return boolean_lists_breps(kernel, a, b, op);
     }
-    let mut current = a.to_vec();
+    let mut current: Vec<Brep> = a
+        .iter()
+        .map(|brep| brep.clone_standing_for_self())
+        .collect::<Result<_, _>>()
+        .map_err(|error| map_error("Boolean input copy", &error))?;
     for (index, chunk) in b.chunks(BATCH).enumerate() {
         current = boolean_lists_breps(kernel, &current, chunk, op)
             .map_err(|error| format!("Boolean batch {index} ({} tools): {error}", chunk.len()))?;
@@ -702,7 +706,7 @@ mod tests {
 
     /// Exact B-rep volume through solidcore's mass-properties integrator.
     fn volume(brep: &Brep) -> Result<f64, String> {
-        let mut copy = brep.clone();
+        let mut copy = brep.clone_standing_for_self().map_err(|error| error.to_string())?;
         let store = AttributeStore::default();
         let attributes = solidcore::mass::integrator::properties::PropertyAttributes {
             store: &store,

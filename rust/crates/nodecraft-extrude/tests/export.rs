@@ -48,8 +48,8 @@ fn solidcore_measures(k: &Kernel, brep: &Brep) -> (f64, f64) {
         store: &store,
         key_of: &|_| ObjectKey(0),
     };
-    let mut area_copy = brep.clone();
-    let mut volume_copy = brep.clone();
+    let mut area_copy = brep.clone_standing_for_self().expect("standing copy");
+    let mut volume_copy = brep.clone_standing_for_self().expect("standing copy");
     (
         brep_area(k, &mut area_copy, 1e-4).expect("area"),
         brep_volume(k, &mut volume_copy, 1e-4, &attributes).expect("volume"),

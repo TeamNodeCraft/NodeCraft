@@ -35,7 +35,7 @@ pub fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, St
     if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
         return Ok(DifferenceMeshes { removed: Mesh::default(), added: Mesh::default() });
     }
-    let removed = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, before.clone(), after.clone())?;
+    let removed = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, crate::copy_brep(&before)?, crate::copy_brep(&after)?)?;
     let added = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, after, before)?;
     Ok(DifferenceMeshes {
         // One side of a pure cut/extrude difference is legitimately empty. An

@@ -406,7 +406,7 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
 
 fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
     match node.node_type.as_str() {
-        "primitive" => primitive_specs(node),
+        "solid" | "primitive" => primitive_specs(node),
         "spline" => vec![
             slider("degree", "Degree", 3.0, 1.0, 9.0, 1.0),
             switch("control", "Control points", false),
@@ -626,7 +626,7 @@ fn draw_number(
 
 pub fn node_title(node: &GraphNode) -> String {
     match node.node_type.as_str() {
-        "primitive" => {
+        "solid" | "primitive" => {
             let kind = node.values.get("primitiveType").and_then(Value::as_str).unwrap_or("box");
             match kind {
                 "box" => "Box".to_owned(),
@@ -681,7 +681,7 @@ pub fn node_badge(node: &GraphNode) -> String {
         "translate" => "Transform",
         "boolean" | "fuse" => "Boolean",
         "combine" => "Part",
-        "primitive" => "Solid",
+        "solid" | "primitive" => "Solid",
         "sketch" => "Sketch",
         "spline" => "Curve",
         "extrude" => "Operation",
@@ -699,7 +699,7 @@ fn section_title(node: &GraphNode) -> &'static str {
         "translate" => "TRANSFORM",
         "boolean" | "fuse" => "OPERATION",
         "combine" => "SHAPES",
-        "primitive" => "PARAMETERS",
+        "solid" | "primitive" => "PARAMETERS",
         "sketch" => "SKETCH",
         "spline" => "SPLINE",
         "extrude" => "EXTRUSION",
@@ -720,7 +720,7 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "stepimporter" => "Imports STEP solids and surfaces. Requires a local .step/.stp file.".to_owned(),
         "exporter" => "Writes the connected shape to a STEP file on disk.".to_owned(),
         "translate" => "Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo.".to_owned(),
-        "primitive" => "Creates a parametric primitive solid. Dimensions are in model units.".to_owned(),
+        "solid" | "primitive" => "Creates a parametric primitive solid. Dimensions are in model units.".to_owned(),
         "boolean" | "fuse" => {
             let mode = node.values.get("mode").and_then(Value::as_str).unwrap_or("union");
             match mode {
@@ -945,6 +945,13 @@ fn action_buttons(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     }
 }
 
+/// The loaded STEP file's display name, without its extension.
+fn step_file_name(node: &GraphNode) -> Option<String> {
+    let path = node.values.get("path").and_then(Value::as_str)?;
+    let name = std::path::Path::new(path).file_stem()?.to_str()?;
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 /// Draw the generated inspector for one node and return field and action changes.
 pub fn show(
     ui: &mut Ui,
@@ -954,6 +961,16 @@ pub fn show(
 ) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
+        if let Some(name) = step_file_name(node) {
+            let theme = crate::theme::get();
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new(format!("File name: {name}"))
+                    .size(12.0)
+                    .strong()
+                    .color(theme.color(theme.text)),
+            );
+        }
         section_label(ui, section_title(node));
         step_import_fields(ui, node, &mut output);
     } else if node.node_type == "linkedpart" {
@@ -1107,6 +1124,14 @@ mod tests {
         let translate = known_specs(&node("translate", Value::Null));
         let x = translate.iter().find(|spec| spec.key == "x").expect("x");
         assert!(matches!(x.widget, Widget::Number { min: None, max: None, .. }));
+    }
+
+    #[test]
+    fn step_file_name_drops_the_extension() {
+        let step = node("stepimporter", serde_json::json!({ "path": "/tmp/models/MoonBaguette.stp" }));
+        assert_eq!(step_file_name(&step).as_deref(), Some("MoonBaguette"));
+        let no_path = node("stepimporter", serde_json::json!({}));
+        assert_eq!(step_file_name(&no_path), None);
     }
 
     #[test]

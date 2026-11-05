@@ -35,7 +35,7 @@ impl WorkloadProfile {
 
 fn exact_weight(node_type: &str) -> usize {
     match node_type {
-        "primitive" | "translate" | "mirror" | "groupinput" | "groupoutput" => 1,
+        "solid" | "primitive" | "translate" | "mirror" | "groupinput" | "groupoutput" => 1,
         "combine" | "sketch" | "spline" | "exporter" => 1,
         "stepimporter" | "boolean" | "fuse" => 8,
         "extrude" => 6,
@@ -56,7 +56,7 @@ fn mesh_bodies(node: &Node) -> usize {
             .unwrap_or(100.0)
             .round()
             .clamp(1.0, 5000.0) as usize,
-        "primitive" | "stepimporter" => 1,
+        "solid" | "primitive" | "stepimporter" => 1,
         _ => 0,
     }
 }
@@ -183,9 +183,9 @@ mod tests {
     #[test]
     fn profiles_depth_and_ready_width() {
         let nodes = vec![
-            node("a", "primitive"),
-            node("b", "primitive"),
-            node("c", "primitive"),
+            node("a", "solid"),
+            node("b", "solid"),
+            node("c", "solid"),
             node("join", "combine"),
             node("move", "translate"),
         ];
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn serial_chain_is_not_dispatched() {
-        let nodes = vec![node("a", "primitive"), node("b", "translate")];
+        let nodes = vec![node("a", "solid"), node("b", "translate")];
         let connections = vec![link("a", "b")];
         let profile = profile_flat(&nodes, &connections, &["b".into()]);
         assert_eq!(profile.max_ready_width, 1);

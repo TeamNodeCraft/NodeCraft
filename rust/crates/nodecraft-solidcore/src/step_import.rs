@@ -264,7 +264,7 @@ mod tests {
         let store = AttributeStore::new();
         let key = |_| ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };
-        let mut brep = import.brep.clone();
+        let mut brep = import.brep.clone_standing_for_self().expect("standing copy");
         let mass = brep_mass_properties(&kernel, &mut brep, 1e-4, 1.0, solidcore::math::Point3::new(0.0, 0.0, 0.0), &attributes).expect("mass");
         assert!((mass.properties.volume - 12_629_528_647.66).abs() / 12_629_528_647.66 < 0.005, "volume {}", mass.properties.volume);
         assert!((mass.properties.area - 201_468_494.547).abs() / 201_468_494.547 < 0.005, "area {}", mass.properties.area);

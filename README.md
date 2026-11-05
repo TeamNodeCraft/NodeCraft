@@ -64,6 +64,7 @@ included.
 - [egui model/view](docs/egui-model-view.md)
 - [Node plugin contract](docs/node-plugin-contract.md)
 - [Agent guide](agents/README.md)
+- [Changelog](CHANGELOG.md)
 - [Website](https://nodecraft.com.au)
 
 ## License

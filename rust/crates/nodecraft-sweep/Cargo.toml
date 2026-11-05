@@ -1,0 +1,10 @@
+[package]
+name = "nodecraft-sweep"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Profile-to-sweep adapters for solidcore ops"
+
+[dependencies]
+solidcore-record = { workspace = true }
+solidcore-ops = { workspace = true }

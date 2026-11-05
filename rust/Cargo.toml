@@ -8,6 +8,8 @@ members = [
   "crates/nodecraft-engine",
   "crates/nodecraft-mesh",
   "crates/nodecraft-layers",
+  "crates/nodecraft-sweep",
+  "crates/nodecraft-search",
   "crates/nodecraft-session",
   "crates/nodecraft-solidcore",
   "crates/nodecraft-wedge",

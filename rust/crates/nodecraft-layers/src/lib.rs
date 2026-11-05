@@ -259,6 +259,16 @@ pub fn offset_faces_kernel(
     })
 }
 
+/// Convert an ops body to a kernel Brep through its record.
+pub fn body_to_kernel(kernel: &mut Kernel, body: &solidcore_ops::Body) -> Result<KernelBrep, String> {
+    let (record, _order) = body
+        .to_record()
+        .map_err(|error| format!("ops body to record: {error}"))?;
+    solidcore_convert::brep::to_kernel(kernel, &record, true)
+        .map(|(brep, _)| brep)
+        .map_err(|error| format!("record to kernel: {error}"))
+}
+
 /// Convert a kernel B-rep to the record form, then plan and evaluate its display
 /// mesh with the single upstream mesher.
 pub fn tessellate_kernel(

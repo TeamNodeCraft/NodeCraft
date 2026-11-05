@@ -58,6 +58,11 @@ pub mod sketch {
     pub use solidcraft_sketch::*;
 }
 
+fn copy_brep(brep: &nodecraft_solidcore::solidcore::Brep) -> Result<nodecraft_solidcore::solidcore::Brep, String> {
+    brep.clone_standing_for_self()
+        .map_err(|error| format!("B-rep copy: {error}"))
+}
+
 fn source<'a>(request: &'a Request, node_id: &str) -> Option<&'a Connection> {
     request.connections.iter().find(|link| link.to == node_id && link.input == "shape")
 }
@@ -448,6 +453,45 @@ fn sketch_profile_curves_transformed(
     Ok(curves)
 }
 
+fn sketch_record_plane(output: &SketchOutput) -> solidcore_record::Plane {
+    let x = output.rotation[0];
+    let y = output.rotation[1];
+    solidcore_record::Plane {
+        origin: solidcore_record::Vec3::new(output.offset[0], output.offset[1], output.offset[2]),
+        x: solidcore_record::Vec3::new(x[0], x[1], x[2]),
+        y: solidcore_record::Vec3::new(y[0], y[1], y[2]),
+    }
+}
+
+fn sketch_record_section(output: &SketchOutput) -> Option<Vec<solidcore_record::profile::Seg2>> {
+    use solidcraft_geom::Seg2;
+    let mut profiles = output.profiles.clone();
+    profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
+    let profile = profiles.into_iter().next()?;
+    if !profile.hole_curves.is_empty() {
+        return None;
+    }
+    profile
+        .region
+        .outer
+        .segs
+        .iter()
+        .map(|segment| match *segment {
+            Seg2::Line { a, b } => Some(solidcore_record::profile::Seg2::Line {
+                a: solidcore_record::Vec2::new(a.x, a.y),
+                b: solidcore_record::Vec2::new(b.x, b.y),
+            }),
+            Seg2::Arc { center, radius, start, sweep } => Some(solidcore_record::profile::Seg2::Arc {
+                center: solidcore_record::Vec2::new(center.x, center.y),
+                radius,
+                start,
+                sweep,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 fn loft_sketch(
     kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel,
     bottom: &SketchOutput,
@@ -458,6 +502,21 @@ fn loft_sketch(
     use nodecraft_solidcore::solidcore::curve::curve::Curve;
     use nodecraft_solidcore::solidcore::curve::line::Line;
     use nodecraft_solidcore::solidcore::math::{Point3, Vec3};
+    if let (Some(bottom_section), Some(top_section)) =
+        (sketch_record_section(bottom), sketch_record_section(top))
+    {
+        let body = nodecraft_sweep::loft_on_planes(
+            &[
+                (bottom_section, sketch_record_plane(bottom)),
+                (top_section, sketch_record_plane(top)),
+            ],
+            if ruled { 1 } else { 2 },
+            cap_ends,
+        )
+        .map_err(|error| format!("Loft: {error}"))?;
+        return nodecraft_layers::body_to_kernel(kernel, &body)
+            .map_err(|error| format!("Loft: {error}"));
+    }
     if let (Ok(bottom_curves), Ok(top_curves)) = (
         sketch_profile_curves(bottom),
         sketch_profile_curves(top),
@@ -557,6 +616,20 @@ fn multi_section_surface_loft(
     use nodecraft_solidcore::solidcore::curve::curve::Curve;
     if sections.len() < 2 {
         return Err("Surface Loft needs at least two sections".into());
+    }
+    let record_sections: Option<Vec<_>> = sections
+        .iter()
+        .map(|section| sketch_record_section(section).map(|segments| (segments, sketch_record_plane(section))))
+        .collect();
+    if let Some(record_sections) = record_sections {
+        let body = nodecraft_sweep::loft_on_planes(
+            &record_sections,
+            if ruled { 1 } else { 2 },
+            cap_ends,
+        )
+        .map_err(|error| format!("Surface Loft: {error}"))?;
+        return nodecraft_layers::body_to_kernel(kernel, &body)
+            .map_err(|error| format!("Surface Loft: {error}"));
     }
     let mut all_curves: Vec<Vec<Curve>> = Vec::with_capacity(sections.len());
     for section in sections {
@@ -755,7 +828,7 @@ fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node
             }
             let next = request.connections.iter().find(|link| link.to == current && link.input == "shape")?;
             current = next.from.clone();
-        } else if node.node_type == "stepimporter" || node.node_type == "extrude" || node.node_type == "boolean" || node.node_type == "fuse" || node.node_type == "primitive" {
+        } else if node.node_type == "stepimporter" || node.node_type == "extrude" || node.node_type == "boolean" || node.node_type == "fuse" || (node.node_type == "solid" || node.node_type == "primitive") {
             return Some((node, offset, rotation));
         } else {
             return None;
@@ -765,7 +838,7 @@ fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node
 }
 
 fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::PlanarBody, String> {
-    if node.node_type == "primitive" {
+    if (node.node_type == "solid" || node.node_type == "primitive") {
         let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
         let number = |key: &str, default: f64| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
         return match kind {
@@ -929,7 +1002,7 @@ fn fnv_seed(id: &str) -> u64 {
 /// passthrough for this node type. Generators return `None` and are turned off.
 fn suppression_source(node: &Node, connections: &[nodecraft_protocol::Connection]) -> Option<String> {
     match node.node_type.as_str() {
-        "primitive" | "sketch" | "spline" | "stepimporter" | "scatter" | "loft"
+        "solid" | "primitive" | "sketch" | "spline" | "stepimporter" | "scatter" | "loft"
         | "surfaceloft" | "combine" | "exporter" | "linkedpart" | "time" => None,
         "boolean" | "fuse" => connections
             .iter()
@@ -973,7 +1046,7 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
         let mut outputs = Vec::new();
         for input in &inputs {
             let mirrored = crate::node_task::execute_exact(
-                crate::node_task::ExactNodeTask::Mirror { brep: input.clone(), values: node.values.clone() },
+                crate::node_task::ExactNodeTask::Mirror { brep: copy_brep(input)?, values: node.values.clone() },
                 &node.id,
                 fnv_seed(&node.id),
             )?
@@ -1018,7 +1091,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
         apply_brep_placement(&mut brep, offset, rotation)?;
         return Ok(brep);
     }
-    if node.node_type == "primitive" {
+    if (node.node_type == "solid" || node.node_type == "primitive") {
         return primitive_brep(node);
     }
     match node.node_type.as_str() {
@@ -1119,7 +1192,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
         "mirror" => {
             let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("mirror has no shape input")?;
             let source_brep = exact_operand_brep(request, &link.from)?;
-            let mut mirrored = source_brep.clone();
+            let mut mirrored = copy_brep(&source_brep)?;
             mirror_brep(&mut mirrored, &node.values)?;
             if mirror_combine(&node.values) {
                 nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, source_brep, mirrored)
@@ -1331,7 +1404,7 @@ fn resolve_primitive_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a
             }
             let next = request.connections.iter().find(|link| link.to == current && link.input == "shape")?;
             current = next.from.clone();
-        } else if node.node_type == "primitive" {
+        } else if (node.node_type == "solid" || node.node_type == "primitive") {
             return Some((node, offset, rotation));
         } else {
             return None;
@@ -2093,7 +2166,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 current = link.from.clone();
                 continue;
             }
-            let mut brep = self.breps.get(&current)?.as_ref().clone();
+            let mut brep = copy_brep(self.breps.get(&current)?.as_ref()).ok()?;
             for (offset, rotation) in placements.iter().rev() {
                 apply_brep_placement(&mut brep, *offset, *rotation).ok()?;
             }
@@ -2164,7 +2237,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
             apply_brep_placement(&mut brep, offset, rotation)?;
             Ok(brep)
-        } else if node.node_type == "primitive" {
+        } else if (node.node_type == "solid" || node.node_type == "primitive") {
             self.cached_primitive_brep(&node)
         } else if node.node_type == "boolean" || node.node_type == "fuse" {
             let a = self.request.connections.iter().find(|link| link.to == node.id && link.input == "a").ok_or("Boolean operand missing A")?.from.clone();
@@ -2219,7 +2292,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             exact_operand_brep(self.request, start)
         };
         if let Ok(ref brep) = result {
-            let brep = Arc::new(brep.clone());
+            let brep = Arc::new(copy_brep(brep)?);
             self.breps.insert(start.to_string(), brep.clone());
             self.cache.insert_brep(cache_key, brep);
         }
@@ -2245,7 +2318,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let mut keys = std::collections::BTreeMap::new();
         let mut warmable = std::collections::BTreeSet::new();
         for node in self.request.nodes.iter() {
-            if node.node_type == "primitive" && !node.suppressed && scope.contains(&node.id) {
+            if (node.node_type == "solid" || node.node_type == "primitive") && !node.suppressed && scope.contains(&node.id) {
                 warmable.insert(node.id.clone());
             }
         }
@@ -2318,7 +2391,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let id = node.id.clone();
             keys.insert(id.clone(), cache_key);
             match node.node_type.as_str() {
-                "primitive" => {
+                "solid" | "primitive" => {
                     let node_for_job = node.clone();
                     tasks.push(ScheduledTask::leaf(
                         id,
@@ -2337,7 +2410,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
                         let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "translate source did not prewarm".to_owned())?;
                         Ok(Box::new(move |kernel| {
-                            let mut brep = (*source).clone();
+                            let mut brep = copy_brep(&source)?;
                             apply_brep_placement_with_kernel(kernel, &mut brep, offset, rotation)?;
                             Ok(std::sync::Arc::new(brep))
                         }))
@@ -2351,7 +2424,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "mirror source did not prewarm".to_owned())?;
                         let values = values.clone();
                         Ok(Box::new(move |kernel| {
-                            let mut brep = (*source).clone();
+                            let mut brep = copy_brep(&source)?;
                             mirror_brep_with_kernel(kernel, &mut brep, &values)?;
                             Ok(std::sync::Arc::new(brep))
                         }))
@@ -2368,7 +2441,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         let a = deps.get(&a).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean A did not prewarm".to_owned())?;
                         let b = deps.get(&b).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean B did not prewarm".to_owned())?;
                         Ok(Box::new(move |kernel| {
-                            let result = nodecraft_bool::boolean_breps_with_kernel(kernel, op, (*a).clone(), (*b).clone())?;
+                            let result = nodecraft_bool::boolean_breps_with_kernel(kernel, op, copy_brep(&a)?, copy_brep(&b)?)?;
                             Ok(std::sync::Arc::new(result))
                         }))
                     }));
@@ -2435,7 +2508,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             openings.push(index);
                         }
                         Ok(Box::new(move |kernel| {
-                            let mut brep = (*source).clone();
+                            let mut brep = copy_brep(&source)?;
                             nodecraft_layers::shell_record_faces(kernel, &mut brep, &openings, signed)
                                 .map(std::sync::Arc::new)
                         }))
@@ -2566,7 +2639,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Group output has no connected input")?;
                     self.evaluate_part(&link.from).map(|part| part.as_ref().clone())
                 }
-                "primitive" => Ok(Part::from_arc(self.cached_primitive_brep_arc(&node)?)),
+                "solid" | "primitive" => Ok(Part::from_arc(self.cached_primitive_brep_arc(&node)?)),
                 "translate" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Part translate has no input")?;
                     let source = self.evaluate_part(&link.from)?;
@@ -3204,7 +3277,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     }
                 }
             }
-            "primitive" | "box" | "cylinder" => {
+            "solid" | "primitive" | "box" | "cylinder" => {
                 // Mesh-only primitive graphs must not build an unused exact BRep.
                 // Boolean/chamfer/exporter ancestors still need the eager build so
                 // their operand cache and progress ordering stay stable.
@@ -3378,7 +3451,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             }
                             apply_export_metadata(&node, path_text)
                         })
-                    } else if primitive.map(|item| item.node_type.as_str()) == Some("primitive") {
+                    } else if matches!(primitive.map(|item| item.node_type.as_str()), Some("solid" | "primitive")) {
                         match kind {
                             "box" => nodecraft_step::write_box(path_text, number("length", 40.0), number("width", 40.0), number("height", 40.0)),
                             "cylinder" => nodecraft_step::write_cylinder(path_text, number("radius", 20.0), number("height", 40.0)),
@@ -3531,7 +3604,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let _ = brep.faces().ids().nth(index).ok_or_else(|| format!("Extrude face {index} does not exist"))?;
                 let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
                 let tool = crate::node_task::execute_exact(
-                    crate::node_task::ExactNodeTask::Extrude { brep: brep.clone(), face_index: index, amount },
+                    crate::node_task::ExactNodeTask::Extrude { brep: copy_brep(&brep)?, face_index: index, amount },
                     node_id,
                     fnv_seed(node_id),
                 )?
@@ -3541,9 +3614,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let preview = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &tool, &display_options()).ok();
                 let result = match operation {
                     "new" => tool,
-                    "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, brep.clone(), tool)?,
-                    "intersect" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Intersection, brep.clone(), tool)?,
-                    _ => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, brep.clone(), tool)?,
+                    "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, copy_brep(&brep)?, tool)?,
+                    "intersect" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Intersection, copy_brep(&brep)?, tool)?,
+                    _ => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, copy_brep(&brep)?, tool)?,
                 };
                 let result = Arc::new(result);
                 self.breps.insert(node_id.into(), result.clone());
@@ -3812,7 +3885,7 @@ pub fn part_display_supported(node_type: &str) -> bool {
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
-        "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "offsetfaces" | "scatter" | "chamfer" | "fillet"
+        "solid" | "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "offsetfaces" | "scatter" | "chamfer" | "fillet"
     )
 }
 
@@ -5723,7 +5796,7 @@ mod tests {
     fn probe_box_brep_edge_metadata() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1, "targets": ["p"], "meshTargets": ["p"],
-            "nodes": [{"id":"p","type":"primitive","values":{"primitiveType":"box","length":20,"width":20,"height":20},"cache":{"key":"p"}}],
+            "nodes": [{"id":"p","type": "primitive","values":{"primitiveType":"box","length":20,"width":20,"height":20},"cache":{"key":"p"}}],
             "connections": []
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());

@@ -55,7 +55,7 @@ use nodecraft_step::PlanarBody;
 use crate::ExtrudeError;
 
 /// An exact extrude result with both neutral STEP-export representations.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ExportableExtrude {
     /// The exact solidcore B-rep from the taper-extrude route.
     pub brep: Brep,

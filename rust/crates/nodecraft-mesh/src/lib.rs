@@ -425,7 +425,9 @@ pub fn brep_display_mesh_with_senses(
     });
     let mut trimmed_brep = None;
     if missing_bspline_trims {
-        let mut copy = brep.clone();
+        let mut copy = brep
+            .clone_standing_for_self()
+            .map_err(|error| format!("display mesh copy: {error}"))?;
         for face in copy.face_list().to_vec() {
             if matches!(
                 fp2::surface(&copy, face).ok().flatten().map(Surface::kind),
@@ -2636,7 +2638,7 @@ mod tests {
         let attrs = PropertyAttributes { store: &store, key_of: &key };
         let volume = |brep: solidcore::Brep| {
             let kernel = Kernel::default();
-            brep_volume(&kernel, &mut brep.clone(), 1e-7, &attrs).unwrap().abs()
+            brep_volume(&kernel, &mut brep.clone_standing_for_self().expect("standing copy"), 1e-7, &attrs).unwrap().abs()
         };
         let mut kernel = Kernel::default();
         let pyramid = api::create_pyramid(&mut kernel, Point3::new(0.0, 0.0, 0.0), 5.0, 20.0).unwrap();

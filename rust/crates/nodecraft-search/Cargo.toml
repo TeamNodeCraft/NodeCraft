@@ -1,0 +1,6 @@
+[package]
+name = "nodecraft-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wildcard and Levenshtein matching for NodeCraft tool search"

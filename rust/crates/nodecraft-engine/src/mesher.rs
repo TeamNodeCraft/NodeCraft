@@ -88,7 +88,12 @@ impl MesherPool {
                         }
                         let outcome = catch_unwind(AssertUnwindSafe(|| {
                             let tolerance = f64::from_bits(work.request.key.tolerance_bits);
-                            let mut brep = (*work.request.body.brep).clone();
+                            let mut brep = work
+                                .request
+                                .body
+                                .brep
+                                .clone_standing_for_self()
+                                .map_err(|error| format!("display copy: {error}"))?;
                             nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, tolerance)
                                 .map(|display| display.mesh)
                         }));

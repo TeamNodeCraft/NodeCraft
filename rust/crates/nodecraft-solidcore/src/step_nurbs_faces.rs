@@ -772,7 +772,7 @@ mod tests {
     }
 
     fn area(brep: &Brep) -> f64 {
-        let mut copy = brep.clone();
+        let mut copy = brep.clone_standing_for_self().expect("standing copy");
         brep_area(&crate::kernel::kernel(), &mut copy, 1e-6).unwrap()
     }
 

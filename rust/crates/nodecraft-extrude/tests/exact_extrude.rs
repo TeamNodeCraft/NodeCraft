@@ -21,9 +21,9 @@ fn measure(k: &Kernel, brep: &Brep) -> (f64, f64) {
         store: &store,
         key_of: &|_| ObjectKey(0),
     };
-    let mut copy = brep.clone();
+    let mut copy = brep.clone_standing_for_self().expect("standing copy");
     let area = brep_area(k, &mut copy, 1e-4).expect("area");
-    let mut copy = brep.clone();
+    let mut copy = brep.clone_standing_for_self().expect("standing copy");
     let volume = brep_volume(k, &mut copy, 1e-4, &attributes).expect("volume");
     (area, volume)
 }
@@ -264,11 +264,11 @@ fn exact_extrude_circular_profile_uses_the_split_fallback() {
         store: &store,
         key_of: &|_| ObjectKey(0),
     };
-    let mut volume_copy = solid.clone(); let volume = brep_volume(&k, &mut volume_copy, 1e-6, &attributes).expect("volume");
+    let mut volume_copy = solid.clone_standing_for_self().expect("standing copy"); let volume = brep_volume(&k, &mut volume_copy, 1e-6, &attributes).expect("volume");
     assert_close(volume, std::f64::consts::PI * 4.0 * 3.0, 1.0e-4);
     // `brep_area` clamps its integration accuracy to 1e-4; the seam split keeps the
     // area within that accuracy of the analytic cylinder.
-    let mut area_copy = solid.clone(); let area = brep_area(&k, &mut area_copy, 1e-4).expect("area");
+    let mut area_copy = solid.clone_standing_for_self().expect("standing copy"); let area = brep_area(&k, &mut area_copy, 1e-4).expect("area");
     assert_close(
         area,
         std::f64::consts::TAU * 4.0 + std::f64::consts::TAU * 2.0 * 3.0,

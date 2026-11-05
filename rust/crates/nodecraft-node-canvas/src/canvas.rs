@@ -210,6 +210,9 @@ pub struct NodeEditor {
     icons: HashMap<String, egui::TextureHandle>,
     theme: crate::theme::CanvasTheme,
     cable_routing: CableRouting,
+    /// Screen rects belonging to host overlays (the tool dock and its menu).
+    /// Pointer actions inside them never reach the canvas.
+    pointer_blockers: Vec<Rect>,
     last_viewport: Option<Rect>,
     view_animation: Option<ViewAnimation>,
     pan_animation: Option<PanAnimation>,
@@ -258,6 +261,7 @@ impl Default for NodeEditor {
             icons: HashMap::new(),
             theme: crate::theme::CanvasTheme::default(),
             cable_routing: CableRouting::J,
+            pointer_blockers: Vec::new(),
             last_viewport: None,
             view_animation: None,
             pan_animation: None,
@@ -326,6 +330,11 @@ impl NodeEditor {
         self.left_dock = width.max(0.0);
     }
 
+    /// Screen rects whose clicks belong to a host overlay, not the canvas.
+    pub fn set_pointer_blockers(&mut self, rects: Vec<Rect>) {
+        self.pointer_blockers = rects;
+    }
+
     /// Screen-space rect of the node panel from the last painted frame.
     ///
     /// Used by the host to scope canvas keyboard actions (Delete) to pointer
@@ -347,12 +356,19 @@ impl NodeEditor {
         Rect::from_min_size(Pos2::new(left, inset_viewport.min.y), Vec2::new(width, inset_viewport.height()))
     }
 
+    /// The graph-space rectangle the viewport currently shows, below the panel
+    /// header. Every caller that maps between screen and graph coordinates uses
+    /// this one rect.
+    pub fn visible_graph_rect(&self, viewport: Rect) -> Rect {
+        panel_canvas(self.panel_rect(viewport))
+    }
+
     /// Pan just enough to bring `graph` into the visible canvas with padding.
     /// Used after inserting a node so a card placed below the current view does
     /// not appear off-screen.
     pub fn ensure_graph_rect_visible(&mut self, viewport: Rect, graph: Rect, padding: f32) {
         let panel = self.panel_rect(viewport);
-        let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
+        let canvas = panel_canvas(panel);
         let screen = Rect::from_min_size(
             canvas.min + self.pan + graph.min.to_vec2() * self.zoom,
             graph.size() * self.zoom,
@@ -476,9 +492,7 @@ impl NodeEditor {
     /// Convert a screen position to canvas graph coordinates. Returns None until
     /// the first frame has established the panel viewport.
     pub fn graph_pos(&self, screen: Pos2) -> Option<Pos2> {
-        let viewport = self.last_viewport?;
-        let panel = self.panel_rect(viewport);
-        let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
+        let canvas = self.visible_graph_rect(self.last_viewport?);
         Some(((screen - canvas.min - self.pan) / self.zoom).to_pos2())
     }
 
@@ -886,7 +900,7 @@ impl NodeEditor {
                 CableRouting::Bezier => 48 * 6,
                 CableRouting::J => 192 * 6,
             },
-            transform: [self.zoom, panel.min.x + self.pan.x, panel.min.y + CANVAS_TOP + self.pan.y, 0.0],
+            transform: [self.zoom, panel_canvas(panel).min.x + self.pan.x, panel_canvas(panel).min.y + self.pan.y, 0.0],
             clip: [
                 panel.min.x + 1.0,
                 panel.min.y + 1.0,
@@ -937,7 +951,7 @@ impl NodeEditor {
                     self.theme.color(self.theme.text),
                 );
 
-                let canvas = Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max);
+                let canvas = panel_canvas(panel);
                 let mini = node_minimap_rect(panel);
                 let pointer = ui.ctx().pointer_latest_pos();
                 if self.wire_drag.is_none()
@@ -1061,7 +1075,7 @@ impl NodeEditor {
                 draw.transform = [
                     self.zoom,
                     panel.min.x + draw_pan.x,
-                    panel.min.y + CANVAS_TOP + draw_pan.y,
+                    panel_canvas(panel).min.y + draw_pan.y,
                     0.0,
                 ];
 
@@ -1952,6 +1966,11 @@ impl NodeEditor {
         } else if empty_canvas_clicked {
             actions.push(NodeEditorAction::Deselect);
         }
+        if ctx.pointer_latest_pos().is_some_and(|pointer| {
+            self.pointer_blockers.iter().any(|rect| rect.contains(pointer))
+        }) {
+            actions.clear();
+        }
         actions
     }
 
@@ -2056,29 +2075,12 @@ impl NodeEditor {
     }
 
     fn fit_graph(&mut self, canvas: Rect, document: &GraphDocument) {
-        let Some((mut min_x, mut min_y)) = document
-            .nodes
-            .iter()
-            .map(|node| (node.x as f32 - NODE_LEFT_PADDING, node.y as f32))
-            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
-        else {
+        let Some(roi) = document_roi(document) else {
             return;
         };
-        let mut max_x = min_x + node_width(&document.nodes[0]) + NODE_RIGHT_PADDING;
-        let mut max_y = min_y + NODE_HEIGHT;
-        for node in &document.nodes {
-            max_x = max_x.max(node.x as f32 + node_width(node) + NODE_RIGHT_PADDING);
-            max_y = max_y.max(node.y as f32 + NODE_HEIGHT);
-            min_x = min_x.min(node.x as f32 - NODE_LEFT_PADDING);
-            min_y = min_y.min(node.y as f32);
-        }
-        let (pan, zoom) = fitted_view(
-            canvas,
-            Rect::from_min_max(Pos2::new(min_x, min_y), Pos2::new(max_x, max_y)),
-        );
+        let (pan, zoom) = fitted_view(canvas, roi);
         self.pan = pan;
         self.zoom = zoom;
-        
     }
 
     fn zoom_about(&mut self, canvas: Rect, anchor: Pos2, factor: f32) {
@@ -2300,11 +2302,13 @@ fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
 
 fn primitive_icon(primitive: &str) -> &'static str {
     match primitive {
-        "sphere" | "partialSphere" => "globe",
-        "cylinder" => "database",
-        "torus" | "partialTorus" => "circle",
-        "cone" | "pyramid" | "wedge" => "triangle",
-        _ => "cube",
+        "sphere" | "partialSphere" => "sphere",
+        "cylinder" => "cylinder",
+        "torus" | "partialTorus" => "torus",
+        "cone" => "cone",
+        "pyramid" => "pyramid",
+        "wedge" => "wedge",
+        _ => "box",
     }
 }
 
@@ -2315,47 +2319,82 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         .and_then(|value| value.as_str())
         .unwrap_or("");
     let name = match node.node_type.as_str() {
-        "loft" | "surfaceloft" | "extrude" => "arrow_up",
-        "sketch" => "edit",
+        "loft" => "loft",
+        "surfaceloft" => "surfaceloft",
+        "extrude" => "extrude",
+        "sketch" => "sketch",
         "spline" => "spline",
-        "chamfer" | "fillet" => "subtract",
-        "shell" => "square_multiple",
-        "primitive" => primitive_icon(primitive),
-        "box" => "cube",
-        "cylinder" => "database",
-        "cone" | "wedge" => "triangle",
-        "sphere" => "globe",
-        "torus" => "circle",
-        "translate" => "arrow_move",
+        "chamfer" => "chamfer",
+        "fillet" => "fillet",
+        "shell" => "shell",
+        "offsetfaces" => "offsetfaces",
+        "solid" | "primitive" => primitive_icon(primitive),
+        "box" => "box",
+        "cylinder" => "cylinder",
+        "cone" => "cone",
+        "wedge" => "wedge",
+        "sphere" => "sphere",
+        "torus" => "torus",
+        "translate" => "translate",
         "mirror" => "mirror",
-        "boolean" | "fuse" | "combine" => "merge",
-        "exporter" => "arrow_download",
-        "stepimporter" | "linkedpart" => "import_step",
-        _ => "cube",
+        "boolean" | "fuse" => match node
+            .values
+            .get("mode")
+            .or_else(|| node.values.get("operation"))
+            .or_else(|| node.values.get("op"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("union")
+        {
+            "intersect" | "intersection" => "intersection",
+            "subtract-reverse" | "subtract-b-a" => "subtract-reverse",
+            "subtract" | "difference" | "subtract-a-b" => "subtract",
+            _ => "union",
+        },
+        "combine" => "combine",
+        "group" => "group",
+        "scatter" => "scatter",
+        "exporter" => "export",
+        "stepimporter" => "import",
+        "linkedpart" => "linked",
+        _ => "box",
     };
     let bytes: &'static [u8] = match name {
-        "arrow_up" => include_bytes!("../../../../vendor/fluent/arrow_up.svg"),
-        "edit" => include_bytes!("../../../../vendor/fluent/edit.svg"),
-        "spline" => include_bytes!("../../../../vendor/fluent/spline.svg"),
-        "subtract" => include_bytes!("../../../../vendor/fluent/subtract.svg"),
-        "square_multiple" => include_bytes!("../../../../vendor/fluent/square_multiple.svg"),
-        "database" => include_bytes!("../../../../vendor/fluent/database.svg"),
-        "triangle" => include_bytes!("../../../../vendor/fluent/triangle.svg"),
-        "globe" => include_bytes!("../../../../vendor/fluent/globe.svg"),
-        "circle" => include_bytes!("../../../../vendor/fluent/circle.svg"),
-        "arrow_move" => include_bytes!("../../../../vendor/fluent/arrow_move.svg"),
-        "mirror" => include_bytes!("../../../../vendor/fluent/mirror.svg"),
-        "merge" => include_bytes!("../../../../vendor/fluent/merge.svg"),
-        "arrow_download" => include_bytes!("../../../../vendor/fluent/arrow_download.svg"),
-        "import_step" => include_bytes!("../../../../vendor/fluent/import_step.svg"),
-        _ => include_bytes!("../../../../vendor/fluent/cube.svg"),
+        "box" => include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"),
+        "sphere" => include_bytes!("../../../../vendor/iconify-design/nodes/sphere.svg"),
+        "cylinder" => include_bytes!("../../../../vendor/iconify-design/nodes/cylinder.svg"),
+        "cone" => include_bytes!("../../../../vendor/iconify-design/nodes/cone.svg"),
+        "pyramid" => include_bytes!("../../../../vendor/iconify-design/nodes/pyramid.svg"),
+        "wedge" => include_bytes!("../../../../vendor/iconify-design/nodes/wedge.svg"),
+        "torus" => include_bytes!("../../../../vendor/iconify-design/nodes/torus.svg"),
+        "sketch" => include_bytes!("../../../../vendor/iconify-design/nodes/sketch.svg"),
+        "spline" => include_bytes!("../../../../vendor/iconify-design/nodes/spline.svg"),
+        "translate" => include_bytes!("../../../../vendor/iconify-design/nodes/translate.svg"),
+        "mirror" => include_bytes!("../../../../vendor/iconify-design/nodes/mirror.svg"),
+        "intersection" => include_bytes!("../../../../vendor/icons/boolean/intersection.svg"),
+        "union" => include_bytes!("../../../../vendor/icons/boolean/union.svg"),
+        "subtract" => include_bytes!("../../../../vendor/icons/boolean/subtract-a-b.svg"),
+        "subtract-reverse" => include_bytes!("../../../../vendor/icons/boolean/subtract-b-a.svg"),
+        "combine" => include_bytes!("../../../../vendor/iconify-design/nodes/combine.svg"),
+        "chamfer" => include_bytes!("../../../../vendor/iconify-design/nodes/chamfer.svg"),
+        "fillet" => include_bytes!("../../../../vendor/iconify-design/nodes/fillet.svg"),
+        "shell" => include_bytes!("../../../../vendor/iconify-design/nodes/shell.svg"),
+        "offsetfaces" => include_bytes!("../../../../vendor/iconify-design/nodes/offsetfaces.svg"),
+        "extrude" => include_bytes!("../../../../vendor/iconify-design/nodes/extrude.svg"),
+        "loft" => include_bytes!("../../../../vendor/iconify-design/nodes/loft.svg"),
+        "surfaceloft" => include_bytes!("../../../../vendor/iconify-design/nodes/surfaceloft.svg"),
+        "scatter" => include_bytes!("../../../../vendor/iconify-design/nodes/scatter.svg"),
+        "group" => include_bytes!("../../../../vendor/iconify-design/nodes/group.svg"),
+        "import" => include_bytes!("../../../../vendor/iconify-design/nodes/import.svg"),
+        "export" => include_bytes!("../../../../vendor/iconify-design/nodes/export.svg"),
+        "linked" => include_bytes!("../../../../vendor/iconify-design/nodes/linked.svg"),
+        _ => include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"),
     };
     (name, bytes)
 }
 
 fn node_title(node_type: &str) -> &'static str {
     match node_type {
-        "primitive" => "Solid",
+        "solid" | "primitive" => "Solid",
         "sketch" => "Sketch",
         "spline" => "Spline",
         "extrude" => "Extrude",
@@ -2387,7 +2426,7 @@ fn node_title(node_type: &str) -> &'static str {
 
 fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
     match node.node_type.as_str() {
-        "primitive" => match node.values.get("primitiveType").and_then(|value| value.as_str()) {
+        "solid" | "primitive" => match node.values.get("primitiveType").and_then(|value| value.as_str()) {
             Some("sphere") => &["radius"],
             Some("cylinder") => &["radius", "height"],
             Some("torus") => &["majorRadius", "minorRadius"],
@@ -2632,9 +2671,7 @@ fn node_screen_center(
     pan: Vec2,
     zoom: f32,
 ) -> Pos2 {
-    let canvas_min = Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP);
-    let origin = canvas_min + pan + Vec2::new(node.x as f32, node.y as f32) * zoom;
-    origin + Vec2::new(node_width(node), NODE_HEIGHT) * zoom * 0.5
+    node_rect(node, panel_canvas(panel), pan, zoom).center()
 }
 
 fn cable_hit(
@@ -2681,7 +2718,7 @@ fn cable_hit_with_hold_for(
     pointer: Pos2,
     held: Option<&ConnectionKey>,
 ) -> Option<ConnectionKey> {
-    let canvas_min = Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP);
+    let canvas_min = panel_canvas(panel).min;
     let map = |x: f32, y: f32| canvas_min + pan + Vec2::new(x, y) * zoom;
     let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
         .nodes
@@ -2804,7 +2841,10 @@ fn fitted_view(canvas: Rect, roi: Rect) -> (Vec2, f32) {
 }
 
 fn panel_canvas(panel: Rect) -> Rect {
-    Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max)
+    Rect::from_min_max(
+        Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP),
+        panel.max,
+    )
 }
 
 fn geometry_key(
@@ -3431,7 +3471,7 @@ mod tests {
             1.0,
         );
         let map = |point: Pos2| {
-            Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP) + pan + point.to_vec2() * zoom
+            panel_canvas(panel).min + pan + point.to_vec2() * zoom
         };
         let (point, derivative) = route.sample(0.5);
         let normal = Vec2::new(-derivative.y, derivative.x).normalized();
@@ -4315,15 +4355,15 @@ mod tests {
     #[test]
     fn primitive_icons_follow_the_selected_solid_type() {
         for (primitive, expected) in [
-            ("box", "cube"),
-            ("sphere", "globe"),
-            ("cylinder", "database"),
-            ("torus", "circle"),
-            ("cone", "triangle"),
-            ("pyramid", "triangle"),
-            ("partialSphere", "globe"),
-            ("partialTorus", "circle"),
-            ("wedge", "triangle"),
+            ("box", "box"),
+            ("sphere", "sphere"),
+            ("cylinder", "cylinder"),
+            ("torus", "torus"),
+            ("cone", "cone"),
+            ("pyramid", "pyramid"),
+            ("partialSphere", "sphere"),
+            ("partialTorus", "torus"),
+            ("wedge", "wedge"),
         ] {
             assert_eq!(primitive_icon(primitive), expected, "icon for {primitive}");
         }
@@ -4449,7 +4489,7 @@ mod tests {
             1.0,
         );
         let map = |point: Pos2| {
-            Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP)
+            panel_canvas(panel).min
                 + pan
                 + point.to_vec2() * zoom
         };

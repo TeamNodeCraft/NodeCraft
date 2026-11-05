@@ -62,19 +62,67 @@ pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
 }
 
 const TOOL_DOCK_WIDTH: f32 = 44.0;
+const TOOL_ICON_SIZE: f32 = 19.0;
+const TOOL_ROW_PADDING: f32 = 8.0;
+const TOOL_ROW_SIZE: f32 = TOOL_ICON_SIZE + TOOL_ROW_PADDING * 2.0;
 const TOOL_DOCK_RADIUS: f32 = 20.0;
 const TOOL_DOCK_GAP: f32 = 8.0;
+const TOOL_SEARCH_SEPARATOR: f32 = 5.0;
+const TOOL_GRIP_HEIGHT: f32 = 24.0;
+const TOOL_SEARCH_CLEAR_AFTER: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const TOOL_DOCK_PADDING: f32 = 8.0;
+const TOOL_SECTION_GAP: f32 = 10.0;
 
-fn tool_dock_rect(panel: egui::Rect) -> egui::Rect {
+fn parse_shortcut(text: &str) -> Option<egui::KeyboardShortcut> {
+    let mut modifiers = egui::Modifiers::NONE;
+    let mut key = None;
+    for part in text.split('+').map(str::trim).filter(|part| !part.is_empty()) {
+        match part.to_lowercase().as_str() {
+            "cmd" | "command" | "meta" | "super" => modifiers |= egui::Modifiers::COMMAND,
+            "shift" => modifiers |= egui::Modifiers::SHIFT,
+            "alt" | "option" => modifiers |= egui::Modifiers::ALT,
+            "ctrl" | "control" => modifiers |= egui::Modifiers::CTRL,
+            _ => key = egui::Key::from_name(part),
+        }
+    }
+    key.map(|key| egui::KeyboardShortcut::new(modifiers, key))
+}
+
+fn shortcut_pressed(ctx: &egui::Context, text: &str) -> bool {
+    parse_shortcut(text)
+        .is_some_and(|shortcut| ctx.input_mut(|input| input.consume_shortcut(&shortcut)))
+}
+
+fn tool_highlight_rect(row: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(row.center(), egui::Vec2::splat(TOOL_ROW_SIZE))
+}
+
+fn tool_dock_height() -> f32 {
+    // One place for the dock's vertical metrics: search, separator, every
+    // category row, the grip, and the gaps between them.
+    let mut height = TOOL_DOCK_PADDING;
+    height += TOOL_ROW_SIZE; // search
+    height += TOOL_SECTION_GAP;
+    height += TOOL_SEARCH_SEPARATOR;
+    height += TOOL_SECTION_GAP;
+    for index in 0..ToolSection::ALL.len() {
+        height += TOOL_ROW_SIZE;
+        if index + 1 < ToolSection::ALL.len() {
+            height += TOOL_SECTION_GAP;
+        }
+    }
+    height += TOOL_SECTION_GAP;
+    height += TOOL_GRIP_HEIGHT;
+    height += TOOL_DOCK_PADDING;
+    height
+}
+
+fn tool_dock_rect(panel: egui::Rect, offset_y: f32, height: f32) -> egui::Rect {
     const PADDING: f32 = 12.0;
-    const SECTION_GAP: f32 = 6.0;
-    const VERTICAL_PADDING: f32 = 8.0;
-    let sections = ToolSection::ALL.len() as f32;
-    let height = sections * TOOL_DOCK_WIDTH
-        + (sections - 1.0) * SECTION_GAP
-        + VERTICAL_PADDING * 2.0;
+    let top = (panel.center().y - height * 0.5 + offset_y)
+        .clamp(panel.top() + 12.0, (panel.bottom() - height - 12.0).max(panel.top() + 12.0));
     egui::Rect::from_min_size(
-        egui::Pos2::new(panel.min.x + PADDING, panel.center().y - height * 0.5),
+        egui::Pos2::new(panel.min.x + PADDING, top),
         egui::Vec2::new(TOOL_DOCK_WIDTH, height),
     )
 }
@@ -87,63 +135,97 @@ struct ToolItem {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolDockFocus {
+    Search,
+    Root { index: usize },
+    Menu { section: ToolSection },
+}
+
+#[derive(Clone, Copy)]
+struct ToolGroup {
+    heading: Option<&'static str>,
+    tools: &'static [ToolItem],
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolSection {
-    Solids,
-    Transform,
+    Create,
     Modify,
+    Boolean,
+    Pattern,
+    Organise,
+    Animate,
     Io,
 }
 
 impl ToolSection {
-    const ALL: [Self; 4] = [Self::Solids, Self::Transform, Self::Modify, Self::Io];
+    const ALL: [Self; 7] = [
+        Self::Create,
+        Self::Modify,
+        Self::Boolean,
+        Self::Pattern,
+        Self::Organise,
+        Self::Animate,
+        Self::Io,
+    ];
 
     fn label(self) -> &'static str {
         match self {
-            Self::Solids => "Solids",
-            Self::Transform => "Transform",
+            Self::Create => "Create",
             Self::Modify => "Modify",
-            Self::Io => "Import / Export",
+            Self::Boolean => "Boolean",
+            Self::Pattern => "Pattern",
+            Self::Organise => "Organise",
+            Self::Animate => "Animate",
+            Self::Io => "Input / Output",
         }
     }
 
     fn icon(self) -> (&'static str, &'static [u8]) {
         match self {
-            Self::Solids => ("cube", include_bytes!("../../../../vendor/fluent/cube.svg")),
-            Self::Transform => ("move", include_bytes!("../../../../vendor/fluent/arrow_move.svg")),
-            Self::Modify => ("merge", include_bytes!("../../../../vendor/fluent/merge.svg")),
-            Self::Io => ("io", include_bytes!("../../../../vendor/fluent/import_step.svg")),
+            Self::Create => ("iconify-create", include_bytes!("../../../../vendor/iconify-design/create.svg")),
+            Self::Modify => ("iconify-modify", include_bytes!("../../../../vendor/iconify-design/modify.svg")),
+            Self::Boolean => ("iconify-boolean", include_bytes!("../../../../vendor/iconify-design/boolean.svg")),
+            Self::Pattern => ("iconify-pattern", include_bytes!("../../../../vendor/iconify-design/pattern.svg")),
+            Self::Organise => ("iconify-organise", include_bytes!("../../../../vendor/iconify-design/organise.svg")),
+            Self::Animate => ("iconify-animate", include_bytes!("../../../../vendor/iconify-design/animate.svg")),
+            Self::Io => ("iconify-io", include_bytes!("../../../../vendor/iconify-design/io.svg")),
         }
     }
 
-    fn tools(self) -> &'static [ToolItem] {
-        const SOLIDS: &[ToolItem] = &[
-            ToolItem { label: "Box", node_type: "primitive", primitive: Some("box") },
-            ToolItem { label: "Sphere", node_type: "primitive", primitive: Some("sphere") },
-            ToolItem { label: "Cylinder", node_type: "primitive", primitive: Some("cylinder") },
-            ToolItem { label: "Cone", node_type: "primitive", primitive: Some("cone") },
-            ToolItem { label: "Torus", node_type: "primitive", primitive: Some("torus") },
-            ToolItem { label: "Pyramid", node_type: "primitive", primitive: Some("pyramid") },
-            ToolItem { label: "Wedge", node_type: "primitive", primitive: Some("wedge") },
-            ToolItem { label: "Partial Sphere", node_type: "primitive", primitive: Some("partialSphere") },
-            ToolItem { label: "Partial Torus", node_type: "primitive", primitive: Some("partialTorus") },
+    fn groups(self) -> &'static [ToolGroup] {
+        const SKETCH: &[ToolItem] = &[
             ToolItem { label: "Sketch", node_type: "sketch", primitive: None },
             ToolItem { label: "Spline", node_type: "spline", primitive: None },
         ];
-        const TRANSFORM: &[ToolItem] = &[
-            ToolItem { label: "Transform", node_type: "translate", primitive: None },
-            ToolItem { label: "Mirror", node_type: "mirror", primitive: None },
+        const SOLIDS: &[ToolItem] = &[
+            ToolItem { label: "Box", node_type: "solid", primitive: Some("box") },
+            ToolItem { label: "Sphere", node_type: "solid", primitive: Some("sphere") },
+            ToolItem { label: "Cylinder", node_type: "solid", primitive: Some("cylinder") },
+            ToolItem { label: "Cone", node_type: "solid", primitive: Some("cone") },
+            ToolItem { label: "Torus", node_type: "solid", primitive: Some("torus") },
+            ToolItem { label: "Pyramid", node_type: "solid", primitive: Some("pyramid") },
+            ToolItem { label: "Wedge", node_type: "solid", primitive: Some("wedge") },
+            ToolItem { label: "Partial Sphere", node_type: "solid", primitive: Some("partialSphere") },
+            ToolItem { label: "Partial Torus", node_type: "solid", primitive: Some("partialTorus") },
+        ];
+        const FEATURES: &[ToolItem] = &[
+            ToolItem { label: "Extrude", node_type: "extrude", primitive: None },
+            ToolItem { label: "Loft", node_type: "loft", primitive: None },
+            ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None },
         ];
         const MODIFY: &[ToolItem] = &[
-            ToolItem { label: "Boolean", node_type: "boolean", primitive: None },
-            ToolItem { label: "Combine to Part", node_type: "combine", primitive: None },
+            ToolItem { label: "Transform", node_type: "translate", primitive: None },
+            ToolItem { label: "Mirror", node_type: "mirror", primitive: None },
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
             ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None },
             ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None },
-            ToolItem { label: "Extrude", node_type: "extrude", primitive: None },
-            ToolItem { label: "Loft", node_type: "loft", primitive: None },
-            ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None },
-            ToolItem { label: "Scatter", node_type: "scatter", primitive: None },
+        ];
+        const BOOLEAN: &[ToolItem] = &[ToolItem { label: "Boolean", node_type: "boolean", primitive: None }];
+        const PATTERN: &[ToolItem] = &[ToolItem { label: "Scatter", node_type: "scatter", primitive: None }];
+        const ORGANISE: &[ToolItem] = &[
+            ToolItem { label: "Combine to Part", node_type: "combine", primitive: None },
             ToolItem { label: "Group", node_type: "group", primitive: None },
         ];
         const IO: &[ToolItem] = &[
@@ -151,11 +233,25 @@ impl ToolSection {
             ToolItem { label: "Linked Part", node_type: "linkedpart", primitive: None },
             ToolItem { label: "Export STEP", node_type: "exporter", primitive: None },
         ];
+        const CREATE: &[ToolGroup] = &[
+            ToolGroup { heading: Some("Sketch"), tools: SKETCH },
+            ToolGroup { heading: Some("Solid"), tools: SOLIDS },
+            ToolGroup { heading: Some("Features"), tools: FEATURES },
+        ];
+        const MODIFY_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: MODIFY }];
+        const BOOLEAN_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: BOOLEAN }];
+        const PATTERN_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: PATTERN }];
+        const ORGANISE_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: ORGANISE }];
+        const ANIMATE_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: &[] }];
+        const IO_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: IO }];
         match self {
-            Self::Solids => SOLIDS,
-            Self::Transform => TRANSFORM,
-            Self::Modify => MODIFY,
-            Self::Io => IO,
+            Self::Create => CREATE,
+            Self::Modify => MODIFY_GROUPS,
+            Self::Boolean => BOOLEAN_GROUPS,
+            Self::Pattern => PATTERN_GROUPS,
+            Self::Organise => ORGANISE_GROUPS,
+            Self::Animate => ANIMATE_GROUPS,
+            Self::Io => IO_GROUPS,
         }
     }
 }
@@ -481,6 +577,7 @@ enum SettingsTab {
     Viewport,
     Engine,
     Diagnostics,
+    Keys,
 }
 
 impl SettingsTab {
@@ -490,6 +587,7 @@ impl SettingsTab {
             Self::Viewport => "Viewport",
             Self::Engine => "Engine",
             Self::Diagnostics => "Diagnostics",
+            Self::Keys => "Keys",
         }
     }
 }
@@ -631,6 +729,9 @@ pub struct NodeCraftApp {
     /// Selection remembered while the tool dock is open; the canvas click-away
     /// that opens the dock clears `selected_nodes` before the tool item is chosen.
     tool_add_source: Option<String>,
+    /// Screen rect of the open tool menu; clicks there belong to the dock, not
+    /// to the canvas underneath.
+    tool_menu_rect: Option<egui::Rect>,
     face_pick_target: Option<String>,
     /// Target whose display mesh is currently shown. Picking is only valid when
     /// this is the explicit topology source for the active selection session.
@@ -708,7 +809,17 @@ pub struct NodeCraftApp {
     theme_rename_id: Option<String>,
     theme_rename_name: String,
     theme_rename_focus: bool,
-    tool_section: Option<ToolSection>,
+    tool_dock_focus: Option<ToolDockFocus>,
+    tool_dock_keyboard_active: bool,
+    tool_search_open: bool,
+    tool_search_query: String,
+    tool_dock_shortcut: String,
+    tool_search_shortcut: String,
+    tool_search_result_index: Option<usize>,
+    tool_search_clear_due: Option<Instant>,
+    tool_menu_index: Option<usize>,
+    tool_dock_offset_y: f32,
+    tool_dock_measured_height: f32,
     sketch_gui: SketchGui,
     control_requests: Receiver<control_server::Request>,
     last_pointer: Option<egui::Pos2>,
@@ -830,6 +941,7 @@ impl NodeCraftApp {
             selected_connections: HashSet::new(),
             viewer_breakpoint: None,
             tool_add_source: None,
+            tool_menu_rect: None,
             face_pick_target: None,
             eval_target: None,
             comparison_pair: None,
@@ -897,7 +1009,17 @@ impl NodeCraftApp {
             theme_rename_id: None,
             theme_rename_name: String::new(),
             theme_rename_focus: false,
-            tool_section: None,
+            tool_dock_focus: None,
+            tool_dock_keyboard_active: false,
+            tool_search_open: false,
+            tool_search_query: String::new(),
+            tool_dock_shortcut: settings.tool_dock_shortcut.clone(),
+            tool_search_shortcut: settings.tool_search_shortcut.clone(),
+            tool_search_result_index: None,
+            tool_search_clear_due: None,
+            tool_menu_index: None,
+            tool_dock_offset_y: settings.tool_dock_offset_y,
+            tool_dock_measured_height: 0.0,
             sketch_gui: SketchGui::default(),
             control_requests: control_server::start(cc.egui_ctx.clone()),
             last_pointer: None,
@@ -1776,6 +1898,54 @@ impl NodeCraftApp {
             .any(|pair| rect.intersects(egui::Rect::from_two_pos(pair[0], pair[1])))
     }
 
+
+    /// A free node goes below every existing node, in the first free slot of
+    /// that bottom band, so repeated additions do not pile up.
+    fn free_node_placement(document: &GraphDocument, node: &GraphNode) -> (f64, f64) {
+        if document.nodes.is_empty() {
+            return (0.0, 0.0);
+        }
+        let extent = node_extent(node);
+        let bounds = document.nodes.iter().map(|existing| {
+            let extent = node_extent(existing);
+            extent.padded_rect(existing.x, existing.y)
+        });
+        let mut min_x = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for rect in bounds {
+            min_x = min_x.min(f64::from(rect.min.x));
+            max_x = max_x.max(f64::from(rect.max.x));
+            max_y = max_y.max(f64::from(rect.max.y));
+        }
+        let gap = 48.0;
+        let step_x = f64::from(extent.width) + gap;
+        let step_y = f64::from(extent.height) + gap;
+        let center_x = (min_x + max_x) * 0.5 - f64::from(extent.width) * 0.5;
+        let mut y = max_y + gap;
+        for _ in 0..64 {
+            // Start under the middle of the existing tree and fill outward left
+            // and right before moving to the next row.
+            for offset in 0..64 {
+                let side = if offset == 0 { 0.0 } else {
+                    let magnitude = ((offset + 1) / 2) as f64;
+                    if offset % 2 == 1 { magnitude } else { -magnitude }
+                };
+                let x = center_x + side * step_x;
+                let candidate = extent.padded_rect(x, y);
+                let clear = !document.nodes.iter().any(|existing| {
+                    let rect = node_extent(existing).padded_rect(existing.x, existing.y);
+                    candidate.intersects(rect)
+                });
+                if clear {
+                    return (x, y);
+                }
+            }
+            y += step_y;
+        }
+        (center_x, max_y + gap)
+    }
+
     fn auto_connect_placement(
         document: &GraphDocument,
         added: &GraphNode,
@@ -1879,9 +2049,6 @@ impl NodeCraftApp {
             self.status = "No document".to_owned();
             return;
         };
-        let panel = self.node_editor.panel_rect(workspace);
-        let center = panel.center();
-        let graph = self.node_editor.graph_pos(center).unwrap_or(egui::Pos2::ZERO);
         let mut used: HashSet<String> = session.document().nodes.iter().map(|node| node.id.clone()).collect();
         let id = unique_node_id(tool.node_type, &mut used);
         let values = match tool.primitive {
@@ -1929,13 +2096,16 @@ impl NodeCraftApp {
             node.y = y;
             moved = branch_moves;
         } else {
-            node.x = f64::from(graph.x) - f64::from(node_width(&node)) * 0.5;
-            node.y = f64::from(graph.y) - f64::from(NODE_HEIGHT) * 0.5;
+            let (x, y) = Self::free_node_placement(session.document(), &node);
+            node.x = x;
+            node.y = y;
         }
         let added_rect = egui::Rect::from_min_size(
             egui::pos2(node.x as f32, node.y as f32),
             egui::vec2(node_width(&node), NODE_HEIGHT),
         );
+        let selection_before = self.selected_nodes.clone();
+        let connections_before = self.selected_connections.clone();
         let mut commands = vec![Command::AddNode { node }];
         if let Some((selected, input, output, _, _, _)) = connect {
             commands.push(Command::Connect {
@@ -1959,9 +2129,16 @@ impl NodeCraftApp {
                 .ensure_graph_rect_visible(workspace, added_rect, 24.0);
             self.egui_ctx.request_repaint();
             self.tool_add_source = None;
-            self.selected_nodes.clear();
-            self.selected_nodes.insert(id.clone());
-            self.selected_connections.clear();
+            if connected || selection_before.is_empty() {
+                // A successful auto-connect hands selection to the new node;
+                // a free node leaves the current selection alone.
+                self.selected_nodes.clear();
+                self.selected_nodes.insert(id.clone());
+                self.selected_connections.clear();
+            } else {
+                self.selected_nodes = selection_before;
+                self.selected_connections = connections_before;
+            }
             self.status = if connected {
                 format!("Added {} and connected it downstream", tool.label)
             } else {
@@ -1969,6 +2146,44 @@ impl NodeCraftApp {
             };
             self.evaluate();
         }
+    }
+
+    fn active_tool_menu(&self) -> Option<ToolSection> {
+        match self.tool_dock_focus {
+            Some(ToolDockFocus::Menu { section }) => Some(section),
+            _ => None,
+        }
+    }
+
+    fn tool_section_index(section: ToolSection) -> usize {
+        ToolSection::ALL
+            .iter()
+            .position(|candidate| *candidate == section)
+            .unwrap_or(0)
+    }
+
+    fn open_tool_menu(&mut self, section: ToolSection, select_first: bool) {
+        self.tool_dock_focus = Some(ToolDockFocus::Menu { section });
+        self.tool_menu_index = select_first.then_some(0);
+    }
+
+    fn close_tool_dock(&mut self) {
+        self.tool_dock_focus = None;
+        self.tool_menu_index = None;
+        self.tool_search_result_index = None;
+        self.tool_dock_keyboard_active = false;
+    }
+
+    fn focus_tool_search(&mut self) {
+        self.tool_dock_focus = Some(ToolDockFocus::Search);
+        self.tool_menu_index = None;
+        self.tool_dock_keyboard_active = true;
+    }
+
+    fn focus_tool_root(&mut self, index: usize) {
+        self.tool_dock_focus = Some(ToolDockFocus::Root { index });
+        self.tool_menu_index = None;
+        self.tool_dock_keyboard_active = true;
     }
 
     fn show_tool_dock(
@@ -1979,7 +2194,192 @@ impl NodeCraftApp {
     ) {
         let theme = crate::theme::get();
         let panel = self.node_editor.panel_rect(workspace);
-        let dock = tool_dock_rect(panel);
+        let measured_height = if self.tool_dock_measured_height > 0.0 {
+            self.tool_dock_measured_height
+        } else {
+            tool_dock_height()
+        };
+        let mut dock = tool_dock_rect(panel, self.tool_dock_offset_y, measured_height);
+
+        let mut clicked_section = None;
+        let mut hovered_section = None;
+        // Only let pointer hover change the open category when the pointer has
+        // actually moved. Otherwise a stationary pointer over the old icon
+        // immediately undoes an arrow-key category change.
+        let pointer_moved = ctx.input(|input| input.pointer.delta().length_sq() > 0.0);
+        let mut section_rects = Vec::new();
+        let mut first_section_rect = None;
+        let dock_content = egui::Area::new(egui::Id::new("node-tool-dock"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(dock.min + egui::vec2(0.0, 8.0))
+            .show(ctx, |ui| {
+                ui.set_width(TOOL_DOCK_WIDTH);
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                let (search_rect, search_response) = ui.allocate_exact_size(
+                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_ROW_SIZE),
+                    egui::Sense::click(),
+                );
+                let search_active = self.tool_search_open
+                    || matches!(self.tool_dock_focus, Some(ToolDockFocus::Search));
+                if search_active || search_response.hovered() {
+                    let fill = if search_active {
+                        theme.color(theme.accent)
+                    } else {
+                        theme.with_alpha(theme.border, 190)
+                    };
+                    ui_shape::fill(&ui.painter(), tool_highlight_rect(search_rect), fill);
+                }
+                let search_tint = crate::theme::Theme::hex(if search_active {
+                    theme.text
+                } else if search_response.hovered() {
+                    theme.icon_hover
+                } else {
+                    theme.icon
+                });
+                let search_svg = tint_svg(include_bytes!("../../../../vendor/iconify-design/search.svg"), &search_tint);
+                let search_image = egui::Image::from_bytes(
+                    "bytes://node-tool-search.svg",
+                    search_svg.into_bytes(),
+                )
+                .fit_to_exact_size(egui::Vec2::splat(TOOL_ICON_SIZE));
+                ui.put(
+                    egui::Rect::from_center_size(search_rect.center(), egui::Vec2::splat(TOOL_ICON_SIZE)),
+                    search_image,
+                );
+                let search_response = search_response.on_hover_text("Search tools");
+                if search_response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if search_response.clicked_by(egui::PointerButton::Primary) {
+                    self.tool_search_open = !self.tool_search_open;
+                    self.tool_search_result_index = None;
+                    self.close_tool_dock();
+                }
+                ui.add_space(TOOL_SECTION_GAP);
+                ui.allocate_exact_size(
+                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_SEARCH_SEPARATOR),
+                    egui::Sense::hover(),
+                );
+                ui.add_space(TOOL_SECTION_GAP);
+                for section in ToolSection::ALL {
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_ROW_SIZE),
+                        egui::Sense::click(),
+                    );
+                    let active = match self.tool_dock_focus {
+                        Some(ToolDockFocus::Menu { section: active }) => active == section,
+                        Some(ToolDockFocus::Root { index }) => {
+                            ToolSection::ALL.get(index) == Some(&section)
+                        }
+                        Some(ToolDockFocus::Search) | None => false,
+                    };
+                    if active || response.hovered() {
+                        let fill = if active {
+                            theme.color(theme.accent)
+                        } else {
+                            theme.with_alpha(theme.border, 190)
+                        };
+                        ui_shape::fill(&ui.painter(), tool_highlight_rect(rect), fill);
+                    }
+                    let tint = crate::theme::Theme::hex(if active {
+                        theme.text
+                    } else if response.hovered() {
+                        theme.icon_hover
+                    } else {
+                        theme.icon
+                    });
+                    let (name, source) = section.icon();
+                    let svg = tint_svg(source, &tint);
+                    let image = egui::Image::from_bytes(
+                        format!("bytes://node-tool-section-{name}.svg"),
+                        svg.into_bytes(),
+                    )
+                    .fit_to_exact_size(egui::Vec2::splat(TOOL_ICON_SIZE));
+                    let icon_response = ui.put(
+                        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(TOOL_ICON_SIZE)),
+                        image,
+                    );
+                    let response = response
+                        .union(icon_response)
+                        .on_hover_text(section.label());
+                    if response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        clicked_section = Some(section);
+                    } else if pointer_moved
+                        && response.hovered()
+                        && self.active_tool_menu().is_some()
+                    {
+                        hovered_section = Some(section);
+                    }
+                    if first_section_rect.is_none() {
+                        first_section_rect = Some(rect);
+                    }
+                    section_rects.push((section, rect));
+                    if section != ToolSection::ALL[ToolSection::ALL.len() - 1] {
+                        ui.add_space(TOOL_SECTION_GAP);
+                    }
+                }
+                ui.add_space(TOOL_SECTION_GAP);
+                let (grip_rect, grip_response) = ui.allocate_exact_size(
+                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_GRIP_HEIGHT),
+                    egui::Sense::click_and_drag(),
+                );
+                if grip_response.double_clicked() {
+                    self.tool_dock_offset_y = 0.0;
+                    self.view_save_due =
+                        Some(Instant::now() + std::time::Duration::from_millis(500));
+                    ui.ctx().request_repaint();
+                }
+                if grip_response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                if grip_response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    let max_offset =
+                        ((panel.height() - self.tool_dock_measured_height) * 0.5 - 12.0)
+                            .max(0.0);
+                    self.tool_dock_offset_y = (self.tool_dock_offset_y
+                        + grip_response.drag_delta().y)
+                        .clamp(-max_offset, max_offset);
+                    self.view_save_due =
+                        Some(Instant::now() + std::time::Duration::from_millis(500));
+                    ui.ctx().request_repaint();
+                }
+                let dot = theme.with_alpha(theme.border, 220);
+                for row in 0..2 {
+                    for column in 0..3 {
+                        let centre = grip_rect.center()
+                            + egui::vec2(
+                                (column as f32 - 1.0) * 5.0,
+                                (row as f32 - 0.5) * 5.0,
+                            );
+                        ui.painter().circle_filled(centre, 1.4, dot);
+                    }
+                }
+                if let Some(first) = first_section_rect {
+                    let centre = egui::Pos2::new(
+                        search_rect.center().x,
+                        (search_rect.center().y + first.center().y) * 0.5,
+                    );
+                    ui.painter().line_segment(
+                        [
+                            egui::Pos2::new(centre.x - 12.0, centre.y),
+                            egui::Pos2::new(centre.x + 12.0, centre.y),
+                        ],
+                        egui::Stroke::new(1.0, theme.with_alpha(theme.border, 160)),
+                    );
+                }
+            });
+
+        // The background is derived from the rows actually rendered, so its
+        // height cannot drift from the icon stack.
+        let content = dock_content.response.rect;
+        dock = egui::Rect::from_min_max(
+            egui::Pos2::new(content.left(), content.top() - 8.0),
+            egui::Pos2::new(content.right(), content.bottom() + 8.0),
+        );
         let background = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("node-tool-dock-background"),
@@ -2005,80 +2405,401 @@ impl NodeCraftApp {
             egui::Color32::TRANSPARENT,
             egui::Stroke::new(1.0, theme.color(theme.dock_border)),
         ));
-
-        let mut clicked_section = None;
-        let mut section_rects = Vec::new();
-        egui::Area::new(egui::Id::new("node-tool-dock"))
-            .order(egui::Order::Tooltip)
-            .fixed_pos(dock.min + egui::vec2(0.0, 8.0))
-            .show(ctx, |ui| {
-                ui.set_width(TOOL_DOCK_WIDTH);
-                ui.spacing_mut().item_spacing = egui::vec2(0.0, 6.0);
-                for section in ToolSection::ALL {
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_DOCK_WIDTH),
-                        egui::Sense::click(),
-                    );
-                    let active = self.tool_section == Some(section);
-                    if active || response.hovered() {
-                        let fill = if active {
-                            theme.color(theme.accent)
-                        } else {
-                            theme.with_alpha(theme.border, 190)
-                        };
-                        ui_shape::fill(&ui.painter(), rect.shrink(4.0), fill);
-                    }
-                    let tint = crate::theme::Theme::hex(if active {
-                        theme.text
-                    } else if response.hovered() {
-                        theme.icon_hover
-                    } else {
-                        theme.icon
-                    });
-                    let (name, source) = section.icon();
-                    let svg = tint_svg(source, &tint);
-                    let image = egui::Image::from_bytes(
-                        format!("bytes://node-tool-section-{name}.svg"),
-                        svg.into_bytes(),
-                    )
-                    .fit_to_exact_size(egui::Vec2::splat(19.0));
-                    ui.put(rect.shrink(13.0), image);
-                    let response = response.on_hover_text(section.label());
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if response.clicked_by(egui::PointerButton::Primary) {
-                        clicked_section = Some(section);
-                    }
-                    section_rects.push((section, rect));
-                }
-            });
+        self.tool_dock_measured_height = dock.height();
 
         let category_clicked = clicked_section.is_some();
         if let Some(section) = clicked_section {
-            self.tool_section = if self.tool_section == Some(section) {
-                None
+            self.tool_search_open = false;
+            if self.active_tool_menu() == Some(section) {
+                self.close_tool_dock();
             } else {
-                Some(section)
-            };
+                self.open_tool_menu(section, false);
+                self.tool_dock_keyboard_active = true;
+            }
+            // Opening the dock must not disturb the canvas selection. If the
+            // click-away path cleared it this frame, restore the remembered
+            // source the dock was opened for.
+            if self.active_tool_menu().is_some()
+                && self.selected_nodes.is_empty()
+                && let Some(source) = self.tool_add_source.clone()
+            {
+                self.selected_nodes.insert(source);
+            }
+        } else if let Some(section) = hovered_section
+            && self.active_tool_menu() != Some(section)
+        {
+            self.open_tool_menu(section, false);
+        }
+
+        // A root keyboard focus is not a menu, so the menu click-away path
+        // below never runs while it is active. Any click that is not a
+        // category activation should clear it.
+        if self.active_tool_menu().is_none()
+            && !category_clicked
+            && ctx.input(|input| input.pointer.any_click())
+        {
+            self.close_tool_dock();
         }
 
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
-            self.tool_section = None;
+            self.close_tool_dock();
+            self.tool_search_open = false;
         }
-        let Some(section) = self.tool_section else {
+
+        if shortcut_pressed(ctx, &self.tool_dock_shortcut) {
+            if self.tool_dock_keyboard_active {
+                self.close_tool_dock();
+                self.tool_search_open = false;
+            } else {
+                self.focus_tool_search();
+                self.tool_search_open = false;
+            }
+            self.tool_menu_rect = None;
+        }
+        if shortcut_pressed(ctx, &self.tool_search_shortcut) {
+            self.tool_search_query.clear();
+            self.tool_search_result_index = None;
+            self.tool_search_clear_due = None;
+            self.tool_search_open = true;
+            self.focus_tool_search();
+            self.tool_menu_rect = None;
+        }
+
+        if self.tool_search_open {
+            let mut chosen = None;
+            let search_centre_y =
+                dock.min.y + TOOL_DOCK_PADDING + TOOL_ROW_SIZE * 0.5;
+            let search_popup_y = (search_centre_y - TOOL_ROW_SIZE * 0.5 - 8.0)
+                .clamp(panel.top() + 8.0, panel.bottom() - 48.0);
+            let search_response = egui::Area::new(egui::Id::new("node-tool-search"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::Pos2::new(dock.max.x + TOOL_DOCK_GAP, search_popup_y))
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(theme.color(theme.popup))
+                        .stroke(egui::Stroke::new(1.0, theme.color(theme.border_strong)))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(260.0);
+                            let query_frame = egui::Frame::new()
+                                .fill(theme.color(theme.control))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    theme.color(theme.border_strong),
+                                ))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(8, 6))
+                                .show(ui, |ui| {
+                                    let field_height =
+                                        ui.text_style_height(&egui::TextStyle::Body) + 6.0;
+                                    ui.add_sized(
+                                        egui::Vec2::new(244.0, field_height),
+                                        egui::TextEdit::singleline(&mut self.tool_search_query)
+                                            .id(egui::Id::new("node-tool-search-field"))
+                                            .frame(egui::Frame::NONE)
+                                            .vertical_align(egui::Align::Center)
+                                            .text_color(theme.color(theme.text))
+                                            .hint_text(
+                                                egui::RichText::new("Search tools")
+                                                    .color(theme.with_alpha(theme.muted, 190)),
+                                            ),
+                                    )
+                                });
+                            let query = query_frame.inner;
+                            // The field and the result list are two modes of the
+                            // same search popup; None means text-entry mode.
+                            if query.clicked() || query.gained_focus() {
+                                self.tool_search_result_index = None;
+                            }
+                            let field_active = self.tool_search_result_index.is_none();
+                            if field_active {
+                                if !query.has_focus() {
+                                    query.request_focus();
+                                }
+                                ui.painter().rect_stroke(
+                                    query_frame.response.rect,
+                                    egui::CornerRadius::same(8),
+                                    egui::Stroke::new(1.5, theme.color(theme.accent)),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let needle = self.tool_search_query.trim().to_lowercase();
+                            if needle.is_empty() {
+                                return;
+                            }
+                            ui.add_space(4.0);
+                            let mut found: Vec<(usize, ToolSection, ToolItem)> = Vec::new();
+                            let pattern = format!("*{needle}*");
+                            let threshold = (needle.chars().count() / 3).max(1);
+                            for section in ToolSection::ALL {
+                                for group in section.groups() {
+                                    for tool in group.tools {
+                                        let wildcard = nodecraft_search::wildcard_matches(&pattern, tool.label)
+                                            || nodecraft_search::wildcard_matches(&pattern, tool.node_type);
+                                        let distance = nodecraft_search::best_levenshtein(&needle, tool.label)
+                                            .min(nodecraft_search::best_levenshtein(&needle, tool.node_type));
+                                        if wildcard || distance <= threshold {
+                                            found.push((if wildcard { 0 } else { distance }, section, *tool));
+                                        }
+                                    }
+                                }
+                            }
+                            found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.label.cmp(b.2.label)));
+                            if found.is_empty() {
+                                ui.label(
+                                    egui::RichText::new("No matching tools")
+                                        .size(11.0)
+                                        .color(theme.color(theme.muted)),
+                                );
+                                self.tool_search_result_index = None;
+                            }
+                            if query.changed() {
+                                self.tool_search_result_index = None;
+                                self.tool_search_clear_due =
+                                    Some(Instant::now() + TOOL_SEARCH_CLEAR_AFTER);
+                            }
+                            let result_count = found.len().min(10);
+                            // These keys must be consumed here. Otherwise an
+                            // unhandled Up/Down can fall through to the native
+                            // menu bar while the result list has focus.
+                            let enter_pressed = ctx.input_mut(|input| {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            });
+                            let results_focused = self.tool_search_result_index.is_some();
+                            let (up_pressed, down_pressed) = if results_focused {
+                                ctx.input_mut(|input| {
+                                    (
+                                        input.consume_key(
+                                            egui::Modifiers::NONE,
+                                            egui::Key::ArrowUp,
+                                        ),
+                                        input.consume_key(
+                                            egui::Modifiers::NONE,
+                                            egui::Key::ArrowDown,
+                                        ),
+                                    )
+                                })
+                            } else {
+                                (false, false)
+                            };
+                            if result_count > 0 {
+                                if enter_pressed {
+                                    if let Some(index) = self.tool_search_result_index {
+                                        chosen = found.get(index).map(|(_, _, tool)| *tool);
+                                    } else {
+                                        self.tool_search_result_index = Some(0);
+                                        query.surrender_focus();
+                                    }
+                                }
+                                if let Some(current) = self.tool_search_result_index {
+                                    let mut index = current.min(result_count - 1);
+                                    if down_pressed {
+                                        index = (index + 1).min(result_count - 1);
+                                    }
+                                    let return_to_field = up_pressed && index == 0;
+                                    if up_pressed && index > 0 {
+                                        index -= 1;
+                                    }
+                                    self.tool_search_result_index =
+                                        (!return_to_field).then_some(index);
+                                    if return_to_field {
+                                        query.request_focus();
+                                    }
+                                }
+                            }
+                            for (index, (_, section, tool)) in
+                                found.iter().take(10).enumerate()
+                            {
+                                let selected = self.tool_search_result_index == Some(index);
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::Vec2::new(260.0, 26.0),
+                                    egui::Sense::click(),
+                                );
+                                if response.hovered() || selected {
+                                    let fill = if selected {
+                                        theme.with_alpha(theme.accent, 170)
+                                    } else {
+                                        theme.with_alpha(theme.control, 190)
+                                    };
+                                    ui_shape::fill(&ui.painter(), rect, fill);
+                                    if response.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                }
+                                ui.painter().text(
+                                    egui::Pos2::new(rect.min.x + 8.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    tool.label,
+                                    egui::FontId::proportional(13.0),
+                                    theme.color(theme.text),
+                                );
+                                ui.painter().text(
+                                    egui::Pos2::new(rect.max.x - 8.0, rect.center().y),
+                                    egui::Align2::RIGHT_CENTER,
+                                    section.label(),
+                                    egui::FontId::proportional(10.0),
+                                    theme.color(theme.muted),
+                                );
+                                if response.clicked() {
+                                    chosen = Some(*tool);
+                                }
+                            }
+                        });
+                });
+            self.tool_menu_rect = Some(search_response.response.rect);
+            // The click that opens the popup is outside it, but inside the dock;
+            // do not treat that same click as click-away.
+            let pointer_on_dock = ctx
+                .pointer_latest_pos()
+                .is_some_and(|pointer| dock.contains(pointer));
+            if search_response.response.clicked_elsewhere() && !pointer_on_dock {
+                self.tool_search_open = false;
+                self.tool_search_clear_due = None;
+                self.close_tool_dock();
+                self.tool_menu_rect = None;
+            }
+            if let Some(tool) = chosen {
+                self.tool_search_open = false;
+                self.tool_search_query.clear();
+                self.tool_search_clear_due = None;
+                self.close_tool_dock();
+                self.add_tool_node(tool, workspace, connect_source);
+            }
+            return;
+        }
+
+        if self.active_tool_menu().is_none() {
+            if !self.tool_dock_keyboard_active {
+                self.tool_menu_rect = None;
+                return;
+            }
+            let keyboard_row_count = ToolSection::ALL.len() + 1;
+            let focused = match self.tool_dock_focus {
+                Some(ToolDockFocus::Search) => Some(0),
+                Some(ToolDockFocus::Root { index }) => Some(index + 1),
+                _ => None,
+            };
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
+                let index = focused
+                    .map(|index| (index + 1).min(keyboard_row_count - 1))
+                    .unwrap_or(0);
+                if index == 0 {
+                    self.focus_tool_search();
+                } else {
+                    self.focus_tool_root(index - 1);
+                }
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
+                let index = focused
+                    .map(|index| index.saturating_sub(1))
+                    .unwrap_or(keyboard_row_count - 1);
+                if index == 0 {
+                    self.focus_tool_search();
+                } else {
+                    self.focus_tool_root(index - 1);
+                }
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowRight))
+                || ctx.input(|input| input.key_pressed(egui::Key::Enter))
+            {
+                match self.tool_dock_focus {
+                    Some(ToolDockFocus::Search) => {
+                        self.tool_search_open = true;
+                        self.tool_menu_rect = None;
+                        return;
+                    }
+                    Some(ToolDockFocus::Root { index }) => {
+                        self.open_tool_menu(ToolSection::ALL[index], true);
+                    }
+                    _ => self.focus_tool_search(),
+                }
+            }
+            if self.active_tool_menu().is_none() {
+                self.tool_menu_rect = None;
+                return;
+            }
+        }
+        let Some(section) = self.active_tool_menu() else {
+            self.tool_menu_rect = None;
             return;
         };
-        let tools = section.tools();
-        let menu_height = 40.0 + tools.len() as f32 * 30.0;
-        let y = section_rects
+        if self.tool_dock_keyboard_active
+            && ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft))
+        {
+            self.focus_tool_root(Self::tool_section_index(section));
+            self.tool_menu_rect = None;
+            return;
+        }
+        let groups = section.groups();
+        let items: Vec<&ToolItem> = groups
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .collect();
+        if !items.is_empty() {
+            if let Some(index) = self.tool_menu_index.as_mut() {
+                *index = (*index).min(items.len() - 1);
+            }
+            if self.tool_dock_keyboard_active
+                && ctx.input(|input| input.key_pressed(egui::Key::ArrowDown))
+            {
+                self.tool_menu_index = Some(match self.tool_menu_index {
+                    Some(index) => (index + 1).min(items.len() - 1),
+                    None => 0,
+                });
+            }
+            if self.tool_dock_keyboard_active
+                && ctx.input(|input| input.key_pressed(egui::Key::ArrowUp))
+            {
+                self.tool_menu_index = Some(match self.tool_menu_index {
+                    Some(index) => index.saturating_sub(1),
+                    None => items.len() - 1,
+                });
+            }
+        }
+        let heading_count = groups.iter().filter(|group| group.heading.is_some()).count();
+        let divider_count = groups.len().saturating_sub(1);
+        let menu_height = 40.0
+            + items.len() as f32 * 30.0
+            + heading_count as f32 * 20.0
+            + divider_count as f32 * 9.0
+            + if items.is_empty() { 24.0 } else { 0.0 };
+        let label_font = egui::FontId::proportional(13.0);
+        let label_width = |text: &str| {
+            ctx.fonts_mut(|fonts| {
+                fonts
+                    .layout_no_wrap(text.to_owned(), label_font.clone(), theme.color(theme.text))
+                    .size()
+                    .x
+            })
+        };
+        let longest = items
+            .iter()
+            .map(|tool| label_width(tool.label))
+            .fold(0.0_f32, f32::max);
+        // Leave room for the row's text padding but keep long labels readable
+        // without letting the flyout grow across the canvas.
+        let row_width = (longest + 20.0).clamp(140.0, 264.0);
+        let anchor_y = section_rects
             .iter()
             .find(|(candidate, _)| *candidate == section)
-            .map(|(_, rect)| rect.max.y + 4.0)
-            .unwrap_or(dock.min.y + 8.0)
-            .min((workspace.bottom() - 12.0 - menu_height).max(dock.min.y + 8.0));
+            .map(|(_, rect)| rect.center().y)
+            .unwrap_or(dock.min.y + 8.0);
+        let y = (anchor_y - menu_height * 0.5).clamp(
+            workspace.top() + 12.0,
+            (workspace.bottom() - 12.0 - menu_height).max(workspace.top() + 12.0),
+        );
         let menu_pos = egui::Pos2::new(dock.max.x + TOOL_DOCK_GAP, y);
-        let mut chosen = None;
+        let keyboard_choice = if self.tool_dock_keyboard_active
+            && ctx.input(|input| input.key_pressed(egui::Key::Enter))
+        {
+            self.tool_menu_index
+                .and_then(|index| items.get(index))
+                .map(|tool| **tool)
+        } else {
+            None
+        };
+        let mut chosen = keyboard_choice;
         let menu_response = egui::Area::new(egui::Id::new("node-tool-dock-menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu_pos)
@@ -2089,44 +2810,107 @@ impl NodeCraftApp {
                     .corner_radius(egui::CornerRadius::same(12))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        ui.set_width(182.0);
+                        ui.set_width(row_width);
                         ui.label(
                             egui::RichText::new(section.label().to_uppercase())
                                 .size(10.0)
                                 .color(theme.color(theme.muted)),
                         );
                         ui.add_space(3.0);
-                        for tool in tools {
-                            let response = ui
-                                .add_sized(
-                                    [182.0, 28.0],
-                                    egui::Button::new(
-                                        egui::RichText::new(tool.label)
-                                            .size(13.0)
-                                            .color(theme.color(theme.text)),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text(match tool.primitive {
-                                    Some(primitive) => format!("Add {} ({primitive})", tool.label),
-                                    None => format!("Add {}", tool.label),
-                                });
-                            if response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        if items.is_empty() {
+                            ui.label(
+                                egui::RichText::new("No animation nodes yet")
+                                    .size(11.0)
+                                    .color(theme.color(theme.muted)),
+                            );
+                        }
+                        let mut item_index = 0;
+                        for (group_index, group) in groups.iter().enumerate() {
+                            if group_index > 0 {
+                                ui.add_space(4.0);
+                                let (line, _) = ui.allocate_exact_size(
+                                    egui::Vec2::new(row_width, 1.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().line_segment(
+                                    [line.left_center(), line.right_center()],
+                                    egui::Stroke::new(1.0, theme.with_alpha(theme.border, 140)),
+                                );
+                                ui.add_space(4.0);
                             }
-                            if response.clicked() {
-                                chosen = Some(*tool);
+                            if let Some(heading) = group.heading {
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new(heading.to_uppercase())
+                                        .size(9.0)
+                                        .strong()
+                                        .color(theme.with_alpha(theme.muted, 220)),
+                                );
+                                ui.add_space(2.0);
+                            }
+                            for tool in group.tools {
+                            let selected = self.tool_menu_index == Some(item_index);
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::Vec2::new(row_width, 28.0),
+                                egui::Sense::click(),
+                            );
+                            if response.hovered() || selected {
+                                let fill = if selected {
+                                    theme.with_alpha(theme.accent, 170)
+                                } else {
+                                    theme.with_alpha(theme.control, 190)
+                                };
+                                ui_shape::fill(&ui.painter(), rect, fill);
+                                if response.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                            }
+                            let text_width = label_width(tool.label);
+                            let label = if text_width <= row_width - 20.0 {
+                                tool.label.to_owned()
+                            } else {
+                                let ellipsis = "…";
+                                let mut cut = tool.label;
+                                while !cut.is_empty()
+                                    && label_width(&format!("{cut}{ellipsis}")) > row_width - 20.0
+                                {
+                                    cut = &cut[..cut.len().saturating_sub(1)];
+                                }
+                                format!("{cut}{ellipsis}")
+                            };
+                            ui.painter().text(
+                                egui::Pos2::new(rect.min.x + 10.0, rect.center().y),
+                                egui::Align2::LEFT_CENTER,
+                                label,
+                                label_font.clone(),
+                                theme.color(theme.text),
+                            );
+                            let response = response.on_hover_text(match tool.primitive {
+                                Some(primitive) => format!("Add {} ({primitive})", tool.label),
+                                None => format!("Add {}", tool.label),
+                            });
+                                if response.clicked() {
+                                    chosen = Some(*tool);
+                                }
+                                item_index += 1;
                             }
                         }
                     });
             });
-        if !category_clicked && menu_response.response.clicked_elsewhere() {
-            self.tool_section = None;
+        self.tool_menu_rect = Some(menu_response.response.rect);
+        let clicked_outside_menu = !category_clicked
+            && ctx.input(|input| input.pointer.any_click())
+            && ctx
+                .pointer_latest_pos()
+                .is_none_or(|pointer| !menu_response.response.rect.contains(pointer));
+        if clicked_outside_menu {
+            self.close_tool_dock();
             self.tool_add_source = None;
+            self.tool_menu_rect = None;
         }
         if let Some(tool) = chosen {
             self.add_tool_node(tool, workspace, connect_source);
-            self.tool_section = None;
+            self.close_tool_dock();
         }
     }
 
@@ -3005,6 +3789,7 @@ impl NodeCraftApp {
                     SettingsTab::Viewport,
                     SettingsTab::Engine,
                     SettingsTab::Diagnostics,
+                    SettingsTab::Keys,
                 ];
                 let mut tab_y = left.min.y + 12.0;
                 for candidate in tabs {
@@ -3327,6 +4112,37 @@ impl NodeCraftApp {
                              Applies when the kernel workers start; restart to change an existing pool.",
                         );
                     }
+                    SettingsTab::Keys => {
+                        content.heading("Key commands");
+                        content.small(
+                            "Tool dock keys only act after clicking the dock or pressing Command-M.",
+                        );
+                        content.add_space(10.0);
+                        for (label, shortcut) in [
+                            ("Tool dock keyboard navigation", &mut self.tool_dock_shortcut),
+                            ("Search tools", &mut self.tool_search_shortcut),
+                        ] {
+                            content.horizontal(|ui| {
+                                ui.add_sized(
+                                    [210.0, 22.0],
+                                    egui::Label::new(label),
+                                );
+                                let changed = ui
+                                    .add_sized(
+                                        [110.0, 24.0],
+                                        egui::TextEdit::singleline(shortcut)
+                                            .hint_text("Cmd+M"),
+                                    )
+                                    .changed();
+                                if changed {
+                                    self.view_save_due = Some(
+                                        Instant::now()
+                                            + std::time::Duration::from_millis(500),
+                                    );
+                                }
+                            });
+                        }
+                    }
                     SettingsTab::Diagnostics => {
                         content.heading("Diagnostics");
                         content.monospace(format!("NodeCraft {}", env!("CARGO_PKG_VERSION")));
@@ -3606,16 +4422,7 @@ impl NodeCraftApp {
             self.new_blank();
         }
         let Some(session) = &self.session else { return };
-        let graph = pointer
-            .and_then(|point| self.node_editor.graph_pos(point))
-            .or_else(|| {
-                session
-                    .document()
-                    .nodes
-                    .last()
-                    .map(|node| egui::pos2(node.x as f32 + 220.0, node.y as f32 + 80.0))
-            })
-            .unwrap_or(egui::Pos2::ZERO);
+        let graph = pointer.and_then(|point| self.node_editor.graph_pos(point));
         let mut used: HashSet<String> = session.document().nodes.iter().map(|node| node.id.clone()).collect();
         let id = unique_node_id("step", &mut used);
         let mut node = GraphNode {
@@ -3626,9 +4433,20 @@ impl NodeCraftApp {
             x: 0.0,
             y: 0.0,
         };
-        node.x = f64::from(graph.x) - f64::from(node_width(&node)) * 0.5;
-        node.y = f64::from(graph.y) - f64::from(NODE_HEIGHT) * 0.5;
+        if let Some(graph) = graph {
+            node.x = f64::from(graph.x) - f64::from(node_width(&node)) * 0.5;
+            node.y = f64::from(graph.y) - f64::from(NODE_HEIGHT) * 0.5;
+        } else {
+            let (x, y) = Self::free_node_placement(session.document(), &node);
+            node.x = x;
+            node.y = y;
+        }
+        let added_rect = egui::Rect::from_min_size(
+            egui::pos2(node.x as f32, node.y as f32),
+            egui::vec2(node_width(&node), NODE_HEIGHT),
+        );
         if self.apply_commands(&[Command::AddNode { node }], Some("drop-step-import")) {
+            let _ = added_rect;
             self.selected_nodes.clear();
             self.selected_nodes.insert(id.clone());
             self.selected_connections.clear();
@@ -3793,6 +4611,15 @@ impl NodeCraftApp {
 
 impl eframe::App for NodeCraftApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self
+            .tool_search_clear_due
+            .is_some_and(|due| Instant::now() >= due)
+        {
+            self.tool_search_query.clear();
+            self.tool_search_result_index = None;
+            self.tool_search_clear_due = None;
+            ctx.request_repaint();
+        }
         self.poll_dialog(ctx);
         self.node_editor.set_cable_routing(self.cable_routing);
         {
@@ -3838,6 +4665,9 @@ impl eframe::App for NodeCraftApp {
                 self.workload_profiler,
                 self.kernel_fixes,
                 self.cable_routing,
+                self.tool_dock_offset_y,
+                &self.tool_dock_shortcut,
+                &self.tool_search_shortcut,
                 &self.last_saved_recent,
             )
             .is_ok()
@@ -4526,7 +5356,7 @@ impl eframe::App for NodeCraftApp {
 
         if self.selected_nodes.len() == 1 {
             self.tool_add_source = self.selected_nodes.iter().next().cloned();
-        } else if self.tool_section.is_none() {
+        } else if self.active_tool_menu().is_none() {
             self.tool_add_source = None;
         }
         let tool_connect_source = self.tool_add_source.clone();
@@ -4538,6 +5368,11 @@ impl eframe::App for NodeCraftApp {
             let central_rect = ui.available_rect_before_wrap();
             viewport_rect = central_rect;
             let panel_rect = self.node_editor.panel_rect(central_rect);
+            let mut blockers = vec![tool_dock_rect(panel_rect, self.tool_dock_offset_y, self.tool_dock_measured_height.max(tool_dock_height()))];
+            if let Some(menu) = self.tool_menu_rect {
+                blockers.push(menu);
+            }
+            self.node_editor.set_pointer_blockers(blockers);
             self.viewport.show_with_backdrop_blockers(
                 ui,
                 panel_rect,
@@ -5182,8 +6017,20 @@ impl eframe::App for NodeCraftApp {
                     self.apply_commands(&commands, Some("move:nodes"));
                 }
                 NodeEditorAction::Deselect => {
-                    self.selected_nodes.clear();
-                    self.selected_connections.clear();
+                    // The floating tool dock sits over the canvas; clicking it is
+                    // not a click-away from the current selection.
+                    let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                    let over_tool_dock = pointer.is_some_and(|pointer| {
+                        tool_dock_rect(self.node_editor.panel_rect(workspace_rect), self.tool_dock_offset_y, self.tool_dock_measured_height.max(tool_dock_height()))
+                            .contains(pointer)
+                            || self
+                                .tool_menu_rect
+                                .is_some_and(|menu| menu.contains(pointer))
+                    });
+                    if !over_tool_dock {
+                        self.selected_nodes.clear();
+                        self.selected_connections.clear();
+                    }
                 }
                 NodeEditorAction::SetPositions(positions) => {
                     let commands: Vec<Command> = positions
@@ -5482,7 +6329,21 @@ struct AppSettings {
     #[serde(default = "default_cable_routing")]
     cable_routing: String,
     #[serde(default)]
+    tool_dock_offset_y: f32,
+    #[serde(default = "default_tool_dock_shortcut")]
+    tool_dock_shortcut: String,
+    #[serde(default = "default_tool_search_shortcut")]
+    tool_search_shortcut: String,
+    #[serde(default)]
     recent_files: Vec<String>,
+}
+
+fn default_tool_dock_shortcut() -> String {
+    "Cmd+M".to_owned()
+}
+
+fn default_tool_search_shortcut() -> String {
+    "Cmd+F".to_owned()
 }
 
 fn default_cable_routing() -> String {
@@ -5516,6 +6377,9 @@ fn save_app_settings(
     workload_profiler: bool,
     kernel_fixes: bool,
     cable_routing: CableRouting,
+    tool_dock_offset_y: f32,
+    tool_dock_shortcut: &str,
+    tool_search_shortcut: &str,
     recent_files: &[PathBuf],
 ) -> Result<(), ()> {
     let path = settings_file().ok_or(())?;
@@ -5532,6 +6396,9 @@ fn save_app_settings(
         workload_profiler,
         kernel_fixes,
         cable_routing: cable_routing.setting_id().to_owned(),
+        tool_dock_offset_y,
+        tool_dock_shortcut: tool_dock_shortcut.to_owned(),
+        tool_search_shortcut: tool_search_shortcut.to_owned(),
         recent_files: recent_files
             .iter()
             .map(|path| path.display().to_string())
@@ -6475,6 +7342,9 @@ mod tests {
             workload_profiler: true,
             kernel_fixes: true,
             cable_routing: "bezier-routing".to_owned(),
+            tool_dock_offset_y: 12.0,
+            tool_dock_shortcut: "Cmd+M".to_owned(),
+            tool_search_shortcut: "Cmd+F".to_owned(),
             recent_files: vec!["/tmp/one.nodecraft".to_owned(), "/tmp/two.nodecraft".to_owned()],
         };
         let text = serde_json::to_string(&settings).expect("serialize settings");
@@ -6488,6 +7358,7 @@ mod tests {
         assert_eq!(parsed.activity, ActivitySettings::default());
         assert!(parsed.feature_overlay);
         assert_eq!(parsed.cable_routing, "bezier-routing");
+        assert_eq!(parsed.tool_dock_offset_y, 12.0);
     }
 
     #[test]
@@ -6694,6 +7565,31 @@ mod tests {
     }
 
     #[test]
+    fn free_node_placement_puts_nodes_below_without_overlap() {
+        let mut document = history_fixture();
+        let max_y = document
+            .nodes
+            .iter()
+            .map(|node| node.y + f64::from(node_extent(node).height))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let template = document.nodes[0].clone();
+        let first = GraphNode {
+            id: "free-one".into(),
+            ..template.clone()
+        };
+        let (x1, y1) = NodeCraftApp::free_node_placement(&document, &first);
+        assert!(y1 >= max_y);
+        document.nodes.push(GraphNode { x: x1, y: y1, ..first.clone() });
+        let second = GraphNode {
+            id: "free-two".into(),
+            ..template
+        };
+        let (x2, y2) = NodeCraftApp::free_node_placement(&document, &second);
+        let first_rect = node_extent(&first).padded_rect(x1, y1);
+        let second_rect = node_extent(&second).padded_rect(x2, y2);
+        assert!(!first_rect.intersects(second_rect));
+    }
+
     fn auto_connect_placement_avoids_an_existing_node() {
         let mut document = history_fixture();
         let mut blocker = document.nodes[0].clone();

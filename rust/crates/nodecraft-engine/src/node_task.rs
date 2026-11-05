@@ -33,7 +33,10 @@ impl NodeOutput {
     pub(crate) fn into_brep(self) -> Option<Brep> {
         match self {
             Self::Shape(shape) => Some(
-                std::sync::Arc::try_unwrap(shape).unwrap_or_else(|shared| (*shared).clone()),
+                match std::sync::Arc::try_unwrap(shape) {
+                    Ok(brep) => brep,
+                    Err(shared) => shared.clone_standing_for_self().ok()?,
+                },
             ),
             _ => None,
         }
@@ -125,7 +128,7 @@ impl ExactNodeTask {
     /// Node types this task layer can dispatch today. The descriptor table
     /// remains the long-term capability source; this is the implemented subset.
     pub(crate) fn supports(node_type: &str) -> bool {
-        matches!(node_type, "primitive" | "boolean" | "fuse" | "extrude" | "fillet" | "shell" | "mirror" | "loft" | "surfaceloft" | "chamfer")
+        matches!(node_type, "solid" | "primitive" | "boolean" | "fuse" | "extrude" | "fillet" | "shell" | "mirror" | "loft" | "surfaceloft" | "chamfer")
     }
 
     pub(crate) fn run(self, kernel: &mut Kernel) -> Result<NodeOutput, String> {
@@ -224,7 +227,7 @@ mod tests {
     fn primitive(length: f64) -> Node {
         Node {
             id: "p".into(),
-            node_type: "primitive".into(),
+            node_type: "solid".into(),
             values: json!({"primitiveType": "box", "length": length, "width": 10.0, "height": 10.0}),
             suppressed: false,
             cache: None,
@@ -254,7 +257,7 @@ mod tests {
 
     #[test]
     fn supported_types_are_limited_to_implemented_entry_points() {
-        assert!(ExactNodeTask::supports("primitive"));
+        assert!(ExactNodeTask::supports("solid"));
         assert!(ExactNodeTask::supports("boolean"));
         assert!(ExactNodeTask::supports("fuse"));
         assert!(ExactNodeTask::supports("extrude"));

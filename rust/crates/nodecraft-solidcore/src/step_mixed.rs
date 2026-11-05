@@ -1118,7 +1118,7 @@ fn validate_mixed_brep(brep: &mut Brep, label: &str) -> Result<(f64, f64), Strin
         ))
         .unwrap_or_else(|| Point3::new(500.0, 500.0, 500.0));
     let mass_at = |origin: Point3| -> Result<(f64, f64), String> {
-        let mut copy = brep.clone();
+        let mut copy = brep.clone_standing_for_self().map_err(|error| error.to_string())?;
         brep_mass_properties(&kernel, &mut copy, 1e-4, 1.0, origin, &attributes)
             .map(|mass| (mass.properties.volume, mass.properties.area))
             .map_err(|error| error.to_string())
@@ -1330,7 +1330,7 @@ mod tests {
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attrs = solidcore::mass::integrator::properties::PropertyAttributes { store: &store, key_of: &key };
-        let volume = brep_volume(&kernel, &mut brep.clone(), 1e-7, &attrs).unwrap().abs();
+        let volume = brep_volume(&kernel, &mut brep.clone_standing_for_self().expect("standing copy"), 1e-7, &attrs).unwrap().abs();
         let expected = std::f64::consts::PI * 25.0 * 10.0;
         assert!((volume - expected).abs() / expected < 0.01, "mixed cylinder volume {volume} expected {expected}");
     }
@@ -1366,7 +1366,7 @@ mod tests {
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };
-        let mut copy = brep.clone();
+        let mut copy = brep.clone_standing_for_self().map_err(|error| error.to_string())?;
         brep_mass_properties(&kernel, &mut copy, 1e-4, 1.0, origin, &attributes)
             .map(|mass| (mass.properties.volume, mass.properties.area))
             .map_err(|error| error.to_string())
@@ -1382,7 +1382,7 @@ mod tests {
         let store = solidcore::geom::attribute::AttributeStore::new();
         let key = |_| solidcore::geom::attribute::ObjectKey(2_000_000);
         let attributes = PropertyAttributes { store: &store, key_of: &key };
-        brep_volume(&kernel, &mut brep.clone(), 1e-7, &attributes).expect("brep_volume").abs()
+        brep_volume(&kernel, &mut brep.clone_standing_for_self().expect("standing copy"), 1e-7, &attributes).expect("brep_volume").abs()
     }
 
     /// The doghouse fixture is an INCH AP203 sample. The mixed reader must scale every

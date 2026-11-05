@@ -907,7 +907,9 @@ pub fn chamfer_brep_exact_with_kernel(
         ));
     }
     let extent = diagonal * 4.0 + 100.0;
-    let mut result = brep.clone();
+    let mut result = brep
+        .clone_standing_for_self()
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     for selection in &selections {
         let frame = edge_frame(&*kernel, brep, selection, interior).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
         let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| nodecraft_solidcore::error::user_message(error))?;

@@ -55,6 +55,7 @@ macro_rules! descriptor {
 
 static DESCRIPTORS: &[NodeDescriptor] = &[
     descriptor!("primitive", NO_PORTS, ValueKind::Shape, true, true),
+    descriptor!("solid", NO_PORTS, ValueKind::Shape, true, true),
     descriptor!("stepimporter", NO_PORTS, ValueKind::Shape, true, true),
     descriptor!("translate", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("mirror", GEOMETRY, ValueKind::Geometry, true, true),
@@ -258,7 +259,7 @@ mod tests {
             assert!(!descriptor.inputs.iter().any(|port| port.name.is_empty()));
         }
         for node_type in [
-            "primitive", "stepimporter", "translate", "mirror", "combine", "boolean",
+            "primitive", "solid", "stepimporter", "translate", "mirror", "combine", "boolean",
             "fuse", "chamfer", "fillet", "shell", "extrude", "loft", "surfaceloft",
             "scatter", "sketch", "spline", "exporter", "linkedpart", "time",
             "sceneTransform",

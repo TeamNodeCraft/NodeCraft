@@ -31,7 +31,6 @@ pub fn apply_fixes(kernel: &mut Kernel) {
     // (WR-732 / #2503).
     kernel.fixes.brep_ray_classifies_current_trims = true;
     // Curved-face blend corners and their certified setback fills (#2343).
-    kernel.fixes.fillet_blend_corner = true;
     kernel.fixes.fillet_setback_beside_curved_faces = true;
     // Chamfers meeting at a vertex are closed by their own corner event (#2345).
     kernel.fixes.fillet_chamfer_corner = true;
@@ -62,7 +61,6 @@ mod tests {
         let kernel = kernel();
         assert!(kernel.fixes.offset_lamina_corner_at_vertex_image);
         assert!(kernel.fixes.brep_ray_classifies_current_trims);
-        assert!(kernel.fixes.fillet_blend_corner);
         assert!(kernel.fixes.fillet_setback_beside_curved_faces);
         assert!(kernel.fixes.fillet_chamfer_corner);
     }
