@@ -53,7 +53,7 @@ pub mod treatment;
 
 pub use edge::{
     EdgeSelection, brep_center, edge_selections, select_edge_by_midpoint, select_edges_by_midpoints,
-    select_edges_by_ordinals, select_edges_from_values,
+    select_edges_by_ordinals, select_edges_from_values, select_edges_from_values_center_first,
 };
 pub use error::BlendError;
 pub use exact::{apply_edge_treatment_brep, chamfer_brep, fillet_brep, fillet_brep_exact, fillet_brep_exact_with_kernel, missing_calls, port_units};

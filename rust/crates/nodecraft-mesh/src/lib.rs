@@ -360,6 +360,7 @@ fn tessellate_faces_parallel(
 
 /// Merge per-face local meshes into one body mesh, preserving face groups and edge IDs.
 fn merge_face_meshes(face_meshes: Vec<(usize, Mesh)>) -> Mesh {
+    let has_colors = face_meshes.iter().any(|(_, mesh)| !mesh.face_colors.is_empty());
     let mut merged = Mesh::default();
     let mut edges: std::collections::BTreeMap<String, BrepEdge> = std::collections::BTreeMap::new();
     for (face_index, mesh) in face_meshes {
@@ -369,10 +370,12 @@ fn merge_face_meshes(face_meshes: Vec<(usize, Mesh)>) -> Mesh {
         let face_count = mesh.faces.len();
         merged.faces.extend(mesh.faces.into_iter().map(|face| [face[0] + offset, face[1] + offset, face[2] + offset]));
         merged.face_groups.extend(mesh.face_groups);
-        if mesh.face_colors.is_empty() {
-            merged.face_colors.extend(std::iter::repeat_n([0.0; 3], face_count));
-        } else {
-            merged.face_colors.extend(mesh.face_colors);
+        if has_colors {
+            if mesh.face_colors.is_empty() {
+                merged.face_colors.extend(std::iter::repeat_n([0.0; 3], face_count));
+            } else {
+                merged.face_colors.extend(mesh.face_colors);
+            }
         }
         for mut edge in mesh.brep_edges {
             if edge.id.starts_with("mesh-edge:") {
@@ -2555,6 +2558,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn merging_uncoloured_meshes_keeps_the_colour_channel_empty() {
+        let mesh = || Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            faces: vec![[0, 1, 2]],
+            face_groups: vec!["face:0".into()],
+            ..Mesh::default()
+        };
+        let merged = crate::merge_meshes(vec![mesh(), mesh()]);
+        assert!(merged.face_colors.is_empty(), "no-look meshes must not allocate a colour per face");
     }
 
     #[test]

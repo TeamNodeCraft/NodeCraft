@@ -194,19 +194,39 @@ pub fn select_edges_by_ordinals(
     Ok(out)
 }
 
+/// Which reference field wins when a viewer pick carries both an exact edge id
+/// and a display-space centre.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EdgeReferencePriority {
+    IdFirst,
+    CenterFirst,
+}
+
 /// Select the edges referenced by a NodeCraft Edge-node `values` object.
-///
-/// Each entry of `values.edges` is matched, in priority order, by
-///  1. `id`: viewer edge id such as `body:0:edge:11` (its ordinal),
-///  2. `ordinal`: index in the solidcore edge list,
-///  3. `center` or `point` (centered display-mesh coordinates): nearest edge.
-///
-/// Duplicates collapse while preserving the node's order. An empty or missing
-/// selection is an explicit [`BlendError::InvalidInput`].
 pub fn select_edges_from_values(
     kernel: &Kernel,
     brep: &Brep,
     values: &Value,
+) -> Result<Vec<EdgeSelection>, BlendError> {
+    select_edges_from_values_with_priority(kernel, brep, values, EdgeReferencePriority::IdFirst)
+}
+
+/// Centre-first resolution. A Boolean or fillet can change the edge ordinals
+/// behind body-scoped viewer ids; the centre sampled from the visible result is
+/// then the more reliable pick.
+pub fn select_edges_from_values_center_first(
+    kernel: &Kernel,
+    brep: &Brep,
+    values: &Value,
+) -> Result<Vec<EdgeSelection>, BlendError> {
+    select_edges_from_values_with_priority(kernel, brep, values, EdgeReferencePriority::CenterFirst)
+}
+
+fn select_edges_from_values_with_priority(
+    kernel: &Kernel,
+    brep: &Brep,
+    values: &Value,
+    priority: EdgeReferencePriority,
 ) -> Result<Vec<EdgeSelection>, BlendError> {
     let refs = values
         .get("edges")
@@ -219,10 +239,9 @@ pub fn select_edges_from_values(
             "edge node has no edges selected; select at least one edge in the viewer".into(),
         ));
     }
-    let center = brep_center(kernel, brep)?;
     let mut out: Vec<EdgeSelection> = Vec::with_capacity(refs.len());
     for (index, reference) in refs.iter().enumerate() {
-        let selection = select_reference(kernel, brep, reference, center).map_err(|error| {
+        let selection = select_reference(kernel, brep, reference, priority).map_err(|error| {
             BlendError::InvalidInput(format!("edges[{index}]: {error}"))
         })?;
         if !out.contains(&selection) {
@@ -237,13 +256,19 @@ fn select_reference(
     kernel: &Kernel,
     brep: &Brep,
     reference: &Value,
-    center: [f64; 3],
+    priority: EdgeReferencePriority,
 ) -> Result<EdgeSelection, BlendError> {
-    // Viewer picks carry both an id and a center. The id is an exact ordinal
-    // into the input B-rep; a center sampled from a different display target can
-    // land on a nearby but wrong (for example smooth) edge, so try the id first
-    // and keep the center only as a fallback.
     let mut id_error = None;
+    let mut center_error = None;
+    if priority == EdgeReferencePriority::CenterFirst {
+        if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
+            let point = json_point(point)?;
+            match select_edge_by_midpoint(kernel, brep, point) {
+                Ok(selection) => return Ok(selection),
+                Err(error) => center_error = Some(error),
+            }
+        }
+    }
     if let Some(id) = reference.get("id").and_then(Value::as_str) {
         if id.starts_with("preview-edge:") {
             return Err(BlendError::InvalidInput(
@@ -263,13 +288,13 @@ fn select_reference(
             .map(|mut selections| selections.remove(0))
             .map_err(|error| BlendError::InvalidInput(error.to_string()));
     }
-    let mut center_error = None;
-    if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
-        let centered = json_point(point)?;
-        let in_brep = add(centered, center);
-        match select_edge_by_midpoint(kernel, brep, in_brep) {
-            Ok(selection) => return Ok(selection),
-            Err(error) => center_error = Some(error),
+    if priority == EdgeReferencePriority::IdFirst {
+        if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
+            let point = json_point(point)?;
+            match select_edge_by_midpoint(kernel, brep, point) {
+                Ok(selection) => return Ok(selection),
+                Err(error) => center_error = Some(error),
+            }
         }
     }
     if let Some(error) = id_error {

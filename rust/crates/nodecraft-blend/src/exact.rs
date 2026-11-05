@@ -91,12 +91,136 @@ pub fn fillet_brep_exact_with_kernel(
     if treatment.mode != EdgeMode::Fillet {
         return Err("exact fillet requires fillet mode".into());
     }
-    let selections = crate::edge::select_edges_from_values(kernel, brep, values)
+    // A saved viewer pick carries both a display-space centre and an edge id.
+    // After a Boolean the id can address a different edge entirely, so prefer
+    // the centre; if SolidCore refuses that edge as smooth, retry by id.
+    let primary = crate::edge::select_edges_from_values_center_first(kernel, brep, values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    if selections.is_empty() {
+    if primary.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let edges: Vec<solidcore::topology::EdgeId> = selections.iter().map(|selection| selection.edge).collect();
+    let fallback = crate::edge::select_edges_from_values(kernel, brep, values).ok();
+    let mut selected = primary;
+    let mut used_fallback = false;
+    loop {
+        match fillet_selection(kernel, brep, &selected, &treatment) {
+            Ok(result) => return Ok(result),
+            Err(error) => {
+                // A closed join can be made of a blendable edge and a smooth
+                // neighbour. Drop the refused smooth edge and round the rest.
+                if let Some(index) = refused_smooth_edge(&error) {
+                    let before = selected.len();
+                    selected.retain(|selection| selection.edge.index() != index);
+                    if selected.len() < before && !selected.is_empty() {
+                        continue;
+                    }
+                }
+                if !used_fallback
+                    && error.contains("Smooth")
+                    && fallback.as_ref().is_some_and(|fallback| fallback != &selected)
+                {
+                    used_fallback = true;
+                    selected = fallback.clone().expect("checked above");
+                    continue;
+                }
+                if error.contains("status 1001") && !selected.is_empty() {
+                    match fillet_selection_ops(kernel, brep, &selected, &treatment) {
+                        Ok(result) => return Ok(result),
+                        Err(ops_error) => {
+                            if let Some(index) = refused_smooth_edge(&ops_error) {
+                                let before = selected.len();
+                                selected.retain(|selection| selection.edge.index() != index);
+                                if selected.len() < before && !selected.is_empty() {
+                                    continue;
+                                }
+                            }
+                            return Err(format!("{error}; ops blend: {ops_error}"));
+                        }
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// The kernel's smooth-edge refusal names the refused `EdgeId`. Parse it so the
+/// smooth part of a join can be skipped while the blendable part is rounded.
+fn refused_smooth_edge(error: &str) -> Option<u32> {
+    if !error.contains("Smooth") {
+        return None;
+    }
+    let start = error.find("EdgeId(")? + "EdgeId(".len();
+    let tail = &error[start..];
+    let end = tail.find(')')?;
+    tail[..end].parse().ok()
+}
+
+/// Route the same round through `solidcore-ops::blend`, which drives the kernel's
+/// full fillet session (corners and setbacks) rather than the direct `fillet_edges`
+/// shortcut.
+fn fillet_selection_ops(
+    kernel: &mut Kernel,
+    brep: &Brep,
+    selections: &[crate::EdgeSelection],
+    treatment: &EdgeTreatment,
+) -> Result<Brep, String> {
+    use solidcore_ops::blend::{Blend, Corners, blend};
+    let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
+        .map_err(|error| format!("{error:?}"))?;
+    let (record, _) = solidcore_convert::brep::to_record(kernel, &mut working)
+        .map_err(|error| format!("{error:?}"))?;
+    let (body, order) = solidcore_ops::Body::from_record(&record, true)
+        .map_err(|error| error.to_string())?;
+    let mut edges = Vec::with_capacity(selections.len());
+    for selection in selections {
+        edges.push(
+            order
+                .edges
+                .iter()
+                .position(|edge| *edge == selection.edge)
+                .ok_or_else(|| "selected edge is missing from the record order".to_owned())?,
+        );
+    }
+    let kind = match treatment.continuity {
+        Continuity::Circular => Blend::Round,
+        Continuity::G2 => Blend::Curvature,
+        Continuity::G3 => return Err("G3 needs the direct fillet path".into()),
+    };
+    if let Err(error) = blend(&body, kind, &edges, &[treatment.length], &[], Corners::Filled) {
+        let text = error.to_string();
+        // Map the ops record-edge index back to the kernel edge id so the caller
+        // can drop a smooth member of a join and retry the blendable rest.
+        if text.contains("has no blend") && text.contains("Smooth") {
+            if let Some(start) = text.find("edge ").map(|index| index + "edge ".len()) {
+                let tail = &text[start..];
+                let end = tail.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(tail.len());
+                if let Ok(record_index) = tail[..end].parse::<usize>() {
+                    if let Some(kernel_edge) = order.edges.get(record_index) {
+                        return Err(format!(
+                            "solidcore-ops blend refused EdgeId({}) as Smooth",
+                            kernel_edge.index()
+                        ));
+                    }
+                }
+            }
+        }
+        return Err(text);
+    }
+    let (record, _) = body.to_record().map_err(|error| error.to_string())?;
+    let (result, _) = solidcore_convert::brep::to_kernel(kernel, &record, true)
+        .map_err(|error| format!("{error:?}"))?;
+    Ok(result)
+}
+
+fn fillet_selection(
+    kernel: &mut Kernel,
+    brep: &Brep,
+    selections: &[crate::EdgeSelection],
+    treatment: &EdgeTreatment,
+) -> Result<Brep, String> {
+    let edges: Vec<solidcore::topology::EdgeId> =
+        selections.iter().map(|selection| selection.edge).collect();
     let mut result = solidcore::topology::brep::p3::brep_copy(kernel, brep)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     // SolidCore's constant-radius API takes the cross-section as an integer:
@@ -253,6 +377,21 @@ mod exact_fillet_tests {
         let filleted = fillet_brep_exact(&brep, &values).expect("two-edge exact fillet");
         assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
         assert!(!filleted.faces().is_empty());
+    }
+
+    #[test]
+    fn ops_blend_rounds_a_box_edge() {
+        let (mut kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let selection = crate::edge_selections(&kernel, &brep).expect("edges")[0].clone();
+        let treatment = EdgeTreatment {
+            mode: EdgeMode::Fillet,
+            continuity: Continuity::Circular,
+            length: 2.0,
+            ..EdgeTreatment::default()
+        };
+        let result = fillet_selection_ops(&mut kernel, &brep, &[selection], &treatment)
+            .expect("ops blend");
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&result).expect("manifold"));
     }
 
     #[test]

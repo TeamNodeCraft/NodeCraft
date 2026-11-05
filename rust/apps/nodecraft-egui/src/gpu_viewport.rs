@@ -506,6 +506,51 @@ fn face_colour(face: u32) -> [f32; 3] {
     PALETTE[(face as usize) % PALETTE.len()]
 }
 
+/// Split a display mesh into chunks small enough for wgpu's per-buffer limit.
+///
+/// Indices are remapped to each chunk's local vertex array. A vertex shared by
+/// triangles that land in different chunks is duplicated there.
+///
+/// This is a temporary workaround for uploading one full-resolution mesh. It
+/// should become unnecessary once display LOD selects a bounded mesh per view,
+/// because the camera will never need every triangle of a huge scene at once.
+fn chunk_object_mesh(
+    vertices: Vec<ObjectVertex>,
+    indices: Vec<u32>,
+) -> Vec<(Vec<ObjectVertex>, Vec<u32>)> {
+    const MAX_CHUNK_VERTICES: usize = 5_000_000;
+    chunk_object_mesh_with_limit(vertices, indices, MAX_CHUNK_VERTICES)
+}
+
+fn chunk_object_mesh_with_limit(
+    vertices: Vec<ObjectVertex>,
+    indices: Vec<u32>,
+    max_vertices: usize,
+) -> Vec<(Vec<ObjectVertex>, Vec<u32>)> {
+    let mut chunks: Vec<(Vec<ObjectVertex>, Vec<u32>)> = Vec::new();
+    let mut chunk_vertices: Vec<ObjectVertex> = Vec::new();
+    let mut chunk_indices: Vec<u32> = Vec::new();
+    let mut remap: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for triangle in indices.chunks(3) {
+        if chunk_vertices.len() + triangle.len() > max_vertices && !chunk_indices.is_empty() {
+            chunks.push((std::mem::take(&mut chunk_vertices), std::mem::take(&mut chunk_indices)));
+            remap.clear();
+        }
+        for &source in triangle {
+            let Some(vertex) = vertices.get(source as usize) else { continue };
+            let local = *remap.entry(source).or_insert_with(|| {
+                chunk_vertices.push(*vertex);
+                (chunk_vertices.len() - 1) as u32
+            });
+            chunk_indices.push(local);
+        }
+    }
+    if !chunk_indices.is_empty() {
+        chunks.push((chunk_vertices, chunk_indices));
+    }
+    chunks
+}
+
 struct GpuMeshAsset {
     key: u64,
     vertices: wgpu::Buffer,
@@ -591,12 +636,15 @@ struct ObjectRenderer {
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     assets: Vec<GpuMeshAsset>,
+    /// One entry per uploaded chunk: (asset key, triangle count). Large meshes
+    /// are split so no single wgpu buffer exceeds the device limit.
+    chunk_spans: Vec<(u64, u32)>,
     draws: Vec<GpuDrawItem>,
     /// One `GpuInstance` per draw, in draw order. Rebuilt in `prepare` whenever
     /// the draw list changes.
     instances: Option<wgpu::Buffer>,
     instances_dirty: bool,
-    pending: Option<(u64, Vec<ObjectVertex>, Vec<u32>)>,
+    pending: Option<Vec<(u64, Vec<ObjectVertex>, Vec<u32>)>>,
     next_key: u64,
 }
 
@@ -718,6 +766,7 @@ impl ObjectRenderer {
             bind_group,
             uniforms,
             assets: Vec::new(),
+            chunk_spans: Vec::new(),
             draws: Vec::new(),
             instances: None,
             instances_dirty: false,
@@ -727,67 +776,86 @@ impl ObjectRenderer {
     }
 
     fn set_mesh(&mut self, vertices: Vec<ObjectVertex>, indices: Vec<u32>) {
-        // A full display mesh arrives as one GPU asset for now, with a single
-        // identity instance. The draw list is already separate so per-instance
-        // assets and transforms can be added without changing the upload path.
-        let key = self.next_key;
-        self.next_key = self.next_key.wrapping_add(1).max(1);
-        let index_count = indices.len() as u32;
-        self.pending = Some((key, vertices, indices));
-        self.draws = vec![GpuDrawItem {
-            asset_key: key,
-            transform: identity_matrix(),
-            index_start: 0,
-            index_count,
-        }];
+        // A 10k-tree scene can exceed wgpu's 256 MiB buffer limit in one vertex
+        // buffer. Split the mesh into bounded chunks; each chunk gets its own
+        // vertex/index buffers and draw range, then the instance buffer keeps
+        // them in one logical mesh.
+        let chunks = chunk_object_mesh(vertices, indices);
+        self.chunk_spans.clear();
+        self.draws.clear();
+        let mut pending = Vec::with_capacity(chunks.len());
+        for (chunk_vertices, chunk_indices) in chunks {
+            let key = self.next_key;
+            self.next_key = self.next_key.wrapping_add(1).max(1);
+            let index_count = chunk_indices.len() as u32;
+            self.draws.push(GpuDrawItem {
+                asset_key: key,
+                transform: identity_matrix(),
+                index_start: 0,
+                index_count,
+            });
+            self.chunk_spans.push((key, index_count / 3));
+            pending.push((key, chunk_vertices, chunk_indices));
+        }
+        self.pending = Some(pending);
         self.instances_dirty = true;
     }
 
     /// Displace the existing draw list without touching the uploaded mesh. The
     /// instance buffer is re-uploaded in `prepare`; vertex/index buffers stay.
     fn set_transform(&mut self, transform: Option<[[f32; 4]; 4]>, affected: Option<&[(u32, u32)]>) {
-        let Some(asset_key) = self.draws.first().map(|draw| draw.asset_key) else { return };
-        // Before `prepare` uploads a freshly queued mesh the asset is still
-        // pending; fall back to the draw's declared range for this frame.
-        let triangles = self
-            .assets
-            .iter()
-            .find(|asset| asset.key == asset_key)
-            .map_or_else(
-                || self.draws.first().map_or(0, |draw| draw.index_count / 3),
-                |asset| asset.index_count / 3,
-            );
+        if self.chunk_spans.is_empty() {
+            return;
+        }
+        let chunks = self.chunk_spans.clone();
         self.draws = match (transform, affected) {
             (Some(matrix), Some(affected)) => {
-                let (moved, stationary) = preview_draw_ranges(affected, triangles);
-                let mut draws = Vec::with_capacity(moved.len() + stationary.len());
-                for range in moved {
-                    let (index_start, index_count) = draw_index_range(range);
-                    draws.push(GpuDrawItem { asset_key, transform: matrix, index_start, index_count });
-                }
-                for range in stationary {
-                    let (index_start, index_count) = draw_index_range(range);
-                    draws.push(GpuDrawItem { asset_key, transform: identity_matrix(), index_start, index_count });
+                let total = chunks.iter().map(|(_, triangles)| *triangles).sum::<u32>();
+                let (moved, stationary) = preview_draw_ranges(affected, total);
+                let mut draws = Vec::new();
+                let mut first_triangle = 0;
+                for (asset_key, triangles) in chunks {
+                    let last_triangle = first_triangle + triangles;
+                    for (ranges, matrix) in [(&moved, matrix), (&stationary, identity_matrix())] {
+                        for &(start, end) in ranges {
+                            let start = start.max(first_triangle);
+                            let end = end.min(last_triangle);
+                            if end <= start {
+                                continue;
+                            }
+                            draws.push(GpuDrawItem {
+                                asset_key,
+                                transform: matrix,
+                                index_start: (start - first_triangle) * 3,
+                                index_count: (end - start) * 3,
+                            });
+                        }
+                    }
+                    first_triangle = last_triangle;
                 }
                 draws
             }
-            (transform, _) => vec![GpuDrawItem {
-                asset_key,
-                transform: transform.unwrap_or_else(identity_matrix),
-                index_start: 0,
-                index_count: triangles * 3,
-            }],
+            (transform, _) => chunks
+                .into_iter()
+                .map(|(asset_key, triangles)| GpuDrawItem {
+                    asset_key,
+                    transform: transform.unwrap_or_else(identity_matrix),
+                    index_start: 0,
+                    index_count: triangles * 3,
+                })
+                .collect(),
         };
         self.instances_dirty = true;
     }
 
     fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &ObjectUniforms) {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
-        if let Some((key, vertices, indices)) = self.pending.take() {
-            if vertices.is_empty() || indices.is_empty() {
-                self.assets.clear();
-                self.draws.clear();
-            } else {
+        if let Some(chunks) = self.pending.take() {
+            self.assets.clear();
+            for (key, vertices, indices) in chunks {
+                if vertices.is_empty() || indices.is_empty() {
+                    continue;
+                }
                 let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("viewport-object-vertices"),
                     size: (vertices.len() * std::mem::size_of::<ObjectVertex>()) as u64,
@@ -802,9 +870,6 @@ impl ObjectRenderer {
                     mapped_at_creation: false,
                 });
                 queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
-                // Upload is the only CPU-side copy; the vertex/index vectors are
-                // dropped at the end of this block.
-                self.assets.clear();
                 self.assets.push(GpuMeshAsset {
                     key,
                     vertices: vertex_buffer,
@@ -2353,6 +2418,21 @@ impl CallbackTrait for GpuCallback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_mesh_is_chunked_with_local_indices() {
+        let vertices: Vec<ObjectVertex> = (0..8)
+            .map(|i| ObjectVertex { position: [i as f32, 0.0, 0.0], normal: [0.0, 0.0, 1.0], colour: [1.0, 0.0, 0.0] })
+            .collect();
+        let indices = vec![0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 0];
+        let chunks = chunk_object_mesh_with_limit(vertices, indices, 3);
+        assert_eq!(chunks.len(), 4);
+        assert_eq!(chunks.iter().map(|(_, indices)| indices.len()).sum::<usize>(), 12);
+        for (vertices, indices) in &chunks {
+            assert!(vertices.len() <= 3);
+            assert!(indices.iter().all(|index| (*index as usize) < vertices.len()));
+        }
+    }
 
     #[test]
     fn lens_shift_is_constant_after_perspective_divide() {

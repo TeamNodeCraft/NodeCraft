@@ -115,6 +115,7 @@ pub struct StepImport {
 
 /// Merges per-body meshes into one display mesh with namespaced groups/edges.
 pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
+    let has_colors = meshes.iter().any(|mesh| !mesh.face_colors.is_empty());
     let mut merged = Mesh::default();
     for (index, mesh) in meshes.drain(..).enumerate() {
         let offset = merged.vertices.len() as u32;
@@ -124,10 +125,12 @@ pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
         let face_count = mesh.faces.len();
         merged.faces.extend(mesh.faces.into_iter().map(|face| [face[0] + offset, face[1] + offset, face[2] + offset]));
         merged.face_groups.extend(mesh.face_groups.into_iter().map(|group| format!("{prefix}{group}")));
-        if mesh.face_colors.is_empty() {
-            merged.face_colors.extend(std::iter::repeat_n([0.0; 3], face_count));
-        } else {
-            merged.face_colors.extend(mesh.face_colors);
+        if has_colors {
+            if mesh.face_colors.is_empty() {
+                merged.face_colors.extend(std::iter::repeat_n([0.0; 3], face_count));
+            } else {
+                merged.face_colors.extend(mesh.face_colors);
+            }
         }
         merged.brep_edges.extend(mesh.brep_edges.into_iter().map(|mut edge| {
             edge.id = format!("{prefix}{}", edge.id);

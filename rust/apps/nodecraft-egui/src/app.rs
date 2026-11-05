@@ -222,7 +222,6 @@ impl ToolSection {
             ToolItem { label: "Mirror", node_type: "mirror", primitive: None },
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
             ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
-            ToolItem { label: "Look", node_type: "look", primitive: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None },
             ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None },
         ];
@@ -231,6 +230,7 @@ impl ToolSection {
         const ORGANISE: &[ToolItem] = &[
             ToolItem { label: "Combine to Part", node_type: "combine", primitive: None },
             ToolItem { label: "Group", node_type: "group", primitive: None },
+            ToolItem { label: "Look", node_type: "look", primitive: None },
         ];
         const IO: &[ToolItem] = &[
             ToolItem { label: "Import STEP", node_type: "stepimporter", primitive: None },
@@ -298,6 +298,24 @@ fn delete_selection_commands(
         });
     }
     commands
+}
+
+/// Remove cables that cross the boundary of `selected`, keeping cables whose
+/// two endpoints are both selected. Used by the shake-to-detach gesture.
+fn disconnection_commands_for_selection(
+    document: &GraphDocument,
+    selected: &HashSet<String>,
+) -> Vec<Command> {
+    document
+        .connections
+        .iter()
+        .filter(|link| selected.contains(&link.from) != selected.contains(&link.to))
+        .map(|link| Command::Disconnect {
+            from: link.from.clone(),
+            to: link.to.clone(),
+            input: link.input.clone(),
+        })
+        .collect()
 }
 
 fn parse_node_clipboard(text: &str) -> Result<NodeClipboard, String> {
@@ -6055,6 +6073,21 @@ impl eframe::App for NodeCraftApp {
                         }
                     }
                 }
+                NodeEditorAction::ShakeSelection { nodes } => {
+                    let Some(session) = &self.session else { continue };
+                    let commands = disconnection_commands_for_selection(session.document(), &nodes);
+                    let count = commands.len();
+                    if count > 0
+                        && self.apply_commands(&commands, Some("shake-disconnect"))
+                    {
+                        self.evaluate();
+                        self.status = format!(
+                            "Detached {} cable{}",
+                            count,
+                            if count == 1 { "" } else { "s" }
+                        );
+                    }
+                }
                 NodeEditorAction::MoveNodes { positions } => {
                     let commands: Vec<Command> = positions
                         .into_iter()
@@ -7626,6 +7659,19 @@ mod tests {
                 && link.from == "translate-copy1"
                 && link.to == "loft-copy1"
         }));
+    }
+
+    #[test]
+    fn shake_disconnects_only_cables_crossing_the_selection() {
+        let document = history_fixture();
+        let selected: HashSet<String> = ["a".to_owned()].into_iter().collect();
+        let commands = disconnection_commands_for_selection(&document, &selected);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Disconnect { from, to, .. }] if from == "a" && to == "b"
+        ));
+        let both: HashSet<String> = ["a".to_owned(), "b".to_owned()].into_iter().collect();
+        assert!(disconnection_commands_for_selection(&document, &both).is_empty());
     }
 
     #[test]

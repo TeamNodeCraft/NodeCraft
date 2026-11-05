@@ -239,6 +239,55 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
       open shells) must stay two-sided.
 - [ ] Add parity/regression coverage for tab reordering and linked-document tabs.
 
+## Appearance and materials
+
+- [ ] Extend Look from colour-only to a named material definition shared by
+      multiple Look nodes: base colour, roughness, metallic, opacity, optional
+      clearcoat/sheen and a display name.
+- [ ] Store material identity on the Part/body boundary, separate from the
+      SolidCore colour attribute; keep colour as the one value the kernel and
+      STEP exporter can understand today.
+- [ ] Add per-body or per-face material parameters to the display mesh and GPU
+      object shader. The shader currently has global roughness/metallic
+      uniforms, so plastic materials need those values in the vertex/instance
+      payload or a second material buffer.
+- [ ] Define material precedence through Combine/Boolean: same material keeps
+      it, mixed materials clear to a neutral material and emit a yellow warning.
+- [ ] Add regression tests for material survival through translate, mirror,
+      shell, chamfer, fillet and Boolean, plus material clearing on mixed
+      Boolean results.
+- [ ] Do not add textures until the display mesh carries UVs end to end:
+      protocol mesh, `DisplayMesh`, GPU vertex format, `solidcore-tess` output,
+      and a per-face UV mapping/conversion boundary.
+- [ ] Decide the UV source for imported STEP faces, primitive faces and
+      post-Boolean/post-fillet faces. Boolean and fillet rebuild faces, so a
+      texture assignment needs a provenance or projection rule, not a stale UV
+      array.
+- [ ] Package texture image files with the `.nodecraft` document or reference a
+      project-relative path; absolute user paths must not leak into the public
+      snapshot or make a document non-portable.
+- [ ] Add sRGB/linear texture sampling and colour-space tests; a colour Look and
+      a textured Look must agree on how base colour is encoded.
+- [ ] Treat STEP texture/material export as separate exporter work. AP242
+      presentation styles can carry colour and some surface-style data, but PBR
+      roughness/metallic and arbitrary textures are not portable in the same
+      way; document what is written and what viewers will ignore.
+- [ ] Keep textures display-only until a STEP round-trip target is specified,
+      and never feed display materials into exact geometry or measurement.
+
+## SolidCore ops and blend
+
+- [ ] Upstream: one half of the two-cylinder union join is classified `Smooth`
+      by `topology::edge::blend_edgeuse_or_why`, although both adjacent faces
+      are the two cylinder surfaces. Neither `ssi_split_curves_at_singular_points`
+      nor `ssi_tangent_curve_tracer` changes it. See
+      `docs/upstream-solidcore-cylinder-join.md`.
+- [ ] Add the upstream regression that builds the two-cylinder union and
+      asserts both join edges are blendable. Filleting both is what NodeCraft
+      needs for an all-round join.
+- [ ] Until upstream resolves it, keep skipping the Smooth half in NodeCraft so
+      the graph evaluates instead of failing the whole fillet.
+
 ## Cross-platform and release
 
 - [ ] Exercise Linux and Windows builds in CI, then run a real interactive smoke

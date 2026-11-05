@@ -94,6 +94,9 @@ pub enum NodeEditorAction {
     EnterGroup { id: String },
     SetLassoSelection { nodes: HashSet<String>, live: bool },
     MoveNodes { positions: Vec<(String, f64, f64)> },
+    /// The user shook the selected nodes left/right: detach the selection from
+    /// cables crossing its boundary, keeping cables inside the selection.
+    ShakeSelection { nodes: HashSet<String> },
     SetPositions(Vec<(String, f64, f64)>),
     CleanupLayout { mode: LayoutMode },
     Deselect,
@@ -114,10 +117,66 @@ struct PanAnimation {
     target_pan: Vec2,
 }
 
+/// Detects a deliberate left/right shake during a node drag. Normal dragging
+/// moves in one direction; a shake reverses horizontal direction repeatedly
+/// within a short window while staying roughly on the same row.
+struct ShakeDetector {
+    last_direction: i32,
+    reversals: u8,
+    horizontal: f32,
+    vertical: f32,
+    last_reversal: Option<Instant>,
+    fired: bool,
+}
+
+impl Default for ShakeDetector {
+    fn default() -> Self {
+        Self {
+            last_direction: 0,
+            reversals: 0,
+            horizontal: 0.0,
+            vertical: 0.0,
+            last_reversal: None,
+            fired: false,
+        }
+    }
+}
+
+impl ShakeDetector {
+    fn push(&mut self, delta: Vec2, now: Instant) -> bool {
+        if self.fired {
+            return false;
+        }
+        self.horizontal += delta.x.abs();
+        self.vertical += delta.y.abs();
+        if delta.x.abs() < 2.0 {
+            return false;
+        }
+        let direction = if delta.x > 0.0 { 1 } else { -1 };
+        if self.last_direction != 0 && direction != self.last_direction {
+            let within_window = self
+                .last_reversal
+                .is_none_or(|last| now.duration_since(last) <= Duration::from_millis(420));
+            self.reversals = if within_window { self.reversals.saturating_add(1) } else { 1 };
+            self.last_reversal = Some(now);
+        }
+        self.last_direction = direction;
+        if self.reversals >= 4
+            && self.horizontal >= 64.0
+            && self.vertical <= self.horizontal * 0.55
+        {
+            self.fired = true;
+            return true;
+        }
+        false
+    }
+}
+
 struct NodeDrag {
     primary: String,
     ids: Vec<String>,
     last_pointer: Pos2,
+    shake: ShakeDetector,
 }
 
 #[derive(Clone)]
@@ -1142,6 +1201,11 @@ impl NodeEditor {
                             self.pan -= autoscroll;
                         }
                         let delta = pointer_delta + autoscroll;
+                        if drag.shake.push(delta, Instant::now()) {
+                            actions.push(NodeEditorAction::ShakeSelection {
+                                nodes: drag.ids.iter().cloned().collect(),
+                            });
+                        }
                         if delta != Vec2::ZERO {
                             let positions: Vec<(String, f64, f64)> = drag
                                 .ids
@@ -1281,6 +1345,7 @@ impl NodeEditor {
                             primary: node.id.clone(),
                             ids,
                             last_pointer: pointer,
+                            shake: ShakeDetector::default(),
                         });
                     }
                     if response.clicked() {
@@ -1646,14 +1711,18 @@ impl NodeEditor {
                 // showing the currently loaded patch and the viewport rectangle.
                 painter.add(crate::squircle::shape(
                     mini,
-                    5.0,
+                    MINIMAP_RADIUS,
                     self.theme.color(self.theme.minimap_bg),
                     Stroke::new(1.0, self.theme.color(self.theme.minimap_border)),
                 ));
 
                 if !document.nodes.is_empty() {
-                    let (mut min_x, mut min_y) = (f32::INFINITY, f32::INFINITY);
-                    let (mut max_x, mut max_y) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+                    // Fit both the graph and the current viewport ROI. When the
+                    // viewport pans away from the nodes, the node marks shrink so
+                    // both stay visible in the minimap.
+                    let roi = minimap_view_bounds(canvas, self.pan, self.zoom);
+                    let (mut min_x, mut min_y) = (roi.min.x, roi.min.y);
+                    let (mut max_x, mut max_y) = (roi.max.x, roi.max.y);
                     for node in &document.nodes {
                         let r = graph_rect(node);
                         min_x = min_x.min(r.min.x);
@@ -1690,26 +1759,22 @@ impl NodeEditor {
                             Stroke::NONE,
                         ));
                     }
-                    let view_min = map(Pos2::new(
-                        (canvas.min.x - canvas.min.x - self.pan.x) / self.zoom,
-                        (canvas.min.y - canvas.min.y - self.pan.y) / self.zoom,
-                    ));
-                    let view_max = map(Pos2::new(
-                        (canvas.max.x - canvas.min.x - self.pan.x) / self.zoom,
-                        (canvas.max.y - canvas.min.y - self.pan.y) / self.zoom,
-                    ));
+                    let view_min = map(roi.min);
+                    let view_max = map(roi.max);
                     let view_rect = Rect::from_min_max(
                         Pos2::new(view_min.x.min(view_max.x), view_min.y.min(view_max.y)),
                         Pos2::new(view_min.x.max(view_max.x), view_min.y.max(view_max.y)),
                     )
                     .intersect(mini);
                     if view_rect.is_positive() {
-                        painter.rect_stroke(
+                        let roi = self.theme.color(self.theme.accent);
+                        painter.add(crate::squircle::shape(
                             view_rect,
-                            egui::CornerRadius::ZERO,
-                            Stroke::new(1.0, self.theme.color(self.theme.accent)),
-                            egui::StrokeKind::Inside,
-                        );
+                            minimap_view_radius(view_rect),
+                            // 15% tint of the ROI accent behind its outline.
+                            self.theme.with_alpha(self.theme.accent, 38),
+                            Stroke::new(1.0, roi),
+                        ));
                     }
 
                     // Canvas zoom is relative to 1 graph unit = 1 egui point.
@@ -2835,10 +2900,37 @@ fn document_roi(document: &GraphDocument) -> Option<Rect> {
     (min.x.is_finite() && max.x.is_finite()).then(|| Rect::from_min_max(min, max))
 }
 
+const MINIMAP_SIZE: f32 = 105.6; // 132 px reduced by 20%
+/// Corner radius for the minimap squircle, about 17% of its size.
+const MINIMAP_RADIUS: f32 = 18.0;
+
+/// Corner radius for the minimap's viewport ROI. The ROI can be tiny when
+/// zoomed out; scaling by its shorter side keeps it rectangular instead of
+/// giving a small rectangle oversized squircle corners.
+/// Graph-space rectangle the canvas viewport currently shows.
+fn minimap_view_bounds(canvas: Rect, pan: Vec2, zoom: f32) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(-pan.x / zoom, -pan.y / zoom),
+        Pos2::new(
+            (canvas.width() - pan.x) / zoom,
+            (canvas.height() - pan.y) / zoom,
+        ),
+    )
+}
+
+fn minimap_view_radius(rect: Rect) -> f32 {
+    let short_side = rect.width().min(rect.height());
+    if short_side < 8.0 {
+        0.0
+    } else {
+        (short_side * 0.18).min(10.0)
+    }
+}
+
 fn node_minimap_rect(panel: Rect) -> Rect {
     Rect::from_min_size(
-        Pos2::new(panel.max.x - 12.0 - 132.0, panel.max.y - 12.0 - 132.0),
-        Vec2::new(132.0, 132.0),
+        Pos2::new(panel.max.x - 12.0 - MINIMAP_SIZE, panel.max.y - 12.0 - MINIMAP_SIZE),
+        Vec2::splat(MINIMAP_SIZE),
     )
 }
 
@@ -3508,6 +3600,23 @@ mod tests {
         let (point, derivative) = route.sample(0.5);
         let normal = Vec2::new(-derivative.y, derivative.x).normalized();
         (map(point), ConnectionKey::from_connection(connection), normal)
+    }
+
+    #[test]
+    fn minimap_view_bounds_follow_the_canvas_pan() {
+        let canvas = Rect::from_min_size(Pos2::new(10.0, 20.0), Vec2::new(100.0, 200.0));
+        let bounds = minimap_view_bounds(canvas, Vec2::new(-10.0, 30.0), 2.0);
+        assert_eq!(bounds.width(), 50.0);
+        assert_eq!(bounds.height(), 100.0);
+        assert_eq!(bounds.min, Pos2::new(5.0, -15.0));
+    }
+
+    #[test]
+    fn minimap_view_radius_scales_with_the_roi() {
+        assert_eq!(minimap_view_radius(Rect::from_min_size(Pos2::ZERO, Vec2::splat(4.0))), 0.0);
+        let medium = minimap_view_radius(Rect::from_min_size(Pos2::ZERO, Vec2::splat(20.0)));
+        assert!((medium - 3.6).abs() < 1.0e-6);
+        assert_eq!(minimap_view_radius(Rect::from_min_size(Pos2::ZERO, Vec2::splat(200.0))), 10.0);
     }
 
     #[test]
@@ -4326,6 +4435,27 @@ mod tests {
         assert_eq!(input_hit.node_id, node.id);
         assert_eq!(output_hit.node_id, node.id);
         assert!(!port_compatible(&input_hit, &output_hit));
+    }
+
+    #[test]
+    fn shaking_reverses_into_a_disconnect_gesture() {
+        let mut shake = ShakeDetector::default();
+        let start = Instant::now();
+        let mut fired = false;
+        for step in 0..12 {
+            let delta = Vec2::new(if step % 2 == 0 { 18.0 } else { -18.0 }, 0.0);
+            fired |= shake.push(delta, start + Duration::from_millis(step * 20));
+        }
+        assert!(fired, "left/right reversals should trigger the shake gesture");
+    }
+
+    #[test]
+    fn a_straight_drag_is_not_a_shake() {
+        let mut shake = ShakeDetector::default();
+        let start = Instant::now();
+        for step in 0..20 {
+            assert!(!shake.push(Vec2::new(12.0, 1.0), start + Duration::from_millis(step * 20)));
+        }
     }
 
     #[test]

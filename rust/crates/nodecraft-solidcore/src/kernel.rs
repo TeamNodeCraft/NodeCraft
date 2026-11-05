@@ -57,7 +57,6 @@ mod tests {
     #[test]
     fn standard_profile_enables_the_new_kernel_fixes() {
         let kernel = kernel();
-        assert!(kernel.fixes.offset_lamina_corner_at_vertex_image);
         assert!(kernel.fixes.brep_ray_classifies_current_trims);
         assert!(kernel.fixes.fillet_setback_beside_curved_faces);
         assert!(kernel.fixes.fillet_chamfer_corner);

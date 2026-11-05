@@ -1297,7 +1297,7 @@ fn exports_boolean_chain(request: &Request, start: &str) -> bool {
 /// evaluation. Mesh-only branches must not pay for this.
 /// Application-level colour attribute carried by a Look node. SolidCore
 /// treats `SmColorAttribute` specially when regions merge through Booleans.
-const LOOK_COLOR_ATTRIBUTE: u64 = 12_066;
+const LOOK_COLOR_ATTRIBUTE: u64 = 100; // solidcore `geom::attribute::ids::COLOR`
 
 fn parse_look_color(values: &serde_json::Value) -> Result<[f64; 3], String> {
     let text = values
@@ -1323,9 +1323,10 @@ fn apply_look_color(
     use nodecraft_solidcore::solidcore::error::EntityRef;
     use nodecraft_solidcore::solidcore::geom::attribute::{Attribute, Behavior};
     use nodecraft_solidcore::solidcore::math::Vec3;
-    let faces: Vec<_> = brep.faces().ids().collect();
-    for face in faces {
-        let entity = EntityRef::Face(face);
+    // Colour belongs to faces: a Boolean merges regions, so a region colour
+    // would paint the whole result instead of only the Looked branch.
+    let faces: Vec<_> = brep.faces().ids().map(EntityRef::Face).collect();
+    for entity in faces {
         let old: Vec<_> = brep
             .entity_attributes(entity)
             .into_iter()
@@ -1358,20 +1359,19 @@ fn apply_brep_face_colors(
 ) {
     use nodecraft_solidcore::solidcore::error::EntityRef;
     use nodecraft_solidcore::solidcore::geom::attribute::AttributeValue;
-    let face_colors: Vec<Option<[f32; 3]>> = brep
-        .faces()
-        .ids()
-        .map(|face| {
-            brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE)
-                .and_then(|attribute| match attribute.value() {
-                    AttributeValue::Color(color) | AttributeValue::Vector3d(color) => {
-                        Some([color.x as f32, color.y as f32, color.z as f32])
-                    }
-                    _ => None,
-                })
-        })
-        .collect();
-    if face_colors.iter().all(Option::is_none) {
+    // Display face groups use the position in `face_list`, not the arena id:
+    // booleans and fillets leave stale arena slots, so those indices diverge.
+    let mut by_face: std::collections::BTreeMap<usize, [f32; 3]> = std::collections::BTreeMap::new();
+    for (position, &face) in brep.face_list().iter().enumerate() {
+        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE) else {
+            continue;
+        };
+        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value() else {
+            continue;
+        };
+        by_face.insert(position, [color.x as f32, color.y as f32, color.z as f32]);
+    }
+    if by_face.is_empty() {
         mesh.face_colors.clear();
         return;
     }
@@ -1382,7 +1382,7 @@ fn apply_brep_face_colors(
             group
                 .rsplit_once("face:")
                 .and_then(|(_, tail)| tail.parse::<usize>().ok())
-                .and_then(|index| face_colors.get(index).copied().flatten())
+                .and_then(|index| by_face.get(&index).copied())
                 .unwrap_or([0.32, 0.34, 0.37])
         })
         .collect();
@@ -4737,6 +4737,128 @@ mod tests {
             assert!(color[1].abs() < 1.0e-5, "{color:?}");
             assert!(color[2].abs() < 1.0e-5, "{color:?}");
         }
+    }
+
+    #[test]
+    fn cylinder_join_picks_resolve_near_the_saved_centres() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 412,
+            "targets": ["boolean"],
+            "meshTargets": [],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "solid", "type": "solid", "values": {"height": 100.0, "primitiveType": "cylinder"}},
+                {"id": "solid-copy1", "type": "solid", "values": {"height": 50.0, "primitiveType": "cylinder", "radius": 18.9}},
+                {"id": "translate", "type": "translate", "values": {"rx": 0.0, "ry": -115.0, "rz": 0.0, "space": "world", "x": 24.0, "y": 0.0, "z": 8.0}},
+                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}}
+            ],
+            "connections": [
+                {"from": "solid-copy1", "to": "translate", "in": "shape", "out": "shape"},
+                {"from": "translate", "to": "boolean", "in": "a", "out": "shape"},
+                {"from": "solid", "to": "boolean", "in": "b", "out": "shape"}
+            ]
+        })).expect("cylinder join json");
+        let mut eval = Eval::new(&request, None);
+        let part = eval.evaluate_part("boolean").expect("boolean part");
+        let brep = part.bodies[0].body.as_ref();
+        let kernel = nodecraft_solidcore::kernel::kernel();
+        let values = serde_json::json!({"edges": [
+            {"center": [14.100593090057371, -11.389926261372036, 4.566759937339359], "id": "edge:1"},
+            {"center": [14.100598600175644, 11.389923453330994, 4.5666884283224745], "id": "edge:2"}
+        ]});
+        let selections = nodecraft_blend::select_edges_from_values_center_first(&kernel, brep, &values)
+            .expect("centre-first selections");
+        assert_eq!(selections.len(), 2);
+        let ids: std::collections::BTreeSet<u32> = selections.iter().map(|selection| selection.edge.index()).collect();
+        assert_eq!(ids, [4, 5].into_iter().collect(), "selected the wrong cylinder edges: {ids:?}");
+    }
+
+    #[test]
+    fn cylinders_two_edge_fillet_evaluates() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 411,
+            "targets": ["fillet"],
+            "meshTargets": ["fillet"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "solid", "type": "solid", "values": {"height": 100.0, "primitiveType": "cylinder"}},
+                {"id": "solid-copy1", "type": "solid", "values": {"height": 50.0, "primitiveType": "cylinder", "radius": 18.9}},
+                {"id": "translate", "type": "translate", "values": {"rx": 0.0, "ry": -115.0, "rz": 0.0, "space": "world", "x": 24.0, "y": 0.0, "z": 8.0}},
+                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "", "length": 8.3, "edges": [
+                    {"center": [14.100593090057371, -11.389926261372036, 4.566759937339359], "id": "edge:1"},
+                    {"center": [14.100598600175644, 11.389923453330994, 4.5666884283224745], "id": "edge:2"}
+                ]}}
+            ],
+            "connections": [
+                {"from": "solid-copy1", "to": "translate", "in": "shape", "out": "shape"},
+                {"from": "translate", "to": "boolean", "in": "a", "out": "shape"},
+                {"from": "solid", "to": "boolean", "in": "b", "out": "shape"},
+                {"from": "boolean", "to": "fillet", "in": "shape", "out": "shape"}
+            ]
+        })).expect("cylinders fillet json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:#?}", output.response.node_errors);
+    }
+
+    #[test]
+    fn look_after_fillet_colours_every_face() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 410,
+            "targets": ["look"],
+            "meshTargets": ["look"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "solid", "type": "solid", "values": {"primitiveType": "box"}},
+                {"id": "solid-copy1", "type": "solid", "values": {"primitiveType": "cylinder"}},
+                {"id": "translate", "type": "translate", "values": {"x": 24.0, "y": 0.0, "z": 10.0, "ry": -55.0}},
+                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "G2", "length": 13.0, "edges": [{"id": "edge:11"}]}},
+                {"id": "look", "type": "look", "values": {"color": "#002440"}}
+            ],
+            "connections": [
+                {"from": "solid-copy1", "to": "translate", "in": "shape", "out": "shape"},
+                {"from": "translate", "to": "boolean", "in": "a", "out": "shape"},
+                {"from": "solid", "to": "boolean", "in": "b", "out": "shape"},
+                {"from": "boolean", "to": "fillet", "in": "shape", "out": "shape"},
+                {"from": "fillet", "to": "look", "in": "shape", "out": "shape"}
+            ]
+        })).expect("look after fillet request json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("look").expect("look mesh").mesh;
+        assert_eq!(mesh.face_colors.len(), mesh.faces.len());
+        let unmatched = mesh
+            .face_colors
+            .iter()
+            .filter(|color| !(color[0] < 0.01 && color[1] > 0.10 && color[2] > 0.20))
+            .count();
+        assert_eq!(unmatched, 0, "{unmatched} of {} faces did not receive the Look colour", mesh.faces.len());
+    }
+
+    #[test]
+    fn look_colours_survive_a_fillet() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 409,
+            "targets": ["fillet"],
+            "meshTargets": ["fillet"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 40, "width": 30, "height": 20}},
+                {"id": "look", "type": "look", "values": {"color": "#ff0000"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "", "length": 2, "edges": [{"ordinal": 0}]}}
+            ],
+            "connections": [
+                {"from": "box", "to": "look", "in": "shape", "out": "shape"},
+                {"from": "look", "to": "fillet", "in": "shape", "out": "shape"}
+            ]
+        })).expect("fillet look request json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
+        assert!(!mesh.faces.is_empty());
+        assert_eq!(mesh.face_colors.len(), mesh.faces.len());
+        assert!(mesh.face_colors.iter().any(|color| color[0] > 0.5), "look colour was lost by the fillet");
     }
 
     #[test]

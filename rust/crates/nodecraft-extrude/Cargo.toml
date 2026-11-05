@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "554443501c478b769d79fb0ae10a126a8077faf0" }
+solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "d93a19bd4e0ca3b141cc028ca73f9cc80be38efe" }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore" }
 nodecraft-step = { path = "../nodecraft-step" }
