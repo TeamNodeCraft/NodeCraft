@@ -29,9 +29,8 @@
 //! curved or non-manifold edges, non-90° dihedrals, non-convex cut cross-sections,
 //! and treatments on edges that meet at a shared corner (adjacent selections).
 //!
-//! G2/G3 fillets and the exact B-rep path are rejected by
-//! [`crate::EdgeTreatment::validate`] / [`crate::exact`] with the missing solidcore
-//! calls named.
+//! G2/G3 fillets use the exact B-rep blend-curve cross-section path, not this
+//! circular-segment mesh preview.
 
 use std::collections::HashMap;
 
@@ -46,7 +45,7 @@ use nodecraft_step::PlanarBody;
 
 use crate::edge::{EdgeSelection, brep_center};
 use crate::error::BlendError;
-use crate::treatment::{EdgeMode, EdgeTreatment};
+use crate::treatment::{Continuity, EdgeMode, EdgeTreatment};
 
 /// Facets used to tessellate a circular fillet. Facet `i` cuts with the plane tangent
 /// to the fillet arc at `i * 90° / FILLET_SEGMENTS`; the first and last tangents are the
@@ -113,6 +112,16 @@ pub fn apply_edge_treatment(
     treatment: &EdgeTreatment,
 ) -> Result<Mesh, BlendError> {
     treatment.validate()?;
+    if treatment.mode == EdgeMode::Fillet && treatment.continuity != Continuity::Circular {
+        return Err(BlendError::missing_api(
+            "fillet G2/G3",
+            format!(
+                "{} fillets are evaluated by the exact B-rep path, not the mesh preview",
+                treatment.continuity.as_str()
+            ),
+            crate::missing::LAW_CONTINUITY.to_vec(),
+        ));
+    }
     if selections.is_empty() {
         return Err(BlendError::InvalidInput(
             "an edge treatment needs at least one selected edge".into(),
@@ -159,6 +168,18 @@ pub fn edge_treatment_preview(
 ) -> Result<Mesh, BlendError> {
     let treatment = EdgeTreatment::from_node_values(values)?;
     treatment.validate()?;
+    if treatment.mode == EdgeMode::Fillet && treatment.continuity != Continuity::Circular {
+        // The mesh preview only has the circular segment sweep; the exact
+        // B-rep path supports G2/G3 through the blend-curve cross-section.
+        return Err(BlendError::missing_api(
+            "fillet G2/G3",
+            format!(
+                "{} fillets are evaluated by the exact B-rep path, not the mesh preview",
+                treatment.continuity.as_str()
+            ),
+            crate::missing::LAW_CONTINUITY.to_vec(),
+        ));
+    }
     let selections = crate::edge::select_edges_from_values(kernel, brep, values)?;
     apply_edge_treatment(kernel, brep, &selections, &treatment)
 }

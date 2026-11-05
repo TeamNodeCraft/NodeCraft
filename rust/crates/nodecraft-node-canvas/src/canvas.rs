@@ -187,6 +187,7 @@ pub struct NodeEditor {
     width: f32,
     left_dock: f32,
     resize_start: Option<(f32, f32)>,
+    resize_dragging: bool,
     geometry_key: Option<u64>,
     occlusion_key: Option<u64>,
     occlusion: Option<HashMap<String, Vec<Rect>>>,
@@ -238,6 +239,7 @@ impl Default for NodeEditor {
             width: 0.0,
             left_dock: 0.0,
             resize_start: None,
+            resize_dragging: false,
             geometry_key: None,
             occlusion_key: None,
             occlusion: None,
@@ -339,6 +341,11 @@ impl NodeEditor {
     ///
     /// Used by the host to scope canvas keyboard actions (Delete) to pointer
     /// interaction with the node editor rather than the whole window.
+    /// True on the frame a divider drag starts, runs or ends.
+    pub fn is_resizing(&self) -> bool {
+        self.resize_dragging
+    }
+
     pub fn panel_screen_rect(&self) -> Option<Rect> {
         self.last_viewport.map(|viewport| self.panel_rect(viewport))
     }
@@ -852,6 +859,7 @@ impl NodeEditor {
         let mut moved_nodes: Option<Vec<(String, f64, f64)>> = None;
         let mut actions = Vec::new();
         let mut chrome_clicked = false;
+        let mut divider_active = false;
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>, f32)> = Vec::new();
         let mut key = geometry_key_for(self.cable_routing, document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
@@ -1584,6 +1592,17 @@ impl NodeEditor {
                     Pos2::new(panel.max.x + 4.0, panel.max.y - 12.0),
                 );
                 let resize = ui.interact(divider, egui::Id::new("node-editor-resize"), Sense::drag());
+                self.resize_dragging =
+                    resize.drag_started() || resize.dragged() || resize.drag_stopped();
+                divider_active = resize.hovered()
+                    || resize.clicked()
+                    || resize.dragged()
+                    || resize.drag_stopped();
+                if divider_active {
+                    // The divider straddles the panel edge, so the canvas underneath
+                    // can otherwise receive the press and deselect on release.
+                    chrome_clicked = true;
+                }
                 if resize.hovered() || resize.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 }
@@ -1966,6 +1985,12 @@ impl NodeEditor {
         } else if empty_canvas_clicked {
             actions.push(NodeEditorAction::Deselect);
         }
+        if divider_active || self.resize_dragging {
+            // The divider straddles the panel edge. Suppress every canvas action
+            // for the press/drag/release so resizing can never select, deselect or
+            // start a lasso.
+            actions.clear();
+        }
         if ctx.pointer_latest_pos().is_some_and(|pointer| {
             self.pointer_blockers.iter().any(|rect| rect.contains(pointer))
         }) {
@@ -2288,7 +2313,10 @@ fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
         .unwrap_or_default()
         .replace("#212121", &colour)
         .replace("#b4b4b4", &colour)
-        .replace("#d8d8dc", &colour);
+        .replace("#d8d8dc", &colour)
+        // Affinity exports the boolean mode SVGs with CSS rgb() fills.
+        .replace("rgb(33,33,33)", &colour)
+        .replace("rgb(33, 33, 33)", &colour);
     // Fluent outline SVGs often rely on the SVG default black fill. Inject the
     // theme colour on the root only when there is no explicit root paint.
     if let Some(root_end) = svg.find('>') {
@@ -2326,6 +2354,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "spline" => "spline",
         "chamfer" => "chamfer",
         "fillet" => "fillet",
+        "look" => "look",
         "shell" => "shell",
         "offsetfaces" => "offsetfaces",
         "solid" | "primitive" => primitive_icon(primitive),
@@ -2377,6 +2406,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "combine" => include_bytes!("../../../../vendor/iconify-design/nodes/combine.svg"),
         "chamfer" => include_bytes!("../../../../vendor/iconify-design/nodes/chamfer.svg"),
         "fillet" => include_bytes!("../../../../vendor/iconify-design/nodes/fillet.svg"),
+        "look" => include_bytes!("../../../../vendor/iconify-design/nodes/look.svg"),
         "shell" => include_bytes!("../../../../vendor/iconify-design/nodes/shell.svg"),
         "offsetfaces" => include_bytes!("../../../../vendor/iconify-design/nodes/offsetfaces.svg"),
         "extrude" => include_bytes!("../../../../vendor/iconify-design/nodes/extrude.svg"),
@@ -2400,6 +2430,7 @@ fn node_title(node_type: &str) -> &'static str {
         "extrude" => "Extrude",
         "chamfer" => "Chamfer",
         "fillet" => "Fillet",
+        "look" => "Look",
         "shell" => "Shell",
         "box" => "Box",
         "cylinder" => "Cylinder",
@@ -2440,6 +2471,7 @@ fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
         "sketch" | "spline" | "linkedpart" | "stepimporter" => &[],
         "extrude" => &["profile", "amount"],
         "chamfer" | "fillet" => &["shape", "length"],
+        "look" => &["shape"],
         "shell" => &["shape", "thickness"],
         "translate" => &["shape", "x", "y", "z", "rx", "ry", "rz"],
         "scatter" => &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"],
@@ -4350,6 +4382,34 @@ mod tests {
         assert_eq!(preview.connections.len(), 1);
         editor.insert_preview.as_mut().expect("preview").shift = 0.0;
         assert!(editor.preview_document(&document).is_none());
+    }
+
+    #[test]
+    fn boolean_modes_select_their_own_icons() {
+        for (mode, expected) in [
+            ("union", "union"),
+            ("intersect", "intersection"),
+            ("subtract", "subtract"),
+            ("subtract-a-b", "subtract"),
+            ("subtract-reverse", "subtract-reverse"),
+            ("subtract-b-a", "subtract-reverse"),
+        ] {
+            let mut node = node_at(0.0, 0.0);
+            node.node_type = "boolean".into();
+            node.values = serde_json::json!({ "mode": mode });
+            assert_eq!(icon_for(&node).0, expected, "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn boolean_subtract_icons_are_tinted() {
+        for source in [
+            include_bytes!("../../../../vendor/icons/boolean/subtract-a-b.svg") as &[u8],
+            include_bytes!("../../../../vendor/icons/boolean/subtract-b-a.svg") as &[u8],
+        ] {
+            let svg = colorized_icon_svg(source, [255, 0, 0, 255]);
+            assert!(svg.contains("#ff0000"), "subtract icon was not tinted");
+        }
     }
 
     #[test]

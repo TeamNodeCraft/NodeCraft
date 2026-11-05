@@ -12,6 +12,7 @@ use crate::viewer_gizmo::{self, Gizmo, GizmoState};
 use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
 use crate::gpu_viewport::GpuViewport;
+use solidcraft_geom::prelude::*;
 
 fn center_distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
@@ -127,10 +128,10 @@ fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 fn raycast_face(
     mesh: &solidcraft_geom::Mesh,
     face_ids: &[String],
-    origin: solidcraft_geom::Vec3,
-    direction: solidcraft_geom::Vec3,
+    origin: solidcore_record_new::Vec3,
+    direction: solidcore_record_new::Vec3,
 ) -> Option<String> {
-    use solidcraft_geom::Vec3;
+    use solidcore_record_new::Vec3;
     let mut best = f64::INFINITY;
     let mut best_face = None;
     for (index, triangle) in mesh.triangles.iter().enumerate() {
@@ -548,6 +549,11 @@ impl Viewport {
         self.show_view_matrix
     }
 
+    /// NDC offset used to compose the camera into the visible viewport.
+    pub fn lens_shift(&self) -> [f32; 2] {
+        self.lens_shift
+    }
+
     pub fn set_show_view_matrix(&mut self, show: bool) {
         self.show_view_matrix = show;
     }
@@ -916,7 +922,7 @@ impl Viewport {
         nearest
     }
 
-    fn project_to_viewport(&self, point: solidcraft_geom::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+    fn project_to_viewport(&self, point: solidcore_record_new::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
         // Unclassified overlay geometry follows the preview only when the whole
         // display is downstream of the edit.
         self.project_to_viewport_body(point, viewport, "")
@@ -928,7 +934,7 @@ impl Viewport {
     /// solid during a partial-body drag.
     fn project_to_viewport_body(
         &self,
-        point: solidcraft_geom::Vec3,
+        point: solidcore_record_new::Vec3,
         viewport: egui::Rect,
         body_id: &str,
     ) -> Option<egui::Pos2> {
@@ -940,7 +946,7 @@ impl Viewport {
             .filter(|_| self.preview_scope.is_affected(body_id));
         let point = transform.map_or(point, |matrix| {
             let m = matrix.map(|column| column.map(f64::from));
-            solidcraft_geom::Vec3::new(
+            solidcore_record_new::Vec3::new(
                 m[0][0] * point.x + m[1][0] * point.y + m[2][0] * point.z + m[3][0],
                 m[0][1] * point.x + m[1][1] * point.y + m[2][1] * point.z + m[3][1],
                 m[0][2] * point.x + m[1][2] * point.y + m[2][2] * point.z + m[3][2],
@@ -1038,7 +1044,7 @@ impl Viewport {
         let Some(comparison) = &display.comparison else { return };
         let theme = crate::theme::get();
         let painter = ui.painter().with_clip_rect(viewport);
-        let mut draw_layer = |triangles: &[([solidcraft_geom::Vec3; 3], [solidcraft_geom::Vec3; 3])], color: egui::Color32| {
+        let mut draw_layer = |triangles: &[([solidcore_record_new::Vec3; 3], [solidcore_record_new::Vec3; 3])], color: egui::Color32| {
             for (points, _) in triangles {
                 let projected: Vec<egui::Pos2> = points
                     .iter()
@@ -1280,12 +1286,12 @@ impl Viewport {
         let center = rect.center();
         let (right, up, back) = self.camera.basis();
         let axes = [
-            ("x", solidcraft_geom::Vec3::X),
-            ("-x", -solidcraft_geom::Vec3::X),
-            ("y", solidcraft_geom::Vec3::Y),
-            ("-y", -solidcraft_geom::Vec3::Y),
-            ("z", solidcraft_geom::Vec3::Z),
-            ("-z", -solidcraft_geom::Vec3::Z),
+            ("x", solidcore_record_new::Vec3::X),
+            ("-x", -solidcore_record_new::Vec3::X),
+            ("y", solidcore_record_new::Vec3::Y),
+            ("-y", -solidcore_record_new::Vec3::Y),
+            ("z", solidcore_record_new::Vec3::Z),
+            ("-z", -solidcore_record_new::Vec3::Z),
         ];
         let mut tips: Vec<(&'static str, egui::Pos2, f32)> = axes
             .iter()
@@ -1597,7 +1603,7 @@ impl Viewport {
 fn add_grid(
     scene: &mut Scene,
     radius: f64,
-    center: solidcraft_geom::Vec3,
+    center: solidcore_record_new::Vec3,
     perspective: bool,
     ortho_fade: f32,
 ) {
@@ -1613,12 +1619,12 @@ fn add_grid(
         };
         scene.grid.push(SceneLine {
             points: vec![
-                solidcraft_geom::Vec3::new(
+                solidcore_record_new::Vec3::new(
                     center.x + line.start[0] as f64,
                     center.y + line.start[1] as f64,
                     center.z + line.start[2] as f64,
                 ),
-                solidcraft_geom::Vec3::new(
+                solidcore_record_new::Vec3::new(
                     center.x + line.end[0] as f64,
                     center.y + line.end[1] as f64,
                     center.z + line.end[2] as f64,
@@ -1655,7 +1661,7 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
     add_grid(
         &mut scene,
         display.radius,
-        solidcraft_geom::Vec3::ZERO,
+        solidcore_record_new::Vec3::ZERO,
         camera.fov > 0.0,
         ortho_fade,
     );
@@ -1681,7 +1687,7 @@ mod tests {
     #[test]
     fn projection_toggle_preserves_target_rotation_and_half_height() {
         let mut viewport = Viewport::default();
-        viewport.camera.target = solidcraft_geom::Vec3::new(12.0, -4.0, 7.0);
+        viewport.camera.target = solidcore_record_new::Vec3::new(12.0, -4.0, 7.0);
         viewport.camera.yaw = 0.4;
         viewport.camera.pitch = 0.3;
         viewport.camera.roll = 0.2;
@@ -1728,8 +1734,8 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.set_mesh(Some(&NodeMesh::default()));
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let point = solidcraft_geom::Vec3::new(1.0, 0.5, 0.0);
-        let shift = solidcraft_geom::Vec3::new(4.0, 0.0, 0.0);
+        let point = solidcore_record_new::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcore_record_new::Vec3::new(4.0, 0.0, 0.0);
         let shifted = viewport
             .project_to_viewport(point + shift, rect)
             .expect("shifted point projects");
@@ -1763,11 +1769,11 @@ mod tests {
     fn face_pick_returns_the_solidcore_face_group() {
         let mesh = solidcraft_geom::Mesh {
             positions: vec![
-                solidcraft_geom::Vec3::new(-1.0, -1.0, 0.0),
-                solidcraft_geom::Vec3::new(1.0, -1.0, 0.0),
-                solidcraft_geom::Vec3::new(1.0, 1.0, 0.0),
+                solidcore_record_new::Vec3::new(-1.0, -1.0, 0.0),
+                solidcore_record_new::Vec3::new(1.0, -1.0, 0.0),
+                solidcore_record_new::Vec3::new(1.0, 1.0, 0.0),
             ],
-            normals: vec![solidcraft_geom::Vec3::Z; 3],
+            normals: vec![solidcore_record_new::Vec3::Z; 3],
             triangles: vec![[0, 1, 2]],
             tri_face: vec![0],
             edges: Vec::new(),
@@ -1780,8 +1786,8 @@ mod tests {
         let picked = raycast_face(
             &mesh,
             &["body:0:face:9".to_owned()],
-            solidcraft_geom::Vec3::new(0.0, 0.0, 5.0),
-            solidcraft_geom::Vec3::new(0.0, 0.0, -1.0),
+            solidcore_record_new::Vec3::new(0.0, 0.0, 5.0),
+            solidcore_record_new::Vec3::new(0.0, 0.0, -1.0),
         );
         assert_eq!(picked.as_deref(), Some("body:0:face:9"));
     }
@@ -1789,7 +1795,7 @@ mod tests {
     #[test]
     fn mesh_update_can_preserve_the_camera() {
         let mut viewport = Viewport::default();
-        viewport.camera.target = solidcraft_geom::Vec3::new(12.0, -4.0, 3.0);
+        viewport.camera.target = solidcore_record_new::Vec3::new(12.0, -4.0, 3.0);
         viewport.camera.distance = 73.0;
         viewport.camera.yaw = 0.6;
         viewport.camera.pitch = 0.3;
@@ -1814,8 +1820,8 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.set_mesh(Some(&NodeMesh::default()));
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let point = solidcraft_geom::Vec3::new(1.0, 0.5, 0.0);
-        let shift = solidcraft_geom::Vec3::new(4.0, 0.0, 0.0);
+        let point = solidcore_record_new::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcore_record_new::Vec3::new(4.0, 0.0, 0.0);
         let plain = viewport
             .project_to_viewport_body(point, rect, "body:1:face:0")
             .expect("point projects");

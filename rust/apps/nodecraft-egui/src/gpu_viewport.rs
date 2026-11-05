@@ -10,7 +10,8 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt as _;
 
 use egui_wgpu::{wgpu, CallbackTrait, RenderState};
-use solidcraft_geom::{Aabb3, Mesh as CraftMesh, Vec3};
+use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
+use solidcore_record_new::Vec3;
 
 use crate::viewport::{PreviewScope, ViewSettings};
 use solidcraft_gpu::depth_format;
@@ -22,6 +23,7 @@ use solidcraft_render::Camera;
 use crate::adapter::DisplayMesh;
 use crate::viewport_grid::grid_step;
 use crate::gpu_backdrop::BackdropRenderer;
+use solidcraft_geom::prelude::*;
 
 const EMPTY_GRID_RADIUS: f64 = 100.0;
 
@@ -1696,11 +1698,15 @@ impl GpuViewport {
                     continue;
                 };
                 let fallback = (*pb - *pa).cross(*pc - *pa);
-                let fallback = fallback.normalized().unwrap_or(solidcraft_geom::Vec3::Z);
+                let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
                 let colour = if self.view.face_colours {
                     face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
                 } else {
-                    [0.17, 0.18, 0.195]
+                    display
+                        .face_colors
+                        .get(triangle_index)
+                        .copied()
+                        .unwrap_or([0.17, 0.18, 0.195])
                 };
                 for (index, point) in [(a, pa), (b, pb), (c, pc)] {
                     let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
@@ -1894,15 +1900,28 @@ impl GpuViewport {
             if include_pbr {
                 let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
                     .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
-                for triangle in &mesh.triangles {
+                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
                     let [a, b, c] = triangle.map(|index| index as usize);
                     let (Some(pa), Some(pb), Some(pc)) =
                         (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
                     else {
                         continue;
                     };
+                    let surface = display
+                        .face_colors
+                        .get(triangle_index)
+                        .and_then(|color| {
+                            OpaqueSurface::new(
+                                Vec3::new(f64::from(color[0]), f64::from(color[1]), f64::from(color[2])),
+                                0.0,
+                                0.44,
+                                1.62,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or(surface);
                     let fallback = (*pb - *pa).cross(*pc - *pa);
-                    let fallback = fallback.normalized().unwrap_or(solidcraft_geom::Vec3::Z);
+                    let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
                     scene.pbr_tri(pa.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pb.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pc.to_f32(), fallback.to_f32(), surface);
@@ -2116,6 +2135,9 @@ impl GpuViewport {
             chrome_visible: self.chrome_visible,
             frame: Frame {
             product: false,
+            product_lights: None,
+            upload_error: None,
+            clouds: Vec::new(),
             key: self.key,
             slot: self.slot.clone(),
             sketch_key: 0,
@@ -2137,10 +2159,12 @@ impl GpuViewport {
             outline: false,
             eye: [eye[0], eye[1], eye[2], if camera.fov > 0.0 { 1.0 } else { 0.0 }],
             ao_radius: 0.0,
+            ao_samples: solidcraft_gpu::view::AO_SAMPLES,
             ssaa: 1.0,
             hover_tint: [0.0; 3],
             selection_tint: [0.0; 3],
             hatch: Default::default(),
+            sky: [0.0, 1.0, 0.0, 0.0],
             },
             backdrop_view_proj,
             backdrop_blur_scale,

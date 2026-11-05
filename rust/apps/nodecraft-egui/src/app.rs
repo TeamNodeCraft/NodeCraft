@@ -32,6 +32,7 @@ use nodecraft_node_canvas::canvas::{
 };
 use nodecraft_node_canvas::routing::CableRouting;
 use nodecraft_node_canvas::theme::CanvasTheme;
+use nodecraft_dock::{DockItem, DockMetrics, DockStyle, paint_background};
 use crate::ui_shape;
 use crate::control_server;
 use crate::sketch_gui::SketchGui;
@@ -51,7 +52,9 @@ pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
         .unwrap_or_default()
         .replace("#212121", colour)
         .replace("#b4b4b4", colour)
-        .replace("#d8d8dc", colour);
+        .replace("#d8d8dc", colour)
+        .replace("rgb(33,33,33)", colour)
+        .replace("rgb(33, 33, 33)", colour);
     if let Some(root_end) = svg.find('>') {
         let root = &svg[..root_end];
         if !root.contains("fill=") && !root.contains("stroke=") {
@@ -61,17 +64,21 @@ pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
     svg
 }
 
-const TOOL_DOCK_WIDTH: f32 = 44.0;
-const TOOL_ICON_SIZE: f32 = 19.0;
-const TOOL_ROW_PADDING: f32 = 8.0;
-const TOOL_ROW_SIZE: f32 = TOOL_ICON_SIZE + TOOL_ROW_PADDING * 2.0;
-const TOOL_DOCK_RADIUS: f32 = 20.0;
+const TOOL_METRICS: DockMetrics = DockMetrics::DEFAULT;
+
+pub(crate) fn tool_dock_style(theme: &crate::theme::Theme) -> DockStyle {
+    DockStyle {
+        background: theme.color(theme.dock),
+        border: theme.color(theme.dock_border),
+        accent: theme.color(theme.accent),
+        text: theme.color(theme.text),
+        icon: theme.color(theme.icon),
+        icon_hover: theme.color(theme.icon_hover),
+        shadow: egui::Color32::from_black_alpha(120),
+    }
+}
 const TOOL_DOCK_GAP: f32 = 8.0;
-const TOOL_SEARCH_SEPARATOR: f32 = 5.0;
-const TOOL_GRIP_HEIGHT: f32 = 24.0;
 const TOOL_SEARCH_CLEAR_AFTER: std::time::Duration = std::time::Duration::from_secs(5 * 60);
-const TOOL_DOCK_PADDING: f32 = 8.0;
-const TOOL_SECTION_GAP: f32 = 10.0;
 
 fn parse_shortcut(text: &str) -> Option<egui::KeyboardShortcut> {
     let mut modifiers = egui::Modifiers::NONE;
@@ -93,37 +100,33 @@ fn shortcut_pressed(ctx: &egui::Context, text: &str) -> bool {
         .is_some_and(|shortcut| ctx.input_mut(|input| input.consume_shortcut(&shortcut)))
 }
 
-fn tool_highlight_rect(row: egui::Rect) -> egui::Rect {
-    egui::Rect::from_center_size(row.center(), egui::Vec2::splat(TOOL_ROW_SIZE))
-}
-
 fn tool_dock_height() -> f32 {
     // One place for the dock's vertical metrics: search, separator, every
     // category row, the grip, and the gaps between them.
-    let mut height = TOOL_DOCK_PADDING;
-    height += TOOL_ROW_SIZE; // search
-    height += TOOL_SECTION_GAP;
-    height += TOOL_SEARCH_SEPARATOR;
-    height += TOOL_SECTION_GAP;
+    let mut height = TOOL_METRICS.padding;
+    height += TOOL_METRICS.row_size(); // search
+    height += TOOL_METRICS.gap;
+    height += TOOL_METRICS.search_separator;
+    height += TOOL_METRICS.gap;
     for index in 0..ToolSection::ALL.len() {
-        height += TOOL_ROW_SIZE;
+        height += TOOL_METRICS.row_size();
         if index + 1 < ToolSection::ALL.len() {
-            height += TOOL_SECTION_GAP;
+            height += TOOL_METRICS.gap;
         }
     }
-    height += TOOL_SECTION_GAP;
-    height += TOOL_GRIP_HEIGHT;
-    height += TOOL_DOCK_PADDING;
+    height += TOOL_METRICS.gap;
+    height += TOOL_METRICS.grip_height;
+    height += TOOL_METRICS.padding;
     height
 }
 
 fn tool_dock_rect(panel: egui::Rect, offset_y: f32, height: f32) -> egui::Rect {
-    const PADDING: f32 = 12.0;
+    let offset = TOOL_METRICS.edge_offset;
     let top = (panel.center().y - height * 0.5 + offset_y)
-        .clamp(panel.top() + 12.0, (panel.bottom() - height - 12.0).max(panel.top() + 12.0));
+        .clamp(panel.top() + offset, (panel.bottom() - height - offset).max(panel.top() + offset));
     egui::Rect::from_min_size(
-        egui::Pos2::new(panel.min.x + PADDING, top),
-        egui::Vec2::new(TOOL_DOCK_WIDTH, height),
+        egui::Pos2::new(panel.min.x + offset, top),
+        egui::Vec2::new(TOOL_METRICS.width, height),
     )
 }
 
@@ -219,6 +222,7 @@ impl ToolSection {
             ToolItem { label: "Mirror", node_type: "mirror", primitive: None },
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
             ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
+            ToolItem { label: "Look", node_type: "look", primitive: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None },
             ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None },
         ];
@@ -695,6 +699,10 @@ struct GizmoDragPreview {
     chain: nodecraft_session::placement::Affine3,
     /// Display bodies the edit feeds, also resolved once at drag start.
     scope: PreviewScope,
+    /// Pre-boolean bodies shown while dragging a branch merged by a Boolean.
+    /// The merged result has no per-operand provenance, so the drag displays
+    /// the inputs instead; the Boolean re-evaluates on release.
+    preview_mesh: Option<Mesh>,
 }
 
 /// What to do once a native file dialog closes.
@@ -753,6 +761,8 @@ pub struct NodeCraftApp {
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
+    /// Boolean operand bodies for the pre-merge drag display.
+    pre_merge: Option<engine_bridge::PreMerge>,
     viewport: Viewport,
     node_editor: NodeEditor,
     status: String,
@@ -961,6 +971,7 @@ impl NodeCraftApp {
             eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
             mesh: None,
+            pre_merge: None,
             viewport,
             node_editor,
             status: "Ready".to_owned(),
@@ -2211,61 +2222,36 @@ impl NodeCraftApp {
         let mut first_section_rect = None;
         let dock_content = egui::Area::new(egui::Id::new("node-tool-dock"))
             .order(egui::Order::Tooltip)
-            .fixed_pos(dock.min + egui::vec2(0.0, 8.0))
+            .fixed_pos(dock.min + TOOL_METRICS.content_offset())
             .show(ctx, |ui| {
-                ui.set_width(TOOL_DOCK_WIDTH);
+                ui.set_width(TOOL_METRICS.width);
                 ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
-                let (search_rect, search_response) = ui.allocate_exact_size(
-                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_ROW_SIZE),
-                    egui::Sense::click(),
-                );
                 let search_active = self.tool_search_open
                     || matches!(self.tool_dock_focus, Some(ToolDockFocus::Search));
-                if search_active || search_response.hovered() {
-                    let fill = if search_active {
-                        theme.color(theme.accent)
-                    } else {
-                        theme.with_alpha(theme.border, 190)
-                    };
-                    ui_shape::fill(&ui.painter(), tool_highlight_rect(search_rect), fill);
-                }
-                let search_tint = crate::theme::Theme::hex(if search_active {
-                    theme.text
-                } else if search_response.hovered() {
-                    theme.icon_hover
-                } else {
-                    theme.icon
-                });
-                let search_svg = tint_svg(include_bytes!("../../../../vendor/iconify-design/search.svg"), &search_tint);
-                let search_image = egui::Image::from_bytes(
-                    "bytes://node-tool-search.svg",
-                    search_svg.into_bytes(),
-                )
-                .fit_to_exact_size(egui::Vec2::splat(TOOL_ICON_SIZE));
-                ui.put(
-                    egui::Rect::from_center_size(search_rect.center(), egui::Vec2::splat(TOOL_ICON_SIZE)),
-                    search_image,
+                let search_response = nodecraft_dock::icon_button(
+                    ui,
+                    TOOL_METRICS,
+                    crate::app::tool_dock_style(&theme),
+                    DockItem::new(
+                        "Search tools",
+                        "search",
+                        include_bytes!("../../../../vendor/iconify-design/search.svg"),
+                    )
+                    .active(search_active),
                 );
-                let search_response = search_response.on_hover_text("Search tools");
-                if search_response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
+                let search_rect = search_response.rect;
                 if search_response.clicked_by(egui::PointerButton::Primary) {
                     self.tool_search_open = !self.tool_search_open;
                     self.tool_search_result_index = None;
                     self.close_tool_dock();
                 }
-                ui.add_space(TOOL_SECTION_GAP);
+                ui.add_space(TOOL_METRICS.gap);
                 ui.allocate_exact_size(
-                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_SEARCH_SEPARATOR),
+                    egui::Vec2::new(TOOL_METRICS.width, TOOL_METRICS.search_separator),
                     egui::Sense::hover(),
                 );
-                ui.add_space(TOOL_SECTION_GAP);
+                ui.add_space(TOOL_METRICS.gap);
                 for section in ToolSection::ALL {
-                    let (rect, response) = ui.allocate_exact_size(
-                        egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_ROW_SIZE),
-                        egui::Sense::click(),
-                    );
                     let active = match self.tool_dock_focus {
                         Some(ToolDockFocus::Menu { section: active }) => active == section,
                         Some(ToolDockFocus::Root { index }) => {
@@ -2273,38 +2259,14 @@ impl NodeCraftApp {
                         }
                         Some(ToolDockFocus::Search) | None => false,
                     };
-                    if active || response.hovered() {
-                        let fill = if active {
-                            theme.color(theme.accent)
-                        } else {
-                            theme.with_alpha(theme.border, 190)
-                        };
-                        ui_shape::fill(&ui.painter(), tool_highlight_rect(rect), fill);
-                    }
-                    let tint = crate::theme::Theme::hex(if active {
-                        theme.text
-                    } else if response.hovered() {
-                        theme.icon_hover
-                    } else {
-                        theme.icon
-                    });
                     let (name, source) = section.icon();
-                    let svg = tint_svg(source, &tint);
-                    let image = egui::Image::from_bytes(
-                        format!("bytes://node-tool-section-{name}.svg"),
-                        svg.into_bytes(),
-                    )
-                    .fit_to_exact_size(egui::Vec2::splat(TOOL_ICON_SIZE));
-                    let icon_response = ui.put(
-                        egui::Rect::from_center_size(rect.center(), egui::Vec2::splat(TOOL_ICON_SIZE)),
-                        image,
+                    let response = nodecraft_dock::icon_button(
+                        ui,
+                        TOOL_METRICS,
+                        crate::app::tool_dock_style(&theme),
+                        DockItem::new(section.label(), name, source).active(active),
                     );
-                    let response = response
-                        .union(icon_response)
-                        .on_hover_text(section.label());
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
+                    let rect = response.rect;
                     if response.clicked_by(egui::PointerButton::Primary) {
                         clicked_section = Some(section);
                     } else if pointer_moved
@@ -2318,12 +2280,12 @@ impl NodeCraftApp {
                     }
                     section_rects.push((section, rect));
                     if section != ToolSection::ALL[ToolSection::ALL.len() - 1] {
-                        ui.add_space(TOOL_SECTION_GAP);
+                        ui.add_space(TOOL_METRICS.gap);
                     }
                 }
-                ui.add_space(TOOL_SECTION_GAP);
+                ui.add_space(TOOL_METRICS.gap);
                 let (grip_rect, grip_response) = ui.allocate_exact_size(
-                    egui::Vec2::new(TOOL_DOCK_WIDTH, TOOL_GRIP_HEIGHT),
+                    egui::Vec2::new(TOOL_METRICS.width, TOOL_METRICS.grip_height),
                     egui::Sense::click_and_drag(),
                 );
                 if grip_response.double_clicked() {
@@ -2376,35 +2338,17 @@ impl NodeCraftApp {
         // The background is derived from the rows actually rendered, so its
         // height cannot drift from the icon stack.
         let content = dock_content.response.rect;
-        dock = egui::Rect::from_min_max(
-            egui::Pos2::new(content.left(), content.top() - 8.0),
-            egui::Pos2::new(content.right(), content.bottom() + 8.0),
-        );
+        dock = nodecraft_dock::background_rect(content, TOOL_METRICS);
         let background = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("node-tool-dock-background"),
         ));
-        background.add(
-            egui::epaint::Shadow {
-                offset: [0, 0],
-                blur: 32,
-                spread: 0,
-                color: egui::Color32::from_black_alpha(120),
-            }
-            .as_shape(dock, egui::CornerRadius::same(TOOL_DOCK_RADIUS as u8)),
+        paint_background(
+            &background,
+            dock,
+            TOOL_METRICS,
+            crate::app::tool_dock_style(&theme),
         );
-        background.add(nodecraft_node_canvas::squircle::shape(
-            dock,
-            TOOL_DOCK_RADIUS,
-            theme.color(theme.dock),
-            egui::Stroke::NONE,
-        ));
-        background.add(nodecraft_node_canvas::squircle::shape(
-            dock,
-            TOOL_DOCK_RADIUS,
-            egui::Color32::TRANSPARENT,
-            egui::Stroke::new(1.0, theme.color(theme.dock_border)),
-        ));
         self.tool_dock_measured_height = dock.height();
 
         let category_clicked = clicked_section.is_some();
@@ -2468,8 +2412,8 @@ impl NodeCraftApp {
         if self.tool_search_open {
             let mut chosen = None;
             let search_centre_y =
-                dock.min.y + TOOL_DOCK_PADDING + TOOL_ROW_SIZE * 0.5;
-            let search_popup_y = (search_centre_y - TOOL_ROW_SIZE * 0.5 - 8.0)
+                dock.min.y + TOOL_METRICS.padding + TOOL_METRICS.row_size() * 0.5;
+            let search_popup_y = (search_centre_y - TOOL_METRICS.row_size() * 0.5 - 8.0)
                 .clamp(panel.top() + 8.0, panel.bottom() - 48.0);
             let search_response = egui::Area::new(egui::Id::new("node-tool-search"))
                 .order(egui::Order::Foreground)
@@ -2957,6 +2901,31 @@ impl NodeCraftApp {
         }
     }
 
+    fn duplicate_selected_nodes(&mut self) {
+        let Some(session) = &self.session else {
+            self.status = "No document".to_owned();
+            return;
+        };
+        let selected: HashSet<&str> = self.selected_nodes.iter().map(String::as_str).collect();
+        let Some(payload) = clipboard_payload(session.document(), &selected) else {
+            self.status = "No nodes selected".to_owned();
+            return;
+        };
+        let count = payload.nodes.len();
+        let (commands, selected_nodes, _) = paste_plan(session.document(), payload, None);
+        self.selected_nodes = selected_nodes;
+        self.selected_connections.clear();
+        if self.apply_commands(&commands, Some("duplicate-nodes")) {
+            self.evaluate();
+            self.status = format!(
+                "Duplicated {count} node{}",
+                if count == 1 { "" } else { "s" }
+            );
+        } else {
+            self.selected_nodes.clear();
+        }
+    }
+
     fn cut_selected_nodes(&mut self) {
         if !self.copy_selected_nodes() {
             return;
@@ -3082,6 +3051,24 @@ impl NodeCraftApp {
         false
     }
 
+    /// Whether `source` feeds `target` through the graph (including itself).
+    fn graph_feeds(document: &GraphDocument, source: &str, target: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut stack = vec![source.to_owned()];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if id == target {
+                return true;
+            }
+            for link in document.connections.iter().filter(|link| link.from == id) {
+                stack.push(link.to.clone());
+            }
+        }
+        false
+    }
+
     fn begin_gizmo_preview(&self, node: &GraphNode) -> Option<GizmoDragPreview> {
         use nodecraft_session::placement::{
             preview_body_scope, transform_chain, Affine3, PreviewBodyScope,
@@ -3106,18 +3093,46 @@ impl NodeCraftApp {
         } else {
             transform_chain(document, &node.id, target)?
         };
-        let scope = match preview_body_scope(document, &node.id, target) {
-            Some(PreviewBodyScope::All) => PreviewScope::All,
-            Some(PreviewBodyScope::Prefixes(prefixes)) => PreviewScope::Bodies(prefixes),
-            // The chain existed, so a missing scope is only an unexpected
-            // topology change; move the whole mesh rather than freezing.
-            None => PreviewScope::All,
+        // A Boolean union has no per-operand bodies in its merged display. For
+        // a drag on one branch, show the two pre-merge inputs and move only the
+        // edited one; the Boolean itself is re-evaluated when the drag ends.
+        let pre_merge = self.pre_merge.as_ref().and_then(|pre| {
+            let feeds_a = Self::graph_feeds(document, &node.id, &pre.a.0);
+            let feeds_b = Self::graph_feeds(document, &node.id, &pre.b.0);
+            if feeds_a == feeds_b {
+                return None;
+            }
+            let prefix = if feeds_a { "body:0:" } else { "body:1:" };
+            let with_groups = |mesh: &Mesh| {
+                let mut mesh = mesh.clone();
+                if mesh.face_groups.len() != mesh.faces.len() {
+                    mesh.face_groups = (0..mesh.faces.len()).map(|index| format!("face:{index}")).collect();
+                }
+                mesh
+            };
+            let mesh = nodecraft_mesh::merge_meshes(vec![with_groups(&pre.a.1), with_groups(&pre.b.1)]);
+            Some((mesh, PreviewScope::Bodies(vec![prefix.to_owned()])))
+        });
+        let (scope, preview_mesh) = match pre_merge {
+            Some((mesh, scope)) => (scope, Some(mesh)),
+            None => {
+                let scope = match preview_body_scope(document, &node.id, target) {
+                    Some(PreviewBodyScope::All) => PreviewScope::All,
+                    Some(PreviewBodyScope::Prefixes(prefixes)) => PreviewScope::Bodies(prefixes),
+                    // No per-body provenance: a fast display preview cannot move
+                    // only the edited branch. Let evaluation drive the drag result
+                    // instead of moving the whole merged body.
+                    None => return None,
+                };
+                (scope, None)
+            }
         };
         Some(GizmoDragPreview {
             node_id: node.id.clone(),
             start_values: node.values.clone(),
             chain,
             scope,
+            preview_mesh,
         })
     }
 
@@ -3179,6 +3194,9 @@ impl NodeCraftApp {
             self.gizmo_drag = selected_node.and_then(|node| self.begin_gizmo_preview(node));
             self.gizmo_edited = false;
             self.gizmo_publish_pending = false;
+            if let Some(mesh) = self.gizmo_drag.as_ref().and_then(|drag| drag.preview_mesh.clone()) {
+                self.viewport.set_mesh_preserving_camera(Some(&mesh));
+            }
         }
         if let Some(node) = selected_node
             && node.node_type == "translate"
@@ -3204,6 +3222,7 @@ impl NodeCraftApp {
             self.refresh_gizmo_preview();
         }
         if update.ended {
+            let had_preview_mesh = self.gizmo_drag.as_ref().is_some_and(|drag| drag.preview_mesh.is_some());
             self.gizmo_dragging = false;
             self.gizmo_drag = None;
             if self.gizmo_edited {
@@ -3220,9 +3239,15 @@ impl NodeCraftApp {
                     // Nothing started (the viewed target is unaffected), so no
                     // new mesh will replace the preview.
                     self.viewport.set_preview_transform(None, PreviewScope::All);
+                    if had_preview_mesh {
+                        self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
+                    }
                 }
             } else {
                 self.viewport.set_preview_transform(None, PreviewScope::All);
+                if had_preview_mesh {
+                    self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
+                }
             }
         }
     }
@@ -4330,6 +4355,7 @@ impl NodeCraftApp {
             let same_target = previous_target.as_deref() == Some(evaluation.target.as_str());
             self.eval_target = Some(evaluation.target.clone());
             self.mesh = evaluation.mesh;
+            self.pre_merge = evaluation.pre_merge;
             // Preserve the camera for updates of the same viewed target (slider/edit),
             // but fit when the breakpoint/target changes so a sphere added to a large
             // graph is framed at its own position instead of the old assembly view.
@@ -4365,6 +4391,15 @@ impl NodeCraftApp {
                     self.viewport.fit();
                     self.camera_initialized = true;
                 }
+            } else if self.mesh.is_none() {
+                // An empty evaluation (for example a sketch breakpoint) must clear
+                // the previous body, but clearing must not refit the camera: the
+                // sketch overlay and the 3D body should stay in the same view.
+                // Preserve once more so switching back to the body does not fit
+                // either.
+                self.viewport.set_mesh_preserving_camera(None);
+                self.preserve_view_for_next_mesh = true;
+                self.camera_initialized = true;
             } else if preserve {
                 self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
             } else {
@@ -4815,6 +4850,17 @@ impl eframe::App for NodeCraftApp {
             self.redo();
         } else if undo_pressed {
             self.undo();
+        }
+        let duplicate_pressed = !typing
+            && !self.selected_nodes.is_empty()
+            && ui.input(|i| {
+                i.modifiers.command
+                    && !i.modifiers.shift
+                    && !i.modifiers.alt
+                    && i.key_pressed(egui::Key::D)
+            });
+        if duplicate_pressed {
+            self.duplicate_selected_nodes();
         }
         if !typing
             && (!self.selected_nodes.is_empty() || !self.selected_connections.is_empty())
@@ -6020,14 +6066,21 @@ impl eframe::App for NodeCraftApp {
                     // The floating tool dock sits over the canvas; clicking it is
                     // not a click-away from the current selection.
                     let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
+                    let node_panel = self.node_editor.panel_rect(workspace_rect);
                     let over_tool_dock = pointer.is_some_and(|pointer| {
-                        tool_dock_rect(self.node_editor.panel_rect(workspace_rect), self.tool_dock_offset_y, self.tool_dock_measured_height.max(tool_dock_height()))
+                        tool_dock_rect(node_panel, self.tool_dock_offset_y, self.tool_dock_measured_height.max(tool_dock_height()))
                             .contains(pointer)
                             || self
                                 .tool_menu_rect
                                 .is_some_and(|menu| menu.contains(pointer))
                     });
-                    if !over_tool_dock {
+                    let over_divider = pointer.is_some_and(|pointer| {
+                        pointer.x >= node_panel.right() - 8.0
+                            && pointer.x <= node_panel.right() + 8.0
+                            && pointer.y >= node_panel.top() + 12.0
+                            && pointer.y <= node_panel.bottom() - 12.0
+                    });
+                    if !over_tool_dock && !over_divider && !self.node_editor.is_resizing() {
                         self.selected_nodes.clear();
                         self.selected_connections.clear();
                     }
@@ -6048,7 +6101,13 @@ impl eframe::App for NodeCraftApp {
                 egui::Pos2::new(node_panel_rect.right() + 12.0, workspace_rect.top() + 12.0),
                 egui::Pos2::new(workspace_rect.right() - 12.0, workspace_rect.bottom() - 12.0),
             );
-            if let Some(value) = self.sketch_gui.show(ui.ctx(), viewport_rect, viewport, &self.viewport.camera) {
+            if let Some(value) = self.sketch_gui.show(
+                ui.ctx(),
+                viewport_rect,
+                viewport,
+                &self.viewport.camera,
+                self.viewport.lens_shift(),
+            ) {
                 if let Some(node) = &sketch_node {
                     if self.apply_commands(
                         &[Command::SetValue {
@@ -6122,6 +6181,7 @@ impl EvalWorker {
                         let evaluation = target.map(|target| engine_bridge::Evaluation {
                             target,
                             mesh: None,
+                            pre_merge: None,
                             comparison: None,
                             difference: None,
                             difference_error: None,
@@ -6164,6 +6224,7 @@ impl EvalWorker {
                         target.map(|target| engine_bridge::Evaluation {
                             target,
                             mesh: None,
+                            pre_merge: None,
                             comparison: None,
                             difference: None,
                             difference_error: None,
@@ -7205,6 +7266,35 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_plan_copies_selection_with_fresh_ids_and_offset() {
+        let document = history_fixture();
+        let selected: HashSet<&str> = document.nodes.iter().map(|node| node.id.as_str()).collect();
+        let payload = clipboard_payload(&document, &selected).expect("selection payload");
+        let (commands, selected, _) = paste_plan(&document, payload, None);
+        let added: Vec<&GraphNode> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::AddNode { node } => Some(node),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(added.len(), 2);
+        assert!(added.iter().any(|node| node.id == "a-copy1"));
+        assert!(added.iter().any(|node| node.id == "b-copy1"));
+        assert_eq!(selected.len(), 2);
+        let a = added.iter().find(|node| node.id == "a-copy1").expect("a copy");
+        assert_eq!(a.x, PASTE_OFFSET);
+        assert_eq!(a.y, PASTE_OFFSET);
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                Command::Connect { from, to, .. } if from == "a-copy1" && to == "b-copy1"
+            )),
+            "internal connection copied"
+        );
+    }
+
+    #[test]
     fn pasted_ids_do_not_collide_with_existing_nodes() {
         let mut used: HashSet<String> = ["primitive".to_owned()].into_iter().collect();
         assert_eq!(unique_node_id("primitive", &mut used), "primitive-copy1");
@@ -7557,6 +7647,7 @@ mod tests {
     fn tool_insert_uses_the_primary_geometry_ports() {
         assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "chamfer"), Some(("shape", "shape")));
         assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "fillet"), Some(("shape", "shape")));
+        assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "look"), Some(("shape", "shape")));
         assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "boolean"), Some(("a", "shape")));
         assert_eq!(NodeCraftApp::auto_connect_ports("sketch", "loft"), Some(("bottom", "sketch")));
         assert_eq!(NodeCraftApp::auto_connect_ports("spline", "surfaceloft"), Some(("sections", "sketch")));

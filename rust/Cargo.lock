@@ -247,9 +247,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -279,9 +279,9 @@ dependencies = [
 
 [[package]]
 name = "async-lock"
-version = "3.4.2"
+version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290f7f2596bd5b78a9fec8088ccd89180d7f9f55b94b0576823bbbdc72ee8311"
+checksum = "0876700b0d007ad25d5508865a4259c3af9af6d296bf663a0d586d0bc3369f6f"
 dependencies = [
  "event-listener",
  "event-listener-strategy",
@@ -564,9 +564,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.10.0"
+version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86e055fa6e3e40ad6187ba25b6855eeb635d5271f8e0f0e1e9a5826b8d75bea0"
+checksum = "375989decec1a0fa424442bed520fa12ede43a48475ce8c7417d2c69b32b5f6b"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -727,9 +727,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.3"
+version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ba106e844045ddc02c20768ac4b0b7cb45f2cc2ecbd833ac9f5dacb183c2055"
+checksum = "5f97d3416d5337d15c4b0d78c8c91df922ca143f57ec20e2d1c188333047ef04"
 dependencies = [
  "cfg-if",
 ]
@@ -2057,6 +2057,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodecraft-dock"
+version = "0.0.1"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "nodecraft-node-canvas",
+]
+
+[[package]]
 name = "nodecraft-egui"
 version = "0.0.1"
 dependencies = [
@@ -2070,6 +2079,7 @@ dependencies = [
  "image",
  "lyon",
  "mimalloc",
+ "nodecraft-dock",
  "nodecraft-engine",
  "nodecraft-mesh",
  "nodecraft-node-canvas",
@@ -2082,6 +2092,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcraft-geom",
  "solidcraft-gpu",
  "solidcraft-render",
@@ -2105,7 +2116,8 @@ dependencies = [
  "nodecraft-sweep",
  "nodecraft-wedge",
  "serde_json",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcraft-geom",
  "solidcraft-sketch",
  "step-assemblies",
@@ -2142,7 +2154,7 @@ dependencies = [
  "solidcore",
  "solidcore-convert",
  "solidcore-ops",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
  "solidcore-tess",
 ]
 
@@ -2171,6 +2183,7 @@ dependencies = [
  "glyphon",
  "lyon",
  "nodecraft-session",
+ "serde_json",
  "wgpu",
 ]
 
@@ -2233,7 +2246,7 @@ name = "nodecraft-sweep"
 version = "0.0.1"
 dependencies = [
  "solidcore-ops",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
 ]
 
 [[package]]
@@ -2295,7 +2308,7 @@ dependencies = [
 [[package]]
 name = "nurbs-grid-mesh"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 
 [[package]]
 name = "objc-sys"
@@ -3494,7 +3507,7 @@ checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -3503,26 +3516,36 @@ dependencies = [
 [[package]]
 name = "solidcore-convert"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "solidcore",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
 ]
 
 [[package]]
 name = "solidcore-ops"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "solidcore",
  "solidcore-convert",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
 ]
 
 [[package]]
 name = "solidcore-record"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "solidcore-record"
+version = "0.1.0"
+source = "git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f#f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f"
 dependencies = [
  "serde",
  "serde_json",
@@ -3547,35 +3570,37 @@ dependencies = [
 [[package]]
 name = "solidcore-tess"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "rayon",
  "serde",
  "solidcore",
  "solidcore-convert",
- "solidcore-record",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0)",
  "spade",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "solidcraft-geom"
-version = "0.24.0"
-source = "git+https://github.com/tangency-labs/solidcraft?branch=develop#456e5b7fa571f6816bbffcfc6f152e812a733a60"
+version = "0.40.0-rc.2"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c#481687fff38057691faf84a6fd844e826c552a6c"
 dependencies = [
  "serde",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "solidcraft-gpu"
-version = "0.24.0"
-source = "git+https://github.com/tangency-labs/solidcraft?branch=develop#456e5b7fa571f6816bbffcfc6f152e812a733a60"
+version = "0.40.0-rc.2"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c#481687fff38057691faf84a6fd844e826c552a6c"
 dependencies = [
  "log",
  "pollster 0.4.0",
  "robust",
  "serde",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcraft-geom",
  "solidcraft-render",
  "thiserror 2.0.21",
@@ -3584,27 +3609,32 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-render"
-version = "0.24.0"
-source = "git+https://github.com/tangency-labs/solidcraft?branch=develop#456e5b7fa571f6816bbffcfc6f152e812a733a60"
+version = "0.40.0-rc.2"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c#481687fff38057691faf84a6fd844e826c552a6c"
 dependencies = [
  "image",
  "moxcms",
  "png 0.18.1",
  "serde",
  "sha2",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcraft-geom",
+ "web-time",
  "weezl",
 ]
 
 [[package]]
 name = "solidcraft-sketch"
-version = "0.24.0"
-source = "git+https://github.com/tangency-labs/solidcraft?branch=develop#456e5b7fa571f6816bbffcfc6f152e812a733a60"
+version = "0.40.0-rc.2"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c#481687fff38057691faf84a6fd844e826c552a6c"
 dependencies = [
+ "harfrust 0.12.0",
  "serde",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcraft-geom",
  "thiserror 2.0.21",
  "ttf-parser",
+ "unicode-bidi",
 ]
 
 [[package]]
@@ -3644,7 +3674,7 @@ dependencies = [
 [[package]]
 name = "step-brep"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "solidcore",
  "step-import",
@@ -3660,7 +3690,7 @@ dependencies = [
 [[package]]
 name = "step-export"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 dependencies = [
  "step-import",
 ]
@@ -3668,7 +3698,7 @@ dependencies = [
 [[package]]
 name = "step-import"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcore?branch=main#b4de2149aadbd737268091c51d8390a7d3cdda70"
+source = "git+https://github.com/tangency-labs/solidcore?rev=554443501c478b769d79fb0ae10a126a8077faf0#554443501c478b769d79fb0ae10a126a8077faf0"
 
 [[package]]
 name = "step-nurbs"
@@ -3873,9 +3903,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.17+spec-1.1.0"
+version = "0.25.18+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e3641d5bbb5349a79e1020a242d251efbc546ad8048d133958323ce9c40a9c9c"
+checksum = "1ec6e78bd70db9420d8d212fa9dc97f116448a1ceff5d00eabb991d407e21396"
 dependencies = [
  "indexmap",
  "toml_datetime",
@@ -3985,9 +4015,9 @@ checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
 
 [[package]]
 name = "unicode-script"
-version = "0.5.8"
+version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "383ad40bb927465ec0ce7720e033cb4ca06912855fc35db31b5755d0de75b1ee"
+checksum = "aa04c955db05429d464c74d495c1ee677e1866e783a4c3747f9c0cef7756cabf"
 
 [[package]]
 name = "unicode-segmentation"
@@ -4748,9 +4778,9 @@ dependencies = [
 
 [[package]]
 name = "winnow"
-version = "1.0.4"
+version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
+checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
 ]
@@ -4832,9 +4862,9 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "yazi"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01738255b5a16e78bbb83e7fbba0a1e7dd506905cfc53f4622d89015a03fbb5"
+checksum = "ac366ea532fa8ee6a992cec9dea525b1dc284e69702f36c2ab5fbebadc81ec86"
 
 [[package]]
 name = "zbus"

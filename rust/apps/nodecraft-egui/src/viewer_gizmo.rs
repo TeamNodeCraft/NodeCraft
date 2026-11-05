@@ -3,7 +3,9 @@
 //! `crates/ui-egui/src/gizmo.rs` (MIT OR Apache-2.0).
 
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, vec2};
-use solidcraft_geom::{Ring, Vec3};
+use solidcraft_geom::Ring;
+use solidcore_record_new::Vec3;
+use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
 
 /// World ↔ screen mapping for the current viewport frame.

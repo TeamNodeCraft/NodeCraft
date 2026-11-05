@@ -197,8 +197,9 @@ pub fn select_edges_by_ordinals(
 /// Select the edges referenced by a NodeCraft Edge-node `values` object.
 ///
 /// Each entry of `values.edges` is matched, in priority order, by
-///  1. `center` or `point` (centered display-mesh coordinates): nearest edge,
-///  2. `ordinal`: index in the solidcore edge list.
+///  1. `id`: viewer edge id such as `body:0:edge:11` (its ordinal),
+///  2. `ordinal`: index in the solidcore edge list,
+///  3. `center` or `point` (centered display-mesh coordinates): nearest edge.
 ///
 /// Duplicates collapse while preserving the node's order. An empty or missing
 /// selection is an explicit [`BlendError::InvalidInput`].
@@ -238,6 +239,30 @@ fn select_reference(
     reference: &Value,
     center: [f64; 3],
 ) -> Result<EdgeSelection, BlendError> {
+    // Viewer picks carry both an id and a center. The id is an exact ordinal
+    // into the input B-rep; a center sampled from a different display target can
+    // land on a nearby but wrong (for example smooth) edge, so try the id first
+    // and keep the center only as a fallback.
+    let mut id_error = None;
+    if let Some(id) = reference.get("id").and_then(Value::as_str) {
+        if id.starts_with("preview-edge:") {
+            return Err(BlendError::InvalidInput(
+                "a preview-only edge cannot be used for an exact treatment; select a B-rep edge".into(),
+            ));
+        }
+        if let Some(ordinal) = id.rsplit("edge:").next().and_then(|tail| tail.parse::<usize>().ok()) {
+            match select_edges_by_ordinals(kernel, brep, &[ordinal]) {
+                Ok(mut selections) => return Ok(selections.remove(0)),
+                Err(error) => id_error = Some(error),
+            }
+        }
+    }
+    if let Some(ordinal) = reference.get("ordinal") {
+        let ordinal = json_ordinal(ordinal)?;
+        return select_edges_by_ordinals(kernel, brep, &[ordinal])
+            .map(|mut selections| selections.remove(0))
+            .map_err(|error| BlendError::InvalidInput(error.to_string()));
+    }
     let mut center_error = None;
     if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
         let centered = json_point(point)?;
@@ -247,24 +272,8 @@ fn select_reference(
             Err(error) => center_error = Some(error),
         }
     }
-    if let Some(ordinal) = reference.get("ordinal") {
-        let ordinal = json_ordinal(ordinal)?;
-        return select_edges_by_ordinals(kernel, brep, &[ordinal])
-            .map(|mut selections| selections.remove(0))
-            .map_err(|error| BlendError::InvalidInput(error.to_string()));
-    }
-    // Viewer picks are body-scoped ids such as `body:0:edge:3`.
-    if let Some(id) = reference.get("id").and_then(Value::as_str) {
-        if id.starts_with("preview-edge:") {
-            return Err(BlendError::InvalidInput(
-                "a preview-only edge cannot be used for an exact treatment; select a B-rep edge".into(),
-            ));
-        }
-        if let Some(ordinal) = id.rsplit("edge:").next().and_then(|tail| tail.parse::<usize>().ok()) {
-            return select_edges_by_ordinals(kernel, brep, &[ordinal])
-                .map(|mut selections| selections.remove(0))
-                .map_err(|error| BlendError::InvalidInput(error.to_string()));
-        }
+    if let Some(error) = id_error {
+        return Err(error);
     }
     if let Some(error) = center_error {
         return Err(error);

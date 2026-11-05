@@ -92,12 +92,11 @@ impl ChamferType {
 /// Fillet continuity of the edge node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Continuity {
-    /// Circular (G1, tangent-continuous) fillet: the only one solidcore's ported
-    /// standard-solver path can express today.
+    /// Circular (G1, tangent-continuous) fillet.
     Circular,
-    /// G2 curvature-continuous fillet (needs a B-spline fillet law).
+    /// G2 curvature-continuous fillet, using solidcore's blend-curve cross-section.
     G2,
-    /// G3 curvature-continuous fillet.
+    /// G3 curvature-continuous fillet, using solidcore's blend-curve cross-section.
     G3,
 }
 
@@ -240,20 +239,7 @@ impl EdgeTreatment {
                     }
                 }
             }
-            EdgeMode::Fillet => {
-                if self.continuity != Continuity::Circular {
-                    return Err(BlendError::missing_api(
-                        "fillet G2/G3",
-                        format!(
-                            "{} fillets need a B-spline fillet law; solidcore only has the \
-                             constant-radius (circular, G1) standard solver data",
-                            self.continuity.as_str()
-                        ),
-                        LAW_CONTINUITY.to_vec(),
-                    ));
-                }
-                Ok(())
-            }
+            EdgeMode::Fillet => Ok(()),
         }
     }
 

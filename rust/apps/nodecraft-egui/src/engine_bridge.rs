@@ -6,9 +6,22 @@ use nodecraft_engine::EngineCache;
 use nodecraft_protocol::{CacheState, Connection, Mesh, Node, Request};
 use nodecraft_session::GraphDocument;
 
+/// The two input bodies of a Boolean target, before the merge.
+///
+/// The merged result has no per-operand display provenance. Keeping the
+/// pre-merge bodies lets a transform drag show the edited branch while the
+/// other operand stays put; the Boolean itself is re-evaluated on release.
+#[derive(Clone)]
+pub struct PreMerge {
+    pub a: (String, Mesh),
+    pub b: (String, Mesh),
+}
+
 pub struct Evaluation {
     pub target: String,
     pub mesh: Option<Mesh>,
+    /// Boolean operands for a pre-merge drag display.
+    pub pre_merge: Option<PreMerge>,
     /// Before/after pair when the selected feature can be compared.
     pub comparison: Option<(Mesh, Mesh)>,
     /// Exact before/after difference bodies from the kernel.
@@ -95,6 +108,7 @@ pub fn evaluate_with_linked_progress_comparison(
                 Some(Evaluation {
                     target,
                     mesh: None,
+                    pre_merge: None,
                     comparison: None,
                     difference: None,
                     difference_error: None,
@@ -114,6 +128,22 @@ pub fn evaluate_with_linked_progress_comparison(
 /// Evaluate an already-flattened graph. Linked-document expansion is cached by
 /// [`nodecraft_session::flat::FlatGraphCache`], so this function must not expand
 /// again.
+/// Immediate a/b sources when `target` is a Boolean with both operands.
+fn pre_merge_sources(document: &GraphDocument, target: &str) -> Option<(String, String)> {
+    let node = document.nodes.iter().find(|node| node.id == target)?;
+    if !matches!(node.node_type.as_str(), "boolean" | "fuse") {
+        return None;
+    }
+    let source = |input: &str| {
+        document
+            .connections
+            .iter()
+            .find(|link| link.to == target && link.input == input)
+            .map(|link| link.from.clone())
+    };
+    Some((source("a")?, source("b")?))
+}
+
 pub fn evaluate_flat_with_progress_comparison(
     document: &GraphDocument,
     target: String,
@@ -124,12 +154,20 @@ pub fn evaluate_flat_with_progress_comparison(
 ) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
+    let pre_merge = pre_merge_sources(document, &target);
     let request = Request {
         request_id: 1,
         tab_id: None,
         graph_revision: None,
         targets: {
             let mut targets = vec![target.clone()];
+            if let Some((a, b)) = &pre_merge {
+                for id in [a, b] {
+                    if !targets.iter().any(|existing| existing == id) {
+                        targets.push(id.clone());
+                    }
+                }
+            }
             if let Some((before, after)) = comparison {
                 for id in [before, after] {
                     if !targets.iter().any(|existing| existing == id) {
@@ -141,6 +179,13 @@ pub fn evaluate_flat_with_progress_comparison(
         },
         mesh_targets: Some({
             let mut targets = vec![target.clone()];
+            if let Some((a, b)) = &pre_merge {
+                for id in [a, b] {
+                    if !targets.iter().any(|existing| existing == id) {
+                        targets.push(id.clone());
+                    }
+                }
+            }
             if let Some((before, after)) = comparison {
                 for id in [before, after] {
                     if !targets.iter().any(|existing| existing == id) {
@@ -187,6 +232,11 @@ pub fn evaluate_flat_with_progress_comparison(
     let cache_stats = output.response.cache_stats;
     let error = output.response.node_errors.get(&target).cloned();
     let mesh = output.response.meshes.get(&target).map(|payload| payload.mesh.clone());
+    let pre_merge = pre_merge.and_then(|(a, b)| {
+        let a_mesh = output.response.meshes.get(&a)?.mesh.clone();
+        let b_mesh = output.response.meshes.get(&b)?.mesh.clone();
+        Some(PreMerge { a: (a, a_mesh), b: (b, b_mesh) })
+    });
     let comparison = comparison.and_then(|(before, after)| {
         let before = output.response.meshes.get(before)?.mesh.clone();
         let after = output.response.meshes.get(after)?.mesh.clone();
@@ -195,7 +245,10 @@ pub fn evaluate_flat_with_progress_comparison(
     (
         Some(Evaluation {
             target,
-            mesh: if error.is_some() { None } else { mesh },
+            // An errored node bypasses to its input, so the mesh can still be
+            // valid even though the node reports its own error.
+            mesh,
+            pre_merge,
             comparison,
             difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
             difference_error: output.response.comparison.as_ref().and_then(|payload| payload.error.clone()),
@@ -242,6 +295,30 @@ mod tests {
             assert_eq!(next.vertices, first.vertices);
             assert_eq!(next.faces, first.faces);
         }
+    }
+
+    #[test]
+    fn boolean_evaluation_returns_the_pre_merge_bodies() {
+        let mut document = GraphDocument::new("boolean-pre-merge");
+        let mut a = node("a");
+        a.values = json!({"primitiveType": "box"});
+        let mut b = node("b");
+        b.values = json!({"primitiveType": "sphere"});
+        let mut boolean = node("boolean");
+        boolean.node_type = "boolean".into();
+        boolean.values = json!({"mode": "union"});
+        document.nodes = vec![a, b, boolean];
+        document.connections = vec![
+            nodecraft_session::GraphConnection { from: "a".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
+            nodecraft_session::GraphConnection { from: "b".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+        ];
+        let (evaluation, _) = evaluate(&document, EngineCache::new(), None);
+        let evaluation = evaluation.expect("evaluation");
+        let pre_merge = evaluation.pre_merge.expect("pre-merge bodies");
+        assert_eq!(pre_merge.a.0, "a");
+        assert_eq!(pre_merge.b.0, "b");
+        assert!(!pre_merge.a.1.faces.is_empty());
+        assert!(!pre_merge.b.1.faces.is_empty());
     }
 
     #[test]

@@ -5,9 +5,11 @@
 use std::collections::HashSet;
 
 use egui::{Pos2, Rect, Stroke, Vec2 as EVec2};
-use solidcraft_geom::{Vec2, Vec3};
+use solidcore_record_new::{Vec2, Vec3};
+use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
 use nodecraft_engine::sketch::{solve, CurveKind, Sketch};
+use nodecraft_dock::{DockItem, DockMetrics, DockStyle, paint_background};
 use crate::ui_shape;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,6 +40,21 @@ impl Tool {
         Self::Trim,
     ];
 
+    fn icon(self) -> (&'static str, &'static [u8]) {
+        match self {
+            Self::Select => ("select", include_bytes!("../../../../vendor/iconify-design/sketch/select.svg")),
+            Self::Line => ("line", include_bytes!("../../../../vendor/iconify-design/sketch/line.svg")),
+            Self::Rectangle => ("rectangle", include_bytes!("../../../../vendor/iconify-design/sketch/rectangle.svg")),
+            Self::Circle => ("circle", include_bytes!("../../../../vendor/iconify-design/sketch/circle.svg")),
+            Self::Arc => ("arc", include_bytes!("../../../../vendor/iconify-design/sketch/arc.svg")),
+            Self::Polyline => ("polyline", include_bytes!("../../../../vendor/iconify-design/sketch/polyline.svg")),
+            Self::Ellipse => ("ellipse", include_bytes!("../../../../vendor/iconify-design/sketch/ellipse.svg")),
+            Self::Polygon => ("polygon", include_bytes!("../../../../vendor/iconify-design/sketch/polygon.svg")),
+            Self::Fillet => ("fillet", include_bytes!("../../../../vendor/iconify-design/sketch/fillet.svg")),
+            Self::Trim => ("trim", include_bytes!("../../../../vendor/iconify-design/sketch/trim.svg")),
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Select => "Select",
@@ -58,19 +75,67 @@ impl Tool {
     }
 }
 
-const CONSTRAINTS: [&str; 12] = [
-    "Horizontal",
-    "Vertical",
-    "Coincident",
-    "Equal",
-    "Parallel",
-    "Perpendicular",
-    "Tangent",
-    "Concentric",
-    "Collinear",
-    "Length",
-    "Radius",
-    "Fix",
+/// Additional gap above the horizontal constraints dock.
+///
+/// The 3D interaction rect is already inset from the workspace by the panel
+/// margin, so this stays zero unless the viewport inset policy changes. This is
+/// the single place to adjust that gap.
+const CONSTRAINT_DOCK_TOP_GAP: f32 = 0.0;
+
+struct SketchDockLayout {
+    tools: Rect,
+    constraints: Rect,
+}
+
+fn sketch_dock_layout(
+    interaction: Rect,
+    tool_height: f32,
+    constraint_rows: usize,
+) -> SketchDockLayout {
+    let metrics = DockMetrics::DEFAULT;
+    let edge = metrics.edge_offset;
+    let tool_top = (interaction.center().y - tool_height * 0.5)
+        .clamp(
+            interaction.top() + edge,
+            (interaction.bottom() - tool_height - edge).max(interaction.top() + edge),
+        );
+    let tools = Rect::from_min_size(
+        Pos2::new(interaction.left(), tool_top),
+        EVec2::new(metrics.width, tool_height),
+    );
+
+    let constraint_metrics = metrics.with_orientation(nodecraft_dock::DockOrientation::Horizontal);
+    let constraint_size = constraint_metrics.dock_size(constraint_rows);
+    let constraint_x = (interaction.center().x - constraint_size.x * 0.5).clamp(
+        interaction.left(),
+        (interaction.right() - constraint_size.x).max(interaction.left()),
+    );
+    let constraints = Rect::from_min_size(
+        Pos2::new(constraint_x, interaction.top() + CONSTRAINT_DOCK_TOP_GAP),
+        constraint_size,
+    );
+    SketchDockLayout { tools, constraints }
+}
+
+struct Constraint {
+    label: &'static str,
+    icon_name: &'static str,
+    icon: &'static [u8],
+}
+
+const CONSTRAINTS: [Constraint; 12] = [
+    Constraint { label: "Horizontal", icon_name: "horizontal", icon: include_bytes!("../../../../vendor/iconify-design/constraints/horizontal.svg") },
+    Constraint { label: "Vertical", icon_name: "vertical", icon: include_bytes!("../../../../vendor/iconify-design/constraints/vertical.svg") },
+    Constraint { label: "Coincident", icon_name: "coincident", icon: include_bytes!("../../../../vendor/iconify-design/constraints/coincident.svg") },
+    Constraint { label: "Equal", icon_name: "equal", icon: include_bytes!("../../../../vendor/iconify-design/constraints/equal.svg") },
+    Constraint { label: "Parallel", icon_name: "parallel", icon: include_bytes!("../../../../vendor/iconify-design/constraints/parallel.svg") },
+    Constraint { label: "Perpendicular", icon_name: "perpendicular", icon: include_bytes!("../../../../vendor/iconify-design/constraints/perpendicular.svg") },
+    Constraint { label: "Tangent", icon_name: "tangent", icon: include_bytes!("../../../../vendor/iconify-design/constraints/tangent.svg") },
+    Constraint { label: "Concentric", icon_name: "concentric", icon: include_bytes!("../../../../vendor/iconify-design/constraints/concentric.svg") },
+    Constraint { label: "Collinear", icon_name: "collinear", icon: include_bytes!("../../../../vendor/iconify-design/constraints/collinear.svg") },
+    Constraint { label: "Length", icon_name: "length", icon: include_bytes!("../../../../vendor/iconify-design/constraints/length.svg") },
+    Constraint { label: "Radius", icon_name: "radius", icon: include_bytes!("../../../../vendor/iconify-design/constraints/radius.svg") },
+    Constraint { label: "Fix", icon_name: "fix", icon: include_bytes!("../../../../vendor/iconify-design/constraints/fix.svg") },
 ];
 
 struct Draft {
@@ -157,6 +222,7 @@ pub struct SketchGui {
     selected_curves: HashSet<usize>,
     fillet_radius: f64,
     dirty: bool,
+    dock_measured_height: f32,
 }
 
 impl Default for SketchGui {
@@ -171,6 +237,7 @@ impl Default for SketchGui {
             selected_curves: HashSet::new(),
             fillet_radius: 5.0,
             dirty: false,
+            dock_measured_height: 0.0,
         }
     }
 }
@@ -223,180 +290,164 @@ impl SketchGui {
         viewport: Rect,
         interaction: Rect,
         camera: &Camera,
+        lens_shift: [f32; 2],
     ) -> Option<serde_json::Value> {
         if interaction.width() < 280.0 || interaction.height() < 220.0 {
             return None;
         }
         let theme = crate::theme::get();
-        let margin = 12.0;
-        let tool_width = 156.0;
-        let constraint_width = 152.0;
-        let tool_pos = Pos2::new(interaction.min.x + margin, interaction.min.y + margin);
-        let constraint_pos = Pos2::new(
-            interaction.max.x - constraint_width - margin,
-            interaction.min.y + margin + 104.0,
-        );
-
         let mut palette_rects = Vec::new();
-        let tool_response = egui::Area::new(egui::Id::new("sketch-tool-palette"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(tool_pos)
+        // The first rect is the whole workspace; interaction is the visible 3D
+        // viewport after the node editor's width is subtracted.
+        let metrics = DockMetrics::DEFAULT;
+        let style = crate::app::tool_dock_style(&theme);
+        let estimated_height = Tool::TOOLS.len() as f32 * metrics.row_size()
+            + (Tool::TOOLS.len() as f32 - 1.0) * metrics.gap
+            + metrics.padding * 2.0;
+        let height = if self.dock_measured_height > 0.0 {
+            self.dock_measured_height
+        } else {
+            estimated_height
+        };
+        let layout = sketch_dock_layout(
+            interaction,
+            height,
+            CONSTRAINTS.len(),
+        );
+        let mut dock = layout.tools;
+        let dock_content = egui::Area::new(egui::Id::new("sketch-tool-dock"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(dock.min + metrics.content_offset())
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(theme.color(theme.popup))
-                    .stroke(Stroke::new(1.0, theme.color(theme.border_strong)))
-                    .corner_radius(egui::CornerRadius::same(12))
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(tool_width - 16.0);
-                        ui.label(
-                            egui::RichText::new("SKETCH · XY PLANE")
-                                .size(10.0)
-                                .color(theme.color(theme.muted)),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new("TOOLS")
-                                .size(9.0)
-                                .color(theme.with_alpha(theme.muted, 190)),
-                        );
-                        for pair in Tool::TOOLS.chunks(2) {
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 4.0;
-                                for tool in pair {
-                                    let selected = self.tool == *tool;
-                                    let response = ui_shape::button(
-                                        ui,
-                                        tool.label(),
-                                        68.0,
-                                        24.0,
-                                        if selected {
-                                            theme.color(theme.accent)
-                                        } else {
-                                            theme.color(theme.control)
-                                        },
-                                        Stroke::new(
-                                            1.0,
-                                            if selected {
-                                                theme.color(theme.accent)
-                                            } else {
-                                                theme.with_alpha(theme.border, 200)
-                                            },
-                                        ),
-                                        theme.color(if selected { theme.text } else { theme.muted }),
-                                    );
-                                    if response.clicked() {
-                                        self.tool = *tool;
-                                        self.draft = None;
-                                        self.arc_draft = None;
-                                    }
+                ui.set_width(metrics.width);
+                ui.spacing_mut().item_spacing = EVec2::ZERO;
+                for (index, tool) in Tool::TOOLS.iter().enumerate() {
+                    let active = self.tool == *tool;
+                    let (name, source) = tool.icon();
+                    let response = nodecraft_dock::icon_button(
+                        ui,
+                        metrics,
+                        style,
+                        DockItem::new(tool.label(), name, source).active(active),
+                    );
+                    if response.clicked() {
+                        self.tool = *tool;
+                        self.draft = None;
+                        self.arc_draft = None;
+                    }
+                    if index + 1 < Tool::TOOLS.len() {
+                        ui.add_space(metrics.gap);
+                    }
+                }
+            });
+        dock = nodecraft_dock::background_rect(dock_content.response.rect, metrics);
+        let dock_painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("sketch-tool-dock-background"),
+        ));
+        paint_background(&dock_painter, dock, metrics, style);
+        if (self.dock_measured_height - dock.height()).abs() > 0.5 {
+            self.dock_measured_height = dock.height();
+            ctx.request_repaint();
+        }
+        palette_rects.push(dock);
+
+        if matches!(self.tool, Tool::Fillet | Tool::Arc) {
+            let options_pos = Pos2::new(dock.max.x + 8.0, dock.center().y - 42.0);
+            let options_response = egui::Area::new(egui::Id::new("sketch-tool-options"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(options_pos)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(theme.color(theme.popup))
+                        .stroke(Stroke::new(1.0, theme.color(theme.border_strong)))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(156.0);
+                            if self.tool == Tool::Arc {
+                                ui.label(
+                                    egui::RichText::new("Click start, end, then a point on the arc")
+                                        .size(10.0)
+                                        .color(theme.color(theme.muted)),
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("FILLET RADIUS")
+                                        .size(9.0)
+                                        .color(theme.with_alpha(theme.muted, 190)),
+                                );
+                                ui.add(
+                                    egui::DragValue::new(&mut self.fillet_radius)
+                                        .speed(0.1)
+                                        .range(0.01..=10_000.0),
+                                );
+                                let ready = self.selected_curves.len() == 2;
+                                let response = ui_shape::button(
+                                    ui,
+                                    if ready { "Apply Fillet" } else { "Select 2 lines" },
+                                    140.0,
+                                    24.0,
+                                    if ready {
+                                        theme.color(theme.accent)
+                                    } else {
+                                        theme.with_alpha(theme.control, 180)
+                                    },
+                                    Stroke::new(1.0, theme.color(theme.border)),
+                                    theme.color(if ready { theme.text } else { theme.muted }),
+                                );
+                                if ready && response.clicked() {
+                                    self.apply_fillet();
                                 }
-                            });
-                        }
-                        if self.tool == Tool::Arc {
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("Click start, end, then a point on the arc")
-                                    .size(9.0)
-                                    .color(theme.with_alpha(theme.muted, 210)),
-                            );
-                        }
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new("PLANE")
-                                .size(9.0)
-                                .color(theme.with_alpha(theme.muted, 190)),
-                        );
-                        ui.label(
-                            egui::RichText::new("Z = 0 · world XY")
-                                .size(11.0)
-                                .color(theme.color(theme.text)),
-                        );
-                        if !self.selected_curves.is_empty() {
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} curve{} selected",
-                                    self.selected_curves.len(),
-                                    if self.selected_curves.len() == 1 { "" } else { "s" }
-                                ))
-                                .size(10.0)
-                                .color(theme.color(theme.highlight)),
-                            );
-                        }
-                        if self.tool == Tool::Fillet {
-                            ui.add_space(6.0);
-                            ui.label(
-                                egui::RichText::new("FILLET RADIUS")
-                                    .size(9.0)
-                                    .color(theme.with_alpha(theme.muted, 190)),
-                            );
-                            ui.add(
-                                egui::DragValue::new(&mut self.fillet_radius)
-                                    .speed(0.1)
-                                    .range(0.01..=10_000.0),
-                            );
-                            let ready = self.selected_curves.len() == 2;
-                            let response = ui_shape::button(
-                                ui,
-                                if ready { "Apply Fillet" } else { "Select 2 lines" },
-                                132.0,
-                                26.0,
-                                if ready {
-                                    theme.color(theme.accent)
-                                } else {
-                                    theme.with_alpha(theme.control, 180)
-                                },
-                                Stroke::new(1.0, theme.color(theme.border)),
-                                theme.color(if ready { theme.text } else { theme.muted }),
-                            );
-                            if ready && response.clicked() {
-                                self.apply_fillet();
                             }
-                        }
-                    });
-            });
-        palette_rects.push(tool_response.response.rect);
+                        });
+                });
+            palette_rects.push(options_response.response.rect);
+        }
 
-        let constraint_response = egui::Area::new(egui::Id::new("sketch-constraints"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(constraint_pos)
+
+        let constraint_metrics = DockMetrics::DEFAULT
+            .with_orientation(nodecraft_dock::DockOrientation::Horizontal);
+        let mut constraint_dock = layout.constraints;
+        let constraint_content = egui::Area::new(egui::Id::new("sketch-constraints"))
+            .order(egui::Order::Tooltip)
+            .fixed_pos(constraint_dock.min + constraint_metrics.content_offset())
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(theme.color(theme.popup))
-                    .stroke(Stroke::new(1.0, theme.color(theme.border_strong)))
-                    .corner_radius(egui::CornerRadius::same(12))
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(constraint_width - 16.0);
-                        ui.label(
-                            egui::RichText::new("CONSTRAINTS")
-                                .size(9.0)
-                                .color(theme.with_alpha(theme.muted, 190)),
+                ui.spacing_mut().item_spacing = EVec2::ZERO;
+                ui.horizontal(|ui| {
+                    for (index, constraint) in CONSTRAINTS.iter().enumerate() {
+                        let response = nodecraft_dock::icon_button(
+                            ui,
+                            constraint_metrics,
+                            style,
+                            DockItem::new(
+                                constraint.label,
+                                constraint.icon_name,
+                                constraint.icon,
+                            ),
                         );
-                        ui.add_space(3.0);
-                        for constraint in CONSTRAINTS {
-                            if ui
-                                .add_sized(
-                                    [constraint_width - 16.0, 22.0],
-                                    egui::Button::new(
-                                        egui::RichText::new(constraint)
-                                            .size(11.0)
-                                            .color(theme.color(theme.text)),
-                                    )
-                                    .frame(false),
-                                )
-                                .clicked()
-                            {
-                                self.tool = Tool::Select;
-                                self.draft = None;
-                            }
+                        if response.clicked() {
+                            self.tool = Tool::Select;
+                            self.draft = None;
                         }
-                    });
+                        if index + 1 < CONSTRAINTS.len() {
+                            ui.add_space(constraint_metrics.gap);
+                        }
+                    }
+                });
             });
-        palette_rects.push(constraint_response.response.rect);
+        constraint_dock = nodecraft_dock::background_rect(
+            constraint_content.response.rect,
+            constraint_metrics,
+        );
+        let constraint_painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Foreground,
+            egui::Id::new("sketch-constraints-background"),
+        ));
+        paint_background(&constraint_painter, constraint_dock, constraint_metrics, style);
+        palette_rects.push(constraint_dock);
 
-        self.handle_input(ctx, viewport, interaction, camera, &palette_rects);
+        self.handle_input(ctx, viewport, interaction, camera, lens_shift, &palette_rects);
 
         let mut painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Middle,
@@ -412,6 +463,7 @@ impl SketchGui {
                 &painter,
                 viewport,
                 camera,
+                lens_shift,
                 &points,
                 Stroke::new(
                     if selected { 3.2 } else { 2.0 },
@@ -427,7 +479,7 @@ impl SketchGui {
             if point.id == "origin" {
                 continue;
             }
-            if let Some(screen) = project(viewport, camera, point.pos) {
+            if let Some(screen) = project(viewport, camera, lens_shift, point.pos) {
                 let selected = self.selected_point == Some(index);
                 painter.circle_filled(
                     screen,
@@ -446,6 +498,7 @@ impl SketchGui {
                     &painter,
                     viewport,
                     camera,
+                    lens_shift,
                     &points,
                     Stroke::new(1.5, theme.with_alpha(theme.accent, 180)),
                 );
@@ -462,6 +515,7 @@ impl SketchGui {
                 &painter,
                 viewport,
                 camera,
+                lens_shift,
                 &points,
                 Stroke::new(1.5, theme.with_alpha(theme.accent, 180)),
             );
@@ -476,6 +530,7 @@ impl SketchGui {
         viewport: Rect,
         interaction: Rect,
         camera: &Camera,
+        lens_shift: [f32; 2],
         palettes: &[Rect],
     ) {
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
@@ -487,7 +542,7 @@ impl SketchGui {
         let over_palette = palettes.iter().any(|rect| rect.contains(pointer));
         if self.tool == Tool::Arc {
             if let Some(draft) = &mut self.arc_draft {
-                if let Some(current) = unproject(viewport, camera, pointer) {
+                if let Some(current) = unproject(viewport, camera, lens_shift, pointer) {
                     draft.current = current;
                 }
             }
@@ -495,7 +550,7 @@ impl SketchGui {
                 && interaction.contains(pointer)
                 && !over_palette
             {
-                let Some(point) = unproject(viewport, camera, pointer) else { return };
+                let Some(point) = unproject(viewport, camera, lens_shift, pointer) else { return };
                 match &mut self.arc_draft {
                     None => {
                         self.arc_draft = Some(ArcDraft {
@@ -527,7 +582,7 @@ impl SketchGui {
                 && !over_palette
             {
                 let additive = ctx.input(|input| input.modifiers.shift || input.modifiers.command);
-                self.select_at(viewport, interaction, camera, pointer, additive);
+                self.select_at(viewport, interaction, camera, lens_shift, pointer, additive);
             }
             return;
         }
@@ -535,7 +590,7 @@ impl SketchGui {
             && interaction.contains(pointer)
             && !over_palette
         {
-            if let Some(start) = unproject(viewport, camera, pointer) {
+            if let Some(start) = unproject(viewport, camera, lens_shift, pointer) {
                 self.draft = Some(Draft {
                     tool: self.tool,
                     start,
@@ -544,7 +599,7 @@ impl SketchGui {
             }
         }
         if let Some(draft) = &mut self.draft {
-            if let Some(current) = unproject(viewport, camera, pointer) {
+            if let Some(current) = unproject(viewport, camera, lens_shift, pointer) {
                 draft.current = current;
             }
             if ctx.input(|input| input.pointer.primary_released()) {
@@ -660,13 +715,14 @@ impl SketchGui {
         viewport: Rect,
         interaction: Rect,
         camera: &Camera,
+        lens_shift: [f32; 2],
         pointer: Pos2,
         additive: bool,
     ) {
         let point_radius = 9.0_f32;
         let mut best_point: Option<(f32, usize)> = None;
         for (index, point) in self.sketch.points.iter().enumerate() {
-            let Some(screen) = project(viewport, camera, point.pos) else { continue };
+            let Some(screen) = project(viewport, camera, lens_shift, point.pos) else { continue };
             if !interaction.contains(screen) {
                 continue;
             }
@@ -688,7 +744,7 @@ impl SketchGui {
                 .sketch
                 .polyline(index)
                 .into_iter()
-                .filter_map(|point| project(viewport, camera, point))
+                .filter_map(|point| project(viewport, camera, lens_shift, point))
                 .collect();
             for pair in projected.windows(2) {
                 let distance = point_segment_distance(pointer, pair[0], pair[1]);
@@ -742,6 +798,10 @@ impl SketchGui {
             _ => {}
         }
         let _ = solve(&mut self.sketch);
+        // Newly drawn geometry must not inherit a stale curve selection; an old
+        // index can otherwise land on one of the new edges and draw it thick.
+        self.selected_curves.clear();
+        self.selected_point = None;
         self.dirty = true;
     }
 }
@@ -779,19 +839,34 @@ fn draft_paths(draft: &Draft) -> Vec<Vec<Vec2>> {
     }
 }
 
-fn project(viewport: Rect, camera: &Camera, point: Vec2) -> Option<Pos2> {
+fn project(viewport: Rect, camera: &Camera, lens_shift: [f32; 2], point: Vec2) -> Option<Pos2> {
     let (x, y, _) = camera.to_screen(
         Vec3::new(point.x, point.y, 0.0),
         f64::from(viewport.width()),
         f64::from(viewport.height()),
         camera.distance.max(1.0),
     )?;
-    Some(viewport.min + EVec2::new(x as f32, y as f32))
+    Some(
+        viewport.min
+            + EVec2::new(
+                x as f32 + lens_shift[0] * viewport.width() * 0.5,
+                y as f32 - lens_shift[1] * viewport.height() * 0.5,
+            ),
+    )
 }
 
-fn unproject(viewport: Rect, camera: &Camera, pointer: Pos2) -> Option<Vec2> {
-    let x = f64::from(pointer.x - viewport.min.x);
-    let y = f64::from(pointer.y - viewport.min.y);
+fn unproject(
+    viewport: Rect,
+    camera: &Camera,
+    lens_shift: [f32; 2],
+    pointer: Pos2,
+) -> Option<Vec2> {
+    let x = f64::from(
+        pointer.x - viewport.min.x - lens_shift[0] * viewport.width() * 0.5,
+    );
+    let y = f64::from(
+        pointer.y - viewport.min.y + lens_shift[1] * viewport.height() * 0.5,
+    );
     let (origin, direction) = camera.ray(
         x,
         y,
@@ -813,12 +888,13 @@ fn draw_polyline(
     painter: &egui::Painter,
     viewport: Rect,
     camera: &Camera,
+    lens_shift: [f32; 2],
     points: &[Vec2],
     stroke: Stroke,
 ) {
     let projected: Vec<Option<Pos2>> = points
         .iter()
-        .map(|point| project(viewport, camera, *point))
+        .map(|point| project(viewport, camera, lens_shift, *point))
         .collect();
     for pair in projected.windows(2) {
         if let (Some(a), Some(b)) = (pair[0], pair[1]) {
@@ -916,9 +992,36 @@ mod tests {
         let camera = Camera::default();
         let viewport = Rect::from_min_size(Pos2::new(100.0, 50.0), EVec2::new(800.0, 600.0));
         let point = Vec2::new(12.0, -8.0);
-        let screen = project(viewport, &camera, point).expect("project");
-        let back = unproject(viewport, &camera, screen).expect("unproject");
+        let screen = project(viewport, &camera, [0.0; 2], point).expect("project");
+        let back = unproject(viewport, &camera, [0.0; 2], screen).expect("unproject");
         assert!((back.x - point.x).abs() < 1.0e-6);
         assert!((back.y - point.y).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn drawing_a_rectangle_clears_stale_curve_selection() {
+        let mut gui = SketchGui {
+            tool: Tool::Rectangle,
+            ..SketchGui::default()
+        };
+        gui.selected_curves.insert(0);
+        gui.commit(Draft {
+            tool: Tool::Rectangle,
+            start: Vec2::new(0.0, 0.0),
+            current: Vec2::new(20.0, 10.0),
+        });
+        assert_eq!(gui.sketch.curves.len(), 4);
+        assert!(gui.selected_curves.is_empty());
+        assert!(gui.selected_point.is_none());
+    }
+
+    #[test]
+    fn constraint_dock_uses_the_viewport_top_without_double_margin() {
+        let viewport = Rect::from_min_max(Pos2::new(100.0, 50.0), Pos2::new(900.0, 700.0));
+        let layout = sketch_dock_layout(viewport, 300.0, CONSTRAINTS.len());
+        assert_eq!(
+            layout.constraints.top(),
+            viewport.top() + CONSTRAINT_DOCK_TOP_GAP
+        );
     }
 }

@@ -178,7 +178,8 @@ impl Affine3 {
 /// nest the names). This rebuilds that same flattened order and returns the
 /// body prefixes downstream of `selected`:
 ///
-/// - `None` when `selected` does not feed `target`,
+/// - `None` when `selected` does not feed `target`, or when `target` merges the
+///   edited branch with unrelated geometry and per-body provenance is lost,
 /// - [`PreviewBodyScope::All`] when every displayed body is downstream,
 /// - [`PreviewBodyScope::Prefixes`] for the subset that moves.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +215,27 @@ pub fn preview_body_scope(
     }
     if !descendants.contains(target) {
         return None;
+    }
+    if selected != target {
+        let merges_operands = document
+            .nodes
+            .iter()
+            .find(|node| node.id == target)
+            .is_some_and(|node| matches!(node.node_type.as_str(), "boolean" | "fuse"))
+            && document
+                .connections
+                .iter()
+                .filter(|link| link.to == target)
+                .map(|link| link.input.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .is_superset(&["a", "b"].into_iter().collect());
+        if merges_operands {
+            // Both operands are unioned into one result body; provenance is
+            // lost inside it. A drag on one branch cannot move only its own
+            // geometry, so there is no display-scoped fast preview; the caller
+            // lets evaluation produce the new body.
+            return None;
+        }
     }
     let Some(layout) = part_body_layout(document, target) else {
         // Unknown display provenance: preview the whole mesh rather than a
@@ -606,7 +628,8 @@ mod tests {
     fn preview_scope_is_all_bodies_for_the_displayed_transform() {
         let document = combine_graph(0);
         assert_eq!(preview_body_scope(&document, "move", "move"), Some(PreviewBodyScope::All));
-        // A Boolean merges both operands into one body, so the whole body moves.
+        // A Boolean merges both operands into one body; moving only one branch
+        // has no display-scoped preview.
         let mut document = combine_graph(0);
         document.nodes.push(node("boolean", "boolean", serde_json::json!({})));
         document.connections.push(GraphConnection {
@@ -621,10 +644,7 @@ mod tests {
             input: "b".into(),
             out: "shape".into(),
         });
-        assert_eq!(
-            preview_body_scope(&document, "move", "boolean"),
-            Some(PreviewBodyScope::All)
-        );
+        assert_eq!(preview_body_scope(&document, "move", "boolean"), None);
     }
 
     #[test]

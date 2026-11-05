@@ -245,6 +245,7 @@ fn resample_closed(points: &[(f64, f64)], count: usize) -> Vec<(f64, f64)> {
 }
 
 fn sketch_profile_points(output: &SketchOutput) -> Result<Vec<(f64, f64, f64)>, String> {
+    use solidcraft_geom::prelude::*;
     let mut profiles = output.profiles.clone();
     profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
     let profile = profiles.into_iter().next().ok_or("Loft sketch has no closed profile")?;
@@ -319,7 +320,8 @@ fn simplify_polyline(points: &[[f64; 3]], tolerance: f64) -> Vec<[f64; 3]> {
 fn sketch_profile_curves(
     output: &SketchOutput,
 ) -> Result<Vec<nodecraft_solidcore::solidcore::curve::curve::Curve>, String> {
-    use solidcraft_geom::Seg2;
+    use solidcore_record_new::Seg2;
+    use solidcraft_geom::prelude::*;
     use nodecraft_solidcore::solidcore::curve::curve::Curve;
     use nodecraft_solidcore::solidcore::curve::line::Line;
     use nodecraft_solidcore::solidcore::math::Point3;
@@ -435,6 +437,7 @@ fn sketch_profile_curves_transformed(
     use nodecraft_solidcore::solidcore::curve::curve::Curve;
     use nodecraft_solidcore::solidcore::curve::line::Line;
     use nodecraft_solidcore::solidcore::math::Point3;
+    use solidcraft_geom::prelude::*;
 
     let points = profile.region.outer.polyline(0.001);
     if points.len() < 3 {
@@ -464,7 +467,8 @@ fn sketch_record_plane(output: &SketchOutput) -> solidcore_record::Plane {
 }
 
 fn sketch_record_section(output: &SketchOutput) -> Option<Vec<solidcore_record::profile::Seg2>> {
-    use solidcraft_geom::Seg2;
+    use solidcore_record_new::Seg2;
+    use solidcraft_geom::prelude::*;
     let mut profiles = output.profiles.clone();
     profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
     let profile = profiles.into_iter().next()?;
@@ -490,6 +494,27 @@ fn sketch_record_section(output: &SketchOutput) -> Option<Vec<solidcore_record::
             _ => None,
         })
         .collect()
+}
+
+fn sketch_extrude_brep(
+    output: &SketchOutput,
+    distance: f64,
+) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+    let curves = sketch_profile_curves(output)?;
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    nodecraft_extrude::extrude_profile_curves(&mut kernel, &curves, distance.abs())
+        .map_err(|error| error.to_string())
+}
+
+fn sketch_from_node(node: &Node) -> Result<SketchOutput, String> {
+    if node.node_type == "spline" {
+        return spline_sketch_from_values(&node.values).map(SketchOutput::new);
+    }
+    let sketch: crate::sketch::Sketch = serde_json::from_value(
+        node.values.get("sketch").cloned().unwrap_or(serde_json::Value::Null),
+    )
+    .map_err(|error| format!("Sketch values: {error}"))?;
+    Ok(SketchOutput::new(sketch))
 }
 
 fn loft_sketch(
@@ -1009,12 +1034,26 @@ fn suppression_source(node: &Node, connections: &[nodecraft_protocol::Connection
             .find(|link| link.to == node.id && link.input == "a")
             .or_else(|| connections.iter().find(|link| link.to == node.id && link.input == "b"))
             .map(|link| link.from.clone()),
-        "translate" | "mirror" | "chamfer" | "fillet" | "shell" | "extrude" => connections
+        "translate" | "mirror" | "chamfer" | "fillet" | "shell" | "extrude" | "look" => connections
             .iter()
             .find(|link| link.to == node.id && (link.input == "shape" || link.input == "profile"))
             .map(|link| link.from.clone()),
         _ => None,
     }
+}
+
+/// The input an errored node passes through.
+///
+/// A failing feature must not black out the whole graph: its output becomes the
+/// nearest meaningful input, the same way a suppressed node behaves. Generators
+/// without an input stay terminal and report only their own error.
+fn bypass_source(node: &Node, connections: &[nodecraft_protocol::Connection]) -> Option<String> {
+    suppression_source(node, connections).or_else(|| {
+        connections
+            .iter()
+            .find(|link| link.to == node.id && (link.input == "shape" || link.input == "profile"))
+            .map(|link| link.from.clone())
+    })
 }
 
 fn effective_output_suppressed(request: &Request, start: &str) -> bool {
@@ -1103,6 +1142,10 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
         "extrude" => {
             let link = request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("extrude operand has no profile")?;
             let source = request.nodes.iter().find(|item| item.id == link.from).ok_or("extrude profile source missing")?;
+            let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
+            if source.node_type == "sketch" || source.node_type == "spline" {
+                return sketch_extrude_brep(&sketch_from_node(source)?, amount);
+            }
             let path = source.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
             if path.is_empty() { return Err("extrude operand requires a STEP profile".into()); }
             let imported = nodecraft_mesh::import_step_brep(path)?;
@@ -1252,6 +1295,99 @@ fn exports_boolean_chain(request: &Request, start: &str) -> bool {
 
 /// Exact consumers that need their upstream primitives as BReps during normal
 /// evaluation. Mesh-only branches must not pay for this.
+/// Application-level colour attribute carried by a Look node. SolidCore
+/// treats `SmColorAttribute` specially when regions merge through Booleans.
+const LOOK_COLOR_ATTRIBUTE: u64 = 12_066;
+
+fn parse_look_color(values: &serde_json::Value) -> Result<[f64; 3], String> {
+    let text = values
+        .get("color")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("#7fa0cf");
+    let hex = text.trim_start_matches('#');
+    if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(format!("Look color must be #RRGGBB, got {text:?}"));
+    }
+    let channel = |range: std::ops::Range<usize>| {
+        u8::from_str_radix(&hex[range], 16)
+            .map(|value| f64::from(value) / 255.0)
+            .map_err(|error| error.to_string())
+    };
+    Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?])
+}
+
+fn apply_look_color(
+    brep: &mut nodecraft_solidcore::solidcore::topology::Brep,
+    color: [f64; 3],
+) -> Result<(), String> {
+    use nodecraft_solidcore::solidcore::error::EntityRef;
+    use nodecraft_solidcore::solidcore::geom::attribute::{Attribute, Behavior};
+    use nodecraft_solidcore::solidcore::math::Vec3;
+    let faces: Vec<_> = brep.faces().ids().collect();
+    for face in faces {
+        let entity = EntityRef::Face(face);
+        let old: Vec<_> = brep
+            .entity_attributes(entity)
+            .into_iter()
+            .filter_map(|(handle, attribute)| {
+                (attribute.attribute_id() == LOOK_COLOR_ATTRIBUTE).then_some(handle)
+            })
+            .collect();
+        for handle in old {
+            brep.remove_attribute(entity, handle)
+                .map_err(|error| error.to_string())?;
+        }
+        brep.add_attribute(
+            entity,
+            Attribute::color(
+                LOOK_COLOR_ATTRIBUTE,
+                Vec3::new(color[0], color[1], color[2]),
+                Behavior::Copy,
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Copy each B-rep face's colour attribute into the display mesh's per-face
+/// colour channel. Faces without a colour keep the renderer default.
+fn apply_brep_face_colors(
+    brep: &nodecraft_solidcore::solidcore::topology::Brep,
+    mesh: &mut nodecraft_protocol::Mesh,
+) {
+    use nodecraft_solidcore::solidcore::error::EntityRef;
+    use nodecraft_solidcore::solidcore::geom::attribute::AttributeValue;
+    let face_colors: Vec<Option<[f32; 3]>> = brep
+        .faces()
+        .ids()
+        .map(|face| {
+            brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE)
+                .and_then(|attribute| match attribute.value() {
+                    AttributeValue::Color(color) | AttributeValue::Vector3d(color) => {
+                        Some([color.x as f32, color.y as f32, color.z as f32])
+                    }
+                    _ => None,
+                })
+        })
+        .collect();
+    if face_colors.iter().all(Option::is_none) {
+        mesh.face_colors.clear();
+        return;
+    }
+    mesh.face_colors = mesh
+        .face_groups
+        .iter()
+        .map(|group| {
+            group
+                .rsplit_once("face:")
+                .and_then(|(_, tail)| tail.parse::<usize>().ok())
+                .and_then(|index| face_colors.get(index).copied().flatten())
+                .unwrap_or([0.32, 0.34, 0.37])
+        })
+        .collect();
+}
+
 fn exact_brep_demands(request: &Request) -> HashSet<String> {
     let mut demands = HashSet::new();
     let mut stack: Vec<String> = request
@@ -1761,6 +1897,7 @@ pub struct EngineOutput {
 }
 
 fn spline_display_mesh(sketch: &crate::sketch::Sketch) -> Mesh {
+    use solidcraft_geom::Vec2Geom;
     let points = sketch.polyline(0);
     if points.len() < 2 {
         return Mesh::default();
@@ -1774,9 +1911,9 @@ fn spline_display_mesh(sketch: &crate::sketch::Sketch) -> Mesh {
         let next = points[(index + 1).min(points.len() - 1)];
         let mut tangent = next - previous;
         if tangent.len2() <= 1.0e-18 {
-            tangent = solidcraft_geom::Vec2::new(1.0, 0.0);
+            tangent = solidcore_record_new::Vec2::new(1.0, 0.0);
         }
-        let normal = solidcraft_geom::Vec2::new(-tangent.y, tangent.x) * (half_width / tangent.len());
+        let normal = solidcore_record_new::Vec2::new(-tangent.y, tangent.x) * (half_width / tangent.len());
         let left = *point + normal;
         let right = *point - normal;
         mesh.vertices.push([left.x as f32, left.y as f32, 0.0]);
@@ -1794,6 +1931,7 @@ fn spline_display_mesh(sketch: &crate::sketch::Sketch) -> Mesh {
 
 fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch::Sketch, String> {
     use crate::sketch::{CurveKind, MAX_SPLINE_POINTS, Sketch};
+    use solidcraft_geom::Vec2Geom;
     let items = values
         .get("points")
         .and_then(serde_json::Value::as_array)
@@ -1816,7 +1954,7 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
             return Err("Spline points need finite x and y values".into());
         }
         let id = sketch
-            .add_point(solidcraft_geom::Vec2::new(x, y), None)
+            .add_point(solidcore_record_new::Vec2::new(x, y), None)
             .map_err(|error| error.to_string())?;
         point_ids.push(id);
     }
@@ -1826,9 +1964,9 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
         .get("degree")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(3)
-        .clamp(1, solidcraft_geom::MAX_BEZIER_DEGREE as u64) as u8;
+        .clamp(1, solidcore_record_new::MAX_BEZIER_DEGREE as u64) as u8;
     sketch
-        .add_curve(CurveKind::Spline { pts: point_ids, control, degree, periodic }, None)
+        .add_curve(CurveKind::Spline { pts: point_ids, control, degree, periodic, nurbs: None }, None)
         .map_err(|error| error.to_string())?;
     Ok(sketch)
 }
@@ -2030,6 +2168,9 @@ struct Eval<'req, 'prog> {
     /// Exact Part results for this evaluation pass.
     parts: HashMap<String, Arc<Part>>,
     part_visiting: Vec<String>,
+    /// Nodes whose own evaluation failed but whose output was replaced by a
+    /// bypass input. Downstream nodes must not treat these as failed inputs.
+    bypassed: HashSet<String>,
     /// Nodes whose exact BRep is an input to an exact consumer. Mesh-only
     /// primitive graphs skip the eager exact-BRep build.
     needs_brep: HashSet<String>,
@@ -2055,6 +2196,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             breps: HashMap::new(),
             parts: HashMap::new(),
             part_visiting: Vec::new(),
+            bypassed: HashSet::new(),
             needs_brep: exact_brep_demands(request),
             sketches: HashMap::new(),
             progress,
@@ -2733,8 +2875,38 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         }
                     }
                 }
+                "look" => {
+                    let link = self.request.connections.iter()
+                        .find(|link| link.to == node.id && (link.input == "shape" || link.input == "a"))
+                        .ok_or("Look has no shape input")?;
+                    let source = self.evaluate_part(&link.from)?;
+                    let color = parse_look_color(&node.values)?;
+                    let mut bodies = Vec::with_capacity(source.bodies.len());
+                    for body in &source.bodies {
+                        let mut brep = copy_brep(body.body.as_ref())?;
+                        apply_look_color(&mut brep, color)?;
+                        bodies.push(BodyInstance {
+                            body: Arc::new(brep),
+                            transforms: body.transforms.clone(),
+                        });
+                    }
+                    Ok(Part { bodies, sketches: source.sketches.clone() })
+                }
                 "extrude" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("Part extrude has no profile input")?;
+                    let source_is_sketch = self
+                        .request
+                        .nodes
+                        .iter()
+                        .find(|item| item.id == link.from)
+                        .is_some_and(|item| item.node_type == "sketch" || item.node_type == "spline");
+                    if source_is_sketch {
+                        let output = self
+                            .sketch_output_for(&link.from)
+                            .ok_or("Extrude sketch source did not evaluate")?;
+                        let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
+                        return Ok(Part::from_brep(sketch_extrude_brep(&output, amount)?));
+                    }
                     let source = self.evaluate_part(&link.from)?;
                     let faces = node.values.get("faces").and_then(serde_json::Value::as_array);
                     if faces.is_none_or(|items| items.is_empty()) {
@@ -2986,8 +3158,19 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.parts.insert(start.to_owned(), part.clone());
             self.cache.insert_part(cache_key, part.clone());
             result.map(|_| part)
+        } else if let Err(error) = result {
+            self.errors.insert(start.to_owned(), error);
+            if let Some(source) = bypass_source(&node, &self.request.connections)
+                && let Ok(part) = self.evaluate_part(&source)
+            {
+                self.bypassed.insert(start.to_owned());
+                let part = Arc::new(part.as_ref().clone());
+                self.parts.insert(start.to_owned(), part.clone());
+                return Ok(part);
+            }
+            Err(self.errors.get(start).cloned().unwrap_or_else(|| "Part evaluation failed".into()))
         } else {
-            result.map(Arc::new)
+            unreachable!()
         }
     }
 
@@ -3025,6 +3208,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
             Err(error) => {
                 self.errors.insert(node_id.into(), error);
+                if let Some(source) = bypass_source(&node, &self.request.connections)
+                    && let Some(mesh) = self.evaluate(&source)
+                {
+                    self.bypassed.insert(node_id.into());
+                    self.objects.insert(node_id.into(), mesh.clone());
+                    self.cache.insert_mesh(cache_key, mesh.clone());
+                    self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+                    self.emit_progress(node_id, ProgressPhase::Complete);
+                    return Some(mesh);
+                }
                 self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
                 self.emit_progress(node_id, ProgressPhase::Complete);
                 None
@@ -3088,8 +3281,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             for (index, body) in part.bodies.iter().enumerate() {
                 let transforms = body_transforms(body.body.as_ref(), part, index);
                 if let Some(local) = self.cache.body_mesh(&body.body, tolerance) {
+                    let mut mesh = (*local).clone();
+                    apply_brep_face_colors(body.body.as_ref(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
-                        mesh: local,
+                        mesh: std::sync::Arc::new(mesh),
                         transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                     });
                 } else {
@@ -3139,9 +3334,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let Some(instance) = result_asset.instances.pop() else {
                         return Err("mesher returned no instance".into());
                     };
-                    self.cache.insert_body_mesh(body, tolerance, instance.mesh.clone());
+                    self.cache.insert_body_mesh(body.clone(), tolerance, instance.mesh.clone());
+                    let mut mesh = (*instance.mesh).clone();
+                    apply_brep_face_colors(body.as_ref(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
-                        mesh: instance.mesh,
+                        mesh: std::sync::Arc::new(mesh),
                         transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                     });
                 }
@@ -3212,6 +3409,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.cache_hits += 1;
             self.cache.failure_hits += 1;
             self.errors.insert(node_id.into(), error);
+            if let Some(source) = bypass_source(&node, &self.request.connections)
+                && let Some(mesh) = self.evaluate(&source)
+            {
+                self.bypassed.insert(node_id.into());
+                self.objects.insert(node_id.into(), mesh.clone());
+                self.cache.insert_mesh(cache_key, mesh.clone());
+                self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+                self.visiting.pop();
+                return Some(mesh);
+            }
             self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
             self.visiting.pop();
             return None;
@@ -3242,6 +3449,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         // Do not spend time computing a node whose input already failed.
         let failed_input = self.request.connections.iter()
             .filter(|link| link.to == node_id)
+            .filter(|link| !self.bypassed.contains(&link.from))
             .find_map(|link| self.errors.get(&link.from).map(|error| (link.from.clone(), error.clone())));
         if let Some((source, error)) = failed_input {
             self.errors.insert(node_id.into(), format!("Input {source} failed: {error}"));
@@ -3590,6 +3798,28 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             "extrude" => (|| -> Result<Mesh, String> {
                 let link = self.request.connections.iter().find(|link| link.to == node_id && (link.input == "profile" || link.input == "shape")).ok_or("Extrude has no profile input.")?;
                 let operation = node.values.get("operation").and_then(serde_json::Value::as_str).unwrap_or("join");
+                let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
+                let source_is_sketch = self
+                    .request
+                    .nodes
+                    .iter()
+                    .find(|item| item.id == link.from)
+                    .is_some_and(|item| item.node_type == "sketch" || item.node_type == "spline");
+                if source_is_sketch {
+                    let output = self
+                        .sketch_output_for(&link.from)
+                        .ok_or("Extrude sketch source did not evaluate")?;
+                    let result = Arc::new(sketch_extrude_brep(&output, amount)?);
+                    self.breps.insert(node_id.into(), result.clone());
+                    if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
+                        self.cache.insert_brep((node_id.to_string(), cache), result.clone());
+                    }
+                    return nodecraft_solidcore::curved::brep_display_mesh(
+                        &nodecraft_solidcore::kernel::kernel(),
+                        &result,
+                        &display_options(),
+                    );
+                }
                 // Resolve the whole upstream chain through the B-rep cache. The source
                 // may be a translate (or Boolean), not just a STEP importer.
                 let brep = self.operand_brep(&link.from)?;
@@ -3665,6 +3895,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 nodecraft_blend::edge_treatment_preview(&kernel, &brep, &values)
                     .map_err(|error| format!("Edge preview: {error}"))
             })(),
+            "look" => match source(self.request, node_id) {
+                Some(link) => self
+                    .evaluate(&link.from)
+                    .ok_or_else(|| "Look input was not evaluated".to_owned()),
+                None => Err("Look has no shape input".to_owned()),
+            },
             "translate" => {
                 let Some(link) = source(self.request, node_id) else {
                     self.errors.insert(node_id.into(), "Transform has no shape input.".into());
@@ -3882,10 +4118,26 @@ pub fn part_display_supported(node_type: &str) -> bool {
     part_supported(node_type)
 }
 
+/// Sketches are edited in the 2D overlay and must not produce a 3D display
+/// body.
+///
+/// Earlier the engine classified `sketch` as a Part display target, and
+/// `part_mesh_asset` tessellated its profile boundary curves into a display
+/// mesh. That mesh was not the sketch overlay: the viewport showed it as a
+/// stray flat/edge-like body behind the sketch. Downstream nodes consume the
+/// typed `SketchOutput` directly, so no display mesh is needed.
+///
+/// If a future feature wants a 3D sketch preview, add it deliberately as an
+/// overlay/ghost with its own opt-in, rather than re-enabling sketch as a Part
+/// display target.
+fn sketch_is_2d_overlay_only(node_type: &str) -> bool {
+    node_type == "sketch"
+}
+
 fn part_supported(node_type: &str) -> bool {
     matches!(
         node_type,
-        "solid" | "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "offsetfaces" | "scatter" | "chamfer" | "fillet"
+        "solid" | "primitive" | "translate" | "mirror" | "combine" | "boolean" | "fuse" | "stepimporter" | "extrude" | "sketch" | "spline" | "loft" | "surfaceloft" | "shell" | "offsetfaces" | "scatter" | "chamfer" | "fillet" | "look"
     )
 }
 
@@ -3903,7 +4155,10 @@ fn part_display_targets(request: &Request) -> HashSet<String> {
                 .nodes
                 .iter()
                 .find(|node| node.id == **id)
-                .is_some_and(|node| part_supported(&node.node_type))
+                .is_some_and(|node| {
+                    !sketch_is_2d_overlay_only(&node.node_type)
+                        && part_supported(&node.node_type)
+                })
                 && ancestors_of(request, id).iter().all(|ancestor| {
                     request
                         .nodes
@@ -4020,6 +4275,13 @@ pub fn evaluate(
     for id in &mesh_targets {
         if !request.targets.contains(id) {
             continue; // Python only meshes evaluated target nodes.
+        }
+        if node(&request, id).is_some_and(|node| sketch_is_2d_overlay_only(&node.node_type)) {
+            // See `sketch_is_2d_overlay_only`: the overlay owns sketch drawing.
+            // Suppress the payload even if another evaluation path produced one,
+            // so a stray sketch body can never reach the 3D viewport.
+            empty_targets.push(id.clone());
+            continue;
         }
         match eval.objects.get(id) {
             Some(mesh) => {
@@ -4453,6 +4715,81 @@ mod tests {
     }
 
     #[test]
+    fn look_attaches_colour_to_every_face() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 407,
+            "targets": ["look"],
+            "meshTargets": ["look"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}},
+                {"id": "look", "type": "look", "values": {"color": "#ff0000"}}
+            ],
+            "connections": [{"from": "box", "to": "look", "in": "shape", "out": "shape"}]
+        })).expect("look request json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("look").expect("look mesh").mesh;
+        assert!(!mesh.faces.is_empty());
+        assert_eq!(mesh.face_colors.len(), mesh.faces.len());
+        for color in &mesh.face_colors {
+            assert!((color[0] - 1.0).abs() < 1.0e-5, "{color:?}");
+            assert!(color[1].abs() < 1.0e-5, "{color:?}");
+            assert!(color[2].abs() < 1.0e-5, "{color:?}");
+        }
+    }
+
+    #[test]
+    fn look_colours_survive_a_boolean() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 408,
+            "targets": ["boolean"],
+            "meshTargets": ["boolean"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "x": -15}},
+                {"id": "sphere", "type": "primitive", "values": {"primitiveType": "sphere", "x": 15}},
+                {"id": "red", "type": "look", "values": {"color": "#ff0000"}},
+                {"id": "blue", "type": "look", "values": {"color": "#0000ff"}},
+                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "red", "in": "shape", "out": "shape"},
+                {"from": "sphere", "to": "blue", "in": "shape", "out": "shape"},
+                {"from": "red", "to": "boolean", "in": "a", "out": "shape"},
+                {"from": "blue", "to": "boolean", "in": "b", "out": "shape"}
+            ]
+        })).expect("boolean look request json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = &output.response.meshes.get("boolean").expect("boolean mesh").mesh;
+        assert!(!mesh.faces.is_empty());
+        assert_eq!(mesh.face_colors.len(), mesh.faces.len());
+        assert!(mesh.face_colors.iter().any(|color| color != &[0.32, 0.34, 0.37]), "no look colours survived");
+    }
+
+    #[test]
+    fn evaluates_g2_and_g3_fillet_nodes() {
+        for continuity in ["G2", "G3"] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 406,
+                "targets": ["fillet"],
+                "meshTargets": ["fillet"],
+                "binaryMesh": false,
+                "nodes": [
+                    {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 40, "width": 30, "height": 20}},
+                    {"id": "fillet", "type": "fillet", "values": {"continuity": continuity, "length": 2, "edges": [{"ordinal": 0}]}}
+                ],
+                "connections": [{"from": "box", "to": "fillet", "in": "shape", "out": "shape"}]
+            })).expect("fillet request json");
+            let output = evaluate(request, EngineCache::new(), None);
+            assert!(output.response.node_errors.is_empty(), "{continuity}: {:?}", output.response.node_errors);
+            let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
+            assert!(!mesh.faces.is_empty(), "{continuity} fillet should have faces");
+        }
+    }
+
+    #[test]
     fn train_graph_execution_regression() {
         let sample = std::fs::read_to_string(fixture("samples/train.nodecraft")).expect("train sample");
         let sample: serde_json::Value = serde_json::from_str(&sample).expect("train sample json");
@@ -4662,6 +4999,32 @@ mod tests {
         assert!(response.node_errors.contains_key("bad"));
         assert!(response.node_errors.get("b").is_some_and(|error| error.contains("Input bad failed")));
         assert!(response.node_errors.get("c").is_some_and(|error| error.contains("Input bad failed")));
+    }
+
+    #[test]
+    fn errored_node_bypasses_to_its_input() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 100,
+            "targets": ["move"],
+            "meshTargets": ["move"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "sphere"}},
+                {"id": "bad", "type": "boolean", "values": {"mode": "not-a-mode"}},
+                {"id": "move", "type": "translate", "values": {"x": 3.0, "y": 0.0, "z": 0.0}}
+            ],
+            "connections": [
+                {"from": "a", "to": "bad", "in": "a", "out": "shape"},
+                {"from": "b", "to": "bad", "in": "b", "out": "shape"},
+                {"from": "bad", "to": "move", "in": "shape", "out": "shape"}
+            ]
+        })).expect("bypass request json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.contains_key("bad"));
+        assert!(!output.response.node_errors.contains_key("move"));
+        let mesh = output.response.meshes.get("move").expect("bypassed mesh");
+        assert!(!mesh.mesh.faces.is_empty(), "bypassed output is empty");
     }
 
     #[test]
@@ -5840,10 +6203,10 @@ mod tests {
     #[test]
     fn part_sketch_target_uses_geometry_container() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6095,10 +6458,10 @@ mod tests {
     #[test]
     fn loft_between_sketch_profiles_uses_solidcore() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6165,10 +6528,10 @@ mod tests {
     #[test]
     fn surface_loft_has_no_end_caps() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6223,7 +6586,7 @@ mod tests {
     fn surface_loft_accepts_open_spline_sections() {
         let mut sketch = crate::sketch::Sketch::new();
         for (x, y) in [(-10.0, 0.0), (-2.0, 6.0), (4.0, -3.0), (12.0, 2.0)] {
-            sketch.add_point(solidcraft_geom::Vec2::new(x, y), None).unwrap();
+            sketch.add_point(solidcore_record_new::Vec2::new(x, y), None).unwrap();
         }
         sketch
             .add_curve(
@@ -6232,6 +6595,7 @@ mod tests {
                     control: false,
                     degree: 3,
                     periodic: false,
+                    nurbs: None,
                 },
                 None,
             )
@@ -6264,10 +6628,10 @@ mod tests {
     #[test]
     fn sketch_output_carries_translate_rotation() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6296,10 +6660,10 @@ mod tests {
     #[test]
     fn loft_after_translate_edit_keeps_typed_sketch_output() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6333,12 +6697,78 @@ mod tests {
     }
 
     #[test]
+    fn extrude_consumes_a_closed_sketch_profile() {
+        let mut sketch = crate::sketch::Sketch::new();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        sketch.add_line_pts(a, b, None).unwrap();
+        sketch.add_line_pts(b, c, None).unwrap();
+        sketch.add_line_pts(c, d, None).unwrap();
+        sketch.add_line_pts(d, a, None).unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["extrude"],
+            "meshTargets": ["extrude"],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": {"sketch": serde_json::to_value(&sketch).unwrap()}, "cache": {"key": "sketch"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 20.0, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [
+                {"from": "sketch", "to": "extrude", "in": "profile", "out": "sketch"}
+            ]
+        })).expect("request");
+        let brep = sketch_extrude_brep(&SketchOutput::new(sketch), 20.0).expect("extrude brep");
+        assert_eq!(
+            (brep.faces().ids().count(), brep.edges().ids().count(), brep.vertices().ids().count()),
+            (6, 12, 8),
+            "box topology"
+        );
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = output.response.meshes.get("extrude").expect("extrude mesh");
+        assert!(!mesh.mesh.faces.is_empty(), "extrude produced no faces");
+        let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
+        let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
+        assert!((max_z - min_z - 20.0).abs() < 0.05, "height {}..{}", min_z, max_z);
+    }
+
+    #[test]
+    fn sketch_target_does_not_emit_a_3d_display_mesh() {
+        let mut sketch = crate::sketch::Sketch::new();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        sketch.add_line_pts(a, b, None).unwrap();
+        sketch.add_line_pts(b, c, None).unwrap();
+        sketch.add_line_pts(c, d, None).unwrap();
+        sketch.add_line_pts(d, a, None).unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["sketch"],
+            "meshTargets": ["sketch"],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": {"sketch": serde_json::to_value(sketch).unwrap()}, "cache": {"key": "sketch"}}
+            ],
+            "connections": []
+        })).expect("request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        if let Some(mesh) = output.response.meshes.get("sketch") {
+            assert!(mesh.mesh.faces.is_empty(), "sketch must not display as a 3D mesh");
+            assert!(mesh.mesh.vertices.is_empty(), "sketch must not display as a 3D mesh");
+        }
+    }
+
+    #[test]
     fn sketch_output_is_typed_cached_and_transformed() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -6366,7 +6796,7 @@ mod tests {
     #[test]
     fn loft_profile_sampling_keeps_arc_curvature() {
         let mut sketch = crate::sketch::Sketch::new();
-        sketch.add_circle(solidcraft_geom::Vec2::new(0.0, 0.0), 10.0, None, None).unwrap();
+        sketch.add_circle(solidcore_record_new::Vec2::new(0.0, 0.0), 10.0, None, None).unwrap();
         let points = sketch_profile_points(&SketchOutput::new(sketch)).expect("profile");
         assert!(points.len() > 64);
         for (x, y, _) in points {
@@ -6378,10 +6808,10 @@ mod tests {
     #[test]
     fn exports_boolean_of_sketch_loft_exact() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcraft_geom::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcraft_geom::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcraft_geom::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();

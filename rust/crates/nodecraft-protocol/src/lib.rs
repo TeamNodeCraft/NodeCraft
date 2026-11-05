@@ -88,6 +88,10 @@ pub struct Mesh {
     pub normals_data: Option<String>,
     #[serde(default)]
     pub face_groups: Vec<String>,
+    /// Optional per-face sRGB colour (parallel to `face_groups`). Empty means
+    /// the renderer's default body colour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub face_colors: Vec<[f32; 3]>,
     #[serde(default)]
     pub brep_edges: Vec<BrepEdge>,
     #[serde(default)]

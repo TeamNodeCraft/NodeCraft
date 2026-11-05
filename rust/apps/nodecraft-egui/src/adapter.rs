@@ -6,14 +6,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use solidcraft_geom::{Mesh as CraftMesh, Vec3};
+use solidcraft_geom::Mesh as CraftMesh;
+use solidcore_record_new::Vec3;
 use nodecraft_protocol::Mesh as NodeMesh;
+use solidcraft_geom::prelude::*;
 
 /// A display mesh plus its edge polylines, ready for the SolidCraft CPU rasterizer.
 pub struct DisplayMesh {
     pub mesh: Arc<CraftMesh>,
     /// Face-group ids indexed by `mesh.tri_face`.
     pub face_ids: Vec<String>,
+    /// Optional per-triangle sRGB colour, parallel to `mesh.triangles`.
+    pub face_colors: Vec<[f32; 3]>,
     /// Pickable B-rep edges in world coordinates, with body-scoped ids.
     pub edges: Vec<DisplayEdge>,
     /// Feature-comparison layers, if this display is a before/after view.
@@ -233,6 +237,11 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     DisplayMesh {
         mesh: Arc::new(mesh),
         face_ids,
+        face_colors: if source.face_colors.len() == source.faces.len() {
+            source.face_colors.clone()
+        } else {
+            Vec::new()
+        },
         edges: pick_edges,
         comparison: None,
         selection_edges: None,
@@ -545,8 +554,8 @@ mod tests {
         assert_eq!(display.edges.len(), 1, "generated mesh edges must not be pickable");
         assert_eq!(display.edges[0].id, "edge:0");
         assert_eq!(display.mesh.edges, vec![vec![
-            solidcraft_geom::Vec3::new(0.0, 0.0, 0.0),
-            solidcraft_geom::Vec3::new(10.0, 0.0, 0.0),
+            solidcore_record_new::Vec3::new(0.0, 0.0, 0.0),
+            solidcore_record_new::Vec3::new(10.0, 0.0, 0.0),
         ]]);
         assert!(display.radius > 0.0);
     }

@@ -82,6 +82,7 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
     ),
     descriptor!("chamfer", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("fillet", GEOMETRY, ValueKind::Geometry, true, true),
+    descriptor!("look", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("shell", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("offsetfaces", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!(
@@ -260,7 +261,7 @@ mod tests {
         }
         for node_type in [
             "primitive", "solid", "stepimporter", "translate", "mirror", "combine", "boolean",
-            "fuse", "chamfer", "fillet", "shell", "extrude", "loft", "surfaceloft",
+            "fuse", "chamfer", "fillet", "look", "shell", "extrude", "loft", "surfaceloft",
             "scatter", "sketch", "spline", "exporter", "linkedpart", "time",
             "sceneTransform",
         ] {

@@ -542,6 +542,9 @@ impl BackdropRenderer {
         );
         let backdrop = Frame {
             product: false,
+            product_lights: None,
+            upload_error: None,
+            clouds: Vec::new(),
             key: frame.key,
             slot: self.slot.clone(),
             sketch_key: 0,
@@ -563,10 +566,12 @@ impl BackdropRenderer {
             outline: false,
             eye: frame.eye,
             ao_radius: 0.0,
+            ao_samples: solidcraft_gpu::view::AO_SAMPLES,
             ssaa: 1.0,
             hover_tint: [0.0; 3],
             selection_tint: [0.0; 3],
             hatch: Default::default(),
+            sky: [0.0, 1.0, 0.0, 0.0],
         };
         let external_bind = external_source.map(|(view, _)| self.bind_source(device, view));
         if external_source.is_none() {

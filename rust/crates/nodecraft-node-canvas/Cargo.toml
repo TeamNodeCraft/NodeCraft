@@ -15,3 +15,6 @@ egui-wgpu = "0.36"
 wgpu = "30"
 glyphon = "0.12"
 bytemuck = "1"
+
+[dev-dependencies]
+serde_json = "1"

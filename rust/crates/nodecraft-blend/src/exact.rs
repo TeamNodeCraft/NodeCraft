@@ -91,9 +91,6 @@ pub fn fillet_brep_exact_with_kernel(
     if treatment.mode != EdgeMode::Fillet {
         return Err("exact fillet requires fillet mode".into());
     }
-    if treatment.continuity != Continuity::Circular {
-        return Err("G2/G3 fillets need a B-spline fillet law; only circular G1 is exact here".into());
-    }
     let selections = crate::edge::select_edges_from_values(kernel, brep, values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if selections.is_empty() {
@@ -102,13 +99,21 @@ pub fn fillet_brep_exact_with_kernel(
     let edges: Vec<solidcore::topology::EdgeId> = selections.iter().map(|selection| selection.edge).collect();
     let mut result = solidcore::topology::brep::p3::brep_copy(kernel, brep)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    // SolidCore's constant-radius API takes the cross-section as an integer:
+    // circular (anything except 0/2) or blend curve (2). G2/G3 use the
+    // blend-curve section; continuity is 1/2/3 for G1/G2/G3.
+    let (xsect_type, continuity) = match treatment.continuity {
+        Continuity::Circular => (1, 1),
+        Continuity::G2 => (2, 2),
+        Continuity::G3 => (2, 3),
+    };
     solidcore::blend::fillet_executive::api::fillet_edges(
         kernel,
         &mut result,
         &edges,
         treatment.length,
-        2, // exact circular cross-section
-        1, // G1
+        xsect_type,
+        continuity,
         1.0,
     )
     .map_err(|error| {
@@ -194,6 +199,61 @@ pub fn fillet_brep(
 #[cfg(test)]
 mod exact_fillet_tests {
     use super::*;
+
+    #[test]
+    fn exact_circular_fillet_accepts_two_adjacent_edges() {
+        let (kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let selections = crate::select_edges_by_midpoints(
+            &kernel,
+            &brep,
+            &[[40.0, 15.0, 20.0], [20.0, 30.0, 20.0]],
+        )
+        .expect("adjacent edges");
+        let edges: Vec<_> = selections.iter().map(|selection| serde_json::json!({"ordinal": selection.ordinal})).collect();
+        let values = serde_json::json!({"mode": "fillet", "continuity": "", "length": 2.0, "edges": edges});
+        let filleted = fillet_brep_exact(&brep, &values).expect("adjacent exact fillet");
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+    }
+
+    #[test]
+    fn exact_g2_and_g3_fillets_produce_closed_solids() {
+        for continuity in ["G2", "G3"] {
+            let (_kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+            let values = serde_json::json!({
+                "mode": "fillet",
+                "continuity": continuity,
+                "length": 2.0,
+                "edges": [{"ordinal": 0}]
+            });
+            let filleted = fillet_brep_exact(&brep, &values)
+                .unwrap_or_else(|error| panic!("{continuity} exact fillet: {error}"));
+            assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        }
+    }
+
+    #[test]
+    fn exact_circular_fillet_accepts_two_parallel_edges() {
+        let (kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let selections = crate::select_edges_by_midpoints(
+            &kernel,
+            &brep,
+            &[[40.0, 15.0, 20.0], [0.0, 15.0, 20.0]],
+        )
+        .expect("two edges");
+        let edges: Vec<_> = selections
+            .iter()
+            .map(|selection| serde_json::json!({"ordinal": selection.ordinal}))
+            .collect();
+        let values = serde_json::json!({
+            "mode": "fillet",
+            "continuity": "",
+            "length": 2.0,
+            "edges": edges,
+        });
+        let filleted = fillet_brep_exact(&brep, &values).expect("two-edge exact fillet");
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        assert!(!filleted.faces().is_empty());
+    }
 
     #[test]
     fn exact_circular_fillet_of_a_box_is_a_closed_solid() {

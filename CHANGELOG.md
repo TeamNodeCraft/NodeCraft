@@ -23,6 +23,33 @@
   move through search, categories and tools, and the shortcuts are editable in
   Settings → Keys.
 
+### Appearance
+
+- Added a pass-through Look node that attaches a per-face colour attribute to
+  the incoming Part. SolidCore carries the colour through modelling operations
+  and Boolean merges, and the viewport renders it.
+
+### Sketch editor
+
+- Updated the SolidCraft stack to 0.40.0-rc.2 (`481687ff`), bringing the newer
+  sketch text, dimension, profile and solver work into the typed sketch output.
+- Updated the SolidCore kernel and its ops/convert/tess/STEP crates to the
+  latest main revision while bridging the SolidCraft 0.40 record types at the
+  sketch/engine boundary.
+- Adapted the GPU frame setup to the newer SolidCraft view fields.
+
+- Replaced the sketch tool palette with a vertical icon dock on the left edge of
+  the 3D viewport, using the same row size, squircle highlight, spacing and
+  hover treatment as the node editor dock.
+- Added sketch-tool icons and a compact tool-options flyout for Fillet and Arc.
+- Moved sketch constraints into a horizontal dock at the top of the visible 3D
+  viewport, centred between the node editor and the window edge.
+- Extracted the shared dock metrics, squircle highlights, icon buttons and
+  background chrome into the reusable `nodecraft-dock` crate, so both docks
+  render through one path.
+- Added a DockOrientation flag so the same generator can lay out vertical or
+  horizontal docks.
+
 ### Other GUI and application changes
 
 - Renamed the Primitive node type to Solid, keeping `primitive` as a document

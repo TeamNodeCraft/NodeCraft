@@ -19,6 +19,7 @@ nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-sweep = { path = "../nodecraft-sweep" }
 solidcore-record = { workspace = true }
+solidcore-record-new = { package = "solidcore-record", git = "https://github.com/tangency-labs/solidcore", rev = "f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f" }
 nodecraft-mesh = { path = "../nodecraft-mesh", default-features = false }
 nodecraft-kernel = { path = "../nodecraft-kernel" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore", default-features = false }
@@ -31,6 +32,6 @@ step-nurbs = { path = "../step-nurbs" }
 step-schema = { path = "../step-schema" }
 step-assemblies = { path = "../step-assemblies" }
 solidcraft-sketch.workspace = true
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", branch = "develop" }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "481687fff38057691faf84a6fd844e826c552a6c" }
 serde_json.workspace = true
 base64 = "0.22"

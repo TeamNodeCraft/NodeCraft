@@ -42,6 +42,11 @@ pub fn canonicalize_node(node: &mut GraphNode) {
         "fillet" => {
             if node.values.get("continuity").is_none() { node.values["continuity"] = json!(""); }
         }
+        "look" => {
+            if node.values.get("color").and_then(serde_json::Value::as_str).is_none() {
+                node.values["color"] = json!("#7fa0cf");
+            }
+        }
         "surfaceloft" => {
             if node.values.get("ruled").is_none() { node.values["ruled"] = json!(0.0); }
         }

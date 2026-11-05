@@ -404,6 +404,44 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     }
 }
 
+fn parse_look_color(text: &str) -> Option<egui::Color32> {
+    let hex = text.trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some(egui::Color32::from_rgb(
+        channel(0..2)?,
+        channel(2..4)?,
+        channel(4..6)?,
+    ))
+}
+
+fn look_color(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+    let current = node
+        .values
+        .get("color")
+        .and_then(Value::as_str)
+        .and_then(parse_look_color)
+        .unwrap_or_else(|| egui::Color32::from_rgb(127, 160, 207));
+    let mut color = current;
+    ui.horizontal(|ui| {
+        ui.label("Colour");
+        if ui.color_edit_button_srgba(&mut color).changed() {
+            output.changes.push(Change {
+                field: "color".to_owned(),
+                value: Value::String(format!(
+                    "#{:02x}{:02x}{:02x}",
+                    color.r(),
+                    color.g(),
+                    color.b()
+                )),
+            });
+        }
+        ui.colored_label(color, format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b()));
+    });
+}
+
 fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
     match node.node_type.as_str() {
         "solid" | "primitive" => primitive_specs(node),
@@ -654,6 +692,7 @@ pub fn node_title(node: &GraphNode) -> String {
         "fuse" => "Fuse".to_owned(),
         "chamfer" => "Chamfer".to_owned(),
         "fillet" => "Fillet".to_owned(),
+        "look" => "Look".to_owned(),
         other => title_case(&other.replace(['_', '-'], " ")),
     }
 }
@@ -685,7 +724,7 @@ pub fn node_badge(node: &GraphNode) -> String {
         "sketch" => "Sketch",
         "spline" => "Curve",
         "extrude" => "Operation",
-        "chamfer" | "fillet" | "shell" => "Feature",
+        "chamfer" | "fillet" | "shell" | "look" => "Feature",
         "scatter" => "Generator",
         _ => "Node",
     }
@@ -705,6 +744,7 @@ fn section_title(node: &GraphNode) -> &'static str {
         "extrude" => "EXTRUSION",
         "chamfer" => "CHAMFER",
         "fillet" => "FILLET",
+        "look" => "LOOK",
         "shell" => "SHELL",
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
@@ -734,6 +774,7 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "mirror" => "Reflects the incoming shape across a world plane.".to_owned(),
         "chamfer" => "Cuts selected edges of the incoming shape.".to_owned(),
         "fillet" => "Rounds selected edges of the incoming shape.".to_owned(),
+        "look" => "Applies a colour to every body in the incoming Part. The geometry is unchanged.".to_owned(),
         "shell" => "Hollows the incoming shape by removing selected faces.".to_owned(),
         "offsetfaces" => "Moves the selected faces along their normals.".to_owned(),
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
@@ -988,6 +1029,10 @@ pub fn show(
         }
         if node.node_type == "surfaceloft" {
             surface_loft_sections(ui, sections, &mut output);
+            ui.add_space(6.0);
+        }
+        if node.node_type == "look" {
+            look_color(ui, node, &mut output);
             ui.add_space(6.0);
         }
         if node.node_type == "offsetfaces" {

@@ -1,0 +1,14 @@
+[package]
+name = "nodecraft-dock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reusable egui tool dock formatting for NodeCraft"
+publish = false
+
+[dependencies]
+egui = "0.36"
+nodecraft-node-canvas = { path = "../nodecraft-node-canvas" }
+
+[dev-dependencies]
+egui_extras = { version = "0.36", default-features = false, features = ["svg"] }

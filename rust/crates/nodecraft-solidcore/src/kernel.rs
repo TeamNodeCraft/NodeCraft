@@ -25,8 +25,6 @@ pub fn apply_fixes(kernel: &mut Kernel) {
     if !experimental_fixes_enabled() {
         return;
     }
-    // Sheet/thicken offsets at free corners (WR-736 / #2611).
-    kernel.fixes.offset_lamina_corner_at_vertex_image = true;
     // B-rep point classification honours the current face trims while editing
     // (WR-732 / #2503).
     kernel.fixes.brep_ray_classifies_current_trims = true;
