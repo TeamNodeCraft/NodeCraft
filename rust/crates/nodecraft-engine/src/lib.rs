@@ -81,15 +81,6 @@ fn node<'a>(request: &'a Request, id: &str) -> Option<&'a Node> {
     request.nodes.iter().find(|node| node.id == id)
 }
 
-fn display_options() -> nodecraft_solidcore::curved::CurvedTessOptions {
-    nodecraft_solidcore::curved::CurvedTessOptions {
-        u_segments: 64,
-        v_segments: 16,
-        loop_segments: 32,
-        bspline_tolerance: 0.02,
-        max_normal_angle_deg: 4.0,
-    }
-}
 
 #[derive(Clone)]
 struct SketchTransform {

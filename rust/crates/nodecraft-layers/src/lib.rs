@@ -7,10 +7,11 @@
 //! `solidcore-ops` owns bodies and workflows, `solidcore-record` is the exact
 //! body data.
 //!
-//! What is still missing upstream is the kernel B-rep <-> record B-rep
-//! conversion. Until that lands, [`tessellate_record`] can only be driven from a
-//! record that already exists (a fixture, a future record-first engine); the
-//! NodeCraft engine still holds kernel B-reps.
+//! The kernel B-rep <-> record B-rep conversion is available at the current
+//! pin through `solidcore-convert::brep`; [`tessellate_kernel`] and
+//! [`kernel_body_edit`] use the upstream ops/convert path. The NodeCraft engine
+//! still holds kernel B-reps, so these conversions remain the seam until the
+//! record-first migration.
 
 use nodecraft_protocol::Mesh;
 use solidcore::kernel::Kernel;

@@ -28,3 +28,4 @@ jobs:
         run: >-
           cargo test --manifest-path rust/Cargo.toml
           -p nodecraft-egui -p nodecraft-node-canvas -p nodecraft-session
+          -p nodecraft-layers

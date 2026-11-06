@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// Display-only tessellation through the upstream layer seam. Exact geometry
+/// never passes through this function.
+fn display_mesh_for_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> Result<Mesh, String> {
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    let mut brep = copy_brep(brep)?;
+    nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05).map(|display| display.mesh)
+}
+
 impl<'req, 'prog> Eval<'req, 'prog> {
     /// Cache a display mesh only when the node itself has no recorded error.
     /// Bypassed meshes from failed nodes must never become healthy cache hits.
@@ -649,12 +657,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 )?
                 .into_shape()
                 .ok_or("boolean task returned no shape")?;
-                let kernel = nodecraft_solidcore::kernel::kernel();
                 self.breps.insert(node_id.into(), result.clone());
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                 }
-                nodecraft_solidcore::curved::brep_display_mesh(&kernel, &result, &display_options())
+                display_mesh_for_brep(&result)
             })(),
             "extrude" => (|| -> Result<Mesh, String> {
                 let link = self.request.connections.iter().find(|link| link.to == node_id && (link.input == "profile" || link.input == "shape")).ok_or("Extrude has no profile input.")?;
@@ -675,11 +682,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                         self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                     }
-                    return nodecraft_solidcore::curved::brep_display_mesh(
-                        &nodecraft_solidcore::kernel::kernel(),
-                        &result,
-                        &display_options(),
-                    );
+                    return display_mesh_for_brep(&result);
                 }
                 // Resolve the whole upstream chain through the B-rep cache. The source
                 // may be a translate (or Boolean), not just a STEP importer.
@@ -701,8 +704,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 )?
                 .into_brep()
                 .ok_or_else(|| "extrude task returned no shape".to_owned())?;
-                let kernel = nodecraft_solidcore::kernel::kernel();
-                let preview = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &tool, &display_options()).ok();
+                let preview = display_mesh_for_brep(&tool).ok();
                 let result = match operation {
                     "new" => tool,
                     "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, copy_brep(&brep)?, tool)?,
@@ -714,7 +716,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                 }
-                let mut display = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &result, &display_options())?;
+                let mut display = display_mesh_for_brep(&result)?;
                 display.feature_preview = preview.filter(|mesh| !mesh.vertices.is_empty()).map(Box::new);
                 display.feature_preview_operation = Some(operation.to_string());
                 Ok(display)
@@ -805,7 +807,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let top = input_source(self.request, node_id, "top").ok_or("Loft has no top section")?.from.clone();
                 let _ = self.evaluate(&bottom);
                 let _ = self.evaluate(&top);
-                let kernel = nodecraft_solidcore::kernel::kernel();
                 let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                 let bottom_output = self.sketch_output_for(&bottom);
                 let top_output = self.sketch_output_for(&top);
@@ -825,7 +826,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                 }
-                nodecraft_solidcore::curved::brep_display_mesh(&kernel, &result, &display_options())
+                display_mesh_for_brep(&result)
                     .map_err(|error| format!("Loft display mesh: {error}"))
             })(),
             "surfaceloft" => (|| -> Result<Mesh, String> {
@@ -846,7 +847,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         .ok_or_else(|| format!("Surface Loft section {section_id} must be a sketch or spline curve"))?;
                     sections.push(output);
                 }
-                let kernel = nodecraft_solidcore::kernel::kernel();
                 let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                 let result = crate::node_task::execute_exact(
                     crate::node_task::ExactNodeTask::SurfaceLoft { sections, ruled },
@@ -859,7 +859,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                 }
-                nodecraft_solidcore::curved::brep_display_mesh(&kernel, &result, &display_options())
+                display_mesh_for_brep(&result)
                     .map_err(|error| format!("Surface Loft display mesh: {error}"))
             })(),
             "time" => {

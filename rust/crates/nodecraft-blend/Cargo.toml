@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "a39659e3d798b56f99266cd2e522360dd99f7cf7" }
+solidcore = { workspace = true }
 solidcore-convert = { workspace = true }
 solidcore-ops = { workspace = true }
 solidcore-record = { workspace = true }
