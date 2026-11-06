@@ -2,14 +2,108 @@
 
 Priority order is approximate.
 
+## Current state (2026-11-06)
+
+- SolidCore is pinned at `3ed6194755cc2a3298882373ff465adeb443485a`
+  (+217 commits over the previous `a39659e3` pin).
+- Engine display branches and comparison ghosts use
+  `nodecraft-layers` / `solidcore-tess`; the engine has no local
+  `brep_display_mesh` calls.
+- Comparison and Boolean operand/export/extrude operation paths use
+  `solidcore-ops` Booleans.
+- The app evaluates in two phases: exact result first (errors/status, previous
+  mesh retained), then display against the warmed Part cache.
+- Part-target Boolean and shell remain kernel-side: ops output reorders edge ids
+  and drops Look colour attributes until upstream exposes provenance/attribute
+  support.
+- G2-fillet top-face shell still fails on the current pin with
+  `solidcore-ops shell: the result is not a closed solid`.
+- Public snapshot is at `2214358` and needs a republish for the pin/ops/evaluation
+  work after it.
+- Tests at this state: engine 120 passed / 1 ignored, egui 110 passed,
+  layers 11 passed, workspace `--all-targets` check clean.
+
+## SolidCore 3ed61947 pin bump (completed)
+
+Upstream moved from `a39659e3` to `3ed6194755cc` — **217 commits ahead** —
+including golden-policy changes, NaN bit-pattern canonicalisation,
+blend/fillet golden cases and fuzz-refusal corrections. The bump is applied.
+
+- [x] Fetch and diff `a39659e3...3ed6194755cc`; note changes to
+      `solidcore-ops`, `solidcore-convert`, `solidcore-tess`, boolean/blend and
+      STEP APIs.
+- [x] Update **every** workspace SolidCore pin together in `rust/Cargo.toml`;
+      member manifests stay on `workspace = true` and the pin guard passes.
+- [x] Run the layer/boundary gates: `nodecraft-layers`, full workspace
+      `--all-targets`, `nodecraft-engine --lib`, `nodecraft-worker`,
+      `nodecraft-mesh --test mesh_quality` and `nodecraft-step` all pass.
+- [x] Re-run the G2-fillet top-face shell reproduction. It still fails with
+      `solidcore-ops shell: the result is not a closed solid`; the new upstream
+      blend/golden work did not fix it.
+- [x] Re-run feature comparison: exact G2 ghost, planar chamfer cache, ops
+      Boolean difference and record-to-tess parity all pass.
+- [ ] Revisit the Part-target Boolean/shell migration when upstream exposes
+      public provenance attach/read or otherwise preserves application
+      attributes and edge identity.
+
+## Remaining after this pass
+
+- [ ] Make display work truly concurrent. The current EvalWorker is sequential
+      after the exact phase and still blocks on display; stale display work is
+      cancelled only when a queued job exists at the exact/display boundary.
+- [ ] Manually smoke-test the two-phase app: heavy-target edits, rapid edits,
+      tab switches during display, failed-node glow, export/clear-cache and
+      cache growth.
+- [ ] Republish the public snapshot with the SolidCore bump, ops Boolean work and
+      two-phase evaluation.
+- [ ] Finish the Part-target Boolean and shell ops migration once upstream
+      provenance/attribute support is available.
+- [ ] Move fillet/chamfer exact evaluation to `solidcore-ops::blend` with a
+      parity matrix (G1/G2/G3, mixed edges, corners/setbacks, two-cylinder joins,
+      chamfer angle/distance, failures).
+- [ ] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows
+      before migrating them.
+- [ ] Retire the local STEP stack after the upstream record/ops importer lands.
+- [ ] Defer record-first exact data until upstream ops covers boolean, extrude,
+      loft, fillet and chamfer (see the record-cache section).
+- [ ] Keep dependency-crate warning cleanup as a separate low-priority item.
+
 ## Recently completed
+
+- [x] Bump SolidCore to `3ed61947` across every workspace crate and re-run the
+      layer, engine, worker, mesh, step and comparison gates.
+- [x] Move comparison ghosts to record/ops Booleans and `solidcore-tess`.
+- [x] Move Boolean operand/export chains and extrude operation Booleans to
+      `solidcore-ops`, with a box-volume parity test.
+- [x] Add `evaluate_exact` and wire the app worker into exact → display phases;
+      publish exact errors/status before meshing, keep the old mesh visible,
+      cancel stale display after the exact phase, keep exports single-pass and
+      make progress display-owned.
+- [x] Split `app.rs` from ~8,183 to ~4,527 lines into evaluation, settings,
+      settings UI, theme editor, tool dock, tabs and document-ops modules.
+- [x] Split the engine into `exact_eval.rs`, `display_eval.rs` plus cache,
+      primitive, look, bypass, face-reference and comparison modules.
+- [x] Route all engine display-only branches and comparison ghosts through
+      `nodecraft-layers` / `solidcore-tess`; engine no longer calls
+      `brep_display_mesh`.
+- [x] Move Boolean operand/export chains and extrude operation booleans to
+      record/ops Booleans, with a box-volume parity test. The Part-target Boolean
+      node path is held back by ops attribute/topology parity.
+- [x] Add failure-cache and exact-comparison caching, `CacheKey`, approximate
+      ghost labelling and selected-node inspector errors.
+- [x] Centralize inspector metadata, topology selection and primitive field
+      metadata in `nodecraft-node-contract`.
+- [x] Add SolidCore pin and app/engine layer-boundary tests, run layers tests in
+      CI, and centralize workspace pins.
+- [x] Refresh the SolidCore alignment/sync docs for the live record/convert/ops/
+      tess bridge.
 
 - [x] Prepare the upstream layer adoption locally: delete the unused
       `crates/solidcore-mesh` port, add the pinned `nodecraft-layers` crate with a
       record -> `solidcore-tess` adapter and a copied record fixture test, and an
-      ops primitive/smb smoke test. The kernel B-rep <-> record bridge is still
-      missing upstream, so `record_bridge()` stays `Missing` and the engine is
-      untouched.
+      ops primitive/smb smoke test. Historical note: the kernel B-rep <-> record
+      bridge was missing at that point; it has since landed and is used by
+      `nodecraft-layers`.
 - [x] Scope engine caches per tab instead of one global worker cache.
 - [x] Cache the flattened linked-document graph per tab.
 - [x] Publish live document revisions from tabs into the shared document store.
@@ -258,14 +352,11 @@ These are cross-cutting improvements, not individual feature requests.
 Display-only mesh branches in `display_eval.rs` (boolean, extrude, loft,
 surfaceloft and extrude preview) now tessellate through
 `nodecraft_layers::tessellate_kernel` / `solidcore-tess` instead of the local
-`brep_display_mesh`. Exact evaluation is unchanged. `comparison.rs` still uses
-the legacy local mesher for its display ghost: the Boolean difference B-reps it
-produces are rejected by `solidcore-convert` (`invalid B-rep record: shell
-count`, `sheet touching itself along an edge`). This is blocked on upstream
-record conversion/Boolean output, not a local meshing choice.
+`brep_display_mesh`. `comparison.rs` now uses record/ops Booleans and
+`solidcore-tess` for feature ghosts. Exact evaluation is unchanged.
 
-Attempted a direct reroute; it broke progress, mesh-cache, BRep-cache and failure
-parity tests, so it was reverted. Do this as a dedicated extraction:
+The engine node branches no longer call `brep_display_mesh`. Remaining work is
+the shared display scheduler and removing the old mesh-only branches themselves:
 
 - [ ] Add a `DisplayTarget` mesher API that preserves:
   - stable mesh cache keys
@@ -273,15 +364,33 @@ parity tests, so it was reverted. Do this as a dedicated extraction:
   - error attribution
   - feature-preview payloads
 - [ ] Route `evaluate_part_display` and mesh-only targets through `DisplayTarget`.
-- [ ] Delete `brep_display_mesh` / `part_display_mesh` calls from node branches.
+- [x] Delete `brep_display_mesh` / `part_display_mesh` calls from engine node
+      branches and comparison; both now use `nodecraft-layers`.
 - [ ] Add parity tests before deleting each branch.
 - [ ] Replace scatter's remaining display-specific path with the same display stage.
 
 ## Evaluation architecture
 
+- [x] Add an exact-only engine entry point: `evaluate_exact` fills the Part cache
+      and returns no display meshes.
+- [x] Wire the app's EvalWorker as a two-phase evaluation: publish the exact
+      result immediately (errors/status while the old mesh stays visible), then
+      run the display pass against the warmed cache. A newer queued edit
+      abandons the stale display pass after the exact phase. Export jobs skip the
+      exact pre-pass so exporters run once, and progress is driven by the display
+      pass only.
+
+- [x] Add the exact-only engine entry point and the first two-phase app worker:
+      exact result published before display, stale display abandoned after the
+      exact phase, exports single-pass, display-owned progress.
 - [ ] Split the engine API into exact evaluation and meshing:
   `evaluate_exact` then `mesh_exact`. This is the prerequisite for real
   parallelism; do not just move the monolithic evaluator onto a second pool.
+- [ ] Add a dedicated display job/result channel and a display worker; exact and
+      display must not share one blocking worker thread.
+- [ ] Revision-stamp display results and reject stale/tab-mismatched meshes.
+- [ ] Coordinate cache ownership between exact and display workers without
+      duplicating the Part/record cache.
 - [ ] Give exact and mesh work independent bounded worker pools and caches.
 - [ ] Make the scheduler the primary exact path and remove duplicate recursive
   exact work from `Eval`.
@@ -418,8 +527,16 @@ record is currently rebuilt and discarded on every display/ops conversion.
 
 ## SolidCore ops and blend
 
+- [ ] Upstream: expose public provenance attach/read (currently `pub(crate)`) or
+      preserve application attributes through ops Boolean/shell. NodeCraft's
+      Look colours and saved edge identity need this before the Part-target
+      Boolean and shell paths can move off the kernel implementation.
+- [ ] Move fillet/chamfer exact evaluation to `solidcore-ops::blend`; keep
+      `nodecraft_blend` for preview/clipping until the exact parity matrix says
+      otherwise.
+
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `a39659e3d798b56f99266cd2e522360dd99f7cf7`:
+      Reproduction at current pin `3ed6194755cc2a3298882373ff465adeb443485a`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

@@ -138,8 +138,15 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             let (a, b) = if reverse { (b.clone(), a.clone()) } else { (a.clone(), b.clone()) };
             let (mut a_breps, b_breps) = (self.operand_breps(&a)?, self.operand_breps(&b)?);
             let mut result = a_breps.drain(..).next().ok_or("Boolean operand A is empty")?;
+            let mut kernel = nodecraft_solidcore::kernel::kernel();
             for brep in b_breps {
-                result = nodecraft_bool::boolean_breps(op.clone(), result, brep)?;
+                result = nodecraft_layers::boolean_breps_ops(
+                    &mut kernel,
+                    &result,
+                    &brep,
+                    crate::ops_boolean(op.clone()),
+                )?
+                .unwrap_or_else(nodecraft_solidcore::solidcore::topology::Brep::new);
             }
             Ok(result)
         } else if node.node_type == "chamfer" {
@@ -326,13 +333,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         self.request.connections.iter().find(|link| link.to == node.id && link.input == "a").cloned(),
                         self.request.connections.iter().find(|link| link.to == node.id && link.input == "b").cloned(),
                     ) else { continue };
-                    let (op, reverse) = match boolean_mode(&node.values) { Ok(value) => value, Err(_) => continue };
+                    let (op, reverse) = match boolean_mode(&node.values) { Ok((op, reverse)) => (ops_boolean(op), reverse), Err(_) => continue };
                     let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
                     tasks.push(ScheduledTask::new(id, vec![a.clone(), b.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
                         let a = deps.get(&a).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean A did not prewarm".to_owned())?;
                         let b = deps.get(&b).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean B did not prewarm".to_owned())?;
                         Ok(Box::new(move |kernel| {
-                            let result = nodecraft_bool::boolean_breps_with_kernel(kernel, op, copy_brep(&a)?, copy_brep(&b)?)?;
+                            let result = nodecraft_layers::boolean_breps_ops(kernel, &a, &b, op)?
+                                .unwrap_or_else(nodecraft_solidcore::solidcore::topology::Brep::new);
                             Ok(std::sync::Arc::new(result))
                         }))
                     }));
@@ -678,12 +686,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     }
                     let mut base = source_solids.into_iter().next().ok_or("Extrude source Part is empty")?;
                     for brep in source.realized_solids()?.into_iter().skip(1) {
-                        base = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, base, brep)?;
+                        base = crate::boolean_breps_ops(&base, &brep, nodecraft_bool::BooleanOp::Union)?;
                     }
                     let result = match operation {
-                        "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, base, tool)?,
-                        "intersect" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Intersection, base, tool)?,
-                        _ => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, base, tool)?,
+                        "remove" => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Difference)?,
+                        "intersect" => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Intersection)?,
+                        _ => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Union)?,
                     };
                     Ok(Part::from_brep(result))
                 }

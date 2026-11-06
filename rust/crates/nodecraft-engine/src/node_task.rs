@@ -91,7 +91,7 @@ impl NodeInputs {
 pub(crate) enum ExactNodeTask {
     Primitive(Node),
     Boolean {
-        op: nodecraft_bool::BooleanOp,
+        op: nodecraft_layers::BooleanOp,
         a: Vec<Brep>,
         b: Vec<Brep>,
     },
@@ -186,16 +186,17 @@ impl ExactNodeTask {
                 // Combine/Part inputs must be unioned before a later
                 // Subtract/Intersect applies to the whole Part.
                 for brep in a {
-                    result = nodecraft_bool::boolean_breps_with_kernel(
+                    result = nodecraft_layers::boolean_breps_ops(
                         kernel,
-                        nodecraft_bool::BooleanOp::Union,
-                        result,
-                        brep,
-                    )?;
+                        &result,
+                        &brep,
+                        nodecraft_layers::BooleanOp::Union,
+                    )?
+                    .unwrap_or_else(Brep::new);
                 }
                 for brep in b {
-                    result =
-                        nodecraft_bool::boolean_breps_with_kernel(kernel, op, result, brep)?;
+                    result = nodecraft_layers::boolean_breps_ops(kernel, &result, &brep, op)?
+                        .unwrap_or_else(Brep::new);
                 }
                 Ok(NodeOutput::Shape(std::sync::Arc::new(result)))
             }

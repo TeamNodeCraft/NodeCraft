@@ -157,7 +157,7 @@ impl EvalWorker {
             // evicting or reusing another tab's entries.
             let mut states: std::collections::HashMap<u64, TabEvalState> =
                 std::collections::HashMap::new();
-            while let Ok(mut job) = job_rx.recv() {
+            'jobs: while let Ok(mut job) = job_rx.recv() {
                 // Only the newest request matters; discard queued stale work.
                 while let Ok(next) = job_rx.try_recv() {
                     job = next;
@@ -175,6 +175,7 @@ impl EvalWorker {
                     Err(error) => {
                         let evaluation = target.map(|target| engine_bridge::Evaluation {
                             target,
+                            display_complete: true,
                             mesh: None,
                             pre_merge: None,
                             comparison: None,
@@ -201,7 +202,68 @@ impl EvalWorker {
                     let _ = progress_tx.send((job.id, job.tab_id, event));
                 };
                 let mut cache = state.cache;
-                let outcome = catch_unwind(AssertUnwindSafe(|| {
+                if !job.run_exporters {
+                    let exact_outcome = catch_unwind(AssertUnwindSafe(|| {
+                        engine_bridge::evaluate_flat_exact(
+                            flat.document(),
+                            target.clone().unwrap_or_default(),
+                            cache,
+                            None,
+                            None,
+                            job.run_exporters,
+                            &job.dirty_nodes,
+                            None,
+                            &job.validation_targets,
+                        )
+                    }));
+                    let exact = match exact_outcome {
+                        Ok((evaluation, next_cache)) => {
+                            cache = next_cache;
+                            evaluation
+                        }
+                        Err(_) => {
+                            cache = EngineCache::new();
+                            let evaluation = target.map(|target| engine_bridge::Evaluation {
+                                target,
+                                display_complete: true,
+                                mesh: None,
+                                pre_merge: None,
+                                comparison: None,
+                                ghost: None,
+                                difference: None,
+                                difference_error: None,
+                                difference_approximate: false,
+                                node_errors: Default::default(),
+                                error: Some("Engine panicked during exact evaluation".into()),
+                                elapsed_ms: 0.0,
+                                kernel_ms: 0.0,
+                                mesh_ms: 0.0,
+                                cache_hits: 0,
+                                cache_misses: 0,
+                            });
+                            state.cache = cache;
+                            if let Some(evaluation) = evaluation
+                                && result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
+                            states.insert(job.tab_id, state);
+                            continue;
+                        }
+                    };
+                    if let Some(exact) = exact
+                        && result_tx.send((job.id, job.tab_id, exact)).is_err() { break; }
+                    // A newer edit may have arrived while the exact pass ran. Publish
+                    // this exact result, abandon the now-stale display pass, and let
+                    // the newest job use the warmed cache.
+                    if let Ok(mut next) = job_rx.try_recv() {
+                        while let Ok(newer) = job_rx.try_recv() {
+                            next = newer;
+                        }
+                        state.cache = cache;
+                        states.insert(job.tab_id, state);
+                        job = next;
+                        continue 'jobs;
+                    }
+                }
+                let display_outcome = catch_unwind(AssertUnwindSafe(|| {
                     engine_bridge::evaluate_flat_with_progress_comparison_dirty(
                         flat.document(),
                         target.clone().unwrap_or_default(),
@@ -214,17 +276,16 @@ impl EvalWorker {
                         &job.validation_targets,
                     )
                 }));
-                let evaluation = match outcome {
+                let evaluation = match display_outcome {
                     Ok((evaluation, next_cache)) => {
                         cache = next_cache;
                         evaluation
                     }
                     Err(_) => {
-                        // A kernel panic must not silently kill the only evaluation
-                        // thread. Drop the poisoned cache and let later edits retry.
                         cache = EngineCache::new();
                         target.map(|target| engine_bridge::Evaluation {
                             target,
+                            display_complete: true,
                             mesh: None,
                             pre_merge: None,
                             comparison: None,
@@ -310,6 +371,19 @@ impl NodeCraftApp {
         while let Some((id, tab_id, evaluation)) = self.eval_worker.try_recv() {
             let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
             if id != pending || tab_id != active_tab_id {
+                continue;
+            }
+            if !evaluation.display_complete {
+                // Exact pre-pass: publish errors/status immediately, but keep the
+                // current mesh and leave the evaluation pending for the display pass.
+                self.evaluation_ms = evaluation.elapsed_ms;
+                self.error = evaluation.error;
+                self.node_errors = evaluation.node_errors.keys().cloned().collect();
+                self.node_error_messages = evaluation.node_errors.clone();
+                self.node_editor.set_error_nodes(self.node_errors.clone());
+                self.cache_hits = evaluation.cache_hits;
+                self.cache_misses = evaluation.cache_misses;
+                self.egui_ctx.request_repaint();
                 continue;
             }
             self.eval_pending = None;

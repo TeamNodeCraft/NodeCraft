@@ -150,30 +150,44 @@ fn len(a: [f64; 3]) -> f64 { dot(a, a).sqrt() }
 /// Parts are flattened to their realized solids. A multi-solid Part is unioned
 /// into one operand first, so the result is independent of input body count.
 pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
-    let before = union_solids(before.realized_solids()?)?;
-    let after = union_solids(after.realized_solids()?)?;
-    let kernel = nodecraft_solidcore::kernel::kernel();
-    let options = nodecraft_solidcore::curved::CurvedTessOptions::default();
-    // Identical (or rigid-equivalent) bodies have no material difference. Boolean
-    // difference of coincident solids is both pointless and numerically hostile.
-    let before_mesh = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &before, &options)
-        .map_err(|error| error.to_string())?;
-    let after_mesh = nodecraft_solidcore::curved::brep_display_mesh(&kernel, &after, &options)
-        .map_err(|error| error.to_string())?;
-    let before_volume = mesh_volume(&before_mesh);
-    let after_volume = mesh_volume(&after_mesh);
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    let before_solids = before.realized_solids()?;
+    let after_solids = after.realized_solids()?;
+    let Some(before) = nodecraft_layers::union_breps_ops(&mut kernel, &before_solids)? else {
+        return Err("comparison before Part has no solids".into());
+    };
+    let Some(after) = nodecraft_layers::union_breps_ops(&mut kernel, &after_solids)? else {
+        return Err("comparison after Part has no solids".into());
+    };
+    // Exact B-rep volume, not display-mesh volume. Mesh density must not hide a
+    // real feature change or make coincident bodies look different.
+    let before_volume = nodecraft_layers::kernel_volume(&mut kernel, &before)?;
+    let after_volume = nodecraft_layers::kernel_volume(&mut kernel, &after)?;
     if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
         return Ok(DifferenceMeshes { removed: Mesh::default(), added: Mesh::default() });
     }
-    let removed = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, crate::copy_brep(&before)?, crate::copy_brep(&after)?)?;
-    let added = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, after, before)?;
+    let removed = nodecraft_layers::boolean_breps_ops(
+        &mut kernel,
+        &before,
+        &after,
+        nodecraft_layers::BooleanOp::Subtract,
+    )?;
+    let added = nodecraft_layers::boolean_breps_ops(
+        &mut kernel,
+        &after,
+        &before,
+        nodecraft_layers::BooleanOp::Subtract,
+    )?;
+    let tolerance = 0.05;
+    let mut mesh_of = |brep: Option<nodecraft_solidcore::solidcore::topology::Brep>| {
+        let Some(mut brep) = brep else { return Mesh::default() };
+        nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, tolerance)
+            .map(|display| display.mesh)
+            .unwrap_or_default()
+    };
     Ok(DifferenceMeshes {
-        // One side of a pure cut/extrude difference is legitimately empty. An
-        // empty BRep is a valid zero-triangle result, not a comparison failure.
-        removed: nodecraft_solidcore::curved::brep_display_mesh(&kernel, &removed, &options)
-            .unwrap_or_default(),
-        added: nodecraft_solidcore::curved::brep_display_mesh(&kernel, &added, &options)
-            .unwrap_or_default(),
+        removed: mesh_of(removed),
+        added: mesh_of(added),
     })
 }
 
@@ -191,13 +205,6 @@ pub(crate) fn mesh_volume(mesh: &Mesh) -> f64 {
     }).sum()
 }
 
-fn union_solids(mut solids: Vec<nodecraft_solidcore::solidcore::topology::Brep>) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let mut result = solids.drain(..).next().ok_or("comparison Part has no solids")?;
-    for solid in solids {
-        result = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, result, solid)?;
-    }
-    Ok(result)
-}
 
 #[cfg(test)]
 mod tests {

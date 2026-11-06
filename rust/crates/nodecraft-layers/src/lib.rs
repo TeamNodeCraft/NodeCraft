@@ -22,6 +22,8 @@ use solidcore_record::brep::Brep as RecordBrep;
 use solidcore_record::Vec3;
 use solidcore_tess::MeshTolerance;
 
+pub use solidcore_ops::BooleanOp;
+
 /// A tessellated record in the shape NodeCraft needs: protocol triangle data
 /// plus the display-only edge polylines the viewport will draw once the record
 /// is the rendering source of truth.
@@ -258,6 +260,107 @@ pub fn offset_faces_kernel(
         solidcore_ops::offset_faces(body, order, &faces, distance)
             .map_err(|error| format!("solidcore-ops offset_faces: {error}"))
     })
+}
+
+/// Boolean of two record bodies through the upstream ops layer.
+pub fn boolean_records(
+    a: &RecordBrep,
+    b: &RecordBrep,
+    op: solidcore_ops::BooleanOp,
+) -> Result<Option<RecordBrep>, String> {
+    let (a, _) = solidcore_ops::Body::from_record(a, true)
+        .map_err(|error| format!("record to ops body A: {error}"))?;
+    let (b, _) = solidcore_ops::Body::from_record(b, true)
+        .map_err(|error| format!("record to ops body B: {error}"))?;
+    solidcore_ops::boolean::boolean(a, b, op)
+        .map_err(|error| format!("solidcore-ops boolean: {error}"))?
+        .map(|body| {
+            body.to_record()
+                .map(|(record, _)| record)
+                .map_err(|error| format!("ops boolean to record: {error}"))
+        })
+        .transpose()
+}
+
+/// Union of record bodies through the upstream ops layer.
+pub fn union_records(records: &[RecordBrep]) -> Result<Option<RecordBrep>, String> {
+    if records.is_empty() {
+        return Ok(None);
+    }
+    let mut bodies = Vec::with_capacity(records.len());
+    for record in records {
+        let (body, _) = solidcore_ops::Body::from_record(record, true)
+            .map_err(|error| format!("record to ops body: {error}"))?;
+        bodies.push(body);
+    }
+    let body = solidcore_ops::boolean::union_all(bodies)
+        .map_err(|error| format!("solidcore-ops union: {error}"))?;
+    body.to_record()
+        .map(|(record, _)| Some(record))
+        .map_err(|error| format!("ops union to record: {error}"))
+}
+
+/// Union kernel B-reps through records + ops, returning a kernel B-rep.
+pub fn union_breps_ops(
+    kernel: &mut Kernel,
+    breps: &[KernelBrep],
+) -> Result<Option<KernelBrep>, String> {
+    if breps.is_empty() {
+        return Ok(None);
+    }
+    let mut records = Vec::with_capacity(breps.len());
+    for brep in breps {
+        let mut copy = brep
+            .clone_standing_for_self()
+            .map_err(|error| format!("union copy: {error}"))?;
+        let (record, _) = solidcore_convert::brep::to_record(kernel, &mut copy)
+            .map_err(|error| format!("kernel to record: {error}"))?;
+        records.push(record);
+    }
+    let Some(record) = union_records(&records)? else {
+        return Ok(None);
+    };
+    solidcore_convert::brep::to_kernel(kernel, &record, true)
+        .map(|(brep, _)| Some(brep))
+        .map_err(|error| format!("union record to kernel: {error}"))
+}
+
+/// Boolean two kernel B-reps through record + ops, returning a kernel B-rep.
+pub fn boolean_breps_ops(
+    kernel: &mut Kernel,
+    a: &KernelBrep,
+    b: &KernelBrep,
+    op: solidcore_ops::BooleanOp,
+) -> Result<Option<KernelBrep>, String> {
+    let mut a_copy = a
+        .clone_standing_for_self()
+        .map_err(|error| format!("boolean copy A: {error}"))?;
+    let mut b_copy = b
+        .clone_standing_for_self()
+        .map_err(|error| format!("boolean copy B: {error}"))?;
+    let (a_record, _) = solidcore_convert::brep::to_record(kernel, &mut a_copy)
+        .map_err(|error| format!("kernel A to record: {error}"))?;
+    let (b_record, _) = solidcore_convert::brep::to_record(kernel, &mut b_copy)
+        .map_err(|error| format!("kernel B to record: {error}"))?;
+    let Some(result) = boolean_records(&a_record, &b_record, op)? else {
+        return Ok(None);
+    };
+    solidcore_convert::brep::to_kernel(kernel, &result, true)
+        .map(|(brep, _)| Some(brep))
+        .map_err(|error| format!("boolean record to kernel: {error}"))
+}
+
+/// Exact volume of a kernel B-rep through the upstream ops body.
+pub fn kernel_volume(kernel: &mut Kernel, brep: &KernelBrep) -> Result<f64, String> {
+    let mut brep = brep
+        .clone_standing_for_self()
+        .map_err(|error| format!("volume copy: {error}"))?;
+    let (record, _) = solidcore_convert::brep::to_record(kernel, &mut brep)
+        .map_err(|error| format!("kernel to record: {error}"))?;
+    let (body, _) = solidcore_ops::Body::from_record(&record, true)
+        .map_err(|error| format!("record to ops body: {error}"))?;
+    body.volume(1.0e-6)
+        .map_err(|error| format!("ops volume: {error}"))
 }
 
 /// Convert an ops body to a kernel Brep through its record.

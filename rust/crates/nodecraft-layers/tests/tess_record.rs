@@ -133,3 +133,31 @@ fn kernel_brep_converts_to_record_and_tessellates() {
     assert!(!display.mesh.faces.is_empty());
     assert_eq!(display.edge_polylines.len(), 12);
 }
+
+#[test]
+fn ops_boolean_difference_returns_a_tessellatable_record() {
+    use solidcore_ops::BooleanOp;
+
+    let a = solidcore_ops::make_box([0.0, 0.0, 0.0], [10.0, 6.0, 4.0])
+        .expect("box A")
+        .to_record()
+        .expect("record A")
+        .0;
+    let b = solidcore_ops::make_box([5.0, 0.0, 0.0], [10.0, 6.0, 4.0])
+        .expect("box B")
+        .to_record()
+        .expect("record B")
+        .0;
+    let difference = nodecraft_layers::boolean_records(&a, &b, BooleanOp::Subtract)
+        .expect("ops boolean")
+        .expect("non-empty difference");
+    let display = nodecraft_layers::tessellate_record(
+        &difference,
+        &MeshTolerance::display(0.05),
+        10.0,
+    )
+    .expect("difference tessellation");
+    assert_eq!(display.stats.faces, 6);
+    assert!(!display.mesh.faces.is_empty());
+    assert_eq!(display.mesh.face_groups.len(), display.mesh.faces.len());
+}

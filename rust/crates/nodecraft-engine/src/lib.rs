@@ -757,6 +757,27 @@ fn loft_exact(
     Ok(skin.brep)
 }
 
+/// Boolean two B-reps through the upstream ops layer, with an empty ops
+/// result represented as an empty B-rep (the graph value contract).
+fn boolean_breps_ops(
+    a: &nodecraft_solidcore::solidcore::topology::Brep,
+    b: &nodecraft_solidcore::solidcore::topology::Brep,
+    op: nodecraft_bool::BooleanOp,
+) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    Ok(nodecraft_layers::boolean_breps_ops(&mut kernel, a, b, ops_boolean(op))?
+        .unwrap_or_else(nodecraft_solidcore::solidcore::topology::Brep::new))
+}
+
+/// Map NodeCraft's Boolean selector to the upstream ops selector.
+fn ops_boolean(op: nodecraft_bool::BooleanOp) -> nodecraft_layers::BooleanOp {
+    match op {
+        nodecraft_bool::BooleanOp::Union => nodecraft_layers::BooleanOp::Union,
+        nodecraft_bool::BooleanOp::Difference => nodecraft_layers::BooleanOp::Subtract,
+        nodecraft_bool::BooleanOp::Intersection => nodecraft_layers::BooleanOp::Intersect,
+    }
+}
+
 fn boolean_mode(values: &serde_json::Value) -> Result<(nodecraft_bool::BooleanOp, bool), String> {
     let mode = values.get("mode").or_else(|| values.get("operation")).or_else(|| values.get("op")).and_then(serde_json::Value::as_str).unwrap_or("union");
     let reverse = mode == "subtract-reverse";
@@ -875,7 +896,7 @@ fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::Pla
         let b = request.connections.iter().find(|link| link.to == node.id && link.input == "b").ok_or("Boolean part missing B")?;
         let (op, reverse) = boolean_mode(&node.values)?;
         let (brep_a, brep_b) = if reverse { (exact_operand_brep(request, &b.from)?, exact_operand_brep(request, &a.from)?) } else { (exact_operand_brep(request, &a.from)?, exact_operand_brep(request, &b.from)?) };
-        let result = nodecraft_bool::boolean_breps(op, brep_a, brep_b)?;
+        let result = boolean_breps_ops(&brep_a, &brep_b, op)?;
         let kernel = nodecraft_solidcore::kernel::kernel();
         return nodecraft_extrude::planar_brep_to_planar_body(&kernel, &result).map_err(|error| error.to_string());
     }
@@ -1021,10 +1042,10 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
                     // Part's pieces first so a later Subtract/Intersect applies to
                     // the whole Part, not just its first connected shape.
                     for brep in a_iter {
-                        result = nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, result, brep)?;
+                        result = boolean_breps_ops(&result, &brep, nodecraft_bool::BooleanOp::Union)?;
                     }
                     for brep in b_breps {
-                        result = nodecraft_bool::boolean_breps(op, result, brep)?;
+                        result = boolean_breps_ops(&result, &brep, op)?;
                     }
                     Ok(result)
                 }
@@ -1078,7 +1099,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
             let mut mirrored = copy_brep(&source_brep)?;
             mirror_brep(&mut mirrored, &node.values)?;
             if mirror_combine(&node.values) {
-                nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, source_brep, mirrored)
+                boolean_breps_ops(&source_brep, &mirrored, nodecraft_bool::BooleanOp::Union)
             } else {
                 Ok(mirrored)
             }
@@ -1110,7 +1131,7 @@ fn export_boolean_exact(request: &Request, boolean_id: &str, path: &str) -> Resu
             let a_breps = exact_operand_breps(request, &a)?;
             let b_breps = exact_operand_breps(request, &b)?;
             let mut result = a_breps.into_iter().next().ok_or("Boolean operand A is empty")?;
-            for brep in b_breps { result = nodecraft_bool::boolean_breps(op, result, brep)?; }
+            for brep in b_breps { result = boolean_breps_ops(&result, &brep, op)?; }
             result
         }
         (Some(a), None) => exact_operand_brep(request, &a.from)?,
@@ -1945,10 +1966,30 @@ fn comparison_cache_key(request: &Request, targets: &[String]) -> Option<(String
     Some((key(targets.first()?)?, key(targets.get(1)?)?))
 }
 
+/// Evaluate the exact graph result and its display meshes.
 pub fn evaluate(
     request: Request,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(ProgressEvent)>,
+) -> EngineOutput {
+    evaluate_mode(request, cache, progress, false)
+}
+
+/// Evaluate only the exact graph result, leaving display tessellation to the
+/// caller. The exact Part cache is filled and can be meshed by a later request.
+pub fn evaluate_exact(
+    request: Request,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(ProgressEvent)>,
+) -> EngineOutput {
+    evaluate_mode(request, cache, progress, true)
+}
+
+fn evaluate_mode(
+    request: Request,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(ProgressEvent)>,
+    exact_only: bool,
 ) -> EngineOutput {
     let started = Instant::now();
     struct DisplayToleranceReset;
@@ -1984,7 +2025,13 @@ pub fn evaluate(
         mesh_required.extend(ancestors_of(&request, target));
     }
     for node_id in evaluation_order_for_targets(&request) {
-        if mesh_required.contains(&node_id) {
+        if exact_only {
+            if node(&request, &node_id).is_some_and(|node| part_supported(&node.node_type)) {
+                eval.evaluate_part_only(&node_id);
+            } else {
+                eval.evaluate(&node_id);
+            }
+        } else if mesh_required.contains(&node_id) {
             eval.evaluate(&node_id);
         } else if part_targets.contains(&node_id) {
             if mesh_targets.contains(&node_id) {
@@ -1996,10 +2043,14 @@ pub fn evaluate(
             eval.evaluate(&node_id);
         }
     }
-    let mesh_targets = request
-        .mesh_targets
-        .clone()
-        .unwrap_or_else(|| request.targets.clone());
+    let mesh_targets = if exact_only {
+        Vec::new()
+    } else {
+        request
+            .mesh_targets
+            .clone()
+            .unwrap_or_else(|| request.targets.clone())
+    };
     let mut mesh_payloads = BTreeMap::new();
     let mut empty_targets = Vec::new();
     for id in &mesh_targets {
@@ -3983,6 +4034,44 @@ mod tests {
 
     /// Boolean operands apply node rotation, not just translation.
     #[test]
+    fn ops_boolean_matches_legacy_volume_for_boxes() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
+
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let a = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
+            .expect("box A");
+        let b = api::create_box(&mut kernel, Point3::new(5.0, 0.0, 0.0), 10.0, 6.0, 4.0)
+            .expect("box B");
+        for op in [
+            nodecraft_bool::BooleanOp::Union,
+            nodecraft_bool::BooleanOp::Difference,
+            nodecraft_bool::BooleanOp::Intersection,
+        ] {
+            let legacy = nodecraft_bool::boolean_breps(
+                op.clone(),
+                copy_brep(&a).expect("copy A"),
+                copy_brep(&b).expect("copy B"),
+            )
+            .expect("legacy boolean");
+            let ops = nodecraft_layers::boolean_breps_ops(
+                &mut kernel,
+                &a,
+                &b,
+                ops_boolean(op),
+            )
+            .expect("ops boolean")
+            .unwrap_or_else(nodecraft_solidcore::solidcore::topology::Brep::new);
+            let legacy_volume = nodecraft_layers::kernel_volume(&mut kernel, &legacy).expect("legacy volume");
+            let ops_volume = nodecraft_layers::kernel_volume(&mut kernel, &ops).expect("ops volume");
+            assert!(
+                (legacy_volume - ops_volume).abs() <= legacy_volume.abs().max(1.0) * 1.0e-6,
+                "Boolean volume parity: legacy={legacy_volume} ops={ops_volume}"
+            );
+        }
+    }
+
+    #[test]
     fn subtract_reverse_swaps_operands_for_solidcore_difference() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 501,
@@ -4297,6 +4386,24 @@ mod tests {
         let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
         assert!(min[0] >= -0.1 && max[0] >= 19.9, "sketch translation missing: {min:?}..{max:?}");
         assert!(cache.part_entries() > 0, "sketch was not represented as a Geometry Part");
+    }
+
+    #[test]
+    fn exact_evaluation_can_fill_the_cache_without_meshing() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["box"],
+            "meshTargets": ["box"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "box"}}
+            ],
+            "connections": []
+        })).expect("exact request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert!(output.response.meshes.is_empty(), "exact evaluation produced display geometry");
+        assert!(output.cache.part_entries() > 0, "exact evaluation did not cache the Part");
     }
 
     #[test]

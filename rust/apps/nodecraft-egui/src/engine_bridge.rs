@@ -20,6 +20,8 @@ pub struct PreMerge {
 
 pub struct Evaluation {
     pub target: String,
+    /// False for the exact-only pre-pass; true once display meshes/timing are final.
+    pub display_complete: bool,
     pub mesh: Option<Mesh>,
     /// Boolean operands for a pre-merge drag display.
     pub pre_merge: Option<PreMerge>,
@@ -126,6 +128,7 @@ pub fn evaluate_with_linked_progress_comparison(
             return (
                 Some(Evaluation {
                     target,
+                    display_complete: true,
                     mesh: None,
                     pre_merge: None,
                     comparison: None,
@@ -198,6 +201,60 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
     validation_targets: &[String],
+) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_with_progress_comparison_dirty_mode(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        dirty_nodes,
+        ghost_input,
+        validation_targets,
+        false,
+    )
+}
+
+/// Exact-only pre-pass for the display scheduler. It fills the Part cache but
+/// produces no display meshes, so the app can publish errors/status before the
+/// final display evaluation.
+pub fn evaluate_flat_exact(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_with_progress_comparison_dirty_mode(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        dirty_nodes,
+        ghost_input,
+        validation_targets,
+        true,
+    )
+}
+
+fn evaluate_flat_with_progress_comparison_dirty_mode(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+    exact_only: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
@@ -297,7 +354,11 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
         mesh_tolerance: None,
         comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
     };
-    let output = nodecraft_engine::evaluate(request, cache, progress);
+    let output = if exact_only {
+        nodecraft_engine::evaluate_exact(request, cache, progress)
+    } else {
+        nodecraft_engine::evaluate(request, cache, progress)
+    };
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     // The engine records the viewed node's full time and its exact B-rep pass;
@@ -331,6 +392,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
     (
         Some(Evaluation {
             target,
+            display_complete: !exact_only,
             // An errored node bypasses to its input, so the mesh can still be
             // valid even though the node reports its own error.
             mesh,
@@ -405,6 +467,42 @@ mod tests {
         let ghost = evaluation.ghost.expect("ghost input mesh");
         assert!(!ghost.faces.is_empty(), "ghost input has no display mesh");
         assert_ne!(evaluation.mesh.unwrap().faces.len(), ghost.faces.len());
+    }
+
+    #[test]
+    fn exact_prepass_fills_the_cache_before_display() {
+        let mut document = GraphDocument::new("two-phase");
+        let mut target = node("target");
+        target.values = json!({"primitiveType": "box"});
+        document.nodes = vec![target];
+        let (exact, cache) = evaluate_flat_exact(
+            &document,
+            "target".to_owned(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+        );
+        let exact = exact.expect("exact evaluation");
+        assert!(!exact.display_complete);
+        assert!(exact.mesh.is_none(), "exact pre-pass produced a display mesh");
+        let (display, _) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "target".to_owned(),
+            cache,
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+        );
+        let display = display.expect("display evaluation");
+        assert!(display.display_complete);
+        assert!(display.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
     }
 
     #[test]

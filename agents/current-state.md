@@ -25,7 +25,7 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `a39659e3d798b56f99266cd2e522360dd99f7cf7`
+- SolidCore pinned at `3ed6194755cc2a3298882373ff465adeb443485a`
 - SolidCraft sketch stack pinned at `d7cad1005a7ab8ed948d7c8cca666230e988c579`
 - STEP planar import normalizes closed-solid winding after new face-use-aware exports
 

@@ -648,7 +648,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let b_breps = self.operand_breps(&b)?;
                 let result = crate::node_task::execute_exact(
                     crate::node_task::ExactNodeTask::Boolean {
-                        op,
+                        op: crate::ops_boolean(op),
                         a: a_breps,
                         b: b_breps,
                     },
@@ -707,9 +707,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let preview = display_mesh_for_brep(&tool).ok();
                 let result = match operation {
                     "new" => tool,
-                    "remove" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Difference, copy_brep(&brep)?, tool)?,
-                    "intersect" => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Intersection, copy_brep(&brep)?, tool)?,
-                    _ => nodecraft_bool::boolean_breps(nodecraft_bool::BooleanOp::Union, copy_brep(&brep)?, tool)?,
+                    "remove" => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Difference)?,
+                    "intersect" => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Intersection)?,
+                    _ => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Union)?,
                 };
                 let result = Arc::new(result);
                 self.breps.insert(node_id.into(), result.clone());
