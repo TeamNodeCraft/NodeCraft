@@ -11,6 +11,7 @@ mod app;
 mod control_server;
 mod engine_bridge;
 mod file_dialog;
+mod hover;
 mod theme;
 mod sketch_gui;
 mod ui_shape;

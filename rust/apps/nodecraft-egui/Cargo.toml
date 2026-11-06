@@ -31,6 +31,7 @@ nodecraft-mesh = { path = "../../crates/nodecraft-mesh", default-features = fals
 nodecraft-protocol = { path = "../../crates/nodecraft-protocol" }
 nodecraft-session = { path = "../../crates/nodecraft-session", default-features = false }
 nodecraft-node-canvas = { path = "../../crates/nodecraft-node-canvas" }
+nodecraft-node-contract = { path = "../../crates/nodecraft-node-contract" }
 nodecraft-search = { path = "../../crates/nodecraft-search" }
 nodecraft-dock = { path = "../../crates/nodecraft-dock" }
 nodecraft-worker = { path = "../../crates/nodecraft-worker", default-features = false }

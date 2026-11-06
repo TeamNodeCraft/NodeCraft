@@ -201,13 +201,13 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
                 }
             }
             (points.len() >= 2).then(|| {
-                let point_count = points.len();
-            let midpoint = points.iter().fold([0.0; 3], |mut sum, point| {
-                    sum[0] += point.x / points.len() as f64;
-                    sum[1] += point.y / points.len() as f64;
-                    sum[2] += point.z / points.len() as f64;
-                    sum
-                });
+                // A point on the edge, not the centroid: this is the geometric
+                // fallback used to resolve the exact B-rep edge. For a closed
+                // circle the centroid lies at its centre and is not on the edge.
+                let midpoint = {
+                    let point = points[points.len() / 2];
+                    [point.x, point.y, point.z]
+                };
                 DisplayEdge { id: edge.id.clone(), points, midpoint, normals }
             })
         })
@@ -525,6 +525,31 @@ fn triangle_centroid_keys(mesh: &NodeMesh, tolerance: f64) -> std::collections::
 mod tests {
     use super::*;
     use nodecraft_protocol::{BrepEdge, Mesh};
+
+    #[test]
+    fn closed_edge_midpoint_lies_on_the_edge() {
+        let source = Mesh {
+            vertices: vec![
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [-10.0, 0.0, 0.0],
+                [0.0, -10.0, 0.0],
+            ],
+            normals: vec![],
+            faces: vec![],
+            face_groups: vec![],
+            brep_edges: vec![BrepEdge {
+                id: "edge:0".into(),
+                kind: "edge".into(),
+                segments: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+            }],
+            ..Mesh::default()
+        };
+        let display = display_mesh(&source);
+        let midpoint = display.edges[0].midpoint;
+        let radius = (midpoint[0] * midpoint[0] + midpoint[1] * midpoint[1]).sqrt();
+        assert!((radius - 10.0).abs() < 1.0e-6, "midpoint {midpoint:?} is not on the circle");
+    }
 
     #[test]
     fn converts_a_triangle_and_edge() {

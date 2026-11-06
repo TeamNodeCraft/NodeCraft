@@ -8,8 +8,9 @@ use egui::{Pos2, Rect, Stroke, Vec2 as EVec2};
 use solidcore_record_new::{Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
-use nodecraft_engine::sketch::{solve, CurveKind, Sketch};
+use nodecraft_engine::sketch::{solve, ConstraintKind, CurveKind, Sketch, SolveReport};
 use nodecraft_dock::{DockItem, DockMetrics, DockStyle, paint_background};
+use crate::hover::HoverMap;
 use crate::ui_shape;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,6 +146,11 @@ struct Draft {
 }
 
 
+struct SketchDrag {
+    start: Vec2,
+    points: Vec<(usize, Vec2)>,
+}
+
 struct ThreePointArc {
     center: Vec2,
     start: Vec2,
@@ -220,6 +226,11 @@ pub struct SketchGui {
     arc_draft: Option<ArcDraft>,
     selected_point: Option<usize>,
     selected_curves: HashSet<usize>,
+    drag: Option<SketchDrag>,
+    /// Line type for new curves: 0 normal, 1 construction, 2 centerline, 3 infinite.
+    draw_type: u8,
+    clear_sketch_armed: bool,
+    solve_report: Option<SolveReport>,
     fillet_radius: f64,
     dirty: bool,
     dock_measured_height: f32,
@@ -235,6 +246,10 @@ impl Default for SketchGui {
             arc_draft: None,
             selected_point: None,
             selected_curves: HashSet::new(),
+            drag: None,
+            draw_type: 0,
+            clear_sketch_armed: false,
+            solve_report: None,
             fillet_radius: 5.0,
             dirty: false,
             dock_measured_height: 0.0,
@@ -258,11 +273,15 @@ impl SketchGui {
         self.arc_draft = None;
         self.selected_point = None;
         self.selected_curves.clear();
+        self.drag = None;
+        self.clear_sketch_armed = false;
+        self.solve_report = None;
         self.dirty = false;
     }
 
     fn add_three_point_arc(&mut self, start: Vec2, end: Vec2, through: Vec2) {
         let Some(arc) = arc_through_three_points(start, end, through) else { return };
+        let first_new = self.sketch.curves.len();
         if self
             .sketch
             .add_arc(arc.center, arc.start, arc.end, [None; 3], None)
@@ -270,7 +289,8 @@ impl SketchGui {
         {
             return;
         }
-        let _ = solve(&mut self.sketch);
+        self.style_curve(first_new);
+        self.resolve();
         self.selected_curves.clear();
         self.dirty = true;
     }
@@ -291,12 +311,13 @@ impl SketchGui {
         interaction: Rect,
         camera: &Camera,
         lens_shift: [f32; 2],
+        blockers: &[Rect],
     ) -> Option<serde_json::Value> {
         if interaction.width() < 280.0 || interaction.height() < 220.0 {
             return None;
         }
         let theme = crate::theme::get();
-        let mut palette_rects = Vec::new();
+        let mut palette_rects = blockers.to_vec();
         // The first rect is the whole workspace; interaction is the visible 3D
         // viewport after the node editor's width is subtracted.
         let metrics = DockMetrics::DEFAULT;
@@ -409,6 +430,7 @@ impl SketchGui {
         let constraint_metrics = DockMetrics::DEFAULT
             .with_orientation(nodecraft_dock::DockOrientation::Horizontal);
         let mut constraint_dock = layout.constraints;
+        let mut constraint_to_apply = None;
         let constraint_content = egui::Area::new(egui::Id::new("sketch-constraints"))
             .order(egui::Order::Tooltip)
             .fixed_pos(constraint_dock.min + constraint_metrics.content_offset())
@@ -429,6 +451,8 @@ impl SketchGui {
                         if response.clicked() {
                             self.tool = Tool::Select;
                             self.draft = None;
+                            self.arc_draft = None;
+                            constraint_to_apply = Some(index);
                         }
                         if index + 1 < CONSTRAINTS.len() {
                             ui.add_space(constraint_metrics.gap);
@@ -446,6 +470,9 @@ impl SketchGui {
         ));
         paint_background(&constraint_painter, constraint_dock, constraint_metrics, style);
         palette_rects.push(constraint_dock);
+        if let Some(index) = constraint_to_apply {
+            self.apply_constraint(index);
+        }
 
         self.handle_input(ctx, viewport, interaction, camera, lens_shift, &palette_rects);
 
@@ -457,6 +484,9 @@ impl SketchGui {
         let line_colour = theme.color(theme.accent);
         let point_colour = theme.color(theme.text);
         for index in 0..self.sketch.curves.len() {
+            if !self.curve_visible(index) {
+                continue;
+            }
             let points = self.sketch.polyline(index);
             let selected = self.selected_curves.contains(&index);
             draw_polyline(
@@ -476,7 +506,7 @@ impl SketchGui {
             );
         }
         for (index, point) in self.sketch.points.iter().enumerate() {
-            if point.id == "origin" {
+            if point.id == "origin" || self.sketch.view.hide_points {
                 continue;
             }
             if let Some(screen) = project(viewport, camera, lens_shift, point.pos) {
@@ -533,24 +563,31 @@ impl SketchGui {
         lens_shift: [f32; 2],
         palettes: &[Rect],
     ) {
+        let pointer_position = ctx.pointer_latest_pos();
+        let hover = HoverMap::new(interaction, palettes, pointer_position);
+        if ctx.input(|input| {
+            input.key_pressed(egui::Key::Delete) || input.key_pressed(egui::Key::Backspace)
+        }) {
+            self.delete_selection();
+        }
         if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.draft = None;
             self.arc_draft = None;
+            if hover.over_viewport() {
+                self.tool = Tool::Select;
+            }
             return;
         }
-        let Some(pointer) = ctx.pointer_latest_pos() else { return };
-        let over_palette = palettes.iter().any(|rect| rect.contains(pointer));
+        let Some(pointer) = pointer_position else { return };
         if self.tool == Tool::Arc {
-            if let Some(draft) = &mut self.arc_draft {
-                if let Some(current) = unproject(viewport, camera, lens_shift, pointer) {
-                    draft.current = current;
-                }
+            let current = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point));
+            if let (Some(draft), Some(current)) = (&mut self.arc_draft, current) {
+                draft.current = current;
             }
             if ctx.input(|input| input.pointer.primary_clicked())
-                && interaction.contains(pointer)
-                && !over_palette
+                && hover.over_viewport()
             {
-                let Some(point) = unproject(viewport, camera, lens_shift, pointer) else { return };
+                let Some(point) = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point)) else { return };
                 match &mut self.arc_draft {
                     None => {
                         self.arc_draft = Some(ArcDraft {
@@ -576,21 +613,32 @@ impl SketchGui {
         }
         if !self.tool.draws() {
             self.draft = None;
-            if self.tool == Tool::Select
-                && ctx.input(|input| input.pointer.primary_clicked())
-                && interaction.contains(pointer)
-                && !over_palette
-            {
-                let additive = ctx.input(|input| input.modifiers.shift || input.modifiers.command);
-                self.select_at(viewport, interaction, camera, lens_shift, pointer, additive);
+            if self.tool == Tool::Select {
+                let pressed = ctx.input(|input| input.pointer.primary_pressed());
+                let released = ctx.input(|input| input.pointer.primary_released());
+                if pressed && hover.over_viewport() {
+                    let additive = ctx.input(|input| input.modifiers.shift || input.modifiers.command);
+                    self.select_at(viewport, interaction, camera, lens_shift, pointer, additive);
+                    self.begin_drag(viewport, camera, lens_shift, pointer);
+                }
+                if self.drag.is_some()
+                    && let Some(point) = unproject(viewport, camera, lens_shift, pointer)
+                {
+                    self.drag_to(point);
+                }
+                if released {
+                    if self.drag.take().is_some() {
+                        self.resolve();
+                        self.dirty = true;
+                    }
+                }
             }
             return;
         }
         if ctx.input(|input| input.pointer.primary_pressed())
-            && interaction.contains(pointer)
-            && !over_palette
+            && hover.over_viewport()
         {
-            if let Some(start) = unproject(viewport, camera, lens_shift, pointer) {
+            if let Some(start) = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point)) {
                 self.draft = Some(Draft {
                     tool: self.tool,
                     start,
@@ -607,6 +655,519 @@ impl SketchGui {
                 self.commit(draft);
             }
         }
+    }
+
+    fn resolve(&mut self) {
+        self.solve_report = Some(solve(&mut self.sketch));
+    }
+
+    fn snap(&self, point: Vec2) -> Vec2 {
+        if self.sketch.view.no_snap {
+            return point;
+        }
+        const STEP: f64 = 1.0;
+        Vec2::new((point.x / STEP).round() * STEP, (point.y / STEP).round() * STEP)
+    }
+
+    fn curve_visible(&self, index: usize) -> bool {
+        let Some(curve) = self.sketch.curves.get(index) else { return false };
+        if curve.construction && self.sketch.view.hide_construction {
+            return false;
+        }
+        if curve.link.is_some() && self.sketch.view.hide_projected {
+            return false;
+        }
+        true
+    }
+
+    fn style_curve(&mut self, index: usize) {
+        let style = self.draw_type;
+        if let Some(curve) = self.sketch.curves.get_mut(index) {
+            curve.construction = style >= 1;
+            curve.centerline = style == 2;
+            curve.infinite = style == 3 && matches!(curve.kind, CurveKind::Line { .. });
+        }
+    }
+
+    fn set_line_type(&mut self, style: u8) {
+        self.draw_type = style;
+        if self.selected_curves.is_empty() {
+            return;
+        }
+        let indices: Vec<usize> = self.selected_curves.iter().copied().collect();
+        for index in indices {
+            self.style_curve(index);
+        }
+        self.resolve();
+        self.dirty = true;
+    }
+
+    fn line_type_icon(style: u8, active: bool) -> (egui::Image<'static>, &'static str) {
+        let (bytes, name) = match style {
+            0 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-normal.svg").as_slice(), "normal"),
+            1 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-construction.svg").as_slice(), "construction"),
+            2 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-centerline.svg").as_slice(), "centerline"),
+            _ => (include_bytes!("../../../../vendor/iconify-design/sketch/line-infinite.svg").as_slice(), "infinite"),
+        };
+        let theme = crate::theme::get();
+        let colour = crate::theme::Theme::hex(if active {
+            [255, 255, 255, 255]
+        } else {
+            theme.icon
+        });
+        let svg = crate::app::tint_svg(bytes, &colour);
+        // Distinguish the tinted variants so egui's image cache cannot keep the
+        // inactive colour on a segment that becomes active.
+        let uri: &'static str = match (style, active) {
+            (0, false) => "bytes://sketch-line-normal.svg",
+            (1, false) => "bytes://sketch-line-construction.svg",
+            (2, false) => "bytes://sketch-line-centerline.svg",
+            (3, false) => "bytes://sketch-line-infinite.svg",
+            (0, true) => "bytes://sketch-line-normal-active.svg",
+            (1, true) => "bytes://sketch-line-construction-active.svg",
+            (2, true) => "bytes://sketch-line-centerline-active.svg",
+            _ => "bytes://sketch-line-infinite-active.svg",
+        };
+        (egui::Image::from_bytes(uri, svg.into_bytes()).fit_to_exact_size(egui::vec2(20.0, 20.0)), name)
+    }
+
+    /// One connected squircle segmented control for the four line types.
+    fn line_type_selector(&mut self, ui: &mut egui::Ui) -> Option<u8> {
+        let theme = crate::theme::get();
+        let width = ui.available_width().min(4.0 * 44.0);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(width, 30.0),
+            egui::Sense::click(),
+        );
+        if !ui.is_rect_visible(rect) {
+            return None;
+        }
+        let painter = ui.painter();
+        painter.add(nodecraft_node_canvas::squircle::shape(
+            rect,
+            7.0,
+            theme.color(theme.control),
+            egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
+        ));
+        let segment_w = rect.width() / 4.0;
+        let hovered = response
+            .hover_pos()
+            .filter(|point| rect.contains(*point))
+            .map(|point| (((point.x - rect.left()) / segment_w).floor() as usize).min(3));
+        let selected = self.draw_type as usize;
+        if let Some(index) = hovered.filter(|index| *index != selected) {
+            let segment = egui::Rect::from_min_size(
+                egui::pos2(rect.left() + segment_w * index as f32, rect.top()),
+                egui::vec2(segment_w, rect.height()),
+            );
+            let mut corners = egui::CornerRadius::ZERO;
+            if index == 0 {
+                corners.nw = 7;
+                corners.sw = 7;
+            } else if index == 3 {
+                corners.ne = 7;
+                corners.se = 7;
+            }
+            painter.rect_filled(segment, corners, theme.with_alpha(theme.highlight, 24));
+        }
+        let selected_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + segment_w * selected as f32, rect.top()),
+            egui::vec2(segment_w, rect.height()),
+        );
+        let mut selected_corners = egui::CornerRadius::ZERO;
+        if selected == 0 {
+            selected_corners.nw = 7;
+            selected_corners.sw = 7;
+        } else if selected == 3 {
+            selected_corners.ne = 7;
+            selected_corners.se = 7;
+        }
+        painter.rect_filled(selected_rect, selected_corners, theme.color(theme.accent));
+        for index in 1..4 {
+            let x = rect.left() + segment_w * index as f32;
+            painter.line_segment(
+                [egui::pos2(x, rect.top() + 1.0), egui::pos2(x, rect.bottom() - 1.0)],
+                egui::Stroke::new(1.0, theme.with_alpha(theme.border, 210)),
+            );
+        }
+        for index in 0..4 {
+            let (image, name) = Self::line_type_icon(index as u8, index == selected);
+            let icon_rect = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + segment_w * (index as f32 + 0.5), rect.center().y),
+                egui::vec2(20.0, 20.0),
+            );
+            image.paint_at(ui, icon_rect);
+            let _ = name;
+        }
+        if response.clicked()
+            && let Some(point) = response.interact_pointer_pos()
+            && rect.contains(point)
+        {
+            return Some((((point.x - rect.left()) / segment_w).floor() as usize).min(3) as u8);
+        }
+        let name = ["Normal", "Construction", "Centerline", "Infinite"][hovered.unwrap_or(selected)];
+        response.on_hover_text(name);
+        None
+    }
+
+    /// Sketch palette controls for the inspector while editing a sketch node.
+    pub fn show_palette(&mut self, ui: &mut egui::Ui) {
+        let theme = crate::theme::get();
+        if self.solve_report.is_none() {
+            self.resolve();
+        }
+        if let Some(report) = &self.solve_report {
+            let text = if report.status == nodecraft_engine::sketch::SolveStatus::Failed {
+                "Constraints conflict".to_owned()
+            } else if self.sketch.curves.is_empty() {
+                "No geometry yet".to_owned()
+            } else if report.dof == 0 {
+                "Fully constrained".to_owned()
+            } else if report.dof == 1 {
+                "1 degree of freedom".to_owned()
+            } else {
+                format!("{} degrees of freedom", report.dof)
+            };
+            ui.label(
+                egui::RichText::new(text)
+                    .size(11.0)
+                    .color(theme.color(theme.muted)),
+            );
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Line Type").size(10.0).color(theme.color(theme.muted)));
+        if let Some(style) = self.line_type_selector(ui) {
+            self.set_line_type(style);
+        }
+        ui.add_space(6.0);
+        let mut view = self.sketch.view.clone();
+        let mut changed = false;
+        for (label, hidden) in [
+            ("Constraints", &mut view.hide_constraints),
+            ("Dimensions", &mut view.hide_dimensions),
+            ("Points", &mut view.hide_points),
+            ("Snap", &mut view.no_snap),
+        ] {
+            let mut shown = !*hidden;
+            if ui.checkbox(&mut shown, label).changed() {
+                *hidden = !shown;
+                changed = true;
+            }
+        }
+        let mut construction_mode = self.draw_type == 1;
+        if ui.checkbox(&mut construction_mode, "Construction mode").changed() {
+            self.set_line_type(if construction_mode { 1 } else { 0 });
+        }
+        egui::CollapsingHeader::new("MORE")
+            .default_open(false)
+            .show(ui, |ui| {
+                for (label, hidden) in [
+                    ("Projected Geometries", &mut view.hide_projected),
+                    ("Construction Geometries", &mut view.hide_construction),
+                ] {
+                    let mut shown = !*hidden;
+                    if ui.checkbox(&mut shown, label).changed() {
+                        *hidden = !shown;
+                        changed = true;
+                    }
+                }
+                for (label, on) in [
+                    ("Slice", &mut view.slice),
+                    ("3D Sketch", &mut view.three_d),
+                ] {
+                    if ui.checkbox(on, label).changed() {
+                        changed = true;
+                    }
+                }
+            });
+        if changed {
+            self.sketch.view = view;
+            self.dirty = true;
+        }
+        ui.add_space(12.0);
+        let danger = egui::Color32::from_rgb(245, 132, 122);
+        if self.clear_sketch_armed {
+            ui.label(
+                egui::RichText::new("Clear all sketch geometry?")
+                    .size(11.0)
+                    .color(danger),
+            );
+            ui.horizontal(|ui| {
+                if ui_shape::button(
+                    ui,
+                    "Cancel",
+                    (ui.available_width() - 6.0) * 0.5,
+                    28.0,
+                    theme.with_alpha(theme.control, 220),
+                    egui::Stroke::new(1.0, theme.with_alpha(theme.border, 210)),
+                    theme.color(theme.text),
+                )
+                .clicked()
+                {
+                    self.clear_sketch_armed = false;
+                }
+                if ui_shape::button(
+                    ui,
+                    "Clear Sketch",
+                    ui.available_width(),
+                    28.0,
+                    egui::Color32::from_rgba_unmultiplied(80, 28, 26, 140),
+                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(245, 132, 122, 180)),
+                    danger,
+                )
+                .clicked()
+                {
+                    self.clear_sketch();
+                }
+            });
+        } else if ui_shape::button(
+            ui,
+            "Clear Sketch",
+            ui.available_width(),
+            28.0,
+            egui::Color32::from_rgba_unmultiplied(80, 28, 26, 90),
+            egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(245, 132, 122, 120)),
+            danger,
+        )
+        .clicked()
+        {
+            self.clear_sketch_armed = true;
+        }
+    }
+
+    /// Non-interactive outline of the sketch while its node is selected but not
+    /// being edited. Lifecycle and tool input stay with the node selection.
+    pub fn show_selection_preview(
+        &self,
+        ctx: &egui::Context,
+        viewport: Rect,
+        interaction: Rect,
+        camera: &Camera,
+        lens_shift: [f32; 2],
+    ) {
+        if interaction.width() < 40.0 || interaction.height() < 40.0 {
+            return;
+        }
+        let theme = crate::theme::get();
+        let mut painter = ctx.layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::new("sketch-selection-preview"),
+        ));
+        painter.set_clip_rect(interaction);
+        let colour = theme.color(theme.highlight);
+        for index in 0..self.sketch.curves.len() {
+            if !self.curve_visible(index) {
+                continue;
+            }
+            let points = self.sketch.polyline(index);
+            draw_polyline(
+                &painter,
+                viewport,
+                camera,
+                lens_shift,
+                &points,
+                Stroke::new(2.0, colour),
+            );
+        }
+        if !self.sketch.view.hide_points {
+            for (index, point) in self.sketch.points.iter().enumerate() {
+                if index == 0 {
+                    continue;
+                }
+                if let Some(screen) = project(viewport, camera, lens_shift, point.pos) {
+                    painter.circle_filled(screen, 2.5, colour);
+                }
+            }
+        }
+    }
+
+    /// Start a point/curve drag from the current selection. A curve moves its
+    /// own points; the origin and other fixed points stay put.
+    fn begin_drag(
+        &mut self,
+        viewport: Rect,
+        camera: &Camera,
+        lens_shift: [f32; 2],
+        pointer: Pos2,
+    ) {
+        let Some(start) = unproject(viewport, camera, lens_shift, pointer) else { return };
+        let mut indices = Vec::new();
+        if let Some(point) = self.selected_point {
+            indices.push(point);
+        } else {
+            for curve in &self.selected_curves {
+                if let Some(curve) = self.sketch.curves.get(*curve) {
+                    indices.extend(curve.kind.point_ids());
+                }
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        let points = indices
+            .into_iter()
+            .filter_map(|index| {
+                let point = self.sketch.points.get(index)?;
+                (!point.fixed).then_some((index, point.pos))
+            })
+            .collect::<Vec<_>>();
+        if !points.is_empty() {
+            self.drag = Some(SketchDrag { start, points });
+        }
+    }
+
+    fn drag_to(&mut self, pointer: Vec2) {
+        let Some(drag) = &self.drag else { return };
+        let delta = pointer - drag.start;
+        for (index, origin) in &drag.points {
+            if let Some(point) = self.sketch.points.get_mut(*index) {
+                point.pos = *origin + delta;
+            }
+        }
+        // Keep constraints authoritative while the pointer moves. Free points
+        // are unchanged; a constrained point stays on its locus.
+        self.resolve();
+    }
+
+    fn clear_sketch(&mut self) {
+        let view = self.sketch.view.clone();
+        self.sketch = Sketch::default();
+        self.sketch.view = view;
+        self.draft = None;
+        self.arc_draft = None;
+        self.selected_point = None;
+        self.selected_curves.clear();
+        self.drag = None;
+        self.draw_type = 0;
+        self.clear_sketch_armed = false;
+        self.resolve();
+        self.dirty = true;
+    }
+
+    fn delete_selection(&mut self) {
+        let changed = if let Some(point) = self.selected_point {
+            let removable = self
+                .sketch
+                .points
+                .get(point)
+                .is_some_and(|point| point.id != "origin");
+            if removable {
+                self.sketch.remove_points(&[point]);
+            }
+            removable
+        } else if !self.selected_curves.is_empty() {
+            let curves: Vec<usize> = self.selected_curves.iter().copied().collect();
+            self.sketch.remove_curves(&curves);
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.selected_point = None;
+            self.selected_curves.clear();
+            self.resolve();
+            self.dirty = true;
+        }
+    }
+
+    /// Apply the constraint dock's button at `index` to the current selection.
+    /// The dock is presentation; `solidcraft_sketch` owns validation and solving.
+    fn apply_constraint(&mut self, index: usize) {
+        let kind = match index {
+            0 => self
+                .selected_line()
+                .map(|l| ConstraintKind::Horizontal { l }),
+            1 => self
+                .selected_line()
+                .map(|l| ConstraintKind::Vertical { l }),
+            2 => None, // Coincident needs two picked points; selection supports one for now.
+            3 => self
+                .selected_curve_pair()
+                .map(|(a, b)| ConstraintKind::Equal { a, b }),
+            4 => self
+                .selected_line_pair()
+                .map(|(a, b)| ConstraintKind::Parallel { a, b }),
+            5 => self
+                .selected_line_pair()
+                .map(|(a, b)| ConstraintKind::Perpendicular { a, b }),
+            6 => self
+                .selected_curve_pair()
+                .map(|(a, b)| ConstraintKind::Tangent { a, b }),
+            7 => self
+                .selected_round_pair()
+                .map(|(a, b)| ConstraintKind::Concentric { a, b }),
+            8 => self
+                .selected_line_pair()
+                .map(|(a, b)| ConstraintKind::Collinear { a, b }),
+            9 => self.selected_line().and_then(|l| {
+                let (a, b) = match self.sketch.curves.get(l)?.kind {
+                    CurveKind::Line { a, b } => (a, b),
+                    _ => return None,
+                };
+                let (pa, pb) = (self.sketch.point(a)?, self.sketch.point(b)?);
+                Some(ConstraintKind::Length { l, value: pa.dist(pb) })
+            }),
+            10 => self.selected_round().map(|(c, value)| ConstraintKind::Radius { c, value }),
+            11 => self.selected_point.map(|p| ConstraintKind::Fix { p }),
+            _ => None,
+        };
+        let Some(kind) = kind else { return };
+        if self.sketch.add_constraint(kind, None).is_ok() {
+            self.resolve();
+            self.dirty = true;
+        }
+    }
+
+    fn selected_line(&self) -> Option<usize> {
+        self.selected_curves.iter().copied().find(|index| {
+            matches!(
+                self.sketch.curves.get(*index).map(|curve| &curve.kind),
+                Some(CurveKind::Line { .. })
+            )
+        })
+    }
+
+    fn selected_curve_pair(&self) -> Option<(usize, usize)> {
+        let mut curves = self.selected_curves.iter().copied();
+        let a = curves.next()?;
+        let b = curves.next()?;
+        (a != b).then_some((a, b))
+    }
+
+    fn selected_line_pair(&self) -> Option<(usize, usize)> {
+        let mut lines = self.selected_curves.iter().copied().filter(|index| {
+            matches!(
+                self.sketch.curves.get(*index).map(|curve| &curve.kind),
+                Some(CurveKind::Line { .. })
+            )
+        });
+        let a = lines.next()?;
+        let b = lines.next()?;
+        (a != b).then_some((a, b))
+    }
+
+    fn selected_round(&self) -> Option<(usize, f64)> {
+        self.selected_curves.iter().copied().find_map(|index| {
+            match self.sketch.curves.get(index).map(|curve| &curve.kind) {
+                Some(CurveKind::Circle { r, .. }) => Some((index, *r)),
+                Some(CurveKind::Arc { c, a, .. }) => {
+                    let center = self.sketch.point(*c)?;
+                    Some((index, center.dist(self.sketch.point(*a)?)))
+                }
+                _ => None,
+            }
+        })
+    }
+
+    fn selected_round_pair(&self) -> Option<(usize, usize)> {
+        let mut rounds = self.selected_curves.iter().copied().filter(|index| {
+            matches!(
+                self.sketch.curves.get(*index).map(|curve| &curve.kind),
+                Some(CurveKind::Circle { .. } | CurveKind::Arc { .. })
+            )
+        });
+        let a = rounds.next()?;
+        let b = rounds.next()?;
+        (a != b).then_some((a, b))
     }
 
     fn apply_fillet(&mut self) {
@@ -705,7 +1266,7 @@ impl SketchGui {
             [Some(center_point), Some(start_point), Some(end_point)],
             None,
         );
-        let _ = solve(&mut self.sketch);
+        self.resolve();
         self.selected_curves.clear();
         self.dirty = true;
     }
@@ -722,6 +1283,9 @@ impl SketchGui {
         let point_radius = 9.0_f32;
         let mut best_point: Option<(f32, usize)> = None;
         for (index, point) in self.sketch.points.iter().enumerate() {
+            if self.sketch.view.hide_points {
+                continue;
+            }
             let Some(screen) = project(viewport, camera, lens_shift, point.pos) else { continue };
             if !interaction.contains(screen) {
                 continue;
@@ -740,6 +1304,9 @@ impl SketchGui {
         }
         let mut best_curve: Option<(f32, usize)> = None;
         for index in 0..self.sketch.curves.len() {
+            if !self.curve_visible(index) {
+                continue;
+            }
             let projected: Vec<Pos2> = self
                 .sketch
                 .polyline(index)
@@ -778,6 +1345,7 @@ impl SketchGui {
         if draft.start.dist(draft.current) <= 1.0e-6 {
             return;
         }
+        let first_new = self.sketch.curves.len();
         match draft.tool {
             Tool::Line => add_line(&mut self.sketch, draft.start, draft.current),
             Tool::Rectangle => {
@@ -797,7 +1365,10 @@ impl SketchGui {
             }
             _ => {}
         }
-        let _ = solve(&mut self.sketch);
+        for index in first_new..self.sketch.curves.len() {
+            self.style_curve(index);
+        }
+        self.resolve();
         // Newly drawn geometry must not inherit a stale curve selection; an old
         // index can otherwise land on one of the new edges and draw it thick.
         self.selected_curves.clear();
@@ -932,6 +1503,96 @@ mod tests {
         assert_eq!(gui.sketch.curves.len(), 1);
         let value = gui.take_value().expect("sketch change");
         assert!(value.get("curves").is_some());
+    }
+
+    #[test]
+    fn clear_sketch_keeps_view_options_and_removes_geometry() {
+        let mut gui = SketchGui::default();
+        let _ = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None);
+        gui.sketch.view.hide_points = true;
+        gui.clear_sketch_armed = true;
+        gui.clear_sketch();
+        assert!(gui.sketch.curves.is_empty());
+        assert_eq!(gui.sketch.points.len(), 1);
+        assert!(gui.sketch.view.hide_points);
+        assert!(!gui.clear_sketch_armed);
+        assert!(gui.dirty);
+    }
+
+    #[test]
+    fn delete_removes_the_selected_sketch_curve() {
+        let mut gui = SketchGui::default();
+        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
+        gui.selected_curves.insert(line);
+        gui.delete_selection();
+        assert!(gui.sketch.curves.is_empty());
+        assert!(gui.selected_curves.is_empty());
+        assert!(gui.dirty);
+    }
+
+    #[test]
+    fn drawn_curves_take_the_selected_line_type() {
+        let mut gui = SketchGui {
+            tool: Tool::Line,
+            draw_type: 1,
+            ..SketchGui::default()
+        };
+        gui.commit(Draft {
+            tool: Tool::Line,
+            start: Vec2::new(0.0, 0.0),
+            current: Vec2::new(20.0, 0.0),
+        });
+        assert!(gui.sketch.curves[0].construction);
+        assert!(!gui.sketch.curves[0].centerline);
+    }
+
+    #[test]
+    fn select_tool_drag_moves_a_point() {
+        let mut gui = SketchGui::default();
+        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
+        let point = match gui.sketch.curves[line].kind {
+            CurveKind::Line { b, .. } => b,
+            _ => unreachable!(),
+        };
+        gui.selected_point = Some(point);
+        gui.drag = Some(SketchDrag {
+            start: Vec2::ZERO,
+            points: vec![(point, gui.sketch.point(point).unwrap())],
+        });
+        gui.drag_to(Vec2::new(3.0, 4.0));
+        assert!(gui.sketch.point(point).unwrap().dist(Vec2::new(13.0, 4.0)) < 1.0e-9);
+    }
+
+    #[test]
+    fn constraint_dock_applies_line_and_dimension_constraints() {
+        let mut gui = SketchGui::default();
+        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 3.0), None, None, None).unwrap();
+        gui.selected_curves.insert(line);
+        gui.apply_constraint(0); // Horizontal
+        assert!(matches!(
+            gui.sketch.constraints.last().map(|constraint| &constraint.kind),
+            Some(ConstraintKind::Horizontal { l }) if *l == line
+        ));
+        gui.apply_constraint(9); // Length
+        assert!(matches!(
+            gui.sketch.constraints.last().map(|constraint| &constraint.kind),
+            Some(ConstraintKind::Length { l, .. }) if *l == line
+        ));
+        assert!(gui.take_value().is_some());
+    }
+
+    #[test]
+    fn constraint_dock_uses_two_selected_lines() {
+        let mut gui = SketchGui::default();
+        let a = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
+        let b = gui.sketch.add_line(Vec2::new(0.0, 10.0), Vec2::new(10.0, 10.0), None, None, None).unwrap();
+        gui.selected_curves.insert(a);
+        gui.selected_curves.insert(b);
+        gui.apply_constraint(4); // Parallel
+        assert!(matches!(
+            gui.sketch.constraints.last().map(|constraint| &constraint.kind),
+            Some(ConstraintKind::Parallel { .. })
+        ));
     }
 
     #[test]

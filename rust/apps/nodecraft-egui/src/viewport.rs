@@ -8,6 +8,7 @@ use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView};
 use nodecraft_protocol::Mesh as NodeMesh;
 
 use crate::adapter::{self, DisplayMesh};
+use crate::hover::HoverMap;
 use crate::viewer_gizmo::{self, Gizmo, GizmoState};
 use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
@@ -196,6 +197,10 @@ pub struct Viewport {
     last_visible: Option<egui::Rect>,
     /// Development-only camera diagnostics. Deliberately not serialized.
     show_view_matrix: bool,
+    /// Opt-in GPU/frame diagnostics overlay. Off by default.
+    show_gpu_info: bool,
+    /// Smoothed frame interval in milliseconds, for the GPU info overlay.
+    frame_ms: f32,
     selection_mode: SelectionMode,
     face_picks: Vec<String>,
     edge_picks: Vec<EdgePick>,
@@ -204,6 +209,9 @@ pub struct Viewport {
     edge_picking_enabled: bool,
     /// A click in a topology mode landed on empty space.
     selection_miss: bool,
+    /// Rectangles owned by viewport chrome (compass, home, projection and display
+    /// settings) that must swallow pointer input before sketch overlays see it.
+    chrome_blockers: Vec<egui::Rect>,
     hovered_edge: Option<String>,
     hovered_face: Option<String>,
     selected_edges: std::collections::BTreeSet<String>,
@@ -211,6 +219,9 @@ pub struct Viewport {
     transform_gizmo: Option<Gizmo>,
     gizmo_state: GizmoState,
     gizmo_update: Option<viewer_gizmo::GizmoUpdate>,
+    /// The comparison layer is a feature-input ghost rather than an exact
+    /// material difference; draw it more faintly.
+    comparison_ghost: bool,
     /// Display-only drag preview applied to the GPU instances and scene edges
     /// until the kernel result for the edited values arrives.
     preview_transform: Option<[[f32; 4]; 4]>,
@@ -218,6 +229,49 @@ pub struct Viewport {
     preview_scope: PreviewScope,
     #[cfg(feature = "gpu-viewport")]
     gpu: Option<GpuViewport>,
+}
+
+/// The projection toggle shows the projection in use: perspective lattice when
+/// perspective is active, square lattice when orthographic.
+fn projection_icon(perspective: bool) -> (&'static [u8], &'static str) {
+    if perspective {
+        (
+            include_bytes!("../../../../vendor/iconify-design/viewport/perspective.svg"),
+            "bytes://nodecraft-perspective.svg",
+        )
+    } else {
+        (
+            include_bytes!("../../../../vendor/iconify-design/viewport/orthographic.svg"),
+            "bytes://nodecraft-orthographic.svg",
+        )
+    }
+}
+
+fn draw_debug_box(ui: &egui::Ui, pos: egui::Pos2, width: f32, lines: &[String]) -> f32 {
+    // Debug is the last layer egui paints, so the diagnostics stay above the
+    // node editor, inspector, tool dock and any other floating panel. They are
+    // painter-only and have no widgets, so nothing in them is clickable.
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Debug,
+        egui::Id::new("viewport-debug-overlay"),
+    ));
+    let height = 19.0 + 15.0 * lines.len() as f32;
+    painter.rect_filled(
+        egui::Rect::from_min_size(pos - egui::vec2(6.0, 6.0), egui::vec2(width, height)),
+        5.0,
+        // More transparent than the old 190-alpha diagnostic box.
+        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    for (index, line) in lines.iter().enumerate() {
+        painter.text(
+            pos + egui::vec2(0.0, 15.0 * index as f32),
+            egui::Align2::LEFT_TOP,
+            line,
+            egui::FontId::monospace(11.0),
+            egui::Color32::from_rgb(210, 225, 220),
+        );
+    }
+    height
 }
 
 impl Default for Viewport {
@@ -235,11 +289,14 @@ impl Default for Viewport {
             last_full: None,
             last_visible: None,
             show_view_matrix: false,
+            show_gpu_info: false,
+            frame_ms: 0.0,
             selection_mode: SelectionMode::Object,
             face_picks: Vec::new(),
             edge_picks: Vec::new(),
             edge_picking_enabled: false,
             selection_miss: false,
+            chrome_blockers: Vec::new(),
             hovered_edge: None,
             hovered_face: None,
             selected_edges: std::collections::BTreeSet::new(),
@@ -247,6 +304,7 @@ impl Default for Viewport {
             transform_gizmo: None,
             gizmo_state: GizmoState::default(),
             gizmo_update: None,
+            comparison_ghost: false,
             preview_transform: None,
             preview_scope: PreviewScope::All,
             #[cfg(feature = "gpu-viewport")]
@@ -336,9 +394,26 @@ impl Viewport {
         added: &NodeMesh,
         removed: &NodeMesh,
     ) {
+        self.comparison_ghost = false;
         self.selected_edges.clear();
         self.hovered_edge = None;
         self.display = Some(crate::adapter::display_mesh_with_difference(base, added, removed));
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+        }
+        self.dirty = true;
+    }
+
+    /// Display `ghost` as a faint feature-input layer under `base`. This is not
+    /// an exact material difference; it is the selected feature's upstream body.
+    pub fn set_feature_ghost_mesh(&mut self, base: &NodeMesh, ghost: &NodeMesh) {
+        self.comparison_ghost = true;
+        self.selected_edges.clear();
+        self.hovered_edge = None;
+        let empty = NodeMesh::default();
+        self.display = Some(crate::adapter::display_mesh_with_difference(base, &empty, ghost));
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
@@ -354,6 +429,7 @@ impl Viewport {
         added: &NodeMesh,
         removed: &NodeMesh,
     ) {
+        self.comparison_ghost = false;
         self.selected_edges.clear();
         self.hovered_edge = None;
         let mut display = crate::adapter::display_mesh_with_difference(base, added, removed);
@@ -371,6 +447,7 @@ impl Viewport {
     }
 
     fn update_mesh(&mut self, mesh: Option<&NodeMesh>) {
+        self.comparison_ghost = false;
         // Edge ids belong to the previous display target. Keeping the highlight
         // across an evaluation makes unrelated edges look selected on the next
         // node/document.
@@ -444,6 +521,12 @@ impl Viewport {
 
     pub fn take_selection_miss(&mut self) -> bool {
         std::mem::take(&mut self.selection_miss)
+    }
+
+    /// Rects of interactive viewport chrome, for overlays that read raw pointer
+    /// input instead of egui widget responses.
+    pub fn interaction_blockers(&self) -> &[egui::Rect] {
+        &self.chrome_blockers
     }
 
     pub fn set_edge_picking_enabled(&mut self, enabled: bool) {
@@ -547,6 +630,24 @@ impl Viewport {
 
     pub fn show_view_matrix(&self) -> bool {
         self.show_view_matrix
+    }
+
+    pub fn show_gpu_info(&self) -> bool {
+        self.show_gpu_info
+    }
+
+    pub fn set_show_gpu_info(&mut self, show: bool) {
+        self.show_gpu_info = show;
+    }
+
+    fn tick_frame_stats(&mut self, ui: &egui::Ui) {
+        let dt = ui.ctx().input(|input| input.stable_dt).clamp(1.0e-4, 1.0);
+        let ms = dt * 1000.0;
+        self.frame_ms = if self.frame_ms > 0.0 {
+            self.frame_ms * 0.85 + ms * 0.15
+        } else {
+            ms
+        };
     }
 
     /// NDC offset used to compose the camera into the visible viewport.
@@ -697,6 +798,9 @@ impl Viewport {
         blockers: &[egui::Rect],
         backdrop_rect: egui::Rect,
     ) {
+        if self.show_gpu_info {
+            self.tick_frame_stats(ui);
+        }
         let available = ui.available_size();
         let width = available.x.max(32.0) as usize;
         let height = available.y.max(32.0) as usize;
@@ -707,6 +811,7 @@ impl Viewport {
         );
         self.last_full = Some(rect);
         self.last_visible = Some(visible);
+        self.chrome_blockers.clear();
 
         let modifiers = ui.ctx().input(|input| input.modifiers);
         let middle = response.dragged_by(egui::PointerButton::Middle);
@@ -735,8 +840,9 @@ impl Viewport {
         }
         let gesture = nodecraft_node_canvas::gesture::TrackpadGesture::read(ui.ctx());
         let pointer_over_overlay = gesture.pointer.is_some_and(|pointer| {
-            blockers.iter().any(|blocker| blocker.contains(pointer))
-                || overlay.contains(pointer)
+            let mut blocked = blockers.to_vec();
+            blocked.push(overlay);
+            HoverMap::new(rect, &blocked, Some(pointer)).over_blocker()
         });
         if response.hovered() && !pointer_over_overlay && gesture.has_navigation() {
             if (gesture.zoom - 1.0).abs() > f32::EPSILON {
@@ -819,7 +925,7 @@ impl Viewport {
                 self.draw_comparison_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
-            self.draw_view_matrix_debug(ui, rect);
+            self.draw_debug_overlays(ui, rect);
             return;
         }
 
@@ -839,7 +945,7 @@ impl Viewport {
                 ui.visuals().weak_text_color(),
             );
         }
-        self.draw_view_matrix_debug(ui, rect);
+        self.draw_debug_overlays(ui, rect);
         if self.chrome_visible {
             self.axis_gizmo(ui, rect, visible);
             // Top selection dock intentionally disabled; see inspector edit action.
@@ -959,53 +1065,82 @@ impl Viewport {
         ))
     }
 
-    fn draw_view_matrix_debug(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
-        if !self.show_view_matrix { return; }
-        let camera = &self.camera;
-        let (right, up, back) = camera.basis();
-        let view = camera.view().0;
-        let target = camera.target;
-        let eye = camera.eye();
-        let lines = [
-            format!(
-                "camera yaw {:.2}  pitch {:.2}  roll {:.2}",
-                camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.roll.to_degrees()
-            ),
-            format!("fov {:.3}  distance {:.3}  half_h {:.3}", camera.fov, camera.distance, camera.half_height()),
-            format!("target {:.3} {:.3} {:.3}", target.x, target.y, target.z),
-            format!("eye    {:.3} {:.3} {:.3}", eye.x, eye.y, eye.z),
-            format!("right  {:.3} {:.3} {:.3}", right.x, right.y, right.z),
-            format!("up     {:.3} {:.3} {:.3}", up.x, up.y, up.z),
-            format!("back   {:.3} {:.3} {:.3}", back.x, back.y, back.z),
-            format!("lens   {:.4} {:.4}", self.lens_shift[0], self.lens_shift[1]),
-            "view matrix".to_owned(),
-        ]
-        .into_iter()
-        .chain(view.iter().map(|row| {
-            format!("{:.3} {:.3} {:.3} {:.3}", row[0], row[1], row[2], row[3])
-        }))
-        .collect::<Vec<_>>();
-        // Diagnostics must sit above the node editor, inspector and all viewport
-        // chrome, so use the global foreground layer rather than the viewport layer.
-        let painter = ui.ctx().layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::new("view-matrix-debug"),
-        ));
-        let pos = viewport.min + egui::vec2(12.0, 12.0);
-        painter.rect_filled(
-            egui::Rect::from_min_size(pos - egui::vec2(6.0, 6.0), egui::vec2(365.0, 19.0 + 15.0 * lines.len() as f32)),
-            5.0,
-            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 190),
-        );
-        for (index, line) in lines.iter().enumerate() {
-            painter.text(
-                pos + egui::vec2(0.0, 15.0 * index as f32),
-                egui::Align2::LEFT_TOP,
-                line,
-                egui::FontId::monospace(11.0),
-                egui::Color32::from_rgb(210, 225, 220),
-            );
+    /// Debug overlays stack from the top-left: GPU info first, then the camera /
+    /// view-matrix block underneath it. Both are paint-only, so they never take
+    /// pointer input from the viewport.
+    fn debug_overlays_enabled(&self) -> bool {
+        self.show_gpu_info || self.show_view_matrix
+    }
+
+    fn draw_debug_overlays(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        if !self.debug_overlays_enabled() {
+            return;
         }
+        let mut pos = viewport.min + egui::vec2(12.0, 12.0);
+        if self.show_gpu_info {
+            let lines = self.gpu_info_lines(viewport);
+            let height = draw_debug_box(ui, pos, 365.0, &lines);
+            pos.y += height + 8.0;
+        }
+        if self.show_view_matrix {
+            let camera = &self.camera;
+            let (right, up, back) = camera.basis();
+            let view = camera.view().0;
+            let target = camera.target;
+            let eye = camera.eye();
+            let lines = [
+                format!(
+                    "camera yaw {:.2}  pitch {:.2}  roll {:.2}",
+                    camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.roll.to_degrees()
+                ),
+                format!("fov {:.3}  distance {:.3}  half_h {:.3}", camera.fov, camera.distance, camera.half_height()),
+                format!("target {:.3} {:.3} {:.3}", target.x, target.y, target.z),
+                format!("eye    {:.3} {:.3} {:.3}", eye.x, eye.y, eye.z),
+                format!("right  {:.3} {:.3} {:.3}", right.x, right.y, right.z),
+                format!("up     {:.3} {:.3} {:.3}", up.x, up.y, up.z),
+                format!("back   {:.3} {:.3} {:.3}", back.x, back.y, back.z),
+                format!("lens   {:.4} {:.4}", self.lens_shift[0], self.lens_shift[1]),
+                "view matrix".to_owned(),
+            ]
+            .into_iter()
+            .chain(view.iter().map(|row| {
+                format!("{:.3} {:.3} {:.3} {:.3}", row[0], row[1], row[2], row[3])
+            }))
+            .collect::<Vec<_>>();
+            draw_debug_box(ui, pos, 365.0, &lines);
+        }
+    }
+
+    fn gpu_info_lines(&self, viewport: egui::Rect) -> Vec<String> {
+        let fps = if self.frame_ms > 0.0 { 1000.0 / self.frame_ms } else { 0.0 };
+        let mut lines = vec![format!(
+            "frame {:.1} ms  {:.0} fps  {}x{}",
+            self.frame_ms,
+            fps,
+            viewport.width().round() as i32,
+            viewport.height().round() as i32
+        )];
+        #[cfg(feature = "gpu-viewport")]
+        {
+            if let Some(gpu) = self.gpu.as_ref().and_then(|gpu| gpu.debug_info()) {
+                lines.push(format!(
+                    "gpu {} ({}, {})",
+                    gpu.adapter, gpu.backend, gpu.device_type
+                ));
+                lines.push(format!(
+                    "object {} tris  {} chunks  {:.1} MB",
+                    gpu.triangles,
+                    gpu.chunks,
+                    gpu.object_bytes as f64 / (1024.0 * 1024.0)
+                ));
+                lines.push(format!("msaa {}x", crate::gpu_viewport::msaa_samples()));
+            } else {
+                lines.push("gpu viewport not initialized".to_owned());
+            }
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        lines.push("gpu viewport feature off".to_owned());
+        lines
     }
 
     fn draw_face_hover(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -1062,11 +1197,11 @@ impl Viewport {
         // Display-only comparison layer. It is painted above the shaded result,
         // never enters the display mesh, and therefore never feeds face/edge/vertex
         // picking. 50% alpha keeps the result readable underneath.
-        const OVERLAY_ALPHA: u8 = 38;
+        let overlay_alpha = if self.comparison_ghost { 14 } else { 38 };
         let add = theme.preview_add;
-        draw_layer(&comparison.added, egui::Color32::from_rgba_unmultiplied(add[0], add[1], add[2], OVERLAY_ALPHA));
+        draw_layer(&comparison.added, egui::Color32::from_rgba_unmultiplied(add[0], add[1], add[2], overlay_alpha));
         let cut = theme.preview_cut;
-        draw_layer(&comparison.removed, egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], OVERLAY_ALPHA));
+        draw_layer(&comparison.removed, egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], overlay_alpha));
     }
 
     fn draw_comparison_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -1076,7 +1211,12 @@ impl Viewport {
         let theme = crate::theme::get();
         let cut = theme.preview_cut;
         let painter = ui.painter().with_clip_rect(viewport);
-        let edge_colour = egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], 128);
+        let edge_colour = egui::Color32::from_rgba_unmultiplied(
+            cut[0],
+            cut[1],
+            cut[2],
+            if self.comparison_ghost { 90 } else { 128 },
+        );
         for edge in &comparison.edges {
             let points: Vec<egui::Pos2> = edge
                 .points
@@ -1103,9 +1243,6 @@ impl Viewport {
                 .collect();
             for pair in points.windows(2) {
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, colour));
-            }
-            for point in points {
-                painter.circle_filled(point, width * 0.7, colour);
             }
         };
         for id in &self.selected_edges {
@@ -1451,10 +1588,11 @@ impl Viewport {
         } else {
             crate::theme::Theme::hex(theme.icon)
         };
-        let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/perspective.svg"))
+        let (icon_source, icon_uri) = projection_icon(self.camera.fov > 0.0);
+        let svg = std::str::from_utf8(icon_source)
             .unwrap_or_default()
             .replace("#d8d8dc", &perspective_colour);
-        let image = egui::Image::from_bytes("bytes://nodecraft-perspective.svg", svg.into_bytes())
+        let image = egui::Image::from_bytes(icon_uri, svg.into_bytes())
             .fit_to_exact_size(egui::Vec2::splat(icon_size));
         ui.put(perspective_icon, image);
 
@@ -1488,6 +1626,7 @@ impl Viewport {
             .fit_to_exact_size(egui::Vec2::splat(icon_size));
         ui.put(view_icon, image);
         self.show_view_settings_menu(ui, &view);
+        self.chrome_blockers = vec![rect, home_rect, perspective_rect, view_rect];
     }
 
     /// Shared display-settings popup, used by the viewport cog and the top bar.
@@ -1683,6 +1822,26 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_info_overlay_is_opt_in() {
+        let mut viewport = Viewport::default();
+        assert!(!viewport.show_gpu_info());
+        assert!(!viewport.show_view_matrix());
+        assert!(!viewport.debug_overlays_enabled());
+        viewport.set_show_gpu_info(true);
+        assert!(viewport.debug_overlays_enabled());
+    }
+
+    #[test]
+    fn projection_toggle_swaps_between_lattice_icons() {
+        let (perspective, perspective_uri) = projection_icon(true);
+        let (orthographic, orthographic_uri) = projection_icon(false);
+        assert_ne!(perspective, orthographic);
+        assert_ne!(perspective_uri, orthographic_uri);
+        assert!(std::str::from_utf8(perspective).unwrap().contains("M5.854 4H18.146"));
+        assert!(std::str::from_utf8(orthographic).unwrap().contains("M3 3H21V21H3Z"));
+    }
 
     #[test]
     fn projection_toggle_preserves_target_rotation_and_half_height() {

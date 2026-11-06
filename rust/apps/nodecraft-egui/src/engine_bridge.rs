@@ -1,5 +1,6 @@
 //! The UI-to-engine boundary. NodeCraft's session/engine remain the authority.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use nodecraft_engine::EngineCache;
@@ -24,14 +25,30 @@ pub struct Evaluation {
     pub pre_merge: Option<PreMerge>,
     /// Before/after pair when the selected feature can be compared.
     pub comparison: Option<(Mesh, Mesh)>,
+    /// Input body ghosted under a selected feature's result.
+    pub ghost: Option<Mesh>,
     /// Exact before/after difference bodies from the kernel.
     pub difference: Option<(Mesh, Mesh)>,
     pub difference_error: Option<String>,
     pub node_errors: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
+    /// B-rep evaluation time for the viewed target, excluding tessellation.
+    pub kernel_ms: f64,
+    /// Display tessellation time for the viewed target.
+    pub mesh_ms: f64,
     pub cache_hits: u32,
     pub cache_misses: u32,
+}
+
+/// Split the evaluation total into kernel and display work.
+///
+/// The engine's per-node timing includes tessellation; its B-rep timing is the
+/// exact pass alone. The viewed node's difference is the display pass, and the
+/// rest of the total is the B-rep work for that target's upstream nodes.
+fn timing_breakdown(elapsed_ms: f64, target_ms: f64, target_brep_ms: f64) -> (f64, f64) {
+    let mesh_ms = (target_ms - target_brep_ms).max(0.0);
+    ((elapsed_ms - mesh_ms).max(0.0), mesh_ms)
 }
 
 pub fn target_for(document: &GraphDocument, viewer_breakpoint: Option<&str>) -> Option<String> {
@@ -110,11 +127,14 @@ pub fn evaluate_with_linked_progress_comparison(
                     mesh: None,
                     pre_merge: None,
                     comparison: None,
+                    ghost: None,
                     difference: None,
                     difference_error: None,
                     node_errors: Default::default(),
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    kernel_ms: 0.0,
+                    mesh_ms: 0.0,
                     cache_hits: 0,
                     cache_misses: 0,
                 }),
@@ -152,6 +172,30 @@ pub fn evaluate_flat_with_progress_comparison(
     comparison: Option<(&str, &str)>,
     run_exporters: bool,
 ) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_with_progress_comparison_dirty(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        &HashSet::new(),
+        None,
+        &[],
+    )
+}
+
+pub fn evaluate_flat_with_progress_comparison_dirty(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
     let pre_merge = pre_merge_sources(document, &target);
@@ -175,6 +219,16 @@ pub fn evaluate_flat_with_progress_comparison(
                     }
                 }
             }
+            if let Some(ghost) = ghost_input
+                && !targets.iter().any(|existing| existing == ghost)
+            {
+                targets.push(ghost.to_owned());
+            }
+            for id in validation_targets {
+                if !targets.iter().any(|existing| existing == id) {
+                    targets.push(id.clone());
+                }
+            }
             targets
         },
         mesh_targets: Some({
@@ -193,6 +247,16 @@ pub fn evaluate_flat_with_progress_comparison(
                     }
                 }
             }
+            if let Some(ghost) = ghost_input
+                && !targets.iter().any(|existing| existing == ghost)
+            {
+                targets.push(ghost.to_owned());
+            }
+            for id in validation_targets {
+                if !targets.iter().any(|existing| existing == id) {
+                    targets.push(id.clone());
+                }
+            }
             targets
         }),
         nodes: document
@@ -205,7 +269,11 @@ pub fn evaluate_flat_with_progress_comparison(
                 suppressed: node.suppressed,
                 cache: Some(CacheState {
                     key: hashes.get(&node.id).map(|hash| hash.to_hex()),
-                    state: Some("cached".into()),
+                    state: Some(if dirty_nodes.contains(&node.id) {
+                        "dirty".into()
+                    } else {
+                        "cached".into()
+                    }),
                 }),
             })
             .collect(),
@@ -229,6 +297,14 @@ pub fn evaluate_flat_with_progress_comparison(
     let output = nodecraft_engine::evaluate(request, cache, progress);
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // The engine records the viewed node's full time and its exact B-rep pass;
+    // their difference is display tessellation. Everything else in the total is
+    // the kernel work for the target's upstream nodes.
+    let (kernel_ms, mesh_ms) = timing_breakdown(
+        elapsed_ms,
+        output.response.timings.get(&target).copied().unwrap_or(0.0),
+        output.response.brep_timings.get(&target).copied().unwrap_or(0.0),
+    );
     let cache_stats = output.response.cache_stats;
     let error = output.response.node_errors.get(&target).cloned();
     let mesh = output.response.meshes.get(&target).map(|payload| payload.mesh.clone());
@@ -242,6 +318,13 @@ pub fn evaluate_flat_with_progress_comparison(
         let after = output.response.meshes.get(after)?.mesh.clone();
         Some((before, after))
     });
+    let ghost = ghost_input.and_then(|id| {
+        output
+            .response
+            .meshes
+            .get(id)
+            .map(|payload| payload.mesh.clone())
+    });
     (
         Some(Evaluation {
             target,
@@ -250,11 +333,14 @@ pub fn evaluate_flat_with_progress_comparison(
             mesh,
             pre_merge,
             comparison,
+            ghost,
             difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
             difference_error: output.response.comparison.as_ref().and_then(|payload| payload.error.clone()),
             node_errors: output.response.node_errors,
             error,
             elapsed_ms,
+            kernel_ms,
+            mesh_ms,
             cache_hits: cache_stats.as_ref().map_or(0, |stats| stats.hits),
             cache_misses: cache_stats.as_ref().map_or(0, |stats| stats.misses),
         }),
@@ -280,6 +366,72 @@ mod tests {
 
     /// Each hash map gets its own random seed, so any hash-order dependence in
     /// meshing shows up across repeated evaluations in one process.
+    #[test]
+    fn timing_breakdown_separates_kernel_and_meshing() {
+        let (kernel, mesh) = timing_breakdown(180.0, 70.0, 20.0);
+        assert!((kernel - 130.0).abs() < 1e-9);
+        assert!((mesh - 50.0).abs() < 1e-9);
+        assert!(((kernel + mesh) - 180.0).abs() < 1e-9);
+        // A cached exact part has no B-rep time; the node time is all mesh.
+        assert_eq!(timing_breakdown(20.0, 20.0, 0.0), (0.0, 20.0));
+        assert_eq!(timing_breakdown(10.0, 0.0, 0.0), (10.0, 0.0));
+    }
+
+    #[test]
+    fn ghost_input_mesh_is_returned_with_the_target() {
+        let mut document = GraphDocument::new("ghost-preview");
+        let mut target = node("target");
+        target.values = json!({"primitiveType": "box"});
+        let mut ghost = node("ghost");
+        ghost.values = json!({"primitiveType": "sphere"});
+        document.nodes = vec![target, ghost];
+        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "target".to_owned(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            Some("ghost"),
+            &[],
+        );
+        let evaluation = evaluation.expect("evaluation");
+        assert!(evaluation.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
+        let ghost = evaluation.ghost.expect("ghost input mesh");
+        assert!(!ghost.faces.is_empty(), "ghost input has no display mesh");
+        assert_ne!(evaluation.mesh.unwrap().faces.len(), ghost.faces.len());
+    }
+
+    #[test]
+    fn validation_targets_report_their_node_errors() {
+        let mut document = GraphDocument::new("validation-errors");
+        let mut target = node("target");
+        target.values = json!({"primitiveType": "box"});
+        let mut broken = node("broken");
+        broken.node_type = "shell".into();
+        broken.values = json!({"thickness": 2.0});
+        document.nodes = vec![target, broken];
+        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "target".to_owned(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &["broken".to_owned()],
+        );
+        let evaluation = evaluation.expect("evaluation");
+        assert!(evaluation.error.is_none(), "{:?}", evaluation.error);
+        assert!(
+            evaluation.node_errors.contains_key("broken"),
+            "validation node error missing: {:?}",
+            evaluation.node_errors
+        );
+    }
+
     #[test]
     fn repeated_evaluation_produces_an_identical_mesh() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../samples/spline-showcase.nodecraft");

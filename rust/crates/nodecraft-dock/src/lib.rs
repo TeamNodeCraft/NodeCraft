@@ -116,6 +116,9 @@ pub struct DockStyle {
     pub text: Color32,
     pub icon: Color32,
     pub icon_hover: Color32,
+    /// Icon tint while an accent-filled row is selected: always white so the
+    /// glyph stays legible on the blue selection rect.
+    pub active_icon: Color32,
     pub shadow: Color32,
 }
 
@@ -219,7 +222,7 @@ pub fn icon_button(
         ));
     }
     let tint = if item.active {
-        style.text
+        style.active_icon
     } else if response.hovered() {
         style.icon_hover
     } else {
@@ -228,7 +231,17 @@ pub fn icon_button(
     let colour = format!("#{:02x}{:02x}{:02x}", tint.r(), tint.g(), tint.b());
     let svg = tint_svg(item.icon, &colour);
     let image = egui::Image::from_bytes(
-        format!("bytes://tool-dock-{}.svg", item.icon_name),
+        format!(
+            "bytes://tool-dock-{}-{}.svg",
+            item.icon_name,
+            if item.active {
+                "active"
+            } else if response.hovered() {
+                "hover"
+            } else {
+                "idle"
+            }
+        ),
         svg.into_bytes(),
     )
     .fit_to_exact_size(Vec2::splat(metrics.icon_size));

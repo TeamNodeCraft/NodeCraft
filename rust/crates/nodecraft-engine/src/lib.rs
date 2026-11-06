@@ -424,8 +424,11 @@ fn sketch_profile_curves(
         }
     }
     flush_line_run(&mut curves, &mut line_run)?;
-    if curves.len() < 3 {
-        return Err("Loft sketch profile is degenerate".into());
+    // A whole circle is one closed periodic curve and a valid profile. Extrude
+    // splits it into halves when solidcore's direct path is unavailable; only a
+    // profile with no boundary at all is degenerate.
+    if curves.is_empty() {
+        return Err("Sketch profile is degenerate".into());
     }
     Ok(curves)
 }
@@ -1671,6 +1674,12 @@ const DEFAULT_PART_CACHE_ENTRIES: usize = 8192;
 const MAX_PART_CACHE_ENTRIES: usize = 65_536;
 const BODY_MESH_CACHE_BYTES: usize = 256 << 20;
 
+/// A node marked dirty must not be answered from any content-addressed cache,
+/// even when a caller supplied a key that matches an older result.
+fn node_cache_is_fresh(node: &Node) -> bool {
+    node.cache.as_ref().and_then(|cache| cache.state.as_deref()) != Some("dirty")
+}
+
 #[derive(Clone, Debug)]
 pub struct EngineCache {
     meshes: HashMap<(String, String), Mesh>,
@@ -1725,6 +1734,12 @@ impl EngineCache {
 
     #[must_use]
     pub fn mesh(&self, key: &(String, String)) -> Option<Mesh> { self.meshes.get(key).cloned() }
+
+    pub fn remove_mesh(&mut self, key: &(String, String)) {
+        if let Some(mesh) = self.meshes.remove(key) {
+            self.mesh_bytes = self.mesh_bytes.saturating_sub(mesh_bytes(&mesh));
+        }
+    }
 
     pub fn insert_mesh(&mut self, key: (String, String), mesh: Mesh) {
         let bytes = mesh_bytes(&mesh);
@@ -2260,7 +2275,8 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (node.id.clone(), node_key);
-        if let Some(brep) = self.cache.brep(&cache_key) {
+        let cache_is_fresh = node_cache_is_fresh(node);
+        if cache_is_fresh && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.brep_hits += 1;
             self.cache_hits += 1;
             self.breps.insert(node.id.clone(), brep.clone());
@@ -2362,7 +2378,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node = self.request.nodes.iter().find(|item| item.id == start).cloned().ok_or("Boolean operand node missing")?;
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (start.to_string(), node_key);
-        if let Some(brep) = self.cache.brep(&cache_key) {
+        if node_cache_is_fresh(&node) && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.brep_hits += 1;
             self.cache_hits += 1;
             self.breps.insert(start.to_string(), brep.clone());
@@ -2524,7 +2540,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
         }
         for node in self.request.nodes.iter() {
-            if !warmable.contains(&node.id) { continue; }
+            if !warmable.contains(&node.id) || !node_cache_is_fresh(node) { continue; }
             let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
             let cache_key = (node.id.clone(), node_key);
             if self.breps.contains_key(&node.id) || self.cache.brep(&cache_key).is_some() {
@@ -2767,7 +2783,8 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (start.to_owned(), node_key);
-        if let Some(part) = self.cache.part(&cache_key) {
+        let cache_is_fresh = node_cache_is_fresh(&node);
+        if cache_is_fresh && let Some(part) = self.cache.part(&cache_key) {
             self.cache.parts_hits += 1;
             self.cache_hits += 1;
             self.parts.insert(start.to_owned(), part.clone());
@@ -3139,7 +3156,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let key = import_cache_key(path);
                     let default_quality = (nodecraft_mesh::display_tolerance()
                         - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs() < 1.0e-9;
-                    if default_quality && let Some(import) = self.cache.import(&key) {
+                    if default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
                         self.cache.import_hits += 1;
                         self.step_diagnostics.insert(node.id.clone(), import.diagnostics.clone());
                     } else {
@@ -3174,14 +3191,45 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
     }
 
+    /// Cache a display mesh only when the node itself has no recorded error.
+    /// Bypassed meshes from failed nodes must never become healthy cache hits.
+    fn cache_mesh_result(
+        &mut self,
+        node_id: &str,
+        cache_key: (String, String),
+        mesh: &Mesh,
+    ) {
+        if let Some(error) = self.errors.get(node_id) {
+            self.cache.insert_failure(cache_key.clone(), error.clone());
+            self.cache.remove_mesh(&cache_key);
+        } else {
+            self.cache.remove_failure(&cache_key);
+            self.cache.insert_mesh(cache_key, mesh.clone());
+        }
+    }
+
     /// Evaluate and tessellate a Part display target without evaluating any
     /// upstream node as a mesh.
     fn evaluate_part_display(&mut self, node_id: &str) -> Option<Mesh> {
         let node = self.request.nodes.iter().find(|node| node.id == node_id)?.clone();
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
+        let cache_is_fresh = node_cache_is_fresh(&node);
         let mesh_quality = nodecraft_mesh::display_tolerance();
         let cache_key = (format!("{node_id}@q{mesh_quality:.6}"), node_key);
-        if let Some(mesh) = self.cache.mesh(&cache_key) {
+        if cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+            self.cache_hits += 1;
+            self.cache.failure_hits += 1;
+            self.errors.insert(node_id.into(), error);
+            if let Some(source) = bypass_source(&node, &self.request.connections)
+                && let Some(mesh) = self.evaluate(&source)
+            {
+                self.bypassed.insert(node_id.into());
+                self.objects.insert(node_id.into(), mesh.clone());
+                return Some(mesh);
+            }
+            return None;
+        }
+        if cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
             self.cache_hits += 1;
             self.objects.insert(node_id.into(), mesh.clone());
             self.order.push(node_id.into());
@@ -3200,20 +3248,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         match result {
             Ok(mesh) => {
                 self.objects.insert(node_id.into(), mesh.clone());
-                self.cache.insert_mesh(cache_key, mesh.clone());
+                self.cache_mesh_result(node_id, cache_key, &mesh);
                 self.order.push(node_id.into());
                 self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
                 self.emit_progress(node_id, ProgressPhase::Complete);
                 Some(mesh)
             }
             Err(error) => {
+                self.cache.insert_failure(cache_key.clone(), error.clone());
+                self.cache.remove_mesh(&cache_key);
                 self.errors.insert(node_id.into(), error);
                 if let Some(source) = bypass_source(&node, &self.request.connections)
                     && let Some(mesh) = self.evaluate(&source)
                 {
                     self.bypassed.insert(node_id.into());
                     self.objects.insert(node_id.into(), mesh.clone());
-                    self.cache.insert_mesh(cache_key, mesh.clone());
                     self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
                     self.emit_progress(node_id, ProgressPhase::Complete);
                     return Some(mesh);
@@ -3229,7 +3278,8 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     fn evaluate_part_only(&mut self, node_id: &str) {
         let node = self.request.nodes.iter().find(|node| node.id == node_id);
         let key = node.and_then(|node| node.cache.as_ref()?.key.clone()).unwrap_or_default();
-        if self.cache.part(&(node_id.to_owned(), key)).is_some() {
+        let cache_is_fresh = node.is_some_and(node_cache_is_fresh);
+        if cache_is_fresh && self.cache.part(&(node_id.to_owned(), key)).is_some() {
             self.cache.parts_hits += 1;
             self.cache_hits += 1;
             return;
@@ -3390,7 +3440,24 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let cache_key = (format!("{node_id}@q{mesh_quality:.6}"), node_key.clone());
         // A dirty node must be recomputed even if its old cache key is still present
         // (for example after "re-evaluate graph" / render all).
-        let cache_is_fresh = node.cache.as_ref().and_then(|cache| cache.state.as_deref()) != Some("dirty");
+        let cache_is_fresh = node_cache_is_fresh(&node);
+        if cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+            self.cache_hits += 1;
+            self.cache.failure_hits += 1;
+            self.errors.insert(node_id.into(), error);
+            if let Some(source) = bypass_source(&node, &self.request.connections)
+                && let Some(mesh) = self.evaluate(&source)
+            {
+                self.bypassed.insert(node_id.into());
+                self.objects.insert(node_id.into(), mesh.clone());
+                self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+                self.visiting.pop();
+                return Some(mesh);
+            }
+            self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
+            self.visiting.pop();
+            return None;
+        }
         if cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
             self.cache_hits += 1;
             self.visiting.pop();
@@ -3405,24 +3472,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
             return Some(mesh);
         }
-        if cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
-            self.cache_hits += 1;
-            self.cache.failure_hits += 1;
-            self.errors.insert(node_id.into(), error);
-            if let Some(source) = bypass_source(&node, &self.request.connections)
-                && let Some(mesh) = self.evaluate(&source)
-            {
-                self.bypassed.insert(node_id.into());
-                self.objects.insert(node_id.into(), mesh.clone());
-                self.cache.insert_mesh(cache_key, mesh.clone());
-                self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
-                self.visiting.pop();
-                return Some(mesh);
-            }
-            self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
-            self.visiting.pop();
-            return None;
-        }
         self.cache_misses += 1;
         // Supported modeling nodes have exactly one semantic implementation:
         // evaluate_part. The mesh path is now only an adapter for legacy/preview
@@ -3435,7 +3484,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         {
             self.emit_progress(node_id, ProgressPhase::Start);
             self.objects.insert(node_id.into(), mesh.clone());
-            self.cache.insert_mesh(cache_key, mesh.clone());
+            self.cache_mesh_result(node_id, cache_key, &mesh);
             self.order.push(node_id.into());
             self.emit_progress(node_id, ProgressPhase::Complete);
             self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
@@ -3467,7 +3516,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let key = import_cache_key(path);
                     let default_quality = (nodecraft_mesh::display_tolerance()
                         - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs() < 1.0e-9;
-                    if default_quality && let Some(import) = self.cache.import(&key) {
+                    if default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
                         self.cache.import_hits += 1;
                         self.step_diagnostics.insert(node_id.into(), import.diagnostics.clone());
                         Ok(import.mesh.clone())
@@ -4032,13 +4081,15 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let result = match mesh {
             Ok(mesh) => {
                 self.order.push(node_id.into());
-                self.cache.remove_failure(&cache_key);
-                self.cache.insert_mesh(cache_key, mesh.clone());
+                self.cache_mesh_result(node_id, cache_key, &mesh);
                 self.objects.insert(node_id.into(), mesh.clone());
                 Some(mesh)
             }
             Err(error) => {
-                if node.node_type != "exporter" { self.cache.insert_failure(cache_key, error.clone()); }
+                if node.node_type != "exporter" {
+                    self.cache.insert_failure(cache_key.clone(), error.clone());
+                }
+                self.cache.remove_mesh(&cache_key);
                 self.errors.insert(node_id.into(), error);
                 None
             }
@@ -4306,28 +4357,35 @@ pub fn evaluate(
             // Skip the kernel difference when the display payloads already prove
             // there is no material change. This also avoids coincident-solid
             // booleans for pass-through features.
-            let before = mesh_payloads.get(&targets[0])?.mesh.clone();
-            let after = mesh_payloads.get(&targets[1])?.mesh.clone();
-            let before_volume = comparison::mesh_volume(&before);
-            let after_volume = comparison::mesh_volume(&after);
+            let before_display = mesh_payloads.get(&targets[0])?.mesh.clone();
+            let after_display = mesh_payloads.get(&targets[1])?.mesh.clone();
+            let before_volume = comparison::mesh_volume(&before_display);
+            let after_volume = comparison::mesh_volume(&after_display);
             if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
                 return None;
             }
             let before = eval.evaluate_part(&targets[0]).ok()?;
             let after = eval.evaluate_part(&targets[1]).ok()?;
-            Some(compare_parts(&before, &after))
+            Some((compare_parts(&before, &after), before_display, after_display))
         })
-        .map(|difference| match difference {
+        .map(|(difference, before_mesh, after_mesh)| match difference {
             Ok(difference) => nodecraft_protocol::ComparisonPayload {
                 added: difference.added,
                 removed: difference.removed,
                 error: None,
             },
-            Err(error) => nodecraft_protocol::ComparisonPayload {
-                added: Default::default(),
-                removed: Default::default(),
-                error: Some(error),
-            },
+            Err(error) => {
+                // The exact surface intersection is not ported for every
+                // curved interface. Keep the feature ghost useful by falling
+                // back to a display-surface difference, while reporting that it
+                // is approximate.
+                let approximate = comparison::surface_difference(&before_mesh, &after_mesh);
+                nodecraft_protocol::ComparisonPayload {
+                    added: approximate.added,
+                    removed: approximate.removed,
+                    error: Some(format!("exact difference unavailable: {error}")),
+                }
+            }
         });
     let response = Response {
         request_id,
@@ -4774,6 +4832,60 @@ mod tests {
     }
 
     #[test]
+    fn g2_fillet_comparison_stays_on_the_fillet_area() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 998,
+            "targets": ["fillet", "solid"],
+            "meshTargets": ["fillet", "solid"],
+            "comparisonTargets": ["solid", "fillet"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "solid", "type": "solid", "values": {"height": 100.0, "primitiveType": "cylinder"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "G2", "length": 19.2, "edges": [{"center": [-20.0, 2.4492935992912173e-15, 50.0], "id": "edge:2"}]}}
+            ],
+            "connections": [{"from": "solid", "to": "fillet", "in": "shape", "out": "shape"}]
+        })).expect("g2 fillet comparison json");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let comparison = output.response.comparison.expect("g2 comparison payload");
+        assert!(
+            !comparison.removed.faces.is_empty() || !comparison.added.faces.is_empty(),
+            "g2 comparison has no ghost geometry: {:?}",
+            comparison.error
+        );
+        let min_z = comparison
+            .removed
+            .vertices
+            .iter()
+            .map(|vertex| vertex[2])
+            .fold(f32::INFINITY, f32::min);
+        assert!(min_z > 1.0, "ghost covers the whole cylinder: min z {min_z}");
+    }
+
+    #[test]
+    fn failed_node_stays_failed_when_its_bypass_mesh_is_reused() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 993,
+            "targets": ["fillet"],
+            "meshTargets": ["fillet"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}},
+                {"id": "fillet", "type": "fillet", "values": {"length": 2.0, "edges": [{"ordinal": 99}]}}
+            ],
+            "connections": [{"from": "box", "to": "fillet", "in": "shape", "out": "shape"}]
+        })).expect("failed fillet json");
+        let first = evaluate(request.clone(), EngineCache::new(), None);
+        assert!(first.response.node_errors.contains_key("fillet"), "{:?}", first.response.node_errors);
+        let second = evaluate(request, first.cache, None);
+        assert!(
+            second.response.node_errors.contains_key("fillet"),
+            "failed node lost its error on a cached evaluation: {:?}",
+            second.response.node_errors
+        );
+    }
+
+    #[test]
     fn cylinders_two_edge_fillet_evaluates() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 411,
@@ -5033,6 +5145,67 @@ mod tests {
                 assert!(from_start < to_start, "downstream {to} started before upstream {from}");
             }
         }
+    }
+
+    #[test]
+    fn dirty_part_display_bypasses_cache_even_with_the_same_key() {
+        fn request(length: f64, dirty: bool) -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["a"],
+                "meshTargets": ["a"],
+                "binaryMesh": false,
+                "nodes": [{
+                    "id": "a",
+                    "type": "primitive",
+                    "values": {"primitiveType": "box", "length": length, "width": 10.0, "height": 10.0},
+                    "cache": {"key": "same-key", "state": if dirty { "dirty" } else { "cached" }}
+                }],
+                "connections": []
+            })).expect("part display request")
+        }
+        let (first, cache, _) = respond_with_progress(request(10.0, true), EngineCache::new(), None);
+        let (_, first_max) = bounds(&first.meshes["a"].mesh);
+        assert!((first_max[0] - 5.0).abs() < 1.0e-3, "{first_max:?}");
+        let (second, cache, _) = respond_with_progress(request(20.0, true), cache, None);
+        let (_, second_max) = bounds(&second.meshes["a"].mesh);
+        assert!(
+            (second_max[0] - 10.0).abs() < 1.0e-3,
+            "dirty display target reused the old cached mesh: {second_max:?}"
+        );
+        let (third, _cache, _) = respond_with_progress(request(20.0, false), cache, None);
+        let (_, third_max) = bounds(&third.meshes["a"].mesh);
+        assert!((third_max[0] - 10.0).abs() < 1.0e-3, "{third_max:?}");
+    }
+
+    #[test]
+    fn dirty_boolean_operand_bypasses_the_brep_cache() {
+        fn request(length: f64, dirty: bool) -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["u"],
+                "meshTargets": ["u"],
+                "binaryMesh": false,
+                "nodes": [
+                    {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": length, "width": 10.0, "height": 10.0}, "cache": {"key": "same-key", "state": if dirty { "dirty" } else { "cached" }}},
+                    {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "b-key", "state": "cached"}},
+                    {"id": "u", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u-key", "state": if dirty { "dirty" } else { "cached" }}}
+                ],
+                "connections": [
+                    {"from": "a", "to": "u", "in": "a", "out": "shape"},
+                    {"from": "b", "to": "u", "in": "b", "out": "shape"}
+                ]
+            })).expect("boolean request")
+        }
+        let (first, cache, _) = respond_with_progress(request(10.0, true), EngineCache::new(), None);
+        let (_, first_max) = bounds(&first.meshes["u"].mesh);
+        assert!((first_max[0] - 5.0).abs() < 1.0e-3, "{first_max:?}");
+        let (second, _cache, _) = respond_with_progress(request(20.0, true), cache, None);
+        let (_, second_max) = bounds(&second.meshes["u"].mesh);
+        assert!(
+            (second_max[0] - 10.0).abs() < 1.0e-3,
+            "dirty Boolean operand reused the old B-rep: {second_max:?}"
+        );
     }
 
     #[test]
@@ -6816,6 +6989,66 @@ mod tests {
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
         assert!((max_z - min_z - 20.0).abs() < 0.05, "edited loft height {}..{}", min_z, max_z);
+    }
+
+    #[test]
+    fn zero_extrude_amount_is_rejected() {
+        let mut sketch = crate::sketch::Sketch::new();
+        sketch
+            .add_circle(solidcore_record_new::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
+            .unwrap();
+        let error = sketch_extrude_brep(&SketchOutput::new(sketch), 0.0).expect_err("zero amount");
+        assert!(error.contains("greater than zero"), "{error}");
+    }
+
+    #[test]
+    fn extrude_consumes_a_circle_sketch_profile() {
+        let mut sketch = crate::sketch::Sketch::new();
+        sketch
+            .add_circle(solidcore_record_new::Vec2::new(1.0, 1.0), 33.18108250839226, None, None)
+            .unwrap();
+        let brep = sketch_extrude_brep(&SketchOutput::new(sketch), 20.0)
+            .expect("circle extrude brep");
+        assert!(!brep.faces().ids().collect::<Vec<_>>().is_empty(), "circle extrude has no faces");
+    }
+
+    #[test]
+    fn circle_extrude_geometry_is_a_cylinder() {
+        let mut sketch = crate::sketch::Sketch::new();
+        sketch
+            .add_circle(solidcore_record_new::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
+            .unwrap();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["extrude"],
+            "meshTargets": ["extrude"],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": {"sketch": serde_json::to_value(&sketch).unwrap()}, "cache": {"key": "sketch"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 6.7, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [{"from": "sketch", "to": "extrude", "in": "profile", "out": "sketch"}]
+        })).expect("request");
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let mesh = output.response.meshes.get("extrude").expect("extrude mesh");
+        let volume = mesh_signed_volume(&mesh.mesh);
+        let expected = std::f64::consts::PI * 51.960239979110156_f64.powi(2) * 6.7;
+        let (min, max) = nodecraft_kernel::bounds(&mesh.mesh).expect("bounds");
+        let mut side_radial_error = 0.0_f64;
+        for vertex in &mesh.mesh.vertices {
+            if vertex[2] > 1.0e-4 && vertex[2] < 6.7 - 1.0e-4 {
+                let dx = f64::from(vertex[0]) + 1.0;
+                let dy = f64::from(vertex[1]);
+                side_radial_error = side_radial_error.max(
+                    ((dx * dx + dy * dy).sqrt() - 51.960239979110156).abs(),
+                );
+            }
+        }
+        assert!((volume - expected).abs() / expected < 0.02, "volume {volume} expected {expected}");
+        assert!(side_radial_error < 1.0e-3, "side radius error {side_radial_error}");
+        assert!((min[0] + 52.960239979110156).abs() < 0.1, "{min:?}");
+        assert!((max[0] - 50.960239979110156).abs() < 0.1, "{max:?}");
+        assert!(min[2].abs() < 0.1 && (max[2] - 6.7).abs() < 0.1, "{min:?} {max:?}");
     }
 
     #[test]

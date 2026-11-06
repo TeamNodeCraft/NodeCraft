@@ -36,6 +36,13 @@ pub struct NodeDescriptor {
     pub output: ValueKind,
     pub exact: bool,
     pub mesh: bool,
+    /// Input port whose result is shown as a ghost under this node's result
+    /// while the node is selected. This is a display capability, independent of
+    /// topology selection.
+    pub preview_input: Option<&'static str>,
+    /// Value field that must be non-empty for the preview to apply. Fillet and
+    /// Chamfer use `edges`: an empty edge selection has no feature to ghost.
+    pub preview_requires_value: Option<&'static str>,
 }
 
 const GEOMETRY: &[PortSpec] = &[PortSpec { name: "shape", kind: ValueKind::Geometry, required: true }];
@@ -49,6 +56,30 @@ macro_rules! descriptor {
             output: $output,
             exact: $exact,
             mesh: $mesh,
+            preview_input: None,
+            preview_requires_value: None,
+        }
+    };
+}
+
+macro_rules! descriptor_with_preview {
+    (
+        $name:literal,
+        $inputs:expr,
+        $output:expr,
+        $exact:literal,
+        $mesh:literal,
+        $preview:literal,
+        $requires:literal
+    ) => {
+        NodeDescriptor {
+            node_type: $name,
+            inputs: $inputs,
+            output: $output,
+            exact: $exact,
+            mesh: $mesh,
+            preview_input: Some($preview),
+            preview_requires_value: Some($requires),
         }
     };
 }
@@ -80,8 +111,8 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
         true,
         true
     ),
-    descriptor!("chamfer", GEOMETRY, ValueKind::Geometry, true, true),
-    descriptor!("fillet", GEOMETRY, ValueKind::Geometry, true, true),
+    descriptor_with_preview!("chamfer", GEOMETRY, ValueKind::Geometry, true, true, "shape", "edges"),
+    descriptor_with_preview!("fillet", GEOMETRY, ValueKind::Geometry, true, true, "shape", "edges"),
     descriptor!("look", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("shell", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("offsetfaces", GEOMETRY, ValueKind::Geometry, true, true),
@@ -128,6 +159,31 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
 #[must_use]
 pub fn descriptor(node_type: &str) -> Option<&'static NodeDescriptor> {
     DESCRIPTORS.iter().find(|descriptor| descriptor.node_type == node_type)
+}
+
+/// The input port whose mesh is ghosted under a selected node's result.
+#[must_use]
+pub fn preview_input(node_type: &str) -> Option<&'static str> {
+    descriptor(node_type)?.preview_input
+}
+
+/// The preview input port, if the node currently has the values that make its
+/// preview meaningful. An empty edge selection means there is no feature to
+/// ghost, regardless of the descriptor capability.
+#[must_use]
+pub fn preview_input_if_active(node_type: &str, values: &serde_json::Value) -> Option<&'static str> {
+    let descriptor = descriptor(node_type)?;
+    let input = descriptor.preview_input?;
+    if let Some(field) = descriptor.preview_requires_value {
+        let active = values
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| !items.is_empty());
+        if !active {
+            return None;
+        }
+    }
+    Some(input)
 }
 
 pub fn descriptors() -> impl Iterator<Item = &'static NodeDescriptor> {
@@ -281,6 +337,30 @@ mod tests {
 
     fn link(from: &str, to: &str, input: &str) -> Connection {
         Connection { from: from.into(), to: to.into(), input: input.into(), out: "shape".into() }
+    }
+
+    #[test]
+    fn preview_inputs_are_declared_by_feature_descriptors() {
+        assert_eq!(preview_input("fillet"), Some("shape"));
+        assert_eq!(preview_input("chamfer"), Some("shape"));
+        assert_eq!(preview_input("translate"), None);
+        assert_eq!(
+            preview_input_if_active("fillet", &serde_json::json!({"edges": []})),
+            None
+        );
+        assert_eq!(
+            preview_input_if_active("fillet", &serde_json::json!({"edges": [{"id": "edge:0"}]})),
+            Some("shape")
+        );
+        // Every declared preview port must exist on the same descriptor.
+        for descriptor in descriptors() {
+            let Some(port) = descriptor.preview_input else { continue };
+            assert!(
+                descriptor.inputs.iter().any(|input| input.name == port),
+                "{} previews missing input {port}",
+                descriptor.node_type
+            );
+        }
     }
 
     #[test]

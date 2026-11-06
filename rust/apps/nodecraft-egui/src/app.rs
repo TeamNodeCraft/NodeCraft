@@ -74,6 +74,7 @@ pub(crate) fn tool_dock_style(theme: &crate::theme::Theme) -> DockStyle {
         text: theme.color(theme.text),
         icon: theme.color(theme.icon),
         icon_hover: theme.color(theme.icon_hover),
+        active_icon: egui::Color32::WHITE,
         shadow: egui::Color32::from_black_alpha(120),
     }
 }
@@ -743,6 +744,67 @@ struct PendingDialogState {
     status_before: String,
 }
 
+/// Identity of one evaluation request. The session generation distinguishes a
+/// replacement graph from the old result even when every graph-level field matches.
+type EvalKey = (
+    u64,
+    String,
+    u64,
+    Option<String>,
+    Option<(String, String)>,
+    Option<String>,
+    Vec<String>,
+    bool,
+);
+
+fn eval_key(
+    session_generation: u64,
+    document_id: &str,
+    revision: u64,
+    selection: &Option<String>,
+    comparison: &Option<(String, String)>,
+    ghost_input: &Option<String>,
+    validation_targets: &[String],
+    run_exporters: bool,
+) -> EvalKey {
+    (
+        session_generation,
+        document_id.to_owned(),
+        revision,
+        selection.clone(),
+        comparison.clone(),
+        ghost_input.clone(),
+        validation_targets.to_vec(),
+        run_exporters,
+    )
+}
+
+/// The before/after pair for the selected feature. The viewport chooses whether
+/// to use the selected result as the base or overlay its difference on the
+/// viewed breakpoint's body.
+fn comparison_for_selection(
+    document: &GraphDocument,
+    selected: Option<&str>,
+    feature_overlay: bool,
+) -> Option<(String, String)> {
+    if !feature_overlay {
+        return None;
+    }
+    NodeCraftApp::comparison_pair_for(document, selected?)
+}
+
+
+/// The upstream input mesh to ghost under a selected feature's result.
+fn feature_ghost_input(document: &GraphDocument, selected: &str) -> Option<String> {
+    let node = document.nodes.iter().find(|node| node.id == selected)?;
+    let port = nodecraft_node_contract::preview_input_if_active(&node.node_type, &node.values)?;
+    document
+        .connections
+        .iter()
+        .find(|link| link.to == node.id && link.input == port)
+        .map(|link| link.from.clone())
+}
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     active_session_revision: u64,
@@ -763,6 +825,11 @@ pub struct NodeCraftApp {
     /// this is the explicit topology source for the active selection session.
     eval_target: Option<String>,
     comparison_pair: Option<(String, String)>,
+    /// Display-only input ghost for the selected feature.
+    preview_ghost: Option<String>,
+    /// Selected nodes outside the viewed closure that are evaluated for error
+    /// glow even though they do not contribute to the displayed mesh.
+    validation_selection: Option<Vec<String>>,
     difference_stats: Option<(usize, usize)>,
     node_errors: HashSet<String>,
     difference_error: Option<String>,
@@ -775,7 +842,11 @@ pub struct NodeCraftApp {
     eval_worker: EvalWorker,
     eval_next: u64,
     eval_pending: Option<u64>,
-    last_eval_key: Option<(String, u64, Option<String>, Option<(String, String)>, bool)>,
+    /// Bumped whenever the active session is installed. The evaluation cache is
+    /// keyed by this too, so a replacement graph that happens to share the old
+    /// document id, revision and target cannot be mistaken for the old result.
+    session_generation: u64,
+    last_eval_key: Option<EvalKey>,
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
@@ -849,6 +920,8 @@ pub struct NodeCraftApp {
     tool_dock_offset_y: f32,
     tool_dock_measured_height: f32,
     sketch_gui: SketchGui,
+    /// The sketch node whose 2D editor is open; node values stay authoritative.
+    editing_sketch: Option<String>,
     control_requests: Receiver<control_server::Request>,
     last_pointer: Option<egui::Pos2>,
 }
@@ -897,6 +970,18 @@ fn hide_settings_zoom_button() {
             }
         }
     }
+}
+
+/// Whether the next mesh result should keep the current camera. A target change
+/// normally refits, but entering/leaving a topology selection explicitly asks to
+/// preserve the view so the inspector edit does not move the 3D viewport.
+fn mesh_preserves_camera(
+    camera_initialized: bool,
+    had_mesh: bool,
+    same_target: bool,
+    requested: bool,
+) -> bool {
+    requested || (camera_initialized && had_mesh && same_target)
 }
 
 impl NodeCraftApp {
@@ -973,6 +1058,8 @@ impl NodeCraftApp {
             face_pick_target: None,
             eval_target: None,
             comparison_pair: None,
+            preview_ghost: None,
+            validation_selection: None,
             difference_stats: None,
             node_errors: HashSet::new(),
             difference_error: None,
@@ -985,6 +1072,7 @@ impl NodeCraftApp {
             eval_worker: EvalWorker::new(),
             eval_next: 0,
             eval_pending: None,
+            session_generation: 0,
             last_eval_key: None,
             eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
@@ -1050,6 +1138,7 @@ impl NodeCraftApp {
             tool_dock_offset_y: settings.tool_dock_offset_y,
             tool_dock_measured_height: 0.0,
             sketch_gui: SketchGui::default(),
+            editing_sketch: None,
             control_requests: control_server::start(cc.egui_ctx.clone()),
             last_pointer: None,
         };
@@ -1325,11 +1414,11 @@ impl NodeCraftApp {
         let cache_misses = tab.cache_misses;
         let camera = tab.camera;
         let Some(session) = self.documents.session(&document_id).cloned() else {
-            self.session = None;
+            self.install_session(None);
             return;
         };
         self.active_session_revision = session.revision();
-        self.session = Some(session);
+        self.install_session(Some(session));
         self.path = path;
         self.selected_nodes = selected_nodes;
         self.selected_connections = selected_connections;
@@ -1644,7 +1733,7 @@ impl NodeCraftApp {
             self.documents.remove(&removed.document_id);
         }
         if self.tabs.is_empty() {
-            self.session = None;
+            self.install_session(None);
             self.path = None;
             self.selected_nodes.clear();
             self.selected_connections.clear();
@@ -1666,7 +1755,7 @@ impl NodeCraftApp {
             .into_iter()
             .collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
-        self.session = Some(session.clone());
+        self.install_session(Some(session.clone()));
         self.pending_dirty.clear();
         self.eval_progress = None;
         self.path = None;
@@ -1733,9 +1822,14 @@ impl NodeCraftApp {
         }
     }
 
+    /// Install the active session. Every install is a new evaluation identity.
+    fn install_session(&mut self, session: Option<Session>) {
+        self.session_generation = self.session_generation.wrapping_add(1);
+        self.session = session;
+    }
+
     fn open_session(&mut self, session: Session, path: Option<PathBuf>, status: String) {
         self.save_active_tab();
-        self.last_eval_key = None;
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
         let document_id = match &path {
@@ -1772,7 +1866,7 @@ impl NodeCraftApp {
         self.tabs.push(tab);
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.active_session_revision = session.revision();
-        self.session = Some(session);
+        self.install_session(Some(session));
         self.pending_dirty.clear();
         self.eval_progress = None;
         self.path = path;
@@ -3387,6 +3481,7 @@ impl NodeCraftApp {
             self.comparison_pair = None;
             self.viewport.set_edge_picking_enabled(false);
             self.sync_comparison_target();
+            self.preserve_view_for_next_mesh = true;
             self.evaluate();
             return true;
         }
@@ -3402,6 +3497,9 @@ impl NodeCraftApp {
         self.comparison_pair = None;
         self.viewport.clear_edge_selection();
         self.refresh_topology_picking();
+        // Entering a face/edge pick shows the feature's input body. Keep the
+        // camera where the user left it instead of refitting to that body.
+        self.preserve_view_for_next_mesh = true;
         self.evaluate();
         true
     }
@@ -3414,6 +3512,7 @@ impl NodeCraftApp {
         self.face_pick_target = None;
         self.comparison_pair = None;
         self.sync_comparison_target();
+        self.preserve_view_for_next_mesh = true;
         self.evaluate();
         self.egui_ctx.request_repaint();
     }
@@ -3563,16 +3662,61 @@ impl NodeCraftApp {
     }
 
     fn sync_comparison_target(&mut self) {
-        let desired = if self.feature_overlay && self.selected_nodes.len() == 1 {
+        let mut changed = false;
+        let desired = if self.selected_nodes.len() == 1 {
             let selected = self.selected_nodes.iter().next().cloned();
             self.session.as_ref().and_then(|session| {
-                Self::comparison_pair_for(session.document(), selected.as_deref()?)
+                comparison_for_selection(
+                    session.document(),
+                    selected.as_deref(),
+                    self.feature_overlay,
+                )
             })
         } else {
             None
         };
         if desired != self.comparison_pair {
             self.comparison_pair = desired;
+            changed = true;
+        }
+        let preview_ghost = if self.selected_nodes.len() == 1
+            && self.face_pick_target.is_none()
+            && self.feature_overlay
+        {
+            self.selected_nodes.iter().next().and_then(|selected| {
+                self.session
+                    .as_ref()
+                    .and_then(|session| feature_ghost_input(session.document(), selected))
+            })
+        } else {
+            None
+        };
+        if preview_ghost != self.preview_ghost {
+            self.preview_ghost = preview_ghost;
+            changed = true;
+        }
+        let validation_selection = self.session.as_ref().map(|session| {
+            let document = session.document();
+            let closure = engine_bridge::target_for(
+                document,
+                self.viewer_breakpoint.as_deref(),
+            )
+            .map(|target| target_closure(document, &target))
+            .unwrap_or_default();
+            let mut selected: Vec<String> = self
+                .selected_nodes
+                .iter()
+                .filter(|id| !closure.contains(*id))
+                .cloned()
+                .collect();
+            selected.sort();
+            selected
+        });
+        if validation_selection != self.validation_selection {
+            self.validation_selection = validation_selection;
+            changed = true;
+        }
+        if changed {
             self.viewport
                 .set_mesh_preserving_camera(self.mesh.as_ref());
             self.evaluate();
@@ -3645,39 +3789,53 @@ impl NodeCraftApp {
             .face_pick_target
             .clone()
             .or_else(|| self.viewer_breakpoint.clone());
-        let comparison = (self.feature_overlay && self.selected_nodes.len() == 1)
-            .then(|| {
-                let selected = self.selected_nodes.iter().next()?;
-                Self::comparison_pair_for(session.document(), selected)
-            })
-            .flatten();
-        if !self.pending_dirty.is_empty() {
-            let target = engine_bridge::target_for(session.document(), evaluation_selection.as_deref());
-            let affected = target.as_deref().is_some_and(|target| {
-                let closure = target_closure(session.document(), target);
-                self.pending_dirty.iter().any(|id| closure.contains(id))
-            }) || comparison.as_ref().is_some_and(|(before, after)| {
-                [before, after].iter().any(|id| {
-                    target_closure(session.document(), id)
-                        .iter()
-                        .any(|candidate| self.pending_dirty.contains(candidate))
-                })
-            });
-            self.pending_dirty.clear();
-            if !affected {
-                self.status = "Graph updated; view is unchanged".to_owned();
-                self.eval_progress = None;
-                return;
-            }
-        }
+        let comparison = if self.selected_nodes.len() == 1 {
+            let selected = self.selected_nodes.iter().next().map(String::as_str);
+            comparison_for_selection(session.document(), selected, self.feature_overlay)
+        } else {
+            None
+        };
+        let ghost_input = if self.face_pick_target.is_none()
+            && self.feature_overlay
+            && self.selected_nodes.len() == 1
+        {
+            self.selected_nodes
+                .iter()
+                .next()
+                .and_then(|selected| feature_ghost_input(session.document(), selected))
+        } else {
+            None
+        };
+        let dirty_nodes = self.pending_dirty.clone();
+        self.pending_dirty.clear();
+        // A selected node outside the viewed target closure is evaluated as an
+        // extra validation target. It contributes node_errors (and therefore the
+        // canvas error glow) without changing the displayed mesh or breakpoint.
+        let viewed_closure = engine_bridge::target_for(
+            session.document(),
+            evaluation_selection.as_deref(),
+        )
+        .map(|target| target_closure(session.document(), &target))
+        .unwrap_or_default();
+        let mut validation_targets: Vec<String> = self
+            .selected_nodes
+            .iter()
+            .filter(|id| !viewed_closure.contains(*id))
+            .cloned()
+            .collect();
+        validation_targets.sort();
+        validation_targets.dedup();
         // Sync helpers can run every frame. Evaluation is a pure function of the
         // graph revision, viewed target and comparison pair; skip identical work
         // before allocating a new pending id.
-        let key = (
-            session.document().id.clone(),
+        let key = eval_key(
+            self.session_generation,
+            &session.document().id,
             session.revision(),
-            evaluation_selection.clone(),
-            comparison.clone(),
+            &evaluation_selection,
+            &comparison,
+            &ghost_input,
+            &validation_targets,
             run_exporters,
         );
         if !clear_cache && self.last_eval_key.as_ref() == Some(&key) {
@@ -3710,8 +3868,11 @@ impl NodeCraftApp {
             document: session.document().clone(),
             selected: evaluation_selection,
             comparison,
+            ghost_input,
+            validation_targets,
             clear_cache,
             run_exporters,
+            dirty_nodes,
             token: nodecraft_engine::kernel_pool::RevisionToken::new(),
         });
         self.egui_ctx.request_repaint();
@@ -3752,6 +3913,7 @@ impl NodeCraftApp {
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
         let mut show_view_matrix = self.viewport.show_view_matrix();
+        let mut show_gpu_info = self.viewport.show_gpu_info();
         let mut engine_threads = self.engine_threads;
         let mut mesher_threads = self.mesher_threads;
         let mut workload_profiler = self.workload_profiler;
@@ -4197,6 +4359,10 @@ impl NodeCraftApp {
                             &mut show_view_matrix,
                             "Show view matrix / camera debug",
                         );
+                        content.checkbox(
+                            &mut show_gpu_info,
+                            "Show GPU / frame debug",
+                        );
                         content.add_space(8.0);
                         content.heading("Node activity glow");
                         content.small(
@@ -4244,6 +4410,7 @@ impl NodeCraftApp {
             self.viewport.set_view(view);
         }
         self.viewport.set_show_view_matrix(show_view_matrix);
+        self.viewport.set_show_gpu_info(show_gpu_info);
         if cable_routing != self.cable_routing {
             self.cable_routing = cable_routing;
             self.node_editor.set_cable_routing(cable_routing);
@@ -4377,8 +4544,12 @@ impl NodeCraftApp {
             // Preserve the camera for updates of the same viewed target (slider/edit),
             // but fit when the breakpoint/target changes so a sphere added to a large
             // graph is framed at its own position instead of the old assembly view.
-            let preserve = std::mem::take(&mut self.preserve_view_for_next_mesh)
-                || (self.camera_initialized && had_mesh && same_target);
+            let preserve = mesh_preserves_camera(
+                self.camera_initialized,
+                had_mesh,
+                same_target,
+                std::mem::take(&mut self.preserve_view_for_next_mesh),
+            );
             self.difference_stats = evaluation
                 .difference
                 .as_ref()
@@ -4388,24 +4559,51 @@ impl NodeCraftApp {
                 let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
                 let before = self.reframe_comparison(&selected, before);
                 let after = self.reframe_comparison(&selected, after);
-                if let Some((added, removed)) = &evaluation.difference {
+                let exact = evaluation.difference.as_ref().filter(|(added, removed)| {
+                    !added.faces.is_empty() || !removed.faces.is_empty()
+                });
+                if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
+                    if let Some((added, removed)) = exact {
+                        let added = self.reframe_comparison(&selected, added);
+                        let removed = self.reframe_comparison(&selected, removed);
+                        if let Some(base) = &self.mesh {
+                            self.viewport.set_exact_comparison_mesh(base, &added, &removed);
+                        } else {
+                            self.viewport
+                                .set_mesh_preserving_camera(self.mesh.as_ref());
+                        }
+                    } else if let Some(ghost) = &evaluation.ghost {
+                        // Exact feature difference unavailable: fall back to the
+                        // feature's input mesh as a faint ghost.
+                        if let Some(base) = &self.mesh {
+                            self.viewport.set_feature_ghost_mesh(base, ghost);
+                        } else {
+                            self.viewport
+                                .set_mesh_preserving_camera(self.mesh.as_ref());
+                        }
+                    } else {
+                        self.viewport
+                            .set_mesh_preserving_camera(self.mesh.as_ref());
+                    }
+                } else if let Some((added, removed)) = exact {
                     let added = self.reframe_comparison(&selected, added);
                     let removed = self.reframe_comparison(&selected, removed);
-                    if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                        self.viewport.set_exact_comparison_mesh(&after, &added, &removed);
-                    } else {
-                        self.viewport.set_selection_comparison_mesh(&after, &before, &added, &removed);
-                    }
+                    self.viewport.set_selection_comparison_mesh(&after, &before, &added, &removed);
                 } else {
-                    // Exact comparison unavailable: keep the original-mesh ghost.
                     let empty = Mesh::default();
-                    if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                        self.viewport.set_exact_comparison_mesh(&after, &empty, &before);
-                    } else {
-                        self.viewport.set_selection_comparison_mesh(&after, &before, &empty, &before);
-                    }
+                    self.viewport.set_selection_comparison_mesh(&after, &before, &empty, &before);
                 }
-                if !self.camera_initialized || !same_target {
+                if !preserve {
+                    self.viewport.fit();
+                    self.camera_initialized = true;
+                }
+            } else if let Some(ghost) = &evaluation.ghost {
+                if let Some(base) = &self.mesh {
+                    self.viewport.set_feature_ghost_mesh(base, ghost);
+                } else {
+                    self.viewport.set_mesh_preserving_camera(None);
+                }
+                if !preserve {
                     self.viewport.fit();
                     self.camera_initialized = true;
                 }
@@ -4460,8 +4658,13 @@ impl NodeCraftApp {
                 .max(Instant::now() + std::time::Duration::from_millis(500));
             self.status = if self.error.is_none() {
                 format!(
-                    "Evaluated {} in {:.1} ms ({} cache hits, {} misses)",
-                    evaluation.target, self.evaluation_ms, self.cache_hits, self.cache_misses
+                    "Evaluated {} in {:.1} ms — kernel {:.1} ms, mesh {:.1} ms ({} cache hits, {} misses)",
+                    evaluation.target,
+                    self.evaluation_ms,
+                    evaluation.kernel_ms,
+                    evaluation.mesh_ms,
+                    self.cache_hits,
+                    self.cache_misses
                 )
             } else {
                 format!("Evaluation failed in {:.1} ms", self.evaluation_ms)
@@ -4645,6 +4848,7 @@ impl NodeCraftApp {
                         "differenceFaces": self.difference_stats,
                         "differenceError": self.difference_error,
                         "errors": self.error,
+                        "nodeErrors": self.node_errors,
                         "status": self.status,
                         "mesh": self.mesh.as_ref().map(|mesh| serde_json::json!({
                             "vertices": mesh.vertices.len(),
@@ -4881,6 +5085,7 @@ impl eframe::App for NodeCraftApp {
             self.duplicate_selected_nodes();
         }
         if !typing
+            && self.editing_sketch.is_none()
             && (!self.selected_nodes.is_empty() || !self.selected_connections.is_empty())
             && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         {
@@ -5343,6 +5548,11 @@ impl eframe::App for NodeCraftApp {
         } else {
             None
         };
+        if let Some(editing) = &self.editing_sketch
+            && selected_node.as_ref().is_none_or(|node| node.id != *editing)
+        {
+            self.editing_sketch = None;
+        }
         let surface_sections: Vec<String> = selected_node
             .as_ref()
             .filter(|node| node.node_type == "surfaceloft")
@@ -5363,6 +5573,9 @@ impl eframe::App for NodeCraftApp {
             .as_ref()
             .filter(|node| node.node_type == "sketch")
             .cloned();
+        let sketch_editing = sketch_node
+            .as_ref()
+            .is_some_and(|node| self.editing_sketch.as_deref() == Some(node.id.as_str()));
         if let Some(node) = &sketch_node {
             self.sketch_gui.sync(&node.id, &node.values);
         }
@@ -5773,7 +5986,12 @@ impl eframe::App for NodeCraftApp {
                                         node,
                                         &surface_sections,
                                         active_selection.as_deref(),
+                                        self.editing_sketch.as_deref() == Some(node.id.as_str()),
                                     );
+                                    if sketch_editing {
+                                        self.sketch_gui.show_palette(ui);
+                                        ui.add_space(8.0);
+                                    }
                                     inspector::note(ui, node);
                                     ui.add_space(8.0);
                                     inspector::actions(ui, node, &mut output);
@@ -5813,6 +6031,15 @@ impl eframe::App for NodeCraftApp {
                     self.evaluate();
                 }
             } else {
+                if output.toggle_sketch_edit {
+                    if self.editing_sketch.as_deref() == Some(node.id.as_str()) {
+                        self.editing_sketch = None;
+                    } else {
+                        self.sketch_gui.sync(&node.id, &node.values);
+                        self.editing_sketch = Some(node.id.clone());
+                    }
+                    self.egui_ctx.request_repaint();
+                }
                 if let Some(field) = output.begin_selection.clone()
                     && self.begin_selection_session(&node.id, &field)
                 {
@@ -6129,17 +6356,19 @@ impl eframe::App for NodeCraftApp {
                 }
             }
         }
-        if sketch_node.is_some() {
-            let viewport = egui::Rect::from_min_max(
-                egui::Pos2::new(node_panel_rect.right() + 12.0, workspace_rect.top() + 12.0),
-                egui::Pos2::new(workspace_rect.right() - 12.0, workspace_rect.bottom() - 12.0),
-            );
+        let sketch_viewport = egui::Rect::from_min_max(
+            egui::Pos2::new(node_panel_rect.right() + 12.0, workspace_rect.top() + 12.0),
+            egui::Pos2::new(workspace_rect.right() - 12.0, workspace_rect.bottom() - 12.0),
+        );
+        if sketch_editing {
+            let blockers = self.viewport.interaction_blockers().to_vec();
             if let Some(value) = self.sketch_gui.show(
                 ui.ctx(),
                 viewport_rect,
-                viewport,
+                sketch_viewport,
                 &self.viewport.camera,
                 self.viewport.lens_shift(),
+                &blockers,
             ) {
                 if let Some(node) = &sketch_node {
                     if self.apply_commands(
@@ -6154,6 +6383,14 @@ impl eframe::App for NodeCraftApp {
                     }
                 }
             }
+        } else if sketch_node.is_some() {
+            self.sketch_gui.show_selection_preview(
+                ui.ctx(),
+                viewport_rect,
+                sketch_viewport,
+                &self.viewport.camera,
+                self.viewport.lens_shift(),
+            );
         }
         self.show_tool_dock(ui.ctx(), workspace_rect, tool_connect_source);
     }
@@ -6166,8 +6403,11 @@ struct EvalJob {
     document: GraphDocument,
     selected: Option<String>,
     comparison: Option<(String, String)>,
+    ghost_input: Option<String>,
+    validation_targets: Vec<String>,
     clear_cache: bool,
     run_exporters: bool,
+    dirty_nodes: std::collections::HashSet<String>,
     token: nodecraft_engine::kernel_pool::RevisionToken,
 }
 
@@ -6216,11 +6456,14 @@ impl EvalWorker {
                             mesh: None,
                             pre_merge: None,
                             comparison: None,
+                            ghost: None,
                             difference: None,
                             difference_error: None,
                             node_errors: Default::default(),
                             error: Some(error.to_string()),
                             elapsed_ms: 0.0,
+                            kernel_ms: 0.0,
+                            mesh_ms: 0.0,
                             cache_hits: 0,
                             cache_misses: 0,
                         });
@@ -6236,13 +6479,16 @@ impl EvalWorker {
                 };
                 let mut cache = state.cache;
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    engine_bridge::evaluate_flat_with_progress_comparison(
+                    engine_bridge::evaluate_flat_with_progress_comparison_dirty(
                         flat.document(),
                         target.clone().unwrap_or_default(),
                         cache,
                         Some(&mut on_progress),
                         job.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
                         job.run_exporters,
+                        &job.dirty_nodes,
+                        job.ghost_input.as_deref(),
+                        &job.validation_targets,
                     )
                 }));
                 let evaluation = match outcome {
@@ -6259,11 +6505,14 @@ impl EvalWorker {
                             mesh: None,
                             pre_merge: None,
                             comparison: None,
+                            ghost: None,
                             difference: None,
                             difference_error: None,
                             node_errors: Default::default(),
                             error: Some("Engine panicked while evaluating this target".into()),
                             elapsed_ms: 0.0,
+                            kernel_ms: 0.0,
+                            mesh_ms: 0.0,
                             cache_hits: 0,
                             cache_misses: 0,
                         })
@@ -7185,6 +7434,56 @@ mod tests {
     }
 
     #[test]
+    fn replaced_sessions_get_a_new_evaluation_identity() {
+        let selection = Some("extrude".to_owned());
+        let comparison = None;
+        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &[], false);
+        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &[], false);
+        assert_ne!(first, replacement, "a replaced session must not reuse the old result");
+    }
+
+
+    #[test]
+    fn selected_feature_previews_without_changing_the_breakpoint() {
+        let document: GraphDocument = serde_json::from_value(json!({
+            "nodes": [
+                {"id": "extrude", "type": "extrude", "values": {}, "x": 0.0, "y": 0.0},
+                {"id": "fillet", "type": "fillet", "values": {"edges": [{"id": "edge:0"}]}, "x": 0.0, "y": 0.0},
+                {"id": "fillet-copy1", "type": "fillet", "values": {"edges": [{"id": "edge:0"}]}, "x": 0.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "extrude", "to": "fillet", "in": "shape", "out": "shape"},
+                {"from": "fillet", "to": "fillet-copy1", "in": "shape", "out": "shape"}
+            ]
+        })).expect("comparison graph");
+
+        assert_eq!(
+            comparison_for_selection(&document, Some("fillet"), true),
+            Some(("extrude".to_owned(), "fillet".to_owned()))
+        );
+        assert_eq!(
+            feature_ghost_input(&document, "fillet"),
+            Some("extrude".to_owned())
+        );
+        assert_eq!(
+            feature_ghost_input(&document, "fillet-copy1"),
+            Some("fillet".to_owned())
+        );
+
+        let inactive: GraphDocument = serde_json::from_value(json!({
+            "nodes": [
+                {"id": "extrude", "type": "extrude", "values": {}, "x": 0.0, "y": 0.0},
+                {"id": "fillet", "type": "fillet", "values": {"edges": []}, "x": 0.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "extrude", "to": "fillet", "in": "shape", "out": "shape"}
+            ]
+        })).expect("inactive comparison graph");
+        assert_eq!(feature_ghost_input(&inactive, "fillet"), None);
+        assert_eq!(comparison_for_selection(&inactive, Some("fillet"), true), None);
+    }
+
+    #[test]
     fn menu_rows_keep_stable_metrics_across_states() {
         let mut style = egui::Style::default();
         crate::theme::menu_style(&mut style);
@@ -7825,6 +8124,16 @@ mod tests {
             );
             assert!(!placed.intersects(rect), "{} overlaps new node", node.id);
         }
+    }
+
+    #[test]
+    fn entering_a_topology_selection_keeps_the_viewport_camera() {
+        // Same target: always preserve; different target: only when the selection
+        // transition asked for it.
+        assert!(mesh_preserves_camera(true, true, true, false));
+        assert!(!mesh_preserves_camera(true, true, false, false));
+        assert!(mesh_preserves_camera(true, true, false, true));
+        assert!(mesh_preserves_camera(false, false, false, true));
     }
 
     #[test]

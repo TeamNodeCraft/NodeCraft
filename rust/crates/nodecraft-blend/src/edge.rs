@@ -97,6 +97,11 @@ pub fn select_edge_by_midpoint(
     brep: &Brep,
     point: [f64; 3],
 ) -> Result<EdgeSelection, BlendError> {
+    if !point.iter().all(|coordinate| coordinate.is_finite()) {
+        return Err(BlendError::InvalidInput(
+            "edge selection point must be finite".into(),
+        ));
+    }
     let selections = edge_selections(kernel, brep)?;
     if selections.is_empty() {
         return Err(BlendError::InvalidInput(
@@ -372,7 +377,16 @@ fn point_to_polyline_distance(
         let parameter = interval.evaluate(sample as f64 / SAMPLES as f64);
         samples.push(evaluate_point(kernel, record.curve.as_ref(), parameter, 0)?);
     }
-    let mut best = f64::INFINITY;
+    // Saved references carry the display edge's representative point. Older
+    // documents stored the centroid, which for a closed circle is the circle
+    // centre rather than a point on the curve; accept either.
+    let centroid = samples.iter().fold([0.0; 3], |mut sum, sample| {
+        sum[0] += sample[0] / samples.len() as f64;
+        sum[1] += sample[1] / samples.len() as f64;
+        sum[2] += sample[2] / samples.len() as f64;
+        sum
+    });
+    let mut best = length3(sub(point, centroid));
     for pair in samples.windows(2) {
         best = best.min(point_segment_distance(point, pair[0], pair[1]));
     }
@@ -457,4 +471,24 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 fn length3(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+
+    #[test]
+    fn closed_circle_edge_resolves_from_its_centroid() {
+        let mut kernel = Kernel::default();
+        let cylinder = api::create_cylinder(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 20.0)
+            .expect("cylinder");
+        let bottom = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 0.0, 0.0])
+            .expect("bottom circle by centroid");
+        assert!((bottom.midpoint[2]).abs() < 1.0e-6, "{:?}", bottom.midpoint);
+        let top = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 0.0, 20.0])
+            .expect("top circle by centroid");
+        assert!((top.midpoint[2] - 20.0).abs() < 1.0e-6, "{:?}", top.midpoint);
+    }
 }

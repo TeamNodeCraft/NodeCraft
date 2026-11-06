@@ -149,7 +149,7 @@ pub enum ExtrudeError {
         /// The loop index within the face.
         loop_index: usize,
     },
-    /// The requested extrusion distance is not finite and positive.
+    /// The requested extrusion distance must be finite and greater than zero.
     InvalidDistance(f64),
     /// A multi-loop (holed) face cannot be extruded by the exact route: upstream's
     /// taper extrude consumes a single curve chain.
@@ -214,7 +214,7 @@ impl fmt::Display for ExtrudeError {
                 write!(f, "boundary loop {loop_index} has fewer than three points")
             }
             Self::InvalidDistance(distance) => {
-                write!(f, "extrusion distance {distance} is not finite and positive")
+                write!(f, "extrude amount must be greater than zero (got {distance})")
             }
             Self::MultipleLoopsUnsupported { face, loops } => write!(
                 f,

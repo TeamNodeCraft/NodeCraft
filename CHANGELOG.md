@@ -4,18 +4,115 @@
 
 ### Build
 
-- Updated SolidCore to `d93a19bd` (current `main`).
+- Updated SolidCore to `a39659e3` (current `main`).
 
-### Sketch editor
+### Graph
+
+- Node errors now stay visible across evaluations. A selected node outside the
+  viewed target is evaluated as a validation target for its error glow. Failed
+  nodes no longer cache their input-bypass mesh as a successful result, and the
+  failure cache is checked before the mesh cache, so a node cannot silently
+  return to "no error" on the next evaluation.
+
+- Node descriptors gain a `preview_input` capability. Fillet and Chamfer declare
+  `shape`: selecting either shows the viewed breakpoint's final body plus the
+  selected feature's difference from its input, without changing the breakpoint.
+  The exact removed/added difference is used when available. If the exact
+  surface intersection is unavailable (some G2 curved fillets), the engine falls
+  back to a localized display-surface difference instead of ghosting the whole
+  input body. Expanding to another feature is a descriptor entry, not a UI
+  special case.
+
+- Closed circular edge references resolve from the saved edge centroid as well
+  as from points on the curve. Older documents stored the circle centre, which
+  previously resolved to the wrong ordinal or a smooth seam; new edge picks also
+  store a point on the edge.
+
+- Changed nodes are sent to the engine as dirty. Every content-addressed cache
+  path honours that state: worker mesh/failure, exact B-rep, Part, Part display,
+  Part-only, primitive B-rep, Boolean operand, warm-prefetch and STEP import.
+  Dragging an inspector value can no longer reuse the previous mesh and report
+  a 0.0 ms cache hit. The body-mesh cache remains pointer-identity based and
+  verifies `Arc::ptr_eq`, so it is not a content-cache bypass.
+
+- Inspector value edits never move the viewed breakpoint. The edited node is
+  marked dirty and the current viewed target is re-evaluated; an unrelated edit
+  leaves the breakpoint exactly where the user put it.
+
+- Evaluation identity now includes a session generation, bumped whenever the
+  active session is installed. Replacing a project cannot reuse the previous
+  graph's result even when its id, revision and target match.
+
+- A zero extrude amount is rejected with "extrude amount must be greater than
+  zero (got 0)" instead of a generic non-finite-distance message.
+
+- Add a cylinder regression for a whole-circle sketch profile, covering its
+  volume, centre, radius, height and side-wall radius.
+
+- A whole-circle sketch profile is now accepted by Extrude: a single closed
+  periodic curve is a valid profile and the extruder already knows how to split
+  it into halves when needed.
+
+- Add a confirmed Clear Sketch action that removes geometry and constraints
+  while keeping the sketch display options.
+
+- Selecting a sketch node outlines its curves and points in the viewport without
+  opening the editor or capturing input.
+
+- Centralise pointer-region checks in a shared `HoverMap` used by the viewport
+  and sketch editor.
+- Delete / Backspace in sketch editing removes the selected sketch points or
+  curves instead of deleting the sketch node.
+
+- The line-type picker is one connected squircle segmented control with white
+  selected icons.
+- Add the sketch palette to the inspector while editing: degrees-of-freedom
+  status, line type (normal, construction, centerline, infinite), constraints /
+  dimensions / points / snap toggles, construction mode, and a More section for
+  projected and construction geometry, slice and 3D sketch. The 3D viewport
+  keeps its own grid and scene; the sketch editor no longer draws a second XY
+  floor.
+
+- Sketches now enter and leave editing from the inspector's Edit sketch /
+  Finish sketch button instead of opening automatically when the node is
+  selected.
+- The Select tool drags points and whole curves; fixed points stay put and the
+  constraint solver runs during the drag.
+
+- Upgrade the sketch model/solver to SolidCraft `d7cad1005` while keeping the
+  NodeCraft egui sketch UI.
+- Wire the constraint dock to `solidcraft-sketch`: horizontal, vertical,
+  equal, parallel, perpendicular, tangent, concentric, collinear, length,
+  radius and fix constraints apply to the current curve/point selection.
 
 - Fillet now skips a smooth edge inside a mixed join selection and rounds the
   remaining blendable edges instead of failing the whole feature.
 
+### Viewport
+
+- Selected and hovered edges draw only their stroke; the per-vertex dots are
+  gone, so dense curved edge selections stay legible.
+
+- Add an opt-in GPU / frame diagnostics overlay (Settings > Diagnostics): frame
+  time, adapter/backend, object triangles, GPU chunks and uploaded object memory.
+  It stacks above the existing camera debug overlay; both background boxes are
+  more transparent and remain non-interactive.
+- The bottom-left evaluation log now splits total time into kernel and display
+  meshing time.
+- Uniform-colour display meshes keep their indexed positions/indices through the
+  GPU object renderer instead of expanding every triangle into three vertices;
+  the 10k forest viewport preparation drops from ~714 ms to ~367 ms.
+- The frosted backdrop keeps at most 120k PBR triangles, since it is blurred
+  heavily; that removes another ~200 ms from the 10k forest viewport preparation.
+
+- Entering or leaving an inspector topology selection keeps the current camera;
+  editing a fillet/chamfer/shell selection no longer refits the 3D viewport to
+  the feature's input body.
+
 ### Node editor
 
-- Viewer edge ids now resolve by SolidCore `EdgeId` index rather than edge-list
-  ordinal. After a Boolean those differ, so a saved join edge was filleting a
-  cylinder cap edge instead.
+- Viewer edge ids resolve by edge-list ordinal, matching the ids the display
+  mesh writes.
 
 ### Node editor
 

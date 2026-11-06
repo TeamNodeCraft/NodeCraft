@@ -23,6 +23,7 @@ pub struct Output {
     pub delete: bool,
     pub section_order: Option<Vec<String>>,
     pub begin_selection: Option<String>,
+    pub toggle_sketch_edit: bool,
     pub choose_linked_part: bool,
     pub open_linked_part: bool,
 }
@@ -999,6 +1000,7 @@ pub fn show(
     node: &GraphNode,
     sections: &[String],
     active_selection: Option<&str>,
+    sketch_editing: bool,
 ) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
@@ -1023,6 +1025,33 @@ pub fn show(
     } else {
         let specs = known_specs(node);
         section_label(ui, section_title(node));
+        if node.node_type == "sketch" {
+            let theme = crate::theme::get();
+            ui.add_space(6.0);
+            let label = if sketch_editing { "Finish Sketch" } else { "Edit Sketch" };
+            if ui_shape::button(
+                ui,
+                label,
+                ui.available_width(),
+                30.0,
+                if sketch_editing {
+                    theme.color(theme.accent)
+                } else {
+                    theme.with_alpha(theme.control, 220)
+                },
+                egui::Stroke::new(1.0, theme.with_alpha(theme.border, 210)),
+                if sketch_editing {
+                    theme.color(theme.control)
+                } else {
+                    theme.color(theme.text)
+                },
+            )
+            .clicked()
+            {
+                output.toggle_sketch_edit = true;
+            }
+            ui.add_space(8.0);
+        }
         if node.node_type == "spline" {
             spline_points(ui, node, &mut output);
             ui.add_space(6.0);

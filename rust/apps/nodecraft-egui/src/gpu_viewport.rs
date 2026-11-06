@@ -27,6 +27,18 @@ use solidcraft_geom::prelude::*;
 
 const EMPTY_GRID_RADIUS: f64 = 100.0;
 
+/// The defocused backdrop is drawn far below display resolution and blurred, so
+/// its PBR copy does not need every triangle. Capping it keeps the per-mesh CPU
+/// and GPU backdrop cost bounded on large assemblies without changing the solid
+/// viewport object.
+const BACKDROP_PBR_TRIANGLE_BUDGET: usize = 120_000;
+
+/// Triangle stride for the backdrop's PBR copy: 1 for a small mesh, larger only
+/// when the mesh exceeds [`BACKDROP_PBR_TRIANGLE_BUDGET`].
+fn backdrop_pbr_stride(triangle_count: usize) -> usize {
+    triangle_count.div_ceil(BACKDROP_PBR_TRIANGLE_BUDGET).max(1)
+}
+
 /// Flat palette background for the viewport callback. SolidCraft clears its own
 /// offscreen frame to transparent; this quad makes the central app surface show the
 /// palette's darkest colour instead of whatever the window compositor leaves behind.
@@ -630,6 +642,37 @@ fn object_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
+/// Indexed object geometry for a display mesh with one colour.
+///
+/// Returns `None` when the mesh has unusable normals; the caller then falls back
+/// to the per-triangle expansion that can synthesise a face normal.
+fn indexed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVertex>, Vec<u32>)> {
+    if mesh.normals.len() < mesh.positions.len() {
+        return None;
+    }
+    let mut vertices = Vec::with_capacity(mesh.positions.len());
+    for (point, normal) in mesh.positions.iter().zip(&mesh.normals) {
+        if !(normal.len() > 1.0e-9) {
+            return None;
+        }
+        vertices.push(ObjectVertex {
+            position: point.to_f32(),
+            normal: normal.to_f32(),
+            colour,
+        });
+    }
+    let mut indices = Vec::with_capacity(mesh.triangles.len() * 3);
+    for triangle in &mesh.triangles {
+        for index in triangle {
+            if *index as usize >= vertices.len() {
+                return None;
+            }
+            indices.push(*index);
+        }
+    }
+    Some((vertices, indices))
+}
+
 struct ObjectRenderer {
     pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
@@ -646,6 +689,8 @@ struct ObjectRenderer {
     instances_dirty: bool,
     pending: Option<Vec<(u64, Vec<ObjectVertex>, Vec<u32>)>>,
     next_key: u64,
+    uploaded_triangles: u64,
+    uploaded_object_bytes: u64,
 }
 
 impl ObjectRenderer {
@@ -772,6 +817,8 @@ impl ObjectRenderer {
             instances_dirty: false,
             pending: None,
             next_key: 1,
+            uploaded_triangles: 0,
+            uploaded_object_bytes: 0,
         }
     }
 
@@ -780,6 +827,9 @@ impl ObjectRenderer {
         // buffer. Split the mesh into bounded chunks; each chunk gets its own
         // vertex/index buffers and draw range, then the instance buffer keeps
         // them in one logical mesh.
+        let uploaded_triangles = indices.len() as u64 / 3;
+        let uploaded_object_bytes = (vertices.len() * std::mem::size_of::<ObjectVertex>()
+            + indices.len() * std::mem::size_of::<u32>()) as u64;
         let chunks = chunk_object_mesh(vertices, indices);
         self.chunk_spans.clear();
         self.draws.clear();
@@ -799,6 +849,8 @@ impl ObjectRenderer {
         }
         self.pending = Some(pending);
         self.instances_dirty = true;
+        self.uploaded_triangles = uploaded_triangles;
+        self.uploaded_object_bytes = uploaded_object_bytes;
     }
 
     /// Displace the existing draw list without touching the uploaded mesh. The
@@ -846,6 +898,17 @@ impl ObjectRenderer {
                 .collect(),
         };
         self.instances_dirty = true;
+    }
+
+    fn debug_info(&self, adapter: &str, backend: &str, device_type: &str) -> GpuDebugInfo {
+        GpuDebugInfo {
+            adapter: adapter.to_owned(),
+            backend: backend.to_owned(),
+            device_type: device_type.to_owned(),
+            chunks: self.chunk_spans.len(),
+            triangles: self.uploaded_triangles,
+            object_bytes: self.uploaded_object_bytes,
+        }
     }
 
     fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &ObjectUniforms) {
@@ -1515,7 +1578,21 @@ struct PreviewState {
     scope: PreviewScope,
 }
 
+/// Stable GPU/display facts for the debug overlay.
+#[derive(Clone, Debug)]
+pub struct GpuDebugInfo {
+    pub adapter: String,
+    pub backend: String,
+    pub device_type: String,
+    pub chunks: usize,
+    pub triangles: u64,
+    pub object_bytes: u64,
+}
+
 pub struct GpuViewport {
+    adapter: String,
+    backend: String,
+    device_type: String,
     slot: SceneSlot,
     key: u64,
     backdrop: Arc<Mutex<BackdropRenderer>>,
@@ -1567,6 +1644,7 @@ impl GpuViewport {
         let backdrop = BackdropRenderer::install(rs);
         let backdrop_id = backdrop.lock().ok()?.texture_id();
         rs.renderer.write().callback_resources.insert(backdrop.clone());
+        let adapter_info = rs.adapter.get_info();
         let scene = Arc::new(Mutex::new(None));
         rs.renderer.write().callback_resources.insert(scene.clone());
 
@@ -1676,6 +1754,9 @@ impl GpuViewport {
         )));
         rs.renderer.write().callback_resources.insert(object.clone());
         Some(Self {
+            adapter: adapter_info.name,
+            backend: format!("{:?}", adapter_info.backend),
+            device_type: format!("{:?}", adapter_info.device_type),
             slot: Arc::new(Mutex::new(None)),
             key: 0,
             backdrop,
@@ -1755,28 +1836,47 @@ impl GpuViewport {
             // The app draws the solid material itself (see ObjectRenderer) so it can use
             // the Swift viewer's light rig and tone mapping. The SolidCraft scene keeps
             // only the edges; the blurred backdrop keeps a PBR copy for defocused colour.
-            for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
-                let [a, b, c] = triangle.map(|index| index as usize);
-                let (Some(pa), Some(pb), Some(pc)) =
-                    (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
-                else {
-                    continue;
-                };
-                let fallback = (*pb - *pa).cross(*pc - *pa);
-                let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
-                let colour = if self.view.face_colours {
-                    face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
-                } else {
-                    display
-                        .face_colors
-                        .get(triangle_index)
-                        .copied()
-                        .unwrap_or([0.17, 0.18, 0.195])
-                };
-                for (index, point) in [(a, pa), (b, pb), (c, pc)] {
-                    let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
-                    object_indices.push(object_vertices.len() as u32);
-                    object_vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
+            //
+            // A uniform colour (the normal case) keeps the indexed display mesh: the
+            // old per-triangle expansion tripled the vertex count and cost ~0.7 s on
+            // a 3.3M-triangle forest. Per-face colour modes still expand, because a
+            // shared position may need a different colour per triangle.
+            let uniform = if self.view.face_colours {
+                None
+            } else if display.face_colors.is_empty() {
+                Some([0.17, 0.18, 0.195])
+            } else {
+                let first = display.face_colors[0];
+                display.face_colors.iter().all(|colour| *colour == first).then_some(first)
+            };
+            let indexed = uniform.and_then(|colour| indexed_object_mesh(mesh, colour));
+            if let Some((vertices, indices)) = indexed {
+                object_vertices = vertices;
+                object_indices = indices;
+            } else {
+                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                    let [a, b, c] = triangle.map(|index| index as usize);
+                    let (Some(pa), Some(pb), Some(pc)) =
+                        (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+                    else {
+                        continue;
+                    };
+                    let fallback = (*pb - *pa).cross(*pc - *pa);
+                    let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
+                    let colour = if self.view.face_colours {
+                        face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
+                    } else {
+                        display
+                            .face_colors
+                            .get(triangle_index)
+                            .copied()
+                            .unwrap_or([0.17, 0.18, 0.195])
+                    };
+                    for (index, point) in [(a, pa), (b, pb), (c, pc)] {
+                        let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
+                        object_indices.push(object_vertices.len() as u32);
+                        object_vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
+                    }
                 }
             }
         }
@@ -1965,7 +2065,7 @@ impl GpuViewport {
             if include_pbr {
                 let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
                     .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
-                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+                for (triangle_index, triangle) in mesh.triangles.iter().enumerate().step_by(backdrop_pbr_stride(mesh.triangles.len())) {
                     let [a, b, c] = triangle.map(|index| index as usize);
                     let (Some(pa), Some(pb), Some(pc)) =
                         (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
@@ -2054,6 +2154,11 @@ impl GpuViewport {
             }
         }
         scene
+    }
+
+    pub fn debug_info(&self) -> Option<GpuDebugInfo> {
+        let object = self.object.lock().ok()?;
+        Some(object.debug_info(&self.adapter, &self.backend, &self.device_type))
     }
 
     pub fn backdrop_texture_id(&self) -> egui::TextureId {
@@ -2458,6 +2563,30 @@ mod tests {
         let (color, resolve) = ("color", "resolve");
         assert_eq!(scene_color_attachment(4, &color, &resolve), (&color, Some(&resolve)));
         assert_eq!(scene_color_attachment(1, &color, &resolve), (&resolve, None));
+    }
+
+    #[test]
+    fn backdrop_pbr_copy_is_budgeted() {
+        assert_eq!(backdrop_pbr_stride(0), 1);
+        assert_eq!(backdrop_pbr_stride(BACKDROP_PBR_TRIANGLE_BUDGET), 1);
+        let stride = backdrop_pbr_stride(3_356_630);
+        assert!(stride > 1);
+        assert!(3_356_630 / stride <= BACKDROP_PBR_TRIANGLE_BUDGET);
+    }
+
+    #[test]
+    fn uniform_colour_mesh_keeps_its_indices() {
+        use nodecraft_protocol::Mesh as NodeMesh;
+        let source = NodeMesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            faces: vec![[0, 1, 2]],
+            ..NodeMesh::default()
+        };
+        let display = crate::adapter::display_mesh(&source);
+        let (vertices, indices) = indexed_object_mesh(&display.mesh, [0.2, 0.3, 0.4]).expect("indexed mesh");
+        assert_eq!(vertices.len(), 3);
+        assert_eq!(indices, vec![0, 1, 2]);
     }
 
     #[test]

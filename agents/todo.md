@@ -145,6 +145,46 @@ Priority order is approximate.
       `samples/gigatest-forest-5000.nodecraft`, and confirm no preview debug hooks
       remain.
 
+## Refactor `app.rs`
+
+`rust/apps/nodecraft-egui/src/app.rs` is ~8,100 lines. Split by lifecycle and
+ownership, not by line count. Extract one unit per commit, keep `NodeCraftApp`
+as the owner, and keep behavior unchanged. Target: roughly 3,500–4,500 lines
+with the central draw order still in one place.
+
+- [ ] **Evaluation** → `evaluation.rs`: `EvalJob`, `TabEvalState`,
+      `EvalWorker`, evaluation-key/dirty plumbing, `evaluate` /
+      `evaluate_with_cache_policy`, `poll_evaluation`. Highest-value, lowest-UI
+      coupling.
+- [ ] **Settings persistence** → `settings.rs`: `AppSettings`,
+      `ActivitySettings`, platform/config paths, load/save, defaults, startup
+      document selection.
+- [ ] **Settings and theme UI** → `settings_ui.rs` / `theme_editor.rs`:
+      `show_app_settings`, theme add/revert/edit buttons, hex editor, palette
+      rows, colour wheel.
+- [ ] **Tool dock** → `tool_dock.rs`: `ToolSection`, `ToolGroup`, `ToolItem`,
+      menu/search/focus state and `show_tool_dock`.
+- [ ] **Tabs and document lifecycle** → `tabs.rs`: `DocumentTab`,
+      open/save/restore/activate/close, session installation, document tabs and
+      file dialogs/drop handling.
+- [ ] **Pure document operations** → `document_ops.rs`: clipboard/paste plan,
+      delete/disconnect command builders, `target_closure`,
+      `downstream_nodes`, `initial_viewer_target`, node position/placement,
+      tab reorder, path/document-id helpers.
+- [ ] **Central UI** last: keep one `ui()` orchestration function and extract
+      one panel per module (`tabs`, `viewport`, `node_editor`, `inspector`,
+      `sketch`, `tool_dock`, overlays). Do not extract before the units above
+      leave the file.
+
+Acceptance:
+
+- each extraction is a separate, behavior-preserving commit;
+- no duplicated helpers or visibility-only copies;
+- unit tests move with their module, and app-level tests stay in `app.rs`;
+- `cargo test -p nodecraft-egui` stays green after every step;
+- `app.rs` ends up containing the app struct, shared state, central `ui()`
+      draw order and high-level coordination only.
+
 ## Next: remove tessellation from node branches
 
 Attempted a direct reroute; it broke progress, mesh-cache, BRep-cache and failure
