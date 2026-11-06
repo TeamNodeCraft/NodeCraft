@@ -63,9 +63,11 @@ document revision and dirty set; an evaluation worker owns the persistent engine
 cache and currently performs exact B-rep work plus display tessellation in one
 call. See [How NodeCraft works](architecture.md).
 
-The monolithic evaluator is the main architectural debt. The next stage is to
-split exact evaluation from display meshing and give them independent bounded
-pools and caches, not to wrap the current monolith in a second thread pool.
+The evaluator is split internally now: `exact_eval.rs` owns Part/B-rep
+construction and `display_eval.rs` owns display meshing and mesh caching, with
+cache, primitive, look, bypass and comparison concerns in their own modules.
+The remaining architectural work is to give exact and display work independent
+bounded pools and a scheduler rather than wrapping one worker call.
 
 ## Known shell limitations
 

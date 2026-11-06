@@ -9,7 +9,7 @@ use solidcore_record_new::{Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
 use nodecraft_engine::sketch::{solve, ConstraintKind, CurveKind, Sketch, SolveReport};
-use nodecraft_dock::{DockItem, DockMetrics, DockStyle, paint_background};
+use nodecraft_dock::{DockItem, DockMetrics, paint_background};
 use crate::hover::HoverMap;
 use crate::ui_shape;
 

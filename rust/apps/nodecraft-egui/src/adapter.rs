@@ -3,7 +3,6 @@
 //! This is deliberately a one-way adapter. SolidCore geometry is never modified by
 //! the UI, and the SolidCraft crates stay upstream-owned.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use solidcraft_geom::Mesh as CraftMesh;
@@ -28,11 +27,6 @@ pub struct DisplayMesh {
     pub center: Vec3,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ComparisonKind {
-    Added,
-    Cut,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct ComparisonMesh {
@@ -250,114 +244,6 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     }
 }
 
-/// Build a display view with transparent added/removed material layers derived
-/// from the feature's before/after meshes. Kept surfaces stay on the normal body.
-#[must_use]
-pub fn display_mesh_with_comparison(
-    after: &NodeMesh,
-    before: &NodeMesh,
-) -> DisplayMesh {
-    display_mesh_with_comparison_on(after, after, before)
-}
-
-/// Base can be the result or the original input. The difference classification
-/// always uses the real before/after pair, independent of which is displayed.
-pub fn display_mesh_with_comparison_on(
-    base: &NodeMesh,
-    after: &NodeMesh,
-    before: &NodeMesh,
-) -> DisplayMesh {
-    let mut display = display_mesh(base);
-    // The diff is a UI-side display aid. Keep it to feature-sized meshes.
-    const MAX_COMPARISON_TRIANGLES: usize = 4_000;
-    if after.faces.len() > MAX_COMPARISON_TRIANGLES || before.faces.len() > MAX_COMPARISON_TRIANGLES {
-        return display;
-    }
-    let (after_volume, before_volume) = (mesh_volume(after), mesh_volume(before));
-    if (after_volume - before_volume).abs() <= (before_volume.abs().max(1.0) * 1.0e-4) {
-        // Rigid transform / unchanged result: no comparison layer.
-        return display;
-    }
-    let kind = if after_volume < before_volume { ComparisonKind::Cut } else { ComparisonKind::Added };
-    let diagonal = mesh_diagonal(after).max(mesh_diagonal(before)).max(1.0);
-    let tolerance = diagonal * 5.0e-4;
-    let mut comparison = ComparisonMesh::default();
-    let after_new: Vec<([Vec3; 3], [Vec3; 3])> = after
-        .faces
-        .iter()
-        .filter_map(|triangle| {
-            let points = triangle.map(|corner| {
-                let point = after.vertices[corner as usize];
-                Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]))
-            });
-            let centroid = (points[0] + points[1] + points[2]) * (1.0 / 3.0);
-            if point_near_surface(centroid, before, tolerance) {
-                return None;
-            }
-            let normal = (points[1] - points[0]).cross(points[2] - points[0]).normalized().unwrap_or(Vec3::Z);
-            Some((points, [normal; 3]))
-        })
-        .collect();
-    match kind {
-        ComparisonKind::Cut => comparison.removed = after_new,
-        ComparisonKind::Added => comparison.added = after_new,
-    }
-    display.comparison = Some(comparison);
-    display
-}
-
-fn point_near_surface(point: Vec3, mesh: &NodeMesh, tolerance: f64) -> bool {
-    let tolerance_sq = tolerance * tolerance;
-    for triangle in &mesh.faces {
-        let a = mesh.vertices[triangle[0] as usize];
-        let b = mesh.vertices[triangle[1] as usize];
-        let c = mesh.vertices[triangle[2] as usize];
-        let a = Vec3::new(f64::from(a[0]), f64::from(a[1]), f64::from(a[2]));
-        let b = Vec3::new(f64::from(b[0]), f64::from(b[1]), f64::from(b[2]));
-        let c = Vec3::new(f64::from(c[0]), f64::from(c[1]), f64::from(c[2]));
-        if point_triangle_distance_sq(point, a, b, c) <= tolerance_sq {
-            return true;
-        }
-    }
-    false
-}
-
-fn point_triangle_distance_sq(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> f64 {
-    let ab = b - a;
-    let ac = c - a;
-    let ap = point - a;
-    let d1 = ab.dot(ap);
-    let d2 = ac.dot(ap);
-    if d1 <= 0.0 && d2 <= 0.0 { return (point - a).len2(); }
-    let bp = point - b;
-    let d3 = ab.dot(bp);
-    let d4 = ac.dot(bp);
-    if d3 >= 0.0 && d4 <= d3 { return (point - b).len2(); }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        let v = d1 / (d1 - d3);
-        return (point - (a + ab * v)).len2();
-    }
-    let cp = point - c;
-    let d5 = ab.dot(cp);
-    let d6 = ac.dot(cp);
-    if d6 >= 0.0 && d5 <= d6 { return (point - c).len2(); }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
-        let w = d2 / (d2 - d6);
-        return (point - (a + ac * w)).len2();
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
-        return (point - (b + (c - b) * w)).len2();
-    }
-    let denom = 1.0 / (va + vb + vc);
-    let v = vb * denom;
-    let w = vc * denom;
-    (point - (a + ab * v + ac * w)).len2()
-}
-
 #[must_use]
 pub fn display_mesh_with_difference(
     base: &NodeMesh,
@@ -481,45 +367,8 @@ fn mesh_triangles(mesh: &NodeMesh) -> Vec<([Vec3; 3], [Vec3; 3])> {
         .collect()
 }
 
-fn mesh_volume(mesh: &NodeMesh) -> f64 {
-    mesh.faces.iter().map(|triangle| {
-        let a = mesh.vertices[triangle[0] as usize];
-        let b = mesh.vertices[triangle[1] as usize];
-        let c = mesh.vertices[triangle[2] as usize];
-        let cross = [
-            f64::from(b[1]) * f64::from(c[2]) - f64::from(b[2]) * f64::from(c[1]),
-            f64::from(b[2]) * f64::from(c[0]) - f64::from(b[0]) * f64::from(c[2]),
-            f64::from(b[0]) * f64::from(c[1]) - f64::from(b[1]) * f64::from(c[0]),
-        ];
-        (f64::from(a[0]) * cross[0] + f64::from(a[1]) * cross[1] + f64::from(a[2]) * cross[2]) / 6.0
-    }).sum()
-}
 
-fn mesh_diagonal(mesh: &NodeMesh) -> f64 {
-    let mut min = [f64::INFINITY; 3];
-    let mut max = [f64::NEG_INFINITY; 3];
-    for point in &mesh.vertices {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(f64::from(point[axis]));
-            max[axis] = max[axis].max(f64::from(point[axis]));
-        }
-    }
-    if !min[0].is_finite() { return 1.0; }
-    ((max[0]-min[0]).powi(2) + (max[1]-min[1]).powi(2) + (max[2]-min[2]).powi(2)).sqrt().max(1.0)
-}
 
-fn triangle_centroid_keys(mesh: &NodeMesh, tolerance: f64) -> std::collections::HashMap<[i64; 3], ()> {
-    let mut keys = std::collections::HashMap::new();
-    for triangle in &mesh.faces {
-        let mut centroid = [0.0f64; 3];
-        for corner in triangle {
-            let point = mesh.vertices[*corner as usize];
-            for axis in 0..3 { centroid[axis] += f64::from(point[axis]) / 3.0; }
-        }
-        keys.insert(centroid.map(|value| (value / tolerance).round() as i64), ());
-    }
-    keys
-}
 
 #[cfg(test)]
 mod tests {

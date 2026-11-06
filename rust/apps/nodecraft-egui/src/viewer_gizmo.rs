@@ -2,7 +2,7 @@
 //! rotation rings and a centre ball. Adapted from SolidCraft's
 //! `crates/ui-egui/src/gizmo.rs` (MIT OR Apache-2.0).
 
-use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, vec2};
+use egui::{Color32, Pos2, Rect, Shape, Stroke, vec2};
 use solidcraft_geom::Ring;
 use solidcore_record_new::Vec3;
 use solidcraft_geom::prelude::*;
@@ -10,7 +10,7 @@ use solidcraft_render::Camera;
 
 /// World ↔ screen mapping for the current viewport frame.
 #[derive(Clone, Copy)]
-struct Proj {
+pub(crate) struct Proj {
     camera: Camera,
     rect: Rect,
     radius: f64,
@@ -73,7 +73,6 @@ pub struct Gizmo {
     pub rx: f64,
     pub ry: f64,
     pub rz: f64,
-    pub local: bool,
     /// Linear inverse of the downstream chain, mapping world deltas back to
     /// this node's parent frame.
     pub world_to_local: [[f64; 3]; 3],
@@ -91,6 +90,7 @@ pub struct GizmoState {
 }
 
 impl GizmoState {
+    #[cfg(test)]
     pub fn is_dragging(&self) -> bool {
         self.dragging
     }
@@ -263,7 +263,6 @@ struct State {
     turned: f64,
 }
 
-const DIRS: [Vec3; 3] = [Vec3::X, Vec3::Y, Vec3::Z];
 /// Arrow length on screen (px).
 pub const LEN_PX: f64 = 110.0;
 

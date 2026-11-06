@@ -210,28 +210,36 @@ These are cross-cutting improvements, not individual feature requests.
 
 ### P1 — structural clean-up
 
-- [ ] Split `nodecraft-engine/src/lib.rs` (~7,200 lines) the way `app.rs` is
+- [x] Split `nodecraft-engine/src/lib.rs` (~7,200 lines) the way `app.rs` is
       split: exact evaluation, display evaluation, caches, comparison and error
-      attribution behind explicit interfaces.
-- [ ] Make node metadata authoritative in one place. Ports, defaults, selection
-      capabilities, preview inputs and inspector fields are currently split
-      across descriptors, engine matches, `known_specs` and `selection_spec`.
-- [ ] Formalise cache keys and entries. Add invariant tests for:
-      failed never caches success; dirty never reads success; bypass never hides
-      an error; a new session never reuses an old evaluation identity.
-- [ ] Define the boundary of node-error discovery. Selected nodes outside the
-      viewed closure are validated for error glow; unviewed, unselected nodes
-      are not evaluated. Document that in the UI/docs or add an explicit
-      background validation mode.
-- [ ] Distinguish exact feature differences from approximate display-surface
-      fallbacks in the comparison payload and UI. Cache exact feature
-      comparisons where possible.
+      attribution behind explicit interfaces. Exact evaluation is now
+      `exact_eval.rs`, display evaluation is `display_eval.rs`; cache,
+      primitive, look, bypass, face-reference and comparison concerns already
+      have their own modules. `lib.rs` is the coordinator.
+- [x] Make node metadata authoritative in one place. Ports, defaults, selection
+      capabilities, preview inputs and inspector fields now live in
+      `nodecraft-node-contract`, including per-primitive fields. The custom
+      stepimporter and exporter editors remain dedicated file-picker UI.
+- [x] Formalise cache keys and entries. `CacheKey` names the shared
+      node-id/content-hash key used by every content cache. Invariant tests cover
+      mesh failure-bypass, dirty Part/B-rep, session identity and exact-comparison
+      cache behaviour.
+- [x] Define the boundary of node-error discovery. Selected nodes outside the
+      viewed closure are validated; the inspector now shows the selected node's
+      error text as well as its canvas glow. Unviewed, unselected branches are
+      not evaluated, and global background validation remains out of scope.
+- [x] Distinguish exact feature differences from approximate display-surface
+      fallbacks in the comparison payload and UI. The payload carries
+      `approximate`, the status bar labels approximate feature ghosts, and exact
+      comparison results are cached by the two target content keys.
 - [ ] Improve shell coverage/validation for curved fillets and top-face
-      openings without reintroducing a silent fallback. Failures must remain
-      explicit.
-- [ ] Remove warning/dead-code debt: unused imports, unused typed-contract
-      scaffolding, 88 collapsible-if clippy warnings, repeated overlong argument
-      lists. Decide whether each dead item is planned or delete it.
+      openings without reintroducing a silent fallback. Malformed and
+      out-of-range opening references now fail explicitly, but the curved/
+      top-face shell limitation is blocked on SolidCore shell topology and
+      remains an explicit error. See the SolidCore pin-bump retest item below.
+- [x] Remove warning/dead-code debt from the main targets. `nodecraft-engine`
+      and the app source check warning-free. Dependency-crate warnings remain a
+      separate clean-up item.
 
 ### P2 — longer-term quality
 
@@ -378,6 +386,15 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
 
 ## SolidCore ops and blend
 
+- [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
+      Reproduction at current pin `a39659e3d798b56f99266cd2e522360dd99f7cf7`:
+      solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
+      `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
+      fails with `Shell: solidcore-ops shell: the result is not a closed solid`
+      while other face ids shell successfully. Check the SolidCore changelog and
+      shell/offset tests when pulling a new revision; if it passes, add a
+      NodeCraft regression and remove the limitation note. Do not add a local
+      shell fallback to mask it.
 - [ ] Upstream: one half of the two-cylinder union join is classified `Smooth`
       by `topology::edge::blend_edgeuse_or_why`, although both adjacent faces
       are the two cylinder surfaces. Neither `ssi_split_curves_at_singular_points`

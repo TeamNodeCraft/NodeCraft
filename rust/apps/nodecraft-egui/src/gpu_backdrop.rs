@@ -227,6 +227,7 @@ fn srgb_to_linear(v: u8) -> f32 {
 
 type Pair = (wgpu::Texture, wgpu::TextureView);
 
+#[allow(dead_code)] // GPU resources are retained for their lifetime.
 pub struct BackdropRenderer {
     renderer: Renderer,
     slot: SceneSlot,

@@ -10,7 +10,8 @@ use nodecraft_protocol::Mesh;
 use crate::Part;
 
 /// Material removed (before minus after) and material added (after minus before).
-pub struct DifferenceMeshes {
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DifferenceMeshes {
     pub removed: Mesh,
     pub added: Mesh,
 }
@@ -148,7 +149,7 @@ fn len(a: [f64; 3]) -> f64 { dot(a, a).sqrt() }
 ///
 /// Parts are flattened to their realized solids. A multi-solid Part is unioned
 /// into one operand first, so the result is independent of input body count.
-pub fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
+pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
     let before = union_solids(before.realized_solids()?)?;
     let after = union_solids(after.realized_solids()?)?;
     let kernel = nodecraft_solidcore::kernel::kernel();

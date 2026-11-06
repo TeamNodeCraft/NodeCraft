@@ -156,6 +156,236 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
     descriptor!("sceneTransform", GEOMETRY, ValueKind::Geometry, true, true),
 ];
 
+
+// ---------------------------------------------------------------------------
+// Neutral inspector field metadata
+// ---------------------------------------------------------------------------
+
+/// How a node value should be edited. UI crates map these to widgets; the
+/// contract never depends on egui.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FieldKind {
+    Text,
+    Switch,
+    Number { min: Option<f64>, max: Option<f64>, step: f64 },
+    Choice(&'static [(&'static str, &'static str)]),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FieldDefault {
+    Text(&'static str),
+    Bool(bool),
+    Number(f64),
+    Choice(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NodeFieldSpec {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub default: FieldDefault,
+    pub kind: FieldKind,
+}
+
+const fn field_text(key: &'static str, label: &'static str, default: &'static str) -> NodeFieldSpec {
+    NodeFieldSpec { key, label, default: FieldDefault::Text(default), kind: FieldKind::Text }
+}
+
+const fn field_switch(key: &'static str, label: &'static str, default: bool) -> NodeFieldSpec {
+    NodeFieldSpec { key, label, default: FieldDefault::Bool(default), kind: FieldKind::Switch }
+}
+
+const fn field_number(
+    key: &'static str,
+    label: &'static str,
+    default: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    step: f64,
+) -> NodeFieldSpec {
+    NodeFieldSpec {
+        key,
+        label,
+        default: FieldDefault::Number(default),
+        kind: FieldKind::Number { min, max, step },
+    }
+}
+
+const fn field_choice(
+    key: &'static str,
+    label: &'static str,
+    default: &'static str,
+    choices: &'static [(&'static str, &'static str)],
+) -> NodeFieldSpec {
+    NodeFieldSpec { key, label, default: FieldDefault::Choice(default), kind: FieldKind::Choice(choices) }
+}
+
+const TRANSLATE_FIELDS: &[NodeFieldSpec] = &[
+    field_choice("space", "Space", "world", &[("world", "World"), ("local", "Local")]),
+    field_number("x", "Position X", 0.0, None, None, 0.01),
+    field_number("y", "Position Y", 0.0, None, None, 0.01),
+    field_number("z", "Position Z", 0.0, None, None, 0.01),
+    field_number("rx", "Rotation X°", 0.0, Some(-180.0), Some(180.0), 0.1),
+    field_number("ry", "Rotation Y°", 0.0, Some(-180.0), Some(180.0), 0.1),
+    field_number("rz", "Rotation Z°", 0.0, Some(-180.0), Some(180.0), 0.1),
+];
+
+const BOOLEAN_FIELDS: &[NodeFieldSpec] = &[field_choice(
+    "mode",
+    "Operation",
+    "union",
+    &[("union", "Union"), ("subtract", "Subtract A − B"), ("subtract-reverse", "Subtract B − A"), ("intersect", "Intersect")],
+)];
+
+const EXTRUDE_FIELDS: &[NodeFieldSpec] = &[
+    field_number("amount", "Amount", 10.0, Some(0.0), None, 0.1),
+    field_choice("operation", "Operation", "new", &[("new", "New"), ("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect")]),
+];
+
+const LOFT_FIELDS: &[NodeFieldSpec] = &[field_number("ruled", "Ruled", 0.0, Some(0.0), Some(1.0), 1.0)];
+
+const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
+    field_number("length", "Distance", 2.0, Some(0.0), None, 0.1),
+    field_choice("chamferType", "Type", "equal", &[("equal", "Equal distance"), ("two-distance", "Two distances"), ("distance-angle", "Distance + angle")]),
+    field_number("distance2", "Distance 2", 2.0, Some(0.0), None, 0.1),
+    field_number("angle", "Angle°", 45.0, Some(0.1), Some(179.9), 0.1),
+];
+
+const FILLET_FIELDS: &[NodeFieldSpec] = &[
+    field_number("length", "Radius", 2.0, Some(0.0), None, 0.1),
+    field_choice("continuity", "Continuity", "", &[("", "Circular (G1)"), ("G2", "Curvature (G2)"), ("G3", "Curvature (G3)")]),
+];
+
+const OFFSET_FIELDS: &[NodeFieldSpec] = &[field_number("distance", "Distance", 1.0, Some(0.0), None, 0.1)];
+
+const SHELL_FIELDS: &[NodeFieldSpec] = &[
+    field_number("thickness", "Thickness", 2.0, Some(0.0), None, 0.1),
+    field_choice("direction", "Direction", "inward", &[("inward", "Inward"), ("outward", "Outward")]),
+];
+
+const MIRROR_FIELDS: &[NodeFieldSpec] = &[
+    field_choice("plane", "Plane", "xz", &[("xy", "XY"), ("xz", "XZ"), ("yz", "YZ")]),
+    field_number("offset", "Offset", 0.0, None, None, 0.01),
+    field_switch("combine", "Combine", true),
+];
+
+const SCATTER_FIELDS: &[NodeFieldSpec] = &[
+    field_switch("combine", "Combine", true),
+    field_number("count", "Count", 1000.0, None, None, 0.1),
+    field_number("spanX", "Span X", 240.0, None, None, 0.1),
+    field_number("spanY", "Span Y", 160.0, None, None, 0.1),
+    field_number("seed", "Seed", 1.0, None, None, 0.1),
+    field_choice("distribution", "Distribution", "random", &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")]),
+    field_number("minScale", "Min scale", 0.75, None, None, 0.1),
+    field_number("maxScale", "Max scale", 1.25, None, None, 0.1),
+];
+
+const SPLINE_FIELDS: &[NodeFieldSpec] = &[
+    field_number("degree", "Degree", 3.0, Some(1.0), Some(9.0), 1.0),
+    field_switch("control", "Control points", false),
+    field_switch("periodic", "Closed", false),
+];
+
+
+pub const PRIMITIVE_TYPES: &[(&str, &str)] = &[
+    ("box", "Box"),
+    ("cylinder", "Cylinder"),
+    ("cone", "Cone"),
+    ("sphere", "Sphere"),
+    ("torus", "Torus"),
+    ("wedge", "Wedge"),
+    ("pyramid", "Pyramid"),
+    ("partialSphere", "Partial sphere"),
+    ("partialTorus", "Partial torus"),
+];
+
+const BOX_FIELDS: &[NodeFieldSpec] = &[
+    field_number("length", "Length", 40.0, Some(0.0), None, 0.1),
+    field_number("width", "Width", 40.0, Some(0.0), None, 0.1),
+    field_number("height", "Height", 40.0, Some(0.0), None, 0.1),
+];
+
+const CYLINDER_FIELDS: &[NodeFieldSpec] = &[
+    field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1),
+    field_number("height", "Height", 40.0, Some(0.0), None, 0.1),
+];
+
+const CONE_FIELDS: &[NodeFieldSpec] = &[
+    field_number("bottomRadius", "Bottom radius", 20.0, Some(0.0), None, 0.1),
+    field_number("topRadius", "Top radius", 0.0, Some(0.0), None, 0.1),
+    field_number("height", "Height", 40.0, Some(0.0), None, 0.1),
+];
+
+const SPHERE_FIELDS: &[NodeFieldSpec] = &[field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1)];
+
+const TORUS_FIELDS: &[NodeFieldSpec] = &[
+    field_number("majorRadius", "Major radius", 15.0, Some(0.0), None, 0.1),
+    field_number("minorRadius", "Minor radius", 5.0, Some(0.0), None, 0.1),
+];
+
+const WEDGE_FIELDS: &[NodeFieldSpec] = &[
+    field_number("length", "Length", 40.0, Some(0.0), None, 0.1),
+    field_number("width", "Width", 30.0, Some(0.0), None, 0.1),
+    field_number("height", "Height", 25.0, Some(0.0), None, 0.1),
+    field_number("topLength", "Top length", 0.0, Some(0.0), None, 0.1),
+];
+
+const PYRAMID_FIELDS: &[NodeFieldSpec] = &[
+    field_number("length", "Base length", 40.0, Some(0.0), None, 0.1),
+    field_number("height", "Height", 40.0, Some(0.0), None, 0.1),
+];
+
+const PARTIAL_SPHERE_FIELDS: &[NodeFieldSpec] = &[
+    field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1),
+    field_number("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
+    field_number("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
+];
+
+const PARTIAL_TORUS_FIELDS: &[NodeFieldSpec] = &[
+    field_number("majorRadius", "Major radius", 15.0, Some(0.0), None, 0.1),
+    field_number("minorRadius", "Minor radius", 5.0, Some(0.0), None, 0.1),
+    field_number("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
+    field_number("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
+];
+
+/// Fields for a primitive kind. Unknown kinds fall back to the box so editing a
+/// partially written document never loses its numeric controls.
+#[must_use]
+pub fn primitive_fields(kind: &str) -> &'static [NodeFieldSpec] {
+    match kind {
+        "cylinder" => CYLINDER_FIELDS,
+        "cone" => CONE_FIELDS,
+        "sphere" => SPHERE_FIELDS,
+        "torus" => TORUS_FIELDS,
+        "wedge" => WEDGE_FIELDS,
+        "pyramid" => PYRAMID_FIELDS,
+        "partialSphere" => PARTIAL_SPHERE_FIELDS,
+        "partialTorus" => PARTIAL_TORUS_FIELDS,
+        _ => BOX_FIELDS,
+    }
+}
+
+/// Neutral field metadata for node types with static inspector fields.
+/// Dynamic field sets (primitive, stepimporter, exporter) stay with their
+/// dedicated UI until a conditional-field model is needed.
+#[must_use]
+pub fn fields(node_type: &str) -> Option<&'static [NodeFieldSpec]> {
+    Some(match node_type {
+        "translate" => TRANSLATE_FIELDS,
+        "boolean" | "fuse" => BOOLEAN_FIELDS,
+        "extrude" => EXTRUDE_FIELDS,
+        "loft" | "surfaceloft" => LOFT_FIELDS,
+        "chamfer" => CHAMFER_FIELDS,
+        "fillet" => FILLET_FIELDS,
+        "offsetfaces" => OFFSET_FIELDS,
+        "shell" => SHELL_FIELDS,
+        "mirror" => MIRROR_FIELDS,
+        "scatter" => SCATTER_FIELDS,
+        "spline" => SPLINE_FIELDS,
+        _ => return None,
+    })
+}
+
 #[must_use]
 pub fn descriptor(node_type: &str) -> Option<&'static NodeDescriptor> {
     DESCRIPTORS.iter().find(|descriptor| descriptor.node_type == node_type)
@@ -184,6 +414,57 @@ pub fn preview_input_if_active(node_type: &str, values: &serde_json::Value) -> O
         }
     }
     Some(input)
+}
+
+
+/// Node types whose exact result is a Part and whose selected result can be
+/// displayed by the Part display path. This is capability metadata, independent
+/// of the geometry implementation.
+const PART_DISPLAY_TYPES: &[&str] = &[
+    "solid", "primitive", "translate", "mirror", "combine", "boolean", "fuse",
+    "stepimporter", "extrude", "sketch", "spline", "loft", "surfaceloft",
+    "shell", "offsetfaces", "scatter", "chamfer", "fillet", "look",
+];
+
+/// Whether this node type has a Part result that the viewport can display.
+#[must_use]
+pub fn part_display_supported(node_type: &str) -> bool {
+    PART_DISPLAY_TYPES.contains(&node_type)
+}
+
+/// Node types that are only drawn by a 2D overlay and must not produce a 3D
+/// display body even though they have a Part display capability.
+#[must_use]
+pub fn overlay_only(node_type: &str) -> bool {
+    node_type == "sketch"
+}
+
+
+/// Topology field a node collects from the viewport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionKind {
+    Edge,
+    Face,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectionSpec {
+    pub node_type: &'static str,
+    pub field: &'static str,
+    pub kind: SelectionKind,
+}
+
+const SELECTION_SPECS: &[SelectionSpec] = &[
+    SelectionSpec { node_type: "chamfer", field: "edges", kind: SelectionKind::Edge },
+    SelectionSpec { node_type: "fillet", field: "edges", kind: SelectionKind::Edge },
+    SelectionSpec { node_type: "shell", field: "faces", kind: SelectionKind::Face },
+    SelectionSpec { node_type: "extrude", field: "faces", kind: SelectionKind::Face },
+];
+
+/// The topology selection a node opts into, if any.
+#[must_use]
+pub fn selection_spec(node_type: &str) -> Option<SelectionSpec> {
+    SELECTION_SPECS.iter().copied().find(|spec| spec.node_type == node_type)
 }
 
 pub fn descriptors() -> impl Iterator<Item = &'static NodeDescriptor> {
@@ -396,5 +677,41 @@ mod tests {
             validate_connections(&nodes, &connections),
             Err(ContractError::WrongKind { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn part_display_capabilities_are_known_node_types() {
+        for node_type in PART_DISPLAY_TYPES {
+            assert!(descriptor(node_type).is_some(), "part display type {node_type:?} has no descriptor");
+        }
+        assert!(overlay_only("sketch"));
+        assert!(!overlay_only("spline"));
+        assert_eq!(selection_spec("fillet").map(|spec| spec.field), Some("edges"));
+        assert_eq!(selection_spec("shell").map(|spec| spec.field), Some("faces"));
+        assert!(selection_spec("primitive").is_none());
+        for spec in SELECTION_SPECS {
+            assert!(descriptor(spec.node_type).is_some(), "selection type has no descriptor");
+        }
+        for node_type in ["translate", "boolean", "extrude", "loft", "chamfer", "fillet", "shell", "mirror", "scatter", "spline"] {
+            let fields = fields(node_type).unwrap_or_else(|| panic!("missing fields for {node_type}"));
+            let mut keys = std::collections::BTreeSet::new();
+            for field in fields {
+                assert!(keys.insert(field.key), "duplicate field {} on {node_type}", field.key);
+            }
+        }
+        assert!(fields("primitive").is_none());
+        let mut primitive_keys = std::collections::BTreeSet::new();
+        for (kind, _) in PRIMITIVE_TYPES {
+            let fields = primitive_fields(kind);
+            assert!(!fields.is_empty(), "primitive {kind} has no fields");
+            for field in fields {
+                assert!(primitive_keys.insert((*kind, field.key)), "duplicate primitive field {} on {kind}", field.key);
+            }
+        }
     }
 }

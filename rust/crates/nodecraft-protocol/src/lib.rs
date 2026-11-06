@@ -155,6 +155,10 @@ pub struct Response {
 pub struct ComparisonPayload {
     pub added: Mesh,
     pub removed: Mesh,
+    /// True when the ghost came from the display-surface fallback rather than
+    /// the exact feature Boolean.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub approximate: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }

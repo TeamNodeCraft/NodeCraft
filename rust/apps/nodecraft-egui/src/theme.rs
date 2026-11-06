@@ -315,23 +315,14 @@ impl Theme {
         egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], alpha)
     }
 
-    /// Map the user-facing radius to the backdrop's dual-Kawase sample scale.
-    /// 24 px is one full sample-scale unit; the default 18 px preserves the
-    /// previous 0.75 backdrop blur.
+    /// Test-covered mapping for the backdrop's dual-Kawase sample scale.
+    #[cfg(test)]
     pub fn backdrop_blur_scale(&self) -> f32 {
         (self.backdrop_blur / 24.0).clamp(0.0, 2.5)
     }
 
-    /// Number of pyramid levels used by the backdrop blur.
-    ///
-    /// One level is the smallest nonzero blur; five is the full chain. The
-    /// 18 px reference keeps the previous full-strength appearance.
-    /// Blend from the direct low-pass into the full pyramid.
-    pub fn backdrop_blur_mix(&self) -> f32 {
-        let t = (self.backdrop_blur / 18.0).clamp(0.0, 1.0);
-        t * t
-    }
-
+    /// Test-covered number of pyramid levels used by the backdrop blur.
+    #[cfg(test)]
     pub fn backdrop_blur_levels(&self) -> usize {
         if self.backdrop_blur <= 0.0 {
             return 0;
@@ -339,6 +330,21 @@ impl Theme {
         ((self.backdrop_blur / 18.0 * 5.0).ceil() as usize).clamp(1, 5)
     }
 
+    /// Test-covered blend from the direct low-pass into the full pyramid.
+    #[cfg(test)]
+    pub fn backdrop_blur_mix(&self) -> f32 {
+        let t = (self.backdrop_blur / 18.0).clamp(0.0, 1.0);
+        t * t
+    }
+
+    /// Map the user-facing radius to the backdrop's dual-Kawase sample scale.
+    /// 24 px is one full sample-scale unit; the default 18 px preserves the
+    /// previous 0.75 backdrop blur.
+    /// Number of pyramid levels used by the backdrop blur.
+    ///
+    /// One level is the smallest nonzero blur; five is the full chain. The
+    /// 18 px reference keeps the previous full-strength appearance.
+    /// Blend from the direct low-pass into the full pyramid.
     /// Update one palette entry by its JSON key. Returns false for unknown keys.
     pub fn set_color(&mut self, key: &str, value: [u8; 4]) -> bool {
         match key {
@@ -658,14 +664,6 @@ pub fn active_defaults() -> Theme {
 }
 
 /// Does the live palette differ from the active theme's embedded baseline?
-pub fn has_changes() -> bool {
-    get() != active_defaults()
-}
-
-pub fn custom_theme_exists() -> bool {
-    active_preset().path.is_some()
-}
-
 fn user_theme_files() -> Vec<ThemePreset> {
     let mut themes = Vec::new();
     if let Some(path) = Theme::legacy_custom_path()
@@ -1348,18 +1346,6 @@ pub fn scroll_style_general() -> egui::style::ScrollStyle {
 ///
 /// The inspector's existing custom scrollbar remains untouched; this is the
 /// shared style for future on-canvas scroll areas.
-pub fn scroll_style_thin() -> egui::style::ScrollStyle {
-    let mut style = egui::style::ScrollStyle::floating();
-    style.bar_width = 7.0;
-    style.floating_width = 3.0;
-    style.floating_allocated_width = 0.0;
-    style.handle_min_length = 20.0;
-    style.dormant_handle_opacity = 0.0;
-    style.active_handle_opacity = 0.55;
-    style.interact_handle_opacity = 0.9;
-    style
-}
-
 #[cfg(test)]
 mod hex_color_tests {
     use super::Theme;

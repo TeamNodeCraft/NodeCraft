@@ -39,10 +39,6 @@ impl<'a> HoverMap<'a> {
         }
     }
 
-    /// The pointer only when it may act on the viewport itself.
-    pub fn pointer_on_viewport(&self) -> Option<Pos2> {
-        (self.hover() == Hover::Viewport).then_some(self.pointer?).or(None)
-    }
 
     pub fn over_viewport(&self) -> bool {
         self.hover() == Hover::Viewport

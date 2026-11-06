@@ -14,6 +14,7 @@ use nodecraft_solidcore::solidcore::{
 /// Typed value crossing the node boundary. Node ids are always flat graph ids;
 /// UI nesting is presentation only.
 #[derive(Clone)]
+#[allow(dead_code)] // Part/Sketch/Mesh outputs are the planned typed-input path.
 pub(crate) enum NodeOutput {
     Shape(std::sync::Arc<Brep>),
     Part(std::sync::Arc<crate::Part>),
@@ -22,6 +23,7 @@ pub(crate) enum NodeOutput {
     Empty,
 }
 
+#[allow(dead_code)]
 impl NodeOutput {
     pub(crate) fn into_shape(self) -> Option<std::sync::Arc<Brep>> {
         match self {
@@ -61,10 +63,12 @@ impl NodeOutput {
 }
 
 /// Inputs are collected by the flat graph's input port names.
+#[allow(dead_code)] // Planned typed-input path for scheduler dispatch.
 pub(crate) struct NodeInputs {
     values: std::collections::BTreeMap<String, NodeOutput>,
 }
 
+#[allow(dead_code)]
 impl NodeInputs {
     pub(crate) fn is_empty(&self) -> bool {
         self.values.is_empty()
@@ -127,6 +131,7 @@ pub(crate) enum ExactNodeTask {
 impl ExactNodeTask {
     /// Node types this task layer can dispatch today. The descriptor table
     /// remains the long-term capability source; this is the implemented subset.
+    #[allow(dead_code)] // Implemented subset; descriptor table remains the authority.
     pub(crate) fn supports(node_type: &str) -> bool {
         matches!(node_type, "solid" | "primitive" | "boolean" | "fuse" | "extrude" | "fillet" | "shell" | "mirror" | "loft" | "surfaceloft" | "chamfer")
     }
@@ -201,7 +206,7 @@ impl ExactNodeTask {
 /// Execute an owned exact task on the shared persistent-kernel pool.
 pub(crate) fn execute_exact(
     task: ExactNodeTask,
-    node_id: &str,
+    _node_id: &str,
     seed: u64,
 ) -> Result<NodeOutput, String> {
     shared_pool().execute(seed, move |kernel| task.run(kernel))
@@ -209,10 +214,12 @@ pub(crate) fn execute_exact(
 
 /// Revision cancellation token for a task group.
 #[derive(Clone)]
+#[allow(dead_code)] // Planned cancellation path for scheduler dispatch.
 pub(crate) struct TaskCancellation {
     pub token: CancelToken,
 }
 
+#[allow(dead_code)]
 impl TaskCancellation {
     pub(crate) fn new() -> Self {
         Self { token: CancelToken::new() }

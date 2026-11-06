@@ -38,24 +38,28 @@ pub fn grid_step(_radius: f64) -> f64 {
 /// distance is three model radii, so `distance / 3` is the model scale; snapping
 /// it to the nearest decade keeps roughly the same number of cells on screen and
 /// subdivides the pattern as the user zooms in or out.
-pub fn adaptive_grid_level(camera_distance: f64) -> (f64, f64) {
-    let scale = (camera_distance / 3.0).max(1.0e-6);
-    let level = scale.log10();
-    let exponent = level.floor();
-    // A decade is one level: at t = 0 the coarse grid is shown, and by t = 1
-    // the next finer grid has fully replaced it.
-    (10.0_f64.powf(exponent + 1.0), level - exponent)
-}
 
-pub fn adaptive_grid_step(camera_distance: f64) -> f64 {
-    adaptive_grid_level(camera_distance).0 / 10.0
-}
 
 /// Upstream-style grid spacing for a view of the given half height.
 ///
 /// Returns `(minor, major)`. This follows the sequence 1, 2, 5, 10, ... rather
 /// than the old fixed 100-unit grid, so cells stay roughly the same size on
 /// screen as the camera zooms.
+
+#[cfg(test)]
+pub fn adaptive_grid_level(camera_distance: f64) -> (f64, f64) {
+    let scale = (camera_distance / 3.0).max(1.0e-6);
+    let level = scale.log10();
+    let exponent = level.floor();
+    (10.0_f64.powf(exponent + 1.0), level - exponent)
+}
+
+#[cfg(test)]
+pub fn adaptive_grid_step(camera_distance: f64) -> f64 {
+    adaptive_grid_level(camera_distance).0 / 10.0
+}
+
+#[cfg(test)]
 pub fn adaptive_grid(half_height: f64) -> (f64, f64) {
     let raw = (half_height / 10.0).max(1.0e-3);
     let p = 10.0_f64.powf(raw.log10().floor());
@@ -174,11 +178,6 @@ fn smoothstep64(edge0: f64, edge1: f64, value: f64) -> f64 {
 
 /// Coarse and fine level weights for a zoom-decade fraction. These are uploaded
 /// as uniforms; the shader only evaluates the two masks.
-pub fn grid_level_weights(level: f64) -> (f32, f32) {
-    let fine = smoothstep64(0.0, 0.65, level);
-    let coarse = 1.0 - smoothstep64(0.35, 1.0, level);
-    (coarse as f32, fine as f32)
-}
 
 /// World-space half-extent of the grid for a model radius.
 pub fn grid_extent(radius: f64) -> f64 {

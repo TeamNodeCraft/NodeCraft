@@ -102,7 +102,7 @@ fn scene_color_attachment<'a, T>(samples: u32, color: &'a T, resolve: &'a T) -> 
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct GridUniforms {
+pub(crate) struct GridUniforms {
     eye: [f32; 4],
     target: [f32; 4],
     center: [f32; 4],
@@ -337,7 +337,7 @@ struct ObjectVertex {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct ObjectUniforms {
+pub(crate) struct ObjectUniforms {
     view_proj: [[f32; 4]; 4],
     back: [f32; 4],
     eye: [f32; 4],
@@ -567,7 +567,6 @@ struct GpuMeshAsset {
     key: u64,
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    index_count: u32,
 }
 
 struct GpuDrawItem {
@@ -937,7 +936,6 @@ impl ObjectRenderer {
                     key,
                     vertices: vertex_buffer,
                     indices: index_buffer,
-                    index_count: indices.len() as u32,
                 });
             }
         }
@@ -1132,6 +1130,8 @@ fn preview_draw_ranges(affected: &[(u32, u32)], total: u32) -> (Vec<(u32, u32)>,
 }
 
 /// Convert a half-open triangle range into an index-buffer draw range.
+
+#[cfg(test)]
 fn draw_index_range((start, end): (u32, u32)) -> (u32, u32) {
     (start * 3, (end - start) * 3)
 }
@@ -1282,7 +1282,7 @@ fn fs() -> @location(0) vec4<f32> {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct AxisUniforms {
+pub(crate) struct AxisUniforms {
     view_proj: [[f32; 4]; 4],
     start: [f32; 4],
     end: [f32; 4],
@@ -1422,7 +1422,7 @@ struct BlitPipeline {
     bind_group: wgpu::BindGroup,
 }
 
-struct SceneTarget {
+pub(crate) struct SceneTarget {
     size: [u32; 2],
     color_view: wgpu::TextureView,
     resolve_view: wgpu::TextureView,
@@ -1605,6 +1605,7 @@ pub struct GpuViewport {
     /// walking every vertex again.
     display_bounds: Aabb3,
     bounds: Aabb3,
+    #[allow(dead_code)] // Kept for future resource creation after GPU init.
     device: wgpu::Device,
     object: Arc<Mutex<ObjectRenderer>>,
     scene: Arc<Mutex<Option<SceneTarget>>>,
@@ -2372,6 +2373,7 @@ pub struct GpuCallback {
     pub object: ObjectUniforms,
     pub background: [u8; 4],
     pub view: ViewSettings,
+    #[allow(dead_code)] // Reserved for GPU chrome rendering.
     pub chrome_visible: bool,
     pub frame: Frame,
     pub backdrop_view_proj: [[f32; 4]; 4],
@@ -2440,7 +2442,7 @@ impl CallbackTrait for GpuCallback {
                     external_view = Some(target.resolve_view.clone());
                     let (view, resolve_target) =
                         scene_color_attachment(samples, &target.color_view, &target.resolve_view);
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("viewport-scene-offscreen"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                             view,

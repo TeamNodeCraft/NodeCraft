@@ -30,6 +30,8 @@ pub struct Evaluation {
     /// Exact before/after difference bodies from the kernel.
     pub difference: Option<(Mesh, Mesh)>,
     pub difference_error: Option<String>,
+    /// The ghost came from the display-surface fallback, not the exact Boolean.
+    pub difference_approximate: bool,
     pub node_errors: std::collections::BTreeMap<String, String>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
@@ -130,6 +132,7 @@ pub fn evaluate_with_linked_progress_comparison(
                     ghost: None,
                     difference: None,
                     difference_error: None,
+                    difference_approximate: false,
                     node_errors: Default::default(),
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
@@ -336,6 +339,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
             ghost,
             difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
             difference_error: output.response.comparison.as_ref().and_then(|payload| payload.error.clone()),
+            difference_approximate: output.response.comparison.as_ref().is_some_and(|payload| payload.approximate),
             node_errors: output.response.node_errors,
             error,
             elapsed_ms,

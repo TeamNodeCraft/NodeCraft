@@ -60,44 +60,9 @@ fn switch(key: &'static str, label: &'static str, default: bool) -> FieldSpec {
     field(key, label, Value::Bool(default), Widget::Switch)
 }
 
-fn number(key: &'static str, label: &'static str, default: f64) -> FieldSpec {
-    field(
-        key,
-        label,
-        Value::from(default),
-        Widget::Number { min: None, max: None, step: 0.1 },
-    )
-}
 
-fn slider(key: &'static str, label: &'static str, default: f64, min: f64, max: f64, step: f64) -> FieldSpec {
-    field(
-        key,
-        label,
-        Value::from(default),
-        Widget::Number { min: Some(min), max: Some(max), step },
-    )
-}
 
-/// A CAD length. Upper bound is intentionally open: the engine and document
-/// format use f64 model units, so the inspector must not cap real-world sizes.
-fn dimension(key: &'static str, label: &'static str, default: f64) -> FieldSpec {
-    field(
-        key,
-        label,
-        Value::from(default),
-        Widget::Number { min: Some(0.0), max: None, step: 0.1 },
-    )
-}
 
-/// A signed CAD length/offset with no upper bound.
-fn measurement(key: &'static str, label: &'static str, default: f64, step: f64) -> FieldSpec {
-    field(
-        key,
-        label,
-        Value::from(default),
-        Widget::Number { min: None, max: None, step },
-    )
-}
 
 fn choice(
     key: &'static str,
@@ -118,68 +83,9 @@ fn primitive_specs(node: &GraphNode) -> Vec<FieldSpec> {
         "primitiveType",
         "Primitive",
         "box",
-        &[
-            ("box", "Box"),
-            ("cylinder", "Cylinder"),
-            ("cone", "Cone"),
-            ("sphere", "Sphere"),
-            ("torus", "Torus"),
-            ("wedge", "Wedge"),
-            ("pyramid", "Pyramid"),
-            ("partialSphere", "Partial sphere"),
-            ("partialTorus", "Partial torus"),
-        ],
+        nodecraft_node_contract::PRIMITIVE_TYPES,
     )];
-    match kind {
-        "sphere" => specs.push(dimension("radius", "Radius", 20.0)),
-        "cylinder" => {
-            specs.push(dimension("radius", "Radius", 20.0));
-            specs.push(dimension("height", "Height", 40.0));
-        }
-        "cone" => {
-            specs.push(dimension("bottomRadius", "Bottom radius", 20.0));
-            specs.push(dimension("topRadius", "Top radius", 0.0));
-            specs.push(dimension("height", "Height", 40.0));
-        }
-        "torus" => {
-            specs.push(dimension("majorRadius", "Major radius", 15.0));
-            specs.push(dimension("minorRadius", "Minor radius", 5.0));
-        }
-        "wedge" => {
-            for (key, label, default) in [
-                ("length", "Length", 40.0),
-                ("width", "Width", 30.0),
-                ("height", "Height", 25.0),
-                ("topLength", "Top length", 0.0),
-            ] {
-                specs.push(dimension(key, label, default));
-            }
-        }
-        "pyramid" => {
-            specs.push(dimension("length", "Base length", 40.0));
-            specs.push(dimension("height", "Height", 40.0));
-        }
-        "partialSphere" => {
-            specs.push(dimension("radius", "Radius", 20.0));
-            specs.push(slider("startAngle", "Start angle°", 0.0, -180.0, 180.0, 1.0));
-            specs.push(slider("endAngle", "End angle°", 90.0, -180.0, 180.0, 1.0));
-        }
-        "partialTorus" => {
-            specs.push(dimension("majorRadius", "Major radius", 15.0));
-            specs.push(dimension("minorRadius", "Minor radius", 5.0));
-            specs.push(slider("startAngle", "Start angle°", 0.0, -180.0, 180.0, 1.0));
-            specs.push(slider("endAngle", "End angle°", 90.0, -180.0, 180.0, 1.0));
-        }
-        _ => {
-            for (key, label, default) in [
-                ("length", "Length", 40.0),
-                ("width", "Width", 40.0),
-                ("height", "Height", 40.0),
-            ] {
-                specs.push(dimension(key, label, default));
-            }
-        }
-    }
+    specs.extend(contract_field_specs(nodecraft_node_contract::primitive_fields(kind)));
     specs
 }
 
@@ -443,84 +349,46 @@ fn look_color(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     });
 }
 
+fn contract_field_specs(fields: &[nodecraft_node_contract::NodeFieldSpec]) -> Vec<FieldSpec> {
+    fields
+        .iter()
+        .map(|spec| {
+            let default = match spec.default {
+                nodecraft_node_contract::FieldDefault::Text(value) => Value::String(value.to_owned()),
+                nodecraft_node_contract::FieldDefault::Bool(value) => Value::Bool(value),
+                nodecraft_node_contract::FieldDefault::Number(value) => Value::from(value),
+                nodecraft_node_contract::FieldDefault::Choice(value) => Value::String(value.to_owned()),
+            };
+            let widget = match spec.kind {
+                nodecraft_node_contract::FieldKind::Text => Widget::Text,
+                nodecraft_node_contract::FieldKind::Switch => Widget::Switch,
+                nodecraft_node_contract::FieldKind::Number { min, max, step } => {
+                    Widget::Number { min, max, step }
+                }
+                nodecraft_node_contract::FieldKind::Choice(choices) => Widget::Choice(choices),
+            };
+            FieldSpec {
+                key: spec.key.to_owned(),
+                label: spec.label.to_owned(),
+                default,
+                widget,
+            }
+        })
+        .collect()
+}
+
+/// Map the contract's neutral field metadata onto this egui inspector.
+fn contract_specs(node_type: &str) -> Option<Vec<FieldSpec>> {
+    let fields = nodecraft_node_contract::fields(node_type)?;
+    Some(contract_field_specs(fields))
+}
+
 fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
+    if let Some(specs) = contract_specs(&node.node_type) {
+        return specs;
+    }
     match node.node_type.as_str() {
         "solid" | "primitive" => primitive_specs(node),
-        "spline" => vec![
-            slider("degree", "Degree", 3.0, 1.0, 9.0, 1.0),
-            switch("control", "Control points", false),
-            switch("periodic", "Closed", false),
-        ],
-        "translate" => vec![
-            choice("space", "Space", "world", &[("world", "World"), ("local", "Local")]),
-            measurement("x", "Position X", 0.0, 0.01),
-            measurement("y", "Position Y", 0.0, 0.01),
-            measurement("z", "Position Z", 0.0, 0.01),
-            slider("rx", "Rotation X°", 0.0, -180.0, 180.0, 0.1),
-            slider("ry", "Rotation Y°", 0.0, -180.0, 180.0, 0.1),
-            slider("rz", "Rotation Z°", 0.0, -180.0, 180.0, 0.1),
-        ],
-        "boolean" | "fuse" => vec![choice(
-            "mode",
-            "Operation",
-            "union",
-            &[
-                ("union", "Union"),
-                ("subtract", "Subtract A − B"),
-                ("subtract-reverse", "Subtract B − A"),
-                ("intersect", "Intersect"),
-            ],
-        )],
-        "extrude" => vec![
-            dimension("amount", "Amount", 10.0),
-            choice(
-                "operation",
-                "Operation",
-                "new",
-                &[("new", "New"), ("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect")],
-            ),
-        ],
-        "loft" | "surfaceloft" => vec![slider("ruled", "Ruled", 0.0, 0.0, 1.0, 1.0)],
-        "chamfer" => vec![
-            dimension("length", "Distance", 2.0),
-            choice("chamferType", "Type", "equal", &[
-                ("equal", "Equal distance"),
-                ("two-distance", "Two distances"),
-                ("distance-angle", "Distance + angle"),
-            ]),
-            dimension("distance2", "Distance 2", 2.0),
-            slider("angle", "Angle°", 45.0, 0.1, 179.9, 0.1),
-        ],
-        "fillet" => vec![
-            dimension("length", "Radius", 2.0),
-            choice("continuity", "Continuity", "", &[
-                ("", "Circular (G1)"),
-                ("G2", "Curvature (G2)"),
-                ("G3", "Curvature (G3)"),
-            ]),
-        ],
-        "offsetfaces" => vec![
-            dimension("distance", "Distance", 1.0),
-        ],
-        "shell" => vec![
-            dimension("thickness", "Thickness", 2.0),
-            choice("direction", "Direction", "inward", &[("inward", "Inward"), ("outward", "Outward")]),
-        ],
-        "mirror" => vec![
-            choice("plane", "Plane", "xz", &[("xy", "XY"), ("xz", "XZ"), ("yz", "YZ")]),
-            measurement("offset", "Offset", 0.0, 0.01),
-            switch("combine", "Combine", true),
-        ],
-        "scatter" => vec![
-            switch("combine", "Combine", true),
-            number("count", "Count", 1000.0),
-            number("spanX", "Span X", 240.0),
-            number("spanY", "Span Y", 160.0),
-            number("seed", "Seed", 1.0),
-            choice("distribution", "Distribution", "random", &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")]),
-            number("minScale", "Min scale", 0.75),
-            number("maxScale", "Max scale", 1.25),
-        ],
         "stepimporter" => vec![
             text("path", "STEP path", ""),
             switch("heal", "Heal", true),
@@ -809,6 +677,31 @@ fn description(ui: &mut Ui, text: &str) {
     ui_shape::callout(ui, text);
 }
 
+/// Show an error for the selected node even when it is outside the viewed
+/// target closure. The canvas glow says where; this says why.
+fn error_banner(ui: &mut Ui, error: &str) {
+    let theme = crate::theme::get();
+    egui::Frame::new()
+        .fill(theme.with_alpha(theme.node_error, 28))
+        .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.node_error, 180)))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new("NODE ERROR")
+                    .size(10.0)
+                    .strong()
+                    .color(theme.color(theme.node_error)),
+            );
+            ui.label(
+                egui::RichText::new(error)
+                    .size(12.0)
+                    .color(theme.color(theme.text)),
+            );
+        });
+    ui.add_space(6.0);
+}
+
 fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
     ui.horizontal(|ui| {
@@ -1001,8 +894,12 @@ pub fn show(
     sections: &[String],
     active_selection: Option<&str>,
     sketch_editing: bool,
+    node_error: Option<&str>,
 ) -> Output {
     let mut output = Output::default();
+    if let Some(error) = node_error {
+        error_banner(ui, error);
+    }
     if node.node_type == "stepimporter" {
         if let Some(name) = step_file_name(node) {
             let theme = crate::theme::get();
@@ -1182,6 +1079,36 @@ mod tests {
             x: 0.0,
             y: 0.0,
         }
+    }
+
+    #[test]
+    fn contract_fields_drive_static_inspector_specs() {
+        let shell = known_specs(&node("shell", Value::Null));
+        assert_eq!(shell.len(), 2);
+        let thickness = shell.iter().find(|spec| spec.key == "thickness").expect("thickness");
+        assert_eq!(thickness.default, serde_json::json!(2.0));
+        assert!(matches!(thickness.widget, Widget::Number { min: Some(0.0), .. }));
+        let direction = shell.iter().find(|spec| spec.key == "direction").expect("direction");
+        assert_eq!(direction.default, serde_json::json!("inward"));
+        assert!(matches!(direction.widget, Widget::Choice(_)));
+
+        let mirror = known_specs(&node("mirror", Value::Null));
+        let combine = mirror.iter().find(|spec| spec.key == "combine").expect("combine");
+        assert_eq!(combine.default, serde_json::json!(true));
+        assert!(matches!(combine.widget, Widget::Switch));
+
+        let fillet = known_specs(&node("fillet", Value::Null));
+        let continuity = fillet.iter().find(|spec| spec.key == "continuity").expect("continuity");
+        assert_eq!(continuity.default, serde_json::json!(""));
+
+        let box_specs = known_specs(&node("primitive", serde_json::json!({"primitiveType": "box"})));
+        assert_eq!(box_specs.len(), 4);
+        let length = box_specs.iter().find(|spec| spec.key == "length").expect("length");
+        assert_eq!(length.default, serde_json::json!(40.0));
+        assert!(matches!(length.widget, Widget::Number { min: Some(0.0), .. }));
+        let cone = known_specs(&node("primitive", serde_json::json!({"primitiveType": "cone"})));
+        assert!(cone.iter().any(|spec| spec.key == "bottomRadius"));
+        assert!(cone.iter().any(|spec| spec.key == "topRadius"));
     }
 
     #[test]

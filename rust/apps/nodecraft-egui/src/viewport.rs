@@ -102,19 +102,8 @@ pub enum SelectionMode {
     Object,
     Face,
     Edge,
-    Vertex,
 }
 
-impl SelectionMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Object => "Object",
-            Self::Face => "Face",
-            Self::Edge => "Edge",
-            Self::Vertex => "Vertex",
-        }
-    }
-}
 
 fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     let ab = b - a;
@@ -362,31 +351,7 @@ impl Viewport {
         self.update_mesh(mesh);
     }
 
-    pub fn set_comparison_mesh(&mut self, before: &NodeMesh, after: &NodeMesh) {
-        self.selected_edges.clear();
-        self.hovered_edge = None;
-        self.display = Some(crate::adapter::display_mesh_with_comparison(after, before));
-        #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
-        }
-        self.dirty = true;
-    }
 
-    pub fn set_source_comparison_mesh(&mut self, before: &NodeMesh, after: &NodeMesh) {
-        self.selected_edges.clear();
-        self.hovered_edge = None;
-        self.display = Some(crate::adapter::display_mesh_with_comparison_on(
-            before, after, before,
-        ));
-        #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
-        }
-        self.dirty = true;
-    }
 
     pub fn set_exact_comparison_mesh(
         &mut self,
@@ -493,9 +458,6 @@ impl Viewport {
         std::mem::take(&mut self.edge_picks)
     }
 
-    pub fn selected_edges(&self) -> &std::collections::BTreeSet<String> {
-        &self.selected_edges
-    }
 
     pub fn set_selection_mode(&mut self, mode: SelectionMode) {
         if mode != self.selection_mode {
@@ -510,10 +472,6 @@ impl Viewport {
         self.hovered_edge = None;
     }
 
-    pub fn set_selected_edges(&mut self, ids: impl IntoIterator<Item = String>) {
-        self.selected_edges = ids.into_iter().collect();
-        self.hovered_edge = None;
-    }
 
     pub fn edge_picking_enabled(&self) -> bool {
         self.edge_picking_enabled
@@ -772,21 +730,6 @@ impl Viewport {
             }
             None => self.gizmo_update = Some(update),
         }
-    }
-
-    pub fn show(&mut self, ui: &mut egui::Ui, overlay: egui::Rect) {
-        self.show_with_backdrop(ui, overlay, overlay);
-    }
-
-    /// Draw the viewport with a separate rect driving the frosted-backdrop crop.
-    /// `overlay` still controls which viewport areas absorb navigation gestures.
-    pub fn show_with_backdrop(
-        &mut self,
-        ui: &mut egui::Ui,
-        overlay: egui::Rect,
-        backdrop_rect: egui::Rect,
-    ) {
-        self.show_with_backdrop_blockers(ui, overlay, &[overlay], backdrop_rect);
     }
 
     /// Draw the viewport while blocking navigation gestures over every floating
@@ -1179,7 +1122,7 @@ impl Viewport {
         let Some(comparison) = &display.comparison else { return };
         let theme = crate::theme::get();
         let painter = ui.painter().with_clip_rect(viewport);
-        let mut draw_layer = |triangles: &[([solidcore_record_new::Vec3; 3], [solidcore_record_new::Vec3; 3])], color: egui::Color32| {
+        let draw_layer = |triangles: &[([solidcore_record_new::Vec3; 3], [solidcore_record_new::Vec3; 3])], color: egui::Color32| {
             for (points, _) in triangles {
                 let projected: Vec<egui::Pos2> = points
                     .iter()
@@ -1301,100 +1244,6 @@ impl Viewport {
             };
             self.face_picks.push(face);
             ui.ctx().request_repaint();
-        }
-    }
-
-    /// Top-of-viewport filter dock for face, edge and vertex selection.
-    fn selection_dock(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, visible: egui::Rect) {
-        const MARGIN: f32 = 14.0;
-        const BUTTON: f32 = 34.0;
-        const HEIGHT: f32 = 30.0;
-        const GAP: f32 = 4.0;
-        let width = BUTTON * 3.0 + GAP * 2.0 + 12.0;
-        // Centre between the node editor's right edge and the window's right edge.
-        let available_left = visible.min.x.clamp(viewport.min.x, viewport.max.x);
-        let available_right = viewport.max.x;
-        let dock_center_x = (available_left + available_right) * 0.5;
-        let dock = egui::Rect::from_center_size(
-            egui::Pos2::new(dock_center_x, viewport.top() + MARGIN + HEIGHT * 0.5),
-            egui::Vec2::new(width, HEIGHT),
-        );
-        // Keep the dock out from under the XYZ compass in narrow viewports.
-        let right_limit = viewport.right() - self.chrome_right_inset - 94.0 - MARGIN * 2.0;
-        let dock = if dock.right() > right_limit {
-            egui::Rect::from_min_size(
-                egui::Pos2::new(right_limit - dock.width(), dock.min.y),
-                dock.size(),
-            )
-        } else {
-            dock
-        };
-        let theme = crate::theme::get();
-        self.dock_rect = Some(dock);
-        let painter = ui.painter().with_clip_rect(viewport);
-        painter.rect_filled(dock, 10.0, theme.with_alpha(theme.window, 205));
-        painter.rect_stroke(
-            dock,
-            10.0,
-            egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
-            egui::StrokeKind::Inside,
-        );
-        let modes = [SelectionMode::Face, SelectionMode::Edge, SelectionMode::Vertex];
-        let mut x = dock.min.x + 6.0;
-        for mode in modes {
-            let button = egui::Rect::from_min_size(
-                egui::Pos2::new(x, dock.min.y + (HEIGHT - BUTTON) * 0.5),
-                egui::Vec2::splat(BUTTON),
-            );
-            let response = ui
-                .interact(
-                    button,
-                    egui::Id::new(("viewport-selection-mode", mode.label())),
-                    egui::Sense::click(),
-                )
-                .on_hover_text(format!("{} selection", mode.label()));
-            let active = self.selection_mode == mode;
-            if active || response.hovered() {
-                painter.rect_filled(
-                    button,
-                    7.0,
-                    theme.with_alpha(if active { theme.highlight } else { theme.control }, 210),
-                );
-            }
-            if response.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if response.clicked() {
-                self.set_selection_mode(if active { SelectionMode::Object } else { mode });
-                ui.ctx().request_repaint();
-            }
-            let colour = if active {
-                theme.color(theme.accent)
-            } else {
-                theme.color(theme.icon)
-            };
-            let center = button.center();
-            match mode {
-                SelectionMode::Face => {
-                    let face = egui::Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::Vec2::splat(13.0));
-                    painter.rect_filled(face, 2.0, theme.with_alpha(theme.icon, 60));
-                    painter.rect_stroke(face, 2.0, egui::Stroke::new(1.5, colour), egui::StrokeKind::Inside);
-                }
-                SelectionMode::Edge => {
-                    painter.line_segment(
-                        [center + egui::vec2(-7.0, 5.0), center + egui::vec2(7.0, -5.0)],
-                        egui::Stroke::new(2.0, colour),
-                    );
-                    painter.circle_filled(center + egui::vec2(-7.0, 5.0), 2.0, colour);
-                    painter.circle_filled(center + egui::vec2(7.0, -5.0), 2.0, colour);
-                }
-                SelectionMode::Vertex => {
-                    painter.circle_filled(center, 5.0, colour);
-                    painter.circle_stroke(center, 7.0, egui::Stroke::new(1.2, colour));
-                }
-                SelectionMode::Object => {}
-            }
-            x += BUTTON + GAP;
         }
     }
 

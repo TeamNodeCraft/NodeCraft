@@ -832,7 +832,9 @@ pub struct NodeCraftApp {
     validation_selection: Option<Vec<String>>,
     difference_stats: Option<(usize, usize)>,
     node_errors: HashSet<String>,
+    node_error_messages: std::collections::BTreeMap<String, String>,
     difference_error: Option<String>,
+    difference_approximate: bool,
     feature_overlay: bool,
     engine_threads: usize,
     mesher_threads: usize,
@@ -1062,7 +1064,9 @@ impl NodeCraftApp {
             validation_selection: None,
             difference_stats: None,
             node_errors: HashSet::new(),
+            node_error_messages: std::collections::BTreeMap::new(),
             difference_error: None,
+            difference_approximate: false,
             feature_overlay: settings.feature_overlay,
             engine_threads: settings.engine_threads,
             mesher_threads: settings.mesher_threads,
@@ -2092,7 +2096,7 @@ impl NodeCraftApp {
             .map(|node| (node.id.clone(), (node.x, node.y)))
             .collect();
         let mut moved: std::collections::BTreeMap<String, (f64, f64)> = std::collections::BTreeMap::new();
-        let (mut x, mut y) = initial;
+        let (mut x, y) = initial;
         for _ in 0..16 {
             let candidate = added_extent.padded_rect(x, y);
             let cables = NodeEditor::connection_paths(document, &positions, cable_routing);
@@ -3134,7 +3138,6 @@ impl NodeCraftApp {
             rx: value("rx"),
             ry: value("ry"),
             rz: value("rz"),
-            local,
             world_to_local: chain.inverse_linear(),
             axes,
         })
@@ -3604,12 +3607,12 @@ impl NodeCraftApp {
     }
 
     fn selection_spec(node_type: &str) -> Option<(&'static str, crate::viewport::SelectionMode)> {
-        match node_type {
-            "chamfer" | "fillet" => Some(("edges", crate::viewport::SelectionMode::Edge)),
-            "shell" => Some(("faces", crate::viewport::SelectionMode::Face)),
-            "extrude" => Some(("faces", crate::viewport::SelectionMode::Face)),
-            _ => None,
-        }
+        let spec = nodecraft_node_contract::selection_spec(node_type)?;
+        let mode = match spec.kind {
+            nodecraft_node_contract::SelectionKind::Edge => crate::viewport::SelectionMode::Edge,
+            nodecraft_node_contract::SelectionKind::Face => crate::viewport::SelectionMode::Face,
+        };
+        Some((spec.field, mode))
     }
 
     fn refresh_topology_picking(&mut self) {
@@ -4534,6 +4537,7 @@ impl NodeCraftApp {
             self.cache_misses = evaluation.cache_misses;
             self.error = evaluation.error;
             self.node_errors = evaluation.node_errors.keys().cloned().collect();
+            self.node_error_messages = evaluation.node_errors.clone();
             self.node_editor.set_error_nodes(self.node_errors.clone());
             let had_mesh = self.mesh.is_some();
             let previous_target = self.eval_target.clone();
@@ -4555,6 +4559,7 @@ impl NodeCraftApp {
                 .as_ref()
                 .map(|(added, removed)| (added.faces.len(), removed.faces.len()));
             self.difference_error = evaluation.difference_error.clone();
+            self.difference_approximate = evaluation.difference_approximate;
             if let Some((before, after)) = &evaluation.comparison {
                 let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
                 let before = self.reframe_comparison(&selected, before);
@@ -4669,6 +4674,9 @@ impl NodeCraftApp {
             } else {
                 format!("Evaluation failed in {:.1} ms", self.evaluation_ms)
             };
+            if self.difference_approximate {
+                self.status.push_str(" — feature ghost is approximate");
+            }
             self.egui_ctx.request_repaint();
         }
     }
@@ -4847,6 +4855,7 @@ impl NodeCraftApp {
                         "comparisonActive": self.comparison_pair.is_some(),
                         "differenceFaces": self.difference_stats,
                         "differenceError": self.difference_error,
+                        "differenceApproximate": self.difference_approximate,
                         "errors": self.error,
                         "nodeErrors": self.node_errors,
                         "status": self.status,
@@ -5969,6 +5978,7 @@ impl eframe::App for NodeCraftApp {
                             ui.style_mut().visuals.widgets.active.corner_radius = bar_corner;
                             let active_selection =
                                 self.active_selection_field().map(str::to_owned);
+                            let node_error = self.node_error_messages.get(&node.id).cloned();
                             let reflow = self.inspector_reflow;
                             let mut scroll = egui::ScrollArea::vertical()
                                 .max_height(list_height)
@@ -5987,6 +5997,7 @@ impl eframe::App for NodeCraftApp {
                                         &surface_sections,
                                         active_selection.as_deref(),
                                         self.editing_sketch.as_deref() == Some(node.id.as_str()),
+                                        node_error.as_deref(),
                                     );
                                     if sketch_editing {
                                         self.sketch_gui.show_palette(ui);
@@ -6459,6 +6470,7 @@ impl EvalWorker {
                             ghost: None,
                             difference: None,
                             difference_error: None,
+                            difference_approximate: false,
                             node_errors: Default::default(),
                             error: Some(error.to_string()),
                             elapsed_ms: 0.0,
@@ -6508,6 +6520,7 @@ impl EvalWorker {
                             ghost: None,
                             difference: None,
                             difference_error: None,
+                            difference_approximate: false,
                             node_errors: Default::default(),
                             error: Some("Engine panicked while evaluating this target".into()),
                             elapsed_ms: 0.0,
