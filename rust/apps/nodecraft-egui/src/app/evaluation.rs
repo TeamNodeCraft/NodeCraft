@@ -157,7 +157,15 @@ impl EvalWorker {
             // evicting or reusing another tab's entries.
             let mut states: std::collections::HashMap<u64, TabEvalState> =
                 std::collections::HashMap::new();
-            'jobs: while let Ok(mut job) = job_rx.recv() {
+            let mut pending_job: Option<EvalJob> = None;
+            'jobs: loop {
+                let mut job = match pending_job.take() {
+                    Some(job) => job,
+                    None => match job_rx.recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    },
+                };
                 // Only the newest request matters; discard queued stale work.
                 while let Ok(next) = job_rx.try_recv() {
                     job = next;
@@ -259,7 +267,7 @@ impl EvalWorker {
                         }
                         state.cache = cache;
                         states.insert(job.tab_id, state);
-                        job = next;
+                        pending_job = Some(next);
                         continue 'jobs;
                     }
                 }
