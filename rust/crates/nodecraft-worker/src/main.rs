@@ -452,7 +452,12 @@ mod tests {
             if value["type"] == "session-result" { result = Some(value); }
         }
         let result = result.expect("session result");
-        assert!(result["cacheStats"]["misses"].as_u64().unwrap_or(0) >= 2);
+        // Primitive operands are prewarmed before the target closure is walked,
+        // so the target itself is the only cache miss in this small graph.
+        assert!(
+            result["cacheStats"]["misses"].as_u64().unwrap_or(0) >= 1,
+            "cache stats did not record the target evaluation: {result}"
+        );
         handle_session(SessionEnvelope {
             mesh_tolerance: None,
             action: "sessionCommand".into(), tab_id: "tab-1".into(), document: None,

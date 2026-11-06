@@ -38,6 +38,7 @@ cargo run --release -p nodecraft-egui -- samples/spline-showcase.nodecraft
 ```sh
 cargo test -p nodecraft-egui
 cargo test -p nodecraft-node-canvas
+cargo test -p nodecraft-session
 cargo test -p nodecraft-engine --lib
 ```
 

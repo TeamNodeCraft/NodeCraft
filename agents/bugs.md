@@ -41,6 +41,13 @@ Windows and Linux compile in CI but have no interactive verification yet.
 Native window chrome, file dialogs, clipboard and GPU surface behaviour are the
 highest-risk areas.
 
+## Slow STEP mass-reference coverage
+
+`solidcore-stepio/tests/stepio_mass_reference.rs` imports the full 46-fixture
+SMLib reference table and takes far longer than the rest of the workspace suite.
+Run it as a separate slow tier, not as a default per-change gate. The known
+sphere seam remains the only failure in the fast workspace tier.
+
 ## Public snapshot gaps
 
 Large STEP corpora, reference checkouts, reports and the full test matrix are

@@ -185,6 +185,67 @@ Acceptance:
 - `app.rs` ends up containing the app struct, shared state, central `ui()`
       draw order and high-level coordination only.
 
+## Code quality review (2026-11-06)
+
+Review carried out at private HEAD `7a29d14`, public `951251b`.
+These are cross-cutting improvements, not individual feature requests.
+
+### P0 — restore a trustworthy baseline
+
+- [x] Free workspace disk and add a target-cleanup policy. `rust/target/debug`
+      was removed (40 GB total target, 33 GB debug), freeing enough space to
+      link. The policy is in [Agent Guide](README.md#build-hygiene): remove build
+      artifacts only, never source or the nested public checkout.
+- [x] Record the actual workspace baseline after cleanup. Fast tier:
+      `cargo test --workspace --exclude solidcore-stepio --no-fail-fast`
+      → 808 passed, 1 failed (known sphere seam), 11 ignored. The
+      `solidcore-stepio` 46-fixture mass-reference test is now an explicit slow
+      tier. Results are in [Current state](current-state.md).
+- [x] Make public CI match its README: add `nodecraft-engine --lib` and
+      `nodecraft-session` to CI. The engine library tests use only public
+      fixtures; the long STEP-corpus tests remain private/slow.
+- [x] Refresh documentation drift: SolidCore `a39659e3`, SolidCraft
+      `d7cad100`, current test counts, explicit viewer breakpoint semantics,
+      known shell failure and node-error discovery boundary.
+
+### P1 — structural clean-up
+
+- [ ] Split `nodecraft-engine/src/lib.rs` (~7,200 lines) the way `app.rs` is
+      split: exact evaluation, display evaluation, caches, comparison and error
+      attribution behind explicit interfaces.
+- [ ] Make node metadata authoritative in one place. Ports, defaults, selection
+      capabilities, preview inputs and inspector fields are currently split
+      across descriptors, engine matches, `known_specs` and `selection_spec`.
+- [ ] Formalise cache keys and entries. Add invariant tests for:
+      failed never caches success; dirty never reads success; bypass never hides
+      an error; a new session never reuses an old evaluation identity.
+- [ ] Define the boundary of node-error discovery. Selected nodes outside the
+      viewed closure are validated for error glow; unviewed, unselected nodes
+      are not evaluated. Document that in the UI/docs or add an explicit
+      background validation mode.
+- [ ] Distinguish exact feature differences from approximate display-surface
+      fallbacks in the comparison payload and UI. Cache exact feature
+      comparisons where possible.
+- [ ] Improve shell coverage/validation for curved fillets and top-face
+      openings without reintroducing a silent fallback. Failures must remain
+      explicit.
+- [ ] Remove warning/dead-code debt: unused imports, unused typed-contract
+      scaffolding, 88 collapsible-if clippy warnings, repeated overlong argument
+      lists. Decide whether each dead item is planned or delete it.
+
+### P2 — longer-term quality
+
+- [ ] Add a CI warning budget and eventually `-D warnings`; remove dead research
+      modules or wire them in.
+- [ ] Add benchmark/regression coverage for large graphs, exact meshing and
+      display tessellation; keep performance changes measurable.
+- [ ] Complete descriptor-driven dispatch so node types cannot drift between
+      evaluation, inspector and public APIs.
+- [ ] Add public release tags/versioning to the snapshot workflow when a release
+      is intended; the current public history has snapshots but no release tag.
+- [ ] Keep the public exporter allowlist reviewed whenever a new sample or
+      required data file is added.
+
 ## Next: remove tessellation from node branches
 
 Attempted a direct reroute; it broke progress, mesh-cache, BRep-cache and failure

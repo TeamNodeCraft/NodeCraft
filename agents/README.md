@@ -20,6 +20,29 @@ changing geometry, the node canvas, or the viewport.
 3. Add a regression test when fixing a real bug.
 4. Keep exact geometry and display geometry separate.
 5. Run the smallest relevant tests first, then the wider suite.
+6. Keep build artifacts out of the workspace budget. `rust/target/debug` can
+   grow to tens of gigabytes; remove that directory when disk pressure blocks
+   linking. Never delete source, samples, reference checkouts, reports or other
+   working files to make room. Do not run `git clean -xfd` while the nested
+   public checkout exists.
+
+## Build hygiene
+
+The workspace and public snapshot share one disk. Before a long build:
+
+```sh
+df -h .
+du -sh rust/target rust/target/debug rust/target/release
+```
+
+If linking fails with `No space left on device`, remove build artifacts only:
+
+```sh
+rm -rf rust/target/debug
+```
+
+That is the supported cleanup path. It forces a debug rebuild but leaves the
+release app, source, samples, caches and public checkout untouched.
 
 The private development tree contains large STEP and vendor corpora that are not
 included in this public snapshot. Missing fixture tests may be skipped locally;

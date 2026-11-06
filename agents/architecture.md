@@ -123,8 +123,9 @@ Invariants:
 ## Viewer breakpoint and evaluation scope
 
 The viewer breakpoint is the node whose result the viewport is currently
-inspecting. In the current app it is derived from the selected node and stored
-per tab; a request targets just that node.
+inspecting. It is explicit and stored per tab. Opening a document pins it to the
+initial viewer target; the node's eye control changes it; selecting a node does
+not move it. A request targets just that node.
 
 The engine evaluates the **target closure**: the breakpoint and its upstream
 dependencies, not the whole graph and not downstream nodes. This is what makes a
@@ -133,17 +134,22 @@ small feature inspectable without rebuilding unrelated geometry.
 Current behaviour:
 
 ```text
-selected node -> viewer_breakpoint -> target request -> upstream closure
+explicit viewer_breakpoint -> target request -> upstream closure
 ```
+
+Current semantics:
+
+- the breakpoint is an explicit **scope root**, independent of selection
+- it is pinned and persisted per tab
+- moving it cancels stale work for the old scope but keeps reusable cache entries
+- a selected node outside the closure is evaluated only as a validation target,
+  so its error reaches the canvas glow without changing the displayed mesh
+- downstream nodes are never evaluated merely because the breakpoint moved
 
 Planned semantics:
 
-- breakpoint is an explicit **scope root**, independent of selection
-- it is pinned and persisted per tab
-- moving it cancels stale work for the old scope but keeps reusable cache entries
 - breakpoint, preview and export are sibling scopes
 - a breakpoint request returns both exact B-rep work and its display mesh
-- downstream nodes are never evaluated merely because the breakpoint moved
 
 The scoped DAG is a core modelling concept, not a debug workaround.
 

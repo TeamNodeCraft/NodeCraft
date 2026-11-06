@@ -24,7 +24,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check
         run: cargo check --manifest-path rust/Cargo.toml -p nodecraft-egui
-      - name: Test
+      - name: Test application and editor
         run: >-
           cargo test --manifest-path rust/Cargo.toml
-          -p nodecraft-egui -p nodecraft-node-canvas
+          -p nodecraft-egui -p nodecraft-node-canvas -p nodecraft-session
+      - name: Test engine library
+        run: >-
+          cargo test --manifest-path rust/Cargo.toml
+          -p nodecraft-engine --lib

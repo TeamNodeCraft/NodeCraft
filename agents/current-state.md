@@ -7,7 +7,8 @@ SolidCore/SMLib for exact geometry.
 
 - native egui application and macOS bundle build
 - flat node graph with stable IDs, undo/redo and linked documents
-- scoped evaluation through a viewer breakpoint (currently selection-driven)
+- scoped evaluation through an explicit per-tab viewer breakpoint; selecting a
+  node does not move it
 - node canvas with card/cable selection, delete and layout modes
 - GPU viewport with SolidCraft rendering, grid, axes, display modes and theme
 - STEP import through the SolidCore stack; older reader paths remain for
@@ -24,18 +25,33 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `d85f648466a752e00d6e1ce8f546e0be0db0896c`
+- SolidCore pinned at `a39659e3d798b56f99266cd2e522360dd99f7cf7`
+- SolidCraft sketch stack pinned at `d7cad1005a7ab8ed948d7c8cca666230e988c579`
 - STEP planar import normalizes closed-solid winding after new face-use-aware exports
 
 ## Test baseline
 
-Latest local baseline for the public subset:
+Latest local baseline after the 2026-11-06 cleanup:
 
 ```text
-nodecraft-egui          62 passed
-nodecraft-node-canvas   19 passed
-nodecraft-engine        75 passed / 1 ignored
+cargo test --workspace --exclude solidcore-stepio --no-fail-fast
+  808 passed / 1 failed / 11 ignored
+
+the one failure is the documented sphere seam in nodecraft-mesh:
+  remaining_ported_primitives_tessellate
+
+targeted:
+  nodecraft-egui          108 passed
+  nodecraft-node-canvas    54 passed / 4 ignored
+  nodecraft-session        53 passed
+  nodecraft-engine        114 passed / 1 ignored
+  nodecraft-node-contract   5 passed
+  nodecraft-blend           8 unit + 5 integration
 ```
+
+`solidcore-stepio` contains a 46-fixture SMLib mass-reference test that takes
+substantially longer than the rest of the workspace suite. Keep it in a separate
+slow tier rather than requiring it for every change.
 
 The public snapshot does not include the large STEP corpora used by the private
 matrix. Some private fixture tests may be skipped there.
@@ -61,6 +77,9 @@ Shelling is not yet general. Current state:
 - cone shelling currently fails at curved display tessellation
   (`solidcore curved tessellation produced no triangles`)
 - inner-shell orientation still needs a correctness audit
+- shelling the top face after a G2 fillet fails with
+  `the result is not a closed solid`; this remains an explicit error, not a
+  silent fallback
 - openings are accepted as body-scoped face references and resolved to
   SolidCore `FaceId`s
 - the offset options (`extend_convex_edges`, `merge_results`,
@@ -69,6 +88,13 @@ Shelling is not yet general. Current state:
 
 The next shell work is per-input option selection, volume/area validation for
 curved primitives, and contextual face editing from the inspector.
+
+## Node error discovery
+
+Selected nodes outside the viewed target closure are evaluated as validation
+targets so their errors reach the canvas glow without changing the breakpoint.
+Unviewed, unselected branches are not evaluated and therefore cannot report
+errors; global background validation is not implemented.
 
 ## Platforms
 
