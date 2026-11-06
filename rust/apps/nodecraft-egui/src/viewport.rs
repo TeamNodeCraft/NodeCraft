@@ -24,6 +24,11 @@ fn center_distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
 pub struct ViewSettings {
     /// Draw the shaded solid with alpha blending.
     pub translucent: bool,
+    /// Opacity of the transform edit ghost layer, 0 = fully transparent,
+    /// 1 = fully opaque.
+    pub ghost_opacity: f32,
+    /// Ignore face colours authored by Look nodes for display only.
+    pub ignore_look_colors: bool,
     pub edges: bool,
     pub triangles: bool,
     /// Draw one normal per display face.
@@ -48,6 +53,8 @@ impl Default for ViewSettings {
     fn default() -> Self {
         Self {
             translucent: false,
+            ghost_opacity: 0.45,
+            ignore_look_colors: false,
             edges: true,
             triangles: false,
             normals: false,
@@ -64,7 +71,15 @@ impl Default for ViewSettings {
 
 impl ViewSettings {
     fn any_extra(self) -> bool {
-        self.translucent || !self.edges || self.triangles || self.normals || self.face_colours || self.zebra
+        self.translucent
+            || !self.edges
+            || self.triangles
+            || self.normals
+            || self.face_colours
+            || self.zebra
+            || self.ignore_look_colors
+            || (self.ghost_opacity - 0.45).abs() > f32::EPSILON
+
     }
 }
 
@@ -173,6 +188,9 @@ pub struct Viewport {
     pub camera: Camera,
     chrome_visible: bool,
     display: Option<DisplayMesh>,
+    /// Original protocol mesh for the current display, used to rebuild when a
+    /// display-only option such as Ignore Look colours changes.
+    source_mesh: Option<NodeMesh>,
     view: ViewSettings,
     /// NDC projection offset used to place the pivot at the visible viewport
     /// centre while leaving `camera.target` at the model centre.
@@ -216,6 +234,19 @@ pub struct Viewport {
     preview_transform: Option<[[f32; 4]; 4]>,
     /// Display bodies the preview moves (see [`PreviewScope`]).
     preview_scope: PreviewScope,
+    /// Alpha for scoped edit-preview geometry. 1.0 is the normal opaque drag
+    /// preview; lower values put the moved range in the ghost layer.
+    preview_alpha: f32,
+    /// Current standalone edit-ghost transform, retained so display-setting
+    /// changes can update the ghost renderer without re-evaluating.
+    edit_ghost_transform: Option<[[f32; 4]; 4]>,
+    /// Branch B-rep edges for the transparent edit ghost, painted as a 2D
+    /// overlay after the ghost faces.
+    edit_ghost_edges: Vec<adapter::DisplayEdge>,
+    edit_ghost_branch: Option<NodeMesh>,
+    /// Theme ghost colour last uploaded to the GPU ghost renderer.
+    edit_ghost_color: [u8; 4],
+    edit_ghost_alpha: f32,
     #[cfg(feature = "gpu-viewport")]
     gpu: Option<GpuViewport>,
 }
@@ -269,6 +300,7 @@ impl Default for Viewport {
             camera: Camera::default(),
             chrome_visible: true,
             display: None,
+            source_mesh: None,
             view: ViewSettings::default(),
             lens_shift: [0.0, 0.0],
             texture: None,
@@ -296,6 +328,12 @@ impl Default for Viewport {
             comparison_ghost: false,
             preview_transform: None,
             preview_scope: PreviewScope::All,
+            preview_alpha: 1.0,
+            edit_ghost_transform: None,
+            edit_ghost_edges: Vec::new(),
+            edit_ghost_branch: None,
+            edit_ghost_color: [0; 4],
+            edit_ghost_alpha: 0.45,
             #[cfg(feature = "gpu-viewport")]
             gpu: None,
         }
@@ -422,22 +460,63 @@ impl Viewport {
         // placement, so the drag preview has done its job.
         self.preview_transform = None;
         self.preview_scope = PreviewScope::All;
-        self.display = mesh.map(adapter::display_mesh);
+        self.preview_alpha = 1.0;
+        self.edit_ghost_transform = None;
+        self.edit_ghost_edges.clear();
+        self.edit_ghost_branch = None;
+        self.edit_ghost_color = [0; 4];
+        self.source_mesh = mesh.cloned();
+        self.display = mesh.map(|mesh| self.display_mesh_for_view(mesh));
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
             gpu.set_mesh(self.display.as_ref());
+            gpu.clear_ghost();
         }
+    }
+
+    fn display_mesh_for_view(&self, mesh: &NodeMesh) -> DisplayMesh {
+        let mut display = adapter::display_mesh(mesh);
+        if self.view.ignore_look_colors {
+            display.face_colors.clear();
+        }
+        display
     }
 
     pub fn set_view(&mut self, view: ViewSettings) {
         if self.view == view {
             return;
         }
+        let ghost_changed = self.view.ghost_opacity != view.ghost_opacity;
+        let look_bypass_changed = self.view.ignore_look_colors != view.ignore_look_colors;
         self.view = view;
+        if look_bypass_changed && let Some(source) = self.source_mesh.clone() {
+            self.display = Some(self.display_mesh_for_view(&source));
+            #[cfg(feature = "gpu-viewport")]
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.set_view(self.view, self.display.as_ref());
+                gpu.set_mesh(self.display.as_ref());
+            }
+        }
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(view, self.display.as_ref());
+            if ghost_changed && self.edit_ghost_transform.is_some() {
+                gpu.set_ghost_transform(self.edit_ghost_transform, view.ghost_opacity);
+            }
+            if ghost_changed && self.preview_transform.is_some() {
+                // A live ghost-transparency slider must update the current
+                // preview instances, not wait for the next evaluation.
+                gpu.set_preview_transform(
+                    self.preview_transform,
+                    self.display.as_ref(),
+                    self.preview_scope.clone(),
+                    view.ghost_opacity,
+                );
+            }
+        }
+        if ghost_changed {
+            self.preview_alpha = view.ghost_opacity;
         }
         self.dirty = true;
     }
@@ -674,19 +753,106 @@ impl Viewport {
     /// Move the display geometry by `transform` without re-uploading the merged
     /// mesh: the object renderer updates the instances of the bodies in `scope`
     /// and the scene edge lines are rebuilt at the previewed placement.
+    /// Show a standalone edit ghost over a dimmed breakpoint mesh. The branch is
+    /// uploaded to its own object renderer, so it is never part of the scene.
+    pub fn set_edit_ghost(
+        &mut self,
+        base: &NodeMesh,
+        branch: &NodeMesh,
+        transform: [[f32; 4]; 4],
+        alpha: f32,
+    ) {
+        let base_source = base.clone();
+        let base = self.display_mesh_for_view(base);
+        let branch_display = self.display_mesh_for_view(branch);
+        self.edit_ghost_branch = Some(branch.clone());
+        self.comparison_ghost = false;
+        self.preview_transform = None;
+        self.preview_scope = PreviewScope::All;
+        self.preview_alpha = 1.0;
+        self.display = Some(base);
+        // Keep the dimmed breakpoint source so display-only options such as
+        // Ignore Look colours can rebuild the base while ghost mode is active.
+        self.source_mesh = Some(base_source);
+        self.edit_ghost_transform = Some(transform);
+        self.edit_ghost_edges = branch_display.edges.clone();
+        self.edit_ghost_alpha = alpha;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref());
+            let ghost_color = crate::theme::get().ghost;
+            gpu.set_ghost_mesh(Some(&branch_display), [ghost_color[0], ghost_color[1], ghost_color[2]]);
+            gpu.set_ghost_transform(Some(transform), alpha);
+        }
+        self.dirty = true;
+    }
+
+    pub fn update_ghost_transform(&mut self, transform: Option<[[f32; 4]; 4]>, alpha: f32) {
+        self.edit_ghost_transform = transform;
+        self.edit_ghost_alpha = alpha;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_ghost_transform(transform, alpha);
+        }
+        self.dirty = true;
+    }
+
+    pub fn set_ghost_mesh(&mut self, branch: &NodeMesh) {
+        self.edit_ghost_branch = Some(branch.clone());
+        self.edit_ghost_color = crate::theme::get().ghost;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            let display = adapter::display_mesh(branch);
+            self.edit_ghost_edges = display.edges.clone();
+            let ghost_color = crate::theme::get().ghost;
+            gpu.set_ghost_mesh(Some(&display), [ghost_color[0], ghost_color[1], ghost_color[2]]);
+            // Mesh uploads reset the object instance transforms. Preserve the
+            // current arm/placement so only the mesh geometry changes here.
+            gpu.set_ghost_transform(self.edit_ghost_transform, self.edit_ghost_alpha);
+        }
+        self.dirty = true;
+    }
+
+    pub fn clear_edit_ghost(&mut self) {
+        self.edit_ghost_transform = None;
+        self.edit_ghost_edges.clear();
+        self.edit_ghost_branch = None;
+        self.edit_ghost_color = [0; 4];
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.clear_ghost();
+        }
+    }
+
     pub fn set_preview_transform(&mut self, transform: Option<[[f32; 4]; 4]>, scope: PreviewScope) {
+        self.set_preview_transform_with_alpha(transform, scope, 1.0);
+    }
+
+    /// Scoped preview with an explicit alpha. Values below 1.0 render the moved
+    /// range in the depth-test-free ghost layer over the opaque scene.
+    pub fn set_preview_transform_with_alpha(
+        &mut self,
+        transform: Option<[[f32; 4]; 4]>,
+        scope: PreviewScope,
+        alpha: f32,
+    ) {
         // A scoped preview only works when the display mesh actually carries
         // those body names; otherwise fall back to moving the whole mesh rather
         // than freezing the preview.
         let scope = self.resolve_preview_scope(scope);
-        if self.preview_transform == transform && self.preview_scope == scope {
+        if self.preview_transform == transform
+            && self.preview_scope == scope
+            && self.preview_alpha == alpha
+        {
             return;
         }
         self.preview_transform = transform;
         self.preview_scope = scope.clone();
+        self.preview_alpha = alpha;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_preview_transform(transform, self.display.as_ref(), scope);
+            gpu.set_preview_transform(transform, self.display.as_ref(), scope, alpha);
         }
         self.dirty = true;
     }
@@ -734,6 +900,27 @@ impl Viewport {
 
     /// Draw the viewport while blocking navigation gestures over every floating
     /// panel, not just the node editor.
+    fn sync_edit_ghost_theme(&mut self) {
+        let color = crate::theme::get().ghost;
+        if self.edit_ghost_color == color {
+            return;
+        }
+        let Some(branch) = &self.edit_ghost_branch else {
+            self.edit_ghost_color = color;
+            return;
+        };
+        let display = adapter::display_mesh(branch);
+        self.edit_ghost_color = color;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_ghost_mesh(Some(&display), [color[0], color[1], color[2]]);
+            // A mesh upload resets instance transforms; reapply the edit
+            // placement so the ghost face stays where the edge overlay is.
+            gpu.set_ghost_transform(self.edit_ghost_transform, self.edit_ghost_alpha);
+        }
+        self.dirty = true;
+    }
+
     pub fn show_with_backdrop_blockers(
         &mut self,
         ui: &mut egui::Ui,
@@ -813,6 +1000,7 @@ impl Viewport {
             self.dirty = true;
         }
 
+        self.sync_edit_ghost_theme();
         let size = [width.min(1400), height.min(1000)];
         if !self.gpu_active()
             && (self.dirty || self.texture.is_none() || self.last_size != size)
@@ -866,6 +1054,7 @@ impl Viewport {
                 self.draw_comparison_overlay(ui, rect);
                 self.draw_edge_highlights(ui, rect);
                 self.draw_comparison_edges(ui, rect);
+                self.draw_edit_ghost_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
             self.draw_debug_overlays(ui, rect);
@@ -1168,6 +1357,41 @@ impl Viewport {
                 .collect();
             for pair in points.windows(2) {
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(2.0, edge_colour));
+            }
+        }
+    }
+
+    fn draw_edit_ghost_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(matrix) = self.edit_ghost_transform else { return };
+        if self.edit_ghost_edges.is_empty() { return; }
+        let painter = ui.painter().with_clip_rect(viewport);
+        let [r, g, b, a] = crate::theme::get().ghost_edge;
+        let colour = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+        for edge in &self.edit_ghost_edges {
+            let projected: Vec<egui::Pos2> = edge
+                .points
+                .iter()
+                .filter_map(|point| {
+                    let x = f64::from(matrix[0][0]) * point.x
+                        + f64::from(matrix[1][0]) * point.y
+                        + f64::from(matrix[2][0]) * point.z
+                        + f64::from(matrix[3][0]);
+                    let y = f64::from(matrix[0][1]) * point.x
+                        + f64::from(matrix[1][1]) * point.y
+                        + f64::from(matrix[2][1]) * point.z
+                        + f64::from(matrix[3][1]);
+                    let z = f64::from(matrix[0][2]) * point.x
+                        + f64::from(matrix[1][2]) * point.y
+                        + f64::from(matrix[2][2]) * point.z
+                        + f64::from(matrix[3][2]);
+                    self.project_to_viewport(
+                        solidcore_record_new::Vec3::new(x, y, z),
+                        viewport,
+                    )
+                })
+                .collect();
+            for pair in projected.windows(2) {
+                painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.6, colour));
             }
         }
     }
@@ -1478,59 +1702,113 @@ impl Viewport {
         self.chrome_blockers = vec![rect, home_rect, perspective_rect, view_rect];
     }
 
+    fn settings_popup() -> f32 {
+        300.0
+    }
+
+    /// Toggle rows reserve this much for their checkmark; section headers and
+    /// slider labels use the same inset so the popup has one alignment column.
+    const SETTINGS_LABEL_INSET: f32 = 28.0;
+
+    fn settings_section(ui: &mut egui::Ui, title: &str) {
+        let theme = crate::theme::get();
+        ui.add_space(Self::SETTINGS_LABEL_INSET);
+        ui.label(
+            egui::RichText::new(title.to_uppercase())
+                .size(9.0)
+                .strong()
+                .color(theme.with_alpha(theme.muted, 190)),
+        );
+        ui.add_space(1.0);
+    }
+
+    fn settings_slider(
+        ui: &mut egui::Ui,
+        label: &str,
+        value: &mut f32,
+        range: std::ops::RangeInclusive<f32>,
+        decimals: usize,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            ui.add_space(Self::SETTINGS_LABEL_INSET);
+            ui.label(egui::RichText::new(label).size(12.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_sized(
+                    [34.0, 18.0],
+                    egui::Label::new(
+                        egui::RichText::new(format!("{value:.decimals$}"))
+                            .size(11.0)
+                            .monospace(),
+                    ),
+                );
+                ui.spacing_mut().slider_width = 118.0;
+                changed = ui
+                    .add(egui::Slider::new(value, range).show_value(false))
+                    .changed();
+            });
+        });
+        changed
+    }
+
     /// Shared display-settings popup, used by the viewport cog and the top bar.
     pub fn show_view_settings_menu(&mut self, _ui: &mut egui::Ui, response: &egui::Response) {
         let mut edited = self.view;
         let mut changed = false;
         egui::Popup::menu(response)
+            // Anchor the right edge to the viewport settings button instead of
+            // letting a wide menu grow leftward under egui's default BOTTOM_START.
+            .align(egui::RectAlign::BOTTOM_END)
+            // Match the viewport panel inset so the popup sits inside the 3D
+            // viewport area rather than tight against the settings button.
+            .gap(12.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .style(crate::theme::menu_style)
             .show(|ui| {
-                ui.set_width(crate::theme::menu_width(
-                    ui,
-                    &[
-                        "Translucent",
-                        "Edges",
-                        "Triangles",
-                        "Face normals",
-                        "Face colours",
-                        "Zebra analysis",
-                    ],
-                ));
-                ui.label(
-                    egui::RichText::new("Display")
-                        .size(11.0)
-                        .color(crate::theme::get().color(crate::theme::get().muted)),
-                );
-                ui.add_space(2.0);
+                // A fixed column avoids popup auto-resize jitter while a slider
+                // drag changes its formatted value text.
+                let width = Self::settings_popup();
+                ui.set_min_width(width);
+                ui.set_max_width(width);
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 4.0);
+
+                Self::settings_section(ui, "Display");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.translucent, "Translucent");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.edges, "Edges");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.triangles, "Triangles");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.normals, "Face normals");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.face_colours, "Face colours");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.zebra, "Zebra analysis");
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new("Material")
-                        .size(11.0)
-                        .color(crate::theme::get().color(crate::theme::get().muted)),
+                changed |= crate::theme::menu_toggle(
+                    ui,
+                    &mut edited.ignore_look_colors,
+                    "Ignore Look colours",
                 );
-                ui.add_space(2.0);
-                ui.spacing_mut().slider_width = 150.0;
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut edited.roughness, 0.045..=1.0)
-                            .text("Roughness")
-                            .max_decimals(2),
-                    )
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::Slider::new(&mut edited.metallic, 0.0..=1.0)
-                            .text("Metallic")
-                            .max_decimals(2),
-                    )
-                    .changed();
+                changed |= Self::settings_slider(
+                    ui,
+                    "Ghost opacity",
+                    &mut edited.ghost_opacity,
+                    0.0..=1.0,
+                    2,
+                );
+
+                Self::settings_section(ui, "Material");
+                changed |= Self::settings_slider(
+                    ui,
+                    "Roughness",
+                    &mut edited.roughness,
+                    0.045..=1.0,
+                    2,
+                );
+                changed |= Self::settings_slider(
+                    ui,
+                    "Metallic",
+                    &mut edited.metallic,
+                    0.0..=1.0,
+                    2,
+                );
+                ui.add_space(6.0);
             });
         if changed {
             self.set_view(edited);
@@ -1821,6 +2099,24 @@ mod tests {
             viewport.camera.pitch,
         );
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn edit_overlay_scope_resolves_to_the_branch_body() {
+        let mut mesh = crate::adapter::display_mesh(&nodecraft_protocol::Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 6],
+            faces: vec![[0, 1, 2], [3, 4, 5]],
+            face_groups: vec!["body:0:face:0".to_owned(), "body:1:face:0".to_owned()],
+            ..nodecraft_protocol::Mesh::default()
+        });
+        mesh.mesh = std::sync::Arc::new((*mesh.mesh).clone());
+        let mut viewport = Viewport::default();
+        viewport.display = Some(mesh);
+        assert_eq!(
+            viewport.resolve_preview_scope(PreviewScope::Bodies(vec!["body:0:".to_owned()])),
+            PreviewScope::Bodies(vec!["body:0:".to_owned()])
+        );
     }
 
     #[test]

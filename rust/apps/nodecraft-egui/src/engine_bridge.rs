@@ -23,6 +23,11 @@ pub struct Evaluation {
     /// False for the exact-only pre-pass; true once display meshes/timing are final.
     pub display_complete: bool,
     pub mesh: Option<Mesh>,
+    /// Display mesh for the node being edited, used by branch-scoped transform
+    /// previews when the breakpoint result is geometrically merged.
+    pub edit_preview: Option<Mesh>,
+    /// Node whose transform input produced `edit_preview`.
+    pub edit_preview_target: Option<String>,
     /// Boolean operands for a pre-merge drag display.
     pub pre_merge: Option<PreMerge>,
     /// Before/after pair when the selected feature can be compared.
@@ -130,6 +135,8 @@ pub fn evaluate_with_linked_progress_comparison(
                     target,
                     display_complete: true,
                     mesh: None,
+                    edit_preview: None,
+                    edit_preview_target: None,
                     pre_merge: None,
                     comparison: None,
                     ghost: None,
@@ -188,6 +195,7 @@ pub fn evaluate_flat_with_progress_comparison(
         &HashSet::new(),
         None,
         &[],
+        None,
     )
 }
 
@@ -201,6 +209,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
     validation_targets: &[String],
+    edit_preview: Option<&str>,
 ) -> (Option<Evaluation>, EngineCache) {
     evaluate_flat_with_progress_comparison_dirty_mode(
         document,
@@ -212,6 +221,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
         dirty_nodes,
         ghost_input,
         validation_targets,
+        edit_preview,
         false,
     )
 }
@@ -229,6 +239,7 @@ pub fn evaluate_flat_exact(
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
     validation_targets: &[String],
+    edit_preview: Option<&str>,
 ) -> (Option<Evaluation>, EngineCache) {
     evaluate_flat_with_progress_comparison_dirty_mode(
         document,
@@ -240,6 +251,7 @@ pub fn evaluate_flat_exact(
         dirty_nodes,
         ghost_input,
         validation_targets,
+        edit_preview,
         true,
     )
 }
@@ -254,6 +266,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
     validation_targets: &[String],
+    edit_preview: Option<&str>,
     exact_only: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
@@ -284,6 +297,11 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             {
                 targets.push(ghost.to_owned());
             }
+            if let Some(preview) = edit_preview
+                && !targets.iter().any(|existing| existing == preview)
+            {
+                targets.push(preview.to_owned());
+            }
             for id in validation_targets {
                 if !targets.iter().any(|existing| existing == id) {
                     targets.push(id.clone());
@@ -311,6 +329,11 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
                 && !targets.iter().any(|existing| existing == ghost)
             {
                 targets.push(ghost.to_owned());
+            }
+            if let Some(preview) = edit_preview
+                && !targets.iter().any(|existing| existing == preview)
+            {
+                targets.push(preview.to_owned());
             }
             for id in validation_targets {
                 if !targets.iter().any(|existing| existing == id) {
@@ -372,6 +395,11 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     let cache_stats = output.response.cache_stats;
     let error = output.response.node_errors.get(&target).cloned();
     let mesh = output.response.meshes.get(&target).map(|payload| payload.mesh.clone());
+    let edit_preview_target = edit_preview.map(str::to_owned);
+    let edit_preview = edit_preview_target
+        .as_deref()
+        .and_then(|id| output.response.meshes.get(id))
+        .map(|payload| payload.mesh.clone());
     let pre_merge = pre_merge.and_then(|(a, b)| {
         let a_mesh = output.response.meshes.get(&a)?.mesh.clone();
         let b_mesh = output.response.meshes.get(&b)?.mesh.clone();
@@ -396,6 +424,8 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             // An errored node bypasses to its input, so the mesh can still be
             // valid even though the node reports its own error.
             mesh,
+            edit_preview,
+            edit_preview_target,
             pre_merge,
             comparison,
             ghost,
@@ -461,6 +491,7 @@ mod tests {
             &HashSet::new(),
             Some("ghost"),
             &[],
+            None,
         );
         let evaluation = evaluation.expect("evaluation");
         assert!(evaluation.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
@@ -485,6 +516,7 @@ mod tests {
             &HashSet::new(),
             None,
             &[],
+            None,
         );
         let exact = exact.expect("exact evaluation");
         assert!(!exact.display_complete);
@@ -499,10 +531,49 @@ mod tests {
             &HashSet::new(),
             None,
             &[],
+            None,
         );
         let display = display.expect("display evaluation");
         assert!(display.display_complete);
         assert!(display.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
+    }
+
+    #[test]
+    fn edit_preview_mesh_is_returned_for_a_merged_breakpoint() {
+        let document: GraphDocument = serde_json::from_value(json!({
+            "id": "edit-preview",
+            "name": "edit-preview",
+            "nodes": [
+                {"id": "box", "type": "solid", "values": {"primitiveType": "box", "width": 30.0}, "suppressed": false, "x": 0.0, "y": 0.0},
+                {"id": "move", "type": "translate", "values": {"x": -24.0}, "suppressed": false, "x": 0.0, "y": 0.0},
+                {"id": "sphere", "type": "solid", "values": {"primitiveType": "sphere"}, "suppressed": false, "x": 0.0, "y": 0.0},
+                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}, "suppressed": false, "x": 0.0, "y": 0.0},
+                {"id": "fillet", "type": "fillet", "values": {}, "suppressed": false, "x": 0.0, "y": 0.0},
+                {"id": "look", "type": "look", "values": {}, "suppressed": false, "x": 0.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "boolean", "in": "a", "out": "shape"},
+                {"from": "sphere", "to": "boolean", "in": "b", "out": "shape"},
+                {"from": "boolean", "to": "fillet", "in": "shape", "out": "shape"},
+                {"from": "fillet", "to": "look", "in": "shape", "out": "shape"}
+            ]
+        })).expect("document");
+        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "look".to_owned(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+            Some("box"),
+        );
+        let evaluation = evaluation.expect("evaluation");
+        let preview = evaluation.edit_preview.expect("edit preview mesh");
+        assert!(!preview.faces.is_empty(), "edit preview mesh is empty");
     }
 
     #[test]
@@ -524,6 +595,7 @@ mod tests {
             &HashSet::new(),
             None,
             &["broken".to_owned()],
+            None,
         );
         let evaluation = evaluation.expect("evaluation");
         assert!(evaluation.error.is_none(), "{:?}", evaluation.error);

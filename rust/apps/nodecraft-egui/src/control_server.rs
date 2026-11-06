@@ -17,6 +17,7 @@ pub enum Command {
     ZoomOut,
     EnsureVisible,
     SelectNode(String),
+    EditNode(String),
     BeginSelection { node: String, field: String },
     ViewNode(String),
     Home,
@@ -124,6 +125,16 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
             .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
         {
             Some(id) => Command::SelectNode(id),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                return;
+            }
+        },
+        "/edit" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+        {
+            Some(id) => Command::EditNode(id),
             None => {
                 let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
                 return;

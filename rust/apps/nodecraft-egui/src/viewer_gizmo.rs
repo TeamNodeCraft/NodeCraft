@@ -148,7 +148,7 @@ pub fn show(
     };
     let id = egui::Id::new(("solidcraft-transform-gizmo", gizmo.node_id.as_str()));
     let painter = ui.painter().with_clip_rect(rect);
-    let Some(drag) = solid_show(ui, &painter, &proj, id, &triad, 1.0) else {
+    let Some(drag) = solid_show(ui, &painter, &proj, id, &triad, TRANSLATE_SNAP_STEP) else {
         state.dragging = false;
         // The pointer can vanish between frames (release outside the window);
         // report that as the end of the drag so previews can be retired.
@@ -268,6 +268,12 @@ pub const LEN_PX: f64 = 110.0;
 
 /// How near a handle a press still takes it (px): the widest, the centre ball.
 pub const HIT_TOLERANCE: f32 = 9.0;
+
+/// Snap steps used only while the snap modifier is held. Keep them here so a
+/// future snapping preference can replace the modifier policy without hunting
+/// through each drag branch.
+const TRANSLATE_SNAP_STEP: f64 = 1.0;
+const ROTATE_SNAP_STEP: f64 = std::f64::consts::PI / 36.0; // 5 degrees
 
 /// Ring radius as a share of the arrow length.
 const RING: f64 = 0.62;
@@ -391,6 +397,16 @@ fn mm_per_px(proj: &Proj, c: Vec3) -> Option<f64> {
     (px > 1e-9).then(|| 1.0 / px)
 }
 
+/// Whether the current modifiers request snapping. Continuous dragging is the
+/// default; snapping is opt-in.
+///
+/// This is deliberately the one policy point. A future "snap while dragging"
+/// preference should change this helper (and the step constants), not add
+/// modifier checks to individual axis/plane/ring branches.
+fn snap_requested(modifiers: egui::Modifiers) -> bool {
+    modifiers.shift
+}
+
 fn snap(v: f64, step: f64, free: bool) -> f64 {
     if free || step <= 0.0 { v } else { (v / step).round() * step }
 }
@@ -435,7 +451,9 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     if state.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    let free = ui.input(|i| i.modifiers.alt || i.modifiers.command || i.modifiers.ctrl);
+    // Continuous by default so the gizmo follows the pointer smoothly. Shift
+    // snaps using the step constants above; see `snap_requested`.
+    let free = !ui.input(|i| snap_requested(i.modifiers));
     let view = proj.ray(sh.ball).1;
     let plane_normal = |axes: &[Vec3; 3], h: Handle| match h {
         Handle::Plane(i) | Handle::Ring(i) => axes[i],
@@ -484,7 +502,7 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
                 st.turned += d;
                 st.last = th;
             }
-            Change::Rotate { axis: i, angle: snap(st.turned, 5f64.to_radians(), free) }
+            Change::Rotate { axis: i, angle: snap(st.turned, ROTATE_SNAP_STEP, free) }
         }
         h => {
             let d = on_plane(proj, p, st.center, plane_normal(&st.axes, h)).map(|q| q - st.grab).unwrap_or(Vec3::ZERO);
@@ -517,6 +535,12 @@ fn arrow(painter: &egui::Painter, a: Pos2, b: Pos2, col: Color32, hot: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapping_is_opt_in_through_one_modifier_policy() {
+        assert!(!snap_requested(egui::Modifiers::default()));
+        assert!(snap_requested(egui::Modifiers { shift: true, ..Default::default() }));
+    }
 
     #[test]
     fn translation_snaps_to_whole_units_unless_free() {

@@ -181,11 +181,15 @@ impl Affine3 {
 /// - `None` when `selected` does not feed `target`, or when `target` merges the
 ///   edited branch with unrelated geometry and per-body provenance is lost,
 /// - [`PreviewBodyScope::All`] when every displayed body is downstream,
-/// - [`PreviewBodyScope::Prefixes`] for the subset that moves.
+/// - [`PreviewBodyScope::Prefixes`] for the subset that moves,
+/// - [`PreviewBodyScope::Unknown`] when downstream merging destroyed the body
+///   layout. Callers can still offer a branch/edit-point preview, but not a
+///   whole-mesh transform.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewBodyScope {
     All,
     Prefixes(Vec<String>),
+    Unknown,
 }
 
 pub fn preview_body_scope(
@@ -238,9 +242,10 @@ pub fn preview_body_scope(
         }
     }
     let Some(layout) = part_body_layout(document, target) else {
-        // Unknown display provenance: preview the whole mesh rather than a
-        // wrong subset.
-        return Some(PreviewBodyScope::All);
+        // Downstream merging or an unsupported display chain hid the body
+        // layout. This is not the same as "all bodies are downstream": the
+        // caller must not move the whole breakpoint mesh here.
+        return Some(PreviewBodyScope::Unknown);
     };
     let mut prefixes = Vec::new();
     let mut all_affected = !layout.is_empty();
@@ -403,16 +408,26 @@ pub fn preview_transform(
 
 /// Transform chain from `from` to `to`, excluding `from` itself.
 ///
-/// Non-transform nodes (Boolean, combine, scatter, ...) contribute identity; a
-/// scatter instance cannot be represented by one affine chain.
+/// A drag preview can only apply one affine chain. Return `None` when the graph
+/// contains more than one path from `from` to `to` (the edit affects several
+/// branches that may transform differently), or when a path crosses a scatter
+/// (its instances cannot be represented by one affine transform).
 pub fn transform_chain(document: &GraphDocument, from: &str, to: &str) -> Option<Affine3> {
     if from == to {
         return Some(Affine3::identity());
     }
-    let path = document_path(document, from, to)?;
+    let path = unique_document_path(document, from, to)?;
     let mut chain = Affine3::identity();
     for id in path.iter().skip(1) {
         let node = document.nodes.iter().find(|node| &node.id == id)?;
+        if node.suppressed {
+            // Suppressed nodes are bypassed by evaluation; their transform must
+            // not leak into the preview chain.
+            continue;
+        }
+        if node.node_type == "scatter" {
+            return None;
+        }
         if let Some(transform) = Affine3::from_node(node) {
             chain = transform.compose(chain);
         }
@@ -420,24 +435,45 @@ pub fn transform_chain(document: &GraphDocument, from: &str, to: &str) -> Option
     Some(chain)
 }
 
-fn document_path(document: &GraphDocument, from: &str, to: &str) -> Option<Vec<String>> {
-    let mut queue = std::collections::VecDeque::from([vec![from.to_owned()]]);
-    let mut seen = std::collections::HashSet::from([from.to_owned()]);
-    while let Some(path) = queue.pop_front() {
-        let Some(last) = path.last() else { continue };
-        for connection in document.connections.iter().filter(|link| &link.from == last) {
-            if !seen.insert(connection.to.clone()) {
+/// The one path from `from` to `to`, or `None` when there are zero or multiple
+/// paths. The reverse reachability set keeps the search bounded on large graphs.
+fn unique_document_path(
+    document: &GraphDocument,
+    from: &str,
+    to: &str,
+) -> Option<Vec<String>> {
+    let mut reaches_to = std::collections::HashSet::from([to.to_owned()]);
+    let mut scan = vec![to.to_owned()];
+    while let Some(id) = scan.pop() {
+        for link in document.connections.iter().filter(|link| link.to == id) {
+            if reaches_to.insert(link.from.clone()) {
+                scan.push(link.from.clone());
+            }
+        }
+    }
+    if !reaches_to.contains(from) {
+        return None;
+    }
+    let mut stack = vec![(from.to_owned(), vec![from.to_owned()])];
+    let mut found: Option<Vec<String>> = None;
+    while let Some((id, path)) = stack.pop() {
+        if id == to {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(path);
+            continue;
+        }
+        for link in document.connections.iter().filter(|link| link.from == id) {
+            if !reaches_to.contains(&link.to) || path.contains(&link.to) {
                 continue;
             }
             let mut next = path.clone();
-            next.push(connection.to.clone());
-            if connection.to == to {
-                return Some(next);
-            }
-            queue.push_back(next);
+            next.push(link.to.clone());
+            stack.push((link.to.clone(), next));
         }
     }
-    None
+    found
 }
 
 #[cfg(test)]
@@ -533,6 +569,28 @@ mod tests {
     }
 
     #[test]
+    fn branch_preview_delta_uses_the_downstream_chain_frame() {
+        // This is the deep-ghost case: the node rotates, a downstream translate
+        // places the branch, and the drag changes the node's X value. The ghost
+        // matrix must be chain · Tcurrent, not Tcurrent · Tstart⁻¹ · chain · Tstart.
+        let downstream = Affine3::from_translate(&serde_json::json!({"y": 22.0}));
+        let start = serde_json::json!({"rx": 90.0, "z": 6.0, "rz": 0.0});
+        let current = serde_json::json!({"rx": 90.0, "z": 6.0, "rz": 35.0});
+        let base = downstream.compose(Affine3::from_translate(&start));
+        let matrix = preview_transform(downstream, &start, &current).compose(base);
+        let expected = downstream.compose(Affine3::from_translate(&current));
+        for point in [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] {
+            let got = matrix.apply_point(point);
+            let want = expected.apply_point(point);
+            for axis in 0..3 {
+                assert!((got[axis] - want[axis]).abs() < 1.0e-9, "{point:?}: {got:?} != {want:?}");
+            }
+        }
+        let wrong = preview_transform(Affine3::identity(), &start, &current).compose(base);
+        assert!((wrong.apply_point([1.0, 0.0, 0.0])[0] - expected.apply_point([1.0, 0.0, 0.0])[0]).abs() > 1.0e-6);
+    }
+
+    #[test]
     fn preview_transform_reports_column_major_gpu_layout() {
         let moved = preview_transform(
             Affine3::identity(),
@@ -566,6 +624,30 @@ mod tests {
 
     fn prefixes(names: &[&str]) -> Option<PreviewBodyScope> {
         Some(PreviewBodyScope::Prefixes(names.iter().map(|name| (*name).to_owned()).collect()))
+    }
+
+    #[test]
+    fn preview_scope_is_unknown_after_a_boolean_and_fillet() {
+        let mut document = GraphDocument::new("preview-unknown");
+        document.nodes = vec![
+            node("box", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("move", "translate", serde_json::json!({"x": 10.0})),
+            node("sphere", "primitive", serde_json::json!({"primitiveType": "sphere"})),
+            node("boolean", "boolean", serde_json::json!({"mode": "union"})),
+            node("fillet", "fillet", serde_json::json!({})),
+            node("look", "look", serde_json::json!({})),
+        ];
+        document.connections = vec![
+            link("box", "move"),
+            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
+            GraphConnection { from: "sphere".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+            link("boolean", "fillet"),
+            link("fillet", "look"),
+        ];
+        assert_eq!(
+            preview_body_scope(&document, "move", "look"),
+            Some(PreviewBodyScope::Unknown)
+        );
     }
 
     #[test]
@@ -697,4 +779,59 @@ mod tests {
         document.nodes.push(node("loose", "translate", serde_json::json!({"x": 1.0})));
         assert_eq!(preview_body_scope(&document, "loose", "combine"), None);
     }
+    #[test]
+    fn transform_chain_rejects_ambiguous_and_scatter_paths() {
+        // Two paths from the transform to the target merge; one affine preview
+        // cannot represent both downstream placements.
+        let mut document = GraphDocument::new("branch-preview");
+        document.nodes = vec![
+            node("move", "translate", serde_json::json!({"x": 1.0})),
+            node("a", "translate", serde_json::json!({"x": 10.0})),
+            node("b", "translate", serde_json::json!({"x": 20.0})),
+            node("merge", "boolean", serde_json::json!({"mode": "union"})),
+        ];
+        document.connections = vec![
+            link("move", "a"),
+            link("move", "b"),
+            link("a", "merge"),
+            link("b", "merge"),
+        ];
+        assert!(transform_chain(&document, "move", "merge").is_none());
+
+        // A scatter below the edited node has per-instance placements.
+        let mut document = GraphDocument::new("scatter-preview");
+        document.nodes = vec![
+            node("move", "translate", serde_json::json!({"x": 1.0})),
+            node("scatter", "scatter", serde_json::json!({"count": 4})),
+        ];
+        document.connections = vec![link("move", "scatter")];
+        assert!(transform_chain(&document, "move", "scatter").is_none());
+
+        // A suppressed downstream transform is bypassed, not composed.
+        let mut document = GraphDocument::new("suppressed-chain");
+        document.nodes = vec![
+            node("move", "translate", serde_json::json!({"x": 1.0})),
+            GraphNode {
+                id: "down".into(),
+                node_type: "translate".into(),
+                values: serde_json::json!({"x": 10.0}),
+                suppressed: true,
+                x: 0.0,
+                y: 0.0,
+            },
+        ];
+        document.connections = vec![link("move", "down")];
+        let chain = transform_chain(&document, "move", "down").expect("chain");
+        assert_eq!(chain.apply_point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+
+        // A single chain still resolves.
+        let mut document = GraphDocument::new("one-chain");
+        document.nodes = vec![
+            node("move", "translate", serde_json::json!({"x": 1.0})),
+            node("down", "translate", serde_json::json!({"x": 10.0})),
+        ];
+        document.connections = vec![link("move", "down")];
+        assert!(transform_chain(&document, "move", "down").is_some());
+    }
+
 }

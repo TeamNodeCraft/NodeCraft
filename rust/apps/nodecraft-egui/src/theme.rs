@@ -71,6 +71,10 @@ pub struct Theme {
     pub preview_add: [u8; 4],
     #[serde(default = "default_preview_cut")]
     pub preview_cut: [u8; 4],
+    #[serde(default = "default_ghost")]
+    pub ghost: [u8; 4],
+    #[serde(default = "default_ghost_edge")]
+    pub ghost_edge: [u8; 4],
 }
 
 fn default_dock() -> [u8; 4] {
@@ -95,6 +99,14 @@ fn default_preview_add() -> [u8; 4] {
 
 fn default_preview_cut() -> [u8; 4] {
     [255, 92, 92, 128]
+}
+
+fn default_ghost() -> [u8; 4] {
+    [97, 148, 199, 255]
+}
+
+fn default_ghost_edge() -> [u8; 4] {
+    [24, 58, 122, 255]
 }
 
 fn default_port_input() -> [u8; 4] {
@@ -381,6 +393,8 @@ impl Theme {
             "axis_x" => self.axis_x = value,
             "axis_y" => self.axis_y = value,
             "axis_z" => self.axis_z = value,
+            "ghost" => self.ghost = value,
+            "ghost_edge" => self.ghost_edge = value,
             _ => return false,
         }
         true
@@ -1263,6 +1277,13 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("axis_x", "X axis", "World X axis colour", theme.axis_x),
                 color("axis_y", "Y axis", "World Y axis colour", theme.axis_y),
                 color("axis_z", "Z axis", "World Z axis colour", theme.axis_z),
+                color("ghost", "Edit ghost", "Transform edit ghost face colour", theme.ghost),
+                color(
+                    "ghost_edge",
+                    "Edit ghost edges",
+                    "Transform edit ghost B-rep edge colour",
+                    theme.ghost_edge,
+                ),
             ],
         },
     ]

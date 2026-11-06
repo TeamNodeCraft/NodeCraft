@@ -15,6 +15,7 @@ pub(super) struct DocumentTab {
     pub(super) path: Option<PathBuf>,
     pub(super) selected_nodes: HashSet<String>,
     pub(super) selected_connections: HashSet<ConnectionKey>,
+    pub(super) edit_target: Option<String>,
     pub(super) viewer_breakpoint: Option<String>,
     pub(super) mesh: Option<Mesh>,
     pub(super) status: String,
@@ -154,6 +155,7 @@ impl NodeCraftApp {
         tab.path = self.path.clone();
         tab.selected_nodes = self.selected_nodes.clone();
         tab.selected_connections = self.selected_connections.clone();
+        tab.edit_target = self.edit_target.clone();
         tab.viewer_breakpoint = self.viewer_breakpoint.clone();
         tab.mesh = mesh;
         tab.status = self.status.clone();
@@ -281,6 +283,7 @@ impl NodeCraftApp {
         let path = tab.path.clone();
         let selected_nodes = std::mem::take(&mut tab.selected_nodes);
         let selected_connections = std::mem::take(&mut tab.selected_connections);
+        let edit_target = tab.edit_target.take();
         let viewer_breakpoint = tab.viewer_breakpoint.take();
         let mesh = tab.mesh.take();
         let status = tab.status.clone();
@@ -298,6 +301,7 @@ impl NodeCraftApp {
         self.path = path;
         self.selected_nodes = selected_nodes;
         self.selected_connections = selected_connections;
+        self.edit_target = edit_target;
         self.viewer_breakpoint = viewer_breakpoint;
         self.mesh = mesh;
         self.status = status;
@@ -637,6 +641,7 @@ impl NodeCraftApp {
         self.path = None;
         self.selected_nodes = selected_nodes.clone();
         self.selected_connections.clear();
+        self.edit_target = None;
         self.viewer_breakpoint = viewer_breakpoint.clone();
         self.mesh = None;
         self.camera_initialized = false;
@@ -730,6 +735,7 @@ impl NodeCraftApp {
             path: path.clone(),
             selected_nodes: selected_nodes.clone(),
             selected_connections: HashSet::new(),
+            edit_target: None,
             viewer_breakpoint: viewer_breakpoint.clone(),
             mesh: None,
             status: status.clone(),

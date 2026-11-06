@@ -20,8 +20,9 @@ Priority order is approximate.
   `solidcore-ops shell: the result is not a closed solid`.
 - Public snapshot is at `2214358` and needs a republish for the pin/ops/evaluation
   work after it.
-- Tests at this state: engine 120 passed / 1 ignored, egui 110 passed,
-  layers 11 passed, workspace `--all-targets` check clean.
+- Tests at this state: engine 120 passed / 1 ignored, egui 112 passed,
+  node-canvas 54 passed / 4 ignored, layers 11 passed, workspace
+  `--all-targets` check clean.
 
 ## SolidCore 3ed61947 pin bump (completed)
 
@@ -58,9 +59,10 @@ blend/fillet golden cases and fuzz-refusal corrections. The bump is applied.
       two-phase evaluation.
 - [ ] Finish the Part-target Boolean and shell ops migration once upstream
       provenance/attribute support is available.
-- [ ] Move fillet/chamfer exact evaluation to `solidcore-ops::blend` with a
-      parity matrix (G1/G2/G3, mixed edges, corners/setbacks, two-cylinder joins,
-      chamfer angle/distance, failures).
+- [ ] Fillet/chamfer ops migration is **on hold**: the current
+      `nodecraft_blend` path works well for now. Revisit `solidcore-ops::blend`
+      only after a dedicated parity matrix (G1/G2/G3, mixed edges,
+      corners/setbacks, two-cylinder joins, chamfer angle/distance, failures).
 - [ ] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows
       before migrating them.
 - [ ] Retire the local STEP stack after the upstream record/ops importer lands.
@@ -75,6 +77,13 @@ blend/fillet golden cases and fuzz-refusal corrections. The bump is applied.
 - [x] Move comparison ghosts to record/ops Booleans and `solidcore-tess`.
 - [x] Move Boolean operand/export chains and extrude operation Booleans to
       `solidcore-ops`, with a box-volume parity test.
+- [x] Decouple selection from viewport editing: double-click enters a node edit
+      target, selection alone never opens a gizmo, and the transform gizmo
+      requires the selected node to be the explicit edit target.
+- [x] Add branch-scoped transform previews: when the breakpoint merges the edit
+      branch, fetch the transform input mesh, draw it over a faint breakpoint
+      mesh, and move only that branch while dragging; the breakpoint mesh itself
+      never moves.
 - [x] Add `evaluate_exact` and wire the app worker into exact → display phases;
       publish exact errors/status before meshing, keep the old mesh visible,
       cancel stale display after the exact phase, keep exports single-pass and
@@ -531,9 +540,8 @@ record is currently rebuilt and discarded on every display/ops conversion.
       preserve application attributes through ops Boolean/shell. NodeCraft's
       Look colours and saved edge identity need this before the Part-target
       Boolean and shell paths can move off the kernel implementation.
-- [ ] Move fillet/chamfer exact evaluation to `solidcore-ops::blend`; keep
-      `nodecraft_blend` for preview/clipping until the exact parity matrix says
-      otherwise.
+- [ ] Fillet/chamfer `solidcore-ops::blend` migration is on hold; keep the
+      current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
       Reproduction at current pin `3ed6194755cc2a3298882373ff465adeb443485a`:

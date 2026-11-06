@@ -12,6 +12,53 @@ impl NodeCraftApp {
         self.evaluate_with_cache_policy(false, false);
     }
 
+    fn linked_documents(&self) -> std::collections::BTreeMap<PathBuf, GraphDocument> {
+        let mut documents = std::collections::BTreeMap::new();
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.document().nodes.iter().any(|node| node.node_type == "linkedpart"))
+        {
+            for (document_id, document) in self.documents.documents() {
+                if let Some(path) = self.documents.path(document_id) {
+                    documents.insert(path.to_path_buf(), document.clone());
+                }
+            }
+        }
+        documents
+    }
+
+    /// Request a branch-only transform preview. Runs on its own thread and cache.
+    pub(super) fn request_transform_preview(&mut self, target: &str) {
+        let Some(session) = &self.session else { return };
+        self.preview_next = self.preview_next.wrapping_add(1);
+        let request_id = self.preview_next;
+        self.preview_pending = Some(request_id);
+        self.preview_worker.request(PreviewRequest {
+            request_id,
+            tab_id: self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0),
+            document: session.document().clone(),
+            linked_documents: self.linked_documents(),
+            target: target.to_owned(),
+            token: nodecraft_engine::kernel_pool::RevisionToken::new(),
+        });
+    }
+
+    pub(super) fn poll_preview(&mut self) {
+        let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
+        while let Some(result) = self.preview_worker.try_recv() {
+            if self.preview_pending != Some(result.request_id) || result.tab_id != active_tab_id {
+                continue;
+            }
+            self.preview_pending = None;
+            self.edit_preview = result.mesh;
+            self.edit_preview_target = Some(result.target);
+            self.attach_pending_edit_ghost();
+            self.refresh_edit_overlay();
+            self.egui_ctx.request_repaint();
+        }
+    }
+
     pub(super) fn evaluate_with_cache_policy(&mut self, clear_cache: bool, run_exporters: bool) {
         self.auto_eval_due = None;
         let Some(session) = &self.session else {
@@ -44,6 +91,9 @@ impl NodeCraftApp {
         } else {
             None
         };
+        // The dedicated preview worker owns the edit ghost mesh; the main
+        // evaluation must not duplicate that branch-only work.
+        let edit_preview: Option<String> = None;
         let dirty_nodes = self.pending_dirty.clone();
         self.pending_dirty.clear();
         // A selected node outside the viewed target closure is evaluated as an
@@ -73,6 +123,7 @@ impl NodeCraftApp {
             &evaluation_selection,
             &comparison,
             &ghost_input,
+            &edit_preview,
             &validation_targets,
             run_exporters,
         );
@@ -90,14 +141,7 @@ impl NodeCraftApp {
         self.eval_progress = (total > 0).then_some(EvalProgress { total, done: 0 });
         self.node_editor.clear_activity();
         self.status = "Evaluating…".to_owned();
-        let mut linked_documents = std::collections::BTreeMap::new();
-        if session.document().nodes.iter().any(|node| node.node_type == "linkedpart") {
-            for (document_id, document) in self.documents.documents() {
-                if let Some(path) = self.documents.path(document_id) {
-                    linked_documents.insert(path.to_path_buf(), document.clone());
-                }
-            }
-        }
+        let linked_documents = self.linked_documents();
         self.comparison_pair = comparison.clone();
         self.eval_worker.send(EvalJob {
             id,
@@ -107,6 +151,7 @@ impl NodeCraftApp {
             selected: evaluation_selection,
             comparison,
             ghost_input,
+            edit_preview,
             validation_targets,
             clear_cache,
             run_exporters,
@@ -126,6 +171,7 @@ pub(super) struct EvalJob {
     selected: Option<String>,
     comparison: Option<(String, String)>,
     ghost_input: Option<String>,
+    edit_preview: Option<String>,
     validation_targets: Vec<String>,
     clear_cache: bool,
     run_exporters: bool,
@@ -185,6 +231,8 @@ impl EvalWorker {
                             target,
                             display_complete: true,
                             mesh: None,
+                            edit_preview: None,
+                        edit_preview_target: None,
                             pre_merge: None,
                             comparison: None,
                             ghost: None,
@@ -222,6 +270,7 @@ impl EvalWorker {
                             &job.dirty_nodes,
                             None,
                             &job.validation_targets,
+                            None,
                         )
                     }));
                     let exact = match exact_outcome {
@@ -235,6 +284,8 @@ impl EvalWorker {
                                 target,
                                 display_complete: true,
                                 mesh: None,
+                                edit_preview: None,
+                        edit_preview_target: None,
                                 pre_merge: None,
                                 comparison: None,
                                 ghost: None,
@@ -282,6 +333,7 @@ impl EvalWorker {
                         &job.dirty_nodes,
                         job.ghost_input.as_deref(),
                         &job.validation_targets,
+                        job.edit_preview.as_deref(),
                     )
                 }));
                 let evaluation = match display_outcome {
@@ -295,6 +347,8 @@ impl EvalWorker {
                             target,
                             display_complete: true,
                             mesh: None,
+                            edit_preview: None,
+                        edit_preview_target: None,
                             pre_merge: None,
                             comparison: None,
                             ghost: None,
@@ -355,6 +409,7 @@ impl EvalWorker {
 
 impl NodeCraftApp {
     pub(super) fn poll_evaluation(&mut self) {
+        self.poll_preview();
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
         let latest_id = self.eval_next;
         while let Some((id, tab_id, event)) = self.eval_worker.try_recv_progress() {
@@ -408,7 +463,10 @@ impl NodeCraftApp {
             let same_target = previous_target.as_deref() == Some(evaluation.target.as_str());
             self.eval_target = Some(evaluation.target.clone());
             self.mesh = evaluation.mesh;
-            self.pre_merge = evaluation.pre_merge;
+            // Preview meshes are owned by PreviewWorker. The main evaluation
+            // deliberately carries no edit preview, so assigning its None here
+            // would clear a valid ghost after every drag/re-evaluation.
+
             // Preserve the camera for updates of the same viewed target (slider/edit),
             // but fit when the breakpoint/target changes so a sphere added to a large
             // graph is framed at its own position instead of the old assembly view.
@@ -541,6 +599,8 @@ impl NodeCraftApp {
             if self.difference_approximate {
                 self.status.push_str(" — feature ghost is approximate");
             }
+            self.attach_pending_edit_ghost();
+            self.refresh_edit_overlay();
             self.egui_ctx.request_repaint();
         }
     }

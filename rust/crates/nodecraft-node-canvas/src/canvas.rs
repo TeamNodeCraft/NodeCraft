@@ -92,6 +92,9 @@ pub enum NodeEditorAction {
     SetViewerBreakpoint { id: String },
     ToggleSuppressed { id: String },
     EnterGroup { id: String },
+    /// Double-click entered a node for editing (inspector/gizmo target), which
+    /// is independent of graph selection and the viewer breakpoint.
+    ActivateNode { id: String },
     SetLassoSelection { nodes: HashSet<String>, live: bool },
     MoveNodes { positions: Vec<(String, f64, f64)> },
     /// The user shook the selected nodes left/right: detach the selection from
@@ -915,6 +918,9 @@ impl NodeEditor {
 
         self.sync_z_order(document);
         let mut clicked = None;
+        // A double-clicked node is activated after selection has been emitted;
+        // see the action ordering at the end of this frame.
+        let mut activated: Option<String> = None;
         let mut moved_nodes: Option<Vec<(String, f64, f64)>> = None;
         let mut actions = Vec::new();
         let mut chrome_clicked = false;
@@ -1347,6 +1353,9 @@ impl NodeEditor {
                             last_pointer: pointer,
                             shake: ShakeDetector::default(),
                         });
+                    }
+                    if response.double_clicked() {
+                        activated = Some(node.id.clone());
                     }
                     if response.clicked() {
                         clicked = Some(node.id.clone());
@@ -2049,6 +2058,13 @@ impl NodeEditor {
             }
         } else if empty_canvas_clicked {
             actions.push(NodeEditorAction::Deselect);
+        }
+        // Activation must come after SelectNode/Deselect: those actions clear the
+        // app's edit target, while double-click activation sets it. Keeping the
+        // ordering here means the app does not have to guess whether a selection
+        // came from a single or double click.
+        if let Some(id) = activated {
+            actions.push(NodeEditorAction::ActivateNode { id });
         }
         if divider_active || self.resize_dragging {
             // The divider straddles the panel edge. Suppress every canvas action

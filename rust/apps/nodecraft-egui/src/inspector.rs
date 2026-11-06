@@ -28,6 +28,44 @@ pub struct Output {
     pub open_linked_part: bool,
 }
 
+/// Paint the inspector reset control at an exact header rect. This is separate
+/// from layout so the caller can centre it against the whole header rather than
+/// only the title row.
+pub fn reset_icon_button_at(ui: &mut Ui, rect: egui::Rect) -> Response {
+    let theme = crate::theme::get();
+    let response = ui.interact(
+        rect,
+        egui::Id::new("inspector-reset"),
+        Sense::click(),
+    );
+    if response.hovered() || response.is_pointer_button_down_on() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let alpha = if response.is_pointer_button_down_on() { 44 } else { 26 };
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(8),
+            theme.with_alpha(theme.highlight, alpha),
+        );
+    }
+    let colour = if response.hovered() {
+        theme.color(theme.text)
+    } else {
+        theme.color(theme.icon)
+    };
+    let svg = std::str::from_utf8(include_bytes!(
+        "../../../../vendor/iconify-design/restore.svg"
+    ))
+    .unwrap_or_default()
+    .replace("currentColor", &crate::theme::Theme::hex(colour.to_array()));
+    let image = egui::Image::from_bytes(
+        "bytes://nodecraft-inspector-reset.svg",
+        svg.into_bytes(),
+    )
+    .fit_to_exact_size(Vec2::splat(17.0));
+    image.paint_at(ui, rect.shrink(4.5));
+    response.on_hover_text("Reset this node's settings to defaults")
+}
+
 #[derive(Clone)]
 enum Widget {
     Text,
@@ -400,6 +438,37 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
         ],
         _ => Vec::new(),
     }
+}
+
+/// Values restored by the inspector reset action. This replaces settings for the
+/// node type while preserving asset/geometry payloads (STEP paths, sketch and
+/// spline point data) that are not settings.
+pub fn reset_values(node: &GraphNode) -> Vec<Change> {
+    let mut values = serde_json::Map::new();
+    for spec in known_specs(node) {
+        values.insert(spec.key, spec.default);
+    }
+    match node.node_type.as_str() {
+        "look" => {
+            values.insert("color".to_owned(), Value::String("#7fa0cf".to_owned()));
+        }
+        "shell" | "offsetfaces" => {
+            values.insert("faces".to_owned(), Value::Array(Vec::new()));
+        }
+        "chamfer" | "fillet" => {
+            values.insert("edges".to_owned(), Value::Array(Vec::new()));
+        }
+        _ => {}
+    }
+    for key in ["path", "sketch", "points"] {
+        if let Some(value) = node.values.get(key) {
+            values.insert(key.to_owned(), value.clone());
+        }
+    }
+    values
+        .into_iter()
+        .map(|(field, value)| Change { field, value })
+        .collect()
 }
 
 fn current_value(node: &GraphNode, spec: &FieldSpec) -> Value {
@@ -1170,6 +1239,46 @@ mod tests {
             assert_eq!(specs[0].key, "mode");
             assert!(matches!(specs[0].widget, Widget::Choice(_)));
         }
+    }
+
+    #[test]
+    fn reset_values_restores_settings_but_preserves_asset_data() {
+        let look = GraphNode {
+            id: "look".into(),
+            node_type: "look".into(),
+            values: serde_json::json!({"color": "#ff0000"}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let reset = reset_values(&look);
+        assert!(reset.iter().any(|change| change.field == "color"
+            && change.value == serde_json::json!("#7fa0cf")));
+
+        let spline = GraphNode {
+            id: "s".into(),
+            node_type: "spline".into(),
+            values: serde_json::json!({"degree": 5.0, "points": [[0.0, 0.0], [1.0, 1.0]]}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let reset = reset_values(&spline);
+        assert!(reset.iter().any(|change| change.field == "degree" && change.value == serde_json::json!(3.0)));
+        assert!(reset.iter().any(|change| change.field == "points"
+            && change.value == serde_json::json!([[0.0, 0.0], [1.0, 1.0]])));
+
+        let fillet = GraphNode {
+            id: "f".into(),
+            node_type: "fillet".into(),
+            values: serde_json::json!({"length": 9.0, "edges": [{"id": "edge:1"}]}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let reset = reset_values(&fillet);
+        assert!(reset.iter().any(|change| change.field == "edges"
+            && change.value == serde_json::json!([])));
     }
 
 }

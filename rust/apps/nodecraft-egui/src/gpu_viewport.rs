@@ -369,12 +369,14 @@ struct In {
     @location(8) normal_1: vec4<f32>,
     @location(9) normal_2: vec4<f32>,
     @location(10) normal_3: vec4<f32>,
+    @location(11) instance_alpha: f32,
 };
 struct Out {
     @builtin(position) position: vec4<f32>,
     @location(0) normal: vec3<f32>,
     @location(1) world: vec3<f32>,
     @location(2) colour: vec3<f32>,
+    @location(3) alpha: f32,
 };
 
 @vertex
@@ -387,6 +389,7 @@ fn vs(in: In) -> Out {
     out.normal = (normal_matrix * vec4<f32>(in.normal, 0.0)).xyz;
     out.world = world.xyz;
     out.colour = in.colour;
+    out.alpha = in.instance_alpha;
     return out;
 }
 
@@ -448,14 +451,20 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     if (dot(n, v) < 0.0) { n = -n; }
 
     if (u.params.y > 0.5) {
-        // Zebra analysis: reflect the view vector and stripe the resulting
-        // direction. Curvature changes bend the reflected direction, breaking
-        // the stripes; G1/G2 joins are read by whether stripes kink or flow.
+        // Zebra analysis is a perfect mirror of a procedural striped skybox.
+        // Sample the reflected view ray in spherical coordinates instead of
+        // shading the surface: the environment itself is high-contrast vertical
+        // bands, so a smooth surface reflects smooth bands and a crease makes
+        // them break. This is deliberately independent of metallic/roughness.
         let reflected = reflect(-v, n);
-        let angle = atan2(reflected.y, reflected.x);
-        let stripe = sin(angle * 12.0);
-        let tone = mix(0.035, 0.965, smoothstep(-0.045, 0.045, stripe));
-        return vec4<f32>(encode(vec3<f32>(tone)), u.params.x);
+        let longitude = atan2(reflected.x, -reflected.z);
+        let latitude = asin(clamp(reflected.y, -1.0, 1.0));
+        let phase = longitude * 14.0 + latitude * 3.0;
+        let wave = sin(phase);
+        let aa = clamp(fwidth(wave) * 0.9, 0.004, 0.3);
+        let stripe = smoothstep(-aa, aa, wave);
+        let tone = mix(0.0, 1.0, stripe);
+        return vec4<f32>(encode(vec3<f32>(tone)), u.params.x * in.alpha);
     }
 
     let base = in.colour;
@@ -496,7 +505,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         * (1.0 - roughness * 0.8) * 1.1;
 
     let mapped = aces(radiance + diffuse_ambient + ambient_specular + vec3<f32>(0.005));
-    return vec4<f32>(encode(mapped), u.params.x);
+    return vec4<f32>(encode(mapped), u.params.x * in.alpha);
 }
 "#;
 
@@ -578,6 +587,13 @@ struct GpuDrawItem {
     /// moved and stationary body ranges.
     index_start: u32,
     index_count: u32,
+    /// 1.0 for the stationary/context bodies; lower values carry the ghost
+    /// opacity for this layer.
+    alpha: f32,
+    /// Explicit ghost-layer membership. This is intentionally independent of
+    /// alpha: the ghost draw must use the ghost pipeline even if the opacity is
+    /// temporarily 1.0 (for example while a setting is being initialised).
+    ghost: bool,
 }
 
 impl GpuDrawItem {
@@ -585,7 +601,9 @@ impl GpuDrawItem {
     /// inverse-transpose normal matrix that keeps lighting correct under
     /// non-uniform scale.
     fn instance(&self) -> GpuInstance {
-        GpuInstance::from_model(self.transform)
+        // The dedicated ghost uniform carries opacity; instance alpha stays 1 so
+        // the shader does not square the ghost value.
+        GpuInstance::from_model(self.transform, 1.0)
     }
 }
 
@@ -599,18 +617,20 @@ impl GpuDrawItem {
 struct GpuInstance {
     model: [[f32; 4]; 4],
     normal: [[f32; 4]; 4],
+    alpha: f32,
+    _padding: [f32; 3],
 }
 
 impl GpuInstance {
-    fn from_model(model: [[f32; 4]; 4]) -> Self {
-        Self { model, normal: normal_matrix(model) }
+    fn from_model(model: [[f32; 4]; 4], alpha: f32) -> Self {
+        Self { model, normal: normal_matrix(model), alpha, _padding: [0.0; 3] }
     }
 }
 
 /// Vertex-buffer layout for `GpuInstance`, shared by the opaque and transparent
 /// object pipelines. Attribute locations 3 through 10 follow the vertex
 /// attributes (0..=2) so the same WGSL `In` struct feeds both pipelines.
-const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
+const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 0, shader_location: 3 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 4 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 5 },
@@ -619,6 +639,7 @@ const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 8] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 8 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 9 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 10 },
+    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 128, shader_location: 11 },
 ];
 
 fn object_instance_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -645,6 +666,99 @@ fn object_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
 ///
 /// Returns `None` when the mesh has unusable normals; the caller then falls back
 /// to the per-triangle expansion that can synthesise a face normal.
+/// Non-indexed fallback for meshes without reliable per-vertex normals.
+fn flat_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVertex>, Vec<u32>)> {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for triangle in &mesh.triangles {
+        let [a, b, c] = triangle.map(|index| index as usize);
+        let (Some(pa), Some(pb), Some(pc)) = (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c)) else { continue };
+        let fallback = (*pb - *pa).cross(*pc - *pa);
+        let normal = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z).to_f32();
+        for point in [pa, pb, pc] {
+            indices.push(vertices.len() as u32);
+            vertices.push(ObjectVertex { position: point.to_f32(), normal, colour });
+        }
+    }
+    Some((vertices, indices))
+}
+
+/// Indexed object geometry with crease-aware smooth normals.
+///
+/// Tessellators often provide faceted normals; zebra analysis then exposes every
+/// triangle boundary. Average incident face normals inside a crease angle so
+/// smooth faces shade continuously, while splitting vertices at genuine creases.
+fn smoothed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVertex>, Vec<u32>)> {
+    // Tessellated smooth surfaces can have coarse facets; treat anything under
+    // 60° as smooth. Real CAD creases (box edges, rims) are near 90° and still
+    // split, so zebra shows genuine discontinuities rather than tessellation
+    // seams.
+    const CREASE_COS: f64 = 0.5; // 60 degrees
+    let key = |p: &Vec3| {
+        (
+            (p.x * 1.0e3).round() as i64,
+            (p.y * 1.0e3).round() as i64,
+            (p.z * 1.0e3).round() as i64,
+        )
+    };
+    let mut incident: std::collections::HashMap<(i64, i64, i64), Vec<Vec3>> =
+        std::collections::HashMap::new();
+    let mut face_normals = Vec::with_capacity(mesh.triangles.len());
+    for triangle in &mesh.triangles {
+        let [a, b, c] = triangle.map(|index| index as usize);
+        let (Some(pa), Some(pb), Some(pc)) = (
+            mesh.positions.get(a),
+            mesh.positions.get(b),
+            mesh.positions.get(c),
+        ) else {
+            face_normals.push(None);
+            continue;
+        };
+        let cross = (*pb - *pa).cross(*pc - *pa);
+        let normal = cross.normalized();
+        face_normals.push(normal);
+        if let Some(normal) = normal {
+            for point in [pa, pb, pc] {
+                incident.entry(key(point)).or_default().push(normal);
+            }
+        }
+    }
+    let mut vertices: Vec<ObjectVertex> = Vec::new();
+    let mut indices = Vec::with_capacity(mesh.triangles.len() * 3);
+    let mut corners: std::collections::HashMap<((i64, i64, i64), [i64; 3]), u32> =
+        std::collections::HashMap::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        let Some(face) = face_normals.get(triangle_index).copied().flatten() else { continue };
+        for index in triangle {
+            let point = mesh.positions.get(*index as usize)?;
+            let k = key(point);
+            let mut sum = Vec3::new(0.0, 0.0, 0.0);
+            for normal in incident.get(&k).into_iter().flatten() {
+                if normal.dot(face) >= CREASE_COS {
+                    sum = sum + *normal;
+                }
+            }
+            let normal = sum.normalized().unwrap_or(face);
+            let normal_key = [
+                (normal.x * 1.0e3).round() as i64,
+                (normal.y * 1.0e3).round() as i64,
+                (normal.z * 1.0e3).round() as i64,
+            ];
+            let vertex_index = *corners.entry((k, normal_key)).or_insert_with(|| {
+                let index = vertices.len() as u32;
+                vertices.push(ObjectVertex {
+                    position: point.to_f32(),
+                    normal: normal.to_f32(),
+                    colour,
+                });
+                index
+            });
+            indices.push(vertex_index);
+        }
+    }
+    Some((vertices, indices))
+}
+
 fn indexed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVertex>, Vec<u32>)> {
     if mesh.normals.len() < mesh.positions.len() {
         return None;
@@ -675,8 +789,12 @@ fn indexed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<Object
 struct ObjectRenderer {
     pipeline: wgpu::RenderPipeline,
     transparent_pipeline: wgpu::RenderPipeline,
+    ghost_pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
+    ghost_bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
+    ghost_uniforms: wgpu::Buffer,
+    ghost_alpha: f32,
     assets: Vec<GpuMeshAsset>,
     /// One entry per uploaded chunk: (asset key, triangle count). Large meshes
     /// are split so no single wgpu buffer exceeds the device limit.
@@ -723,6 +841,17 @@ impl ObjectRenderer {
             label: Some("viewport-object-bind-group"),
             layout: &bind_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
+        });
+        let ghost_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport-object-ghost-uniforms"),
+            size: std::mem::size_of::<ObjectUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let ghost_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport-object-ghost-bind-group"),
+            layout: &bind_layout,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ghost_uniforms.as_entire_binding() }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-object-layout"),
@@ -804,11 +933,48 @@ impl ObjectRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("viewport-object-ghost-layer-pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[Some(object_vertex_layout()), Some(object_instance_layout())],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth,
+                depth_write_enabled: Some(false),
+                // The ghost is an overlay layer: never z-fight with the opaque
+                // breakpoint body underneath it.
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             pipeline,
             transparent_pipeline,
+            ghost_pipeline,
             bind_group,
+            ghost_bind_group,
             uniforms,
+            ghost_uniforms,
+            ghost_alpha: 1.0,
             assets: Vec::new(),
             chunk_spans: Vec::new(),
             draws: Vec::new(),
@@ -832,6 +998,7 @@ impl ObjectRenderer {
         let chunks = chunk_object_mesh(vertices, indices);
         self.chunk_spans.clear();
         self.draws.clear();
+        self.ghost_alpha = 1.0;
         let mut pending = Vec::with_capacity(chunks.len());
         for (chunk_vertices, chunk_indices) in chunks {
             let key = self.next_key;
@@ -842,6 +1009,8 @@ impl ObjectRenderer {
                 transform: identity_matrix(),
                 index_start: 0,
                 index_count,
+                alpha: 1.0,
+                ghost: false,
             });
             self.chunk_spans.push((key, index_count / 3));
             pending.push((key, chunk_vertices, chunk_indices));
@@ -854,7 +1023,13 @@ impl ObjectRenderer {
 
     /// Displace the existing draw list without touching the uploaded mesh. The
     /// instance buffer is re-uploaded in `prepare`; vertex/index buffers stay.
-    fn set_transform(&mut self, transform: Option<[[f32; 4]; 4]>, affected: Option<&[(u32, u32)]>) {
+    fn set_transform(
+        &mut self,
+        transform: Option<[[f32; 4]; 4]>,
+        affected: Option<&[(u32, u32)]>,
+        ghost_alpha: f32,
+    ) {
+        self.ghost_alpha = ghost_alpha;
         if self.chunk_spans.is_empty() {
             return;
         }
@@ -867,7 +1042,10 @@ impl ObjectRenderer {
                 let mut first_triangle = 0;
                 for (asset_key, triangles) in chunks {
                     let last_triangle = first_triangle + triangles;
-                    for (ranges, matrix) in [(&moved, matrix), (&stationary, identity_matrix())] {
+                    for (ranges, matrix, alpha, ghost) in [
+                        (&moved, matrix, ghost_alpha, true),
+                        (&stationary, identity_matrix(), 1.0, false),
+                    ] {
                         for &(start, end) in ranges {
                             let start = start.max(first_triangle);
                             let end = end.min(last_triangle);
@@ -879,6 +1057,10 @@ impl ObjectRenderer {
                                 transform: matrix,
                                 index_start: (start - first_triangle) * 3,
                                 index_count: (end - start) * 3,
+                                // Moved ranges are the edit branch; stationary
+                                // ranges are the dim breakpoint context.
+                                alpha,
+                                ghost,
                             });
                         }
                     }
@@ -893,10 +1075,16 @@ impl ObjectRenderer {
                     transform: transform.unwrap_or_else(identity_matrix),
                     index_start: 0,
                     index_count: triangles * 3,
+                    alpha: 1.0,
+                    ghost: false,
                 })
                 .collect(),
         };
         self.instances_dirty = true;
+    }
+
+    fn set_ghost_alpha(&mut self, alpha: f32) {
+        self.ghost_alpha = alpha;
     }
 
     fn debug_info(&self, adapter: &str, backend: &str, device_type: &str) -> GpuDebugInfo {
@@ -912,6 +1100,9 @@ impl ObjectRenderer {
 
     fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, uniforms: &ObjectUniforms) {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(uniforms));
+        let mut ghost = *uniforms;
+        ghost.params[0] = self.ghost_alpha;
+        queue.write_buffer(&self.ghost_uniforms, 0, bytemuck::bytes_of(&ghost));
         if let Some(chunks) = self.pending.take() {
             self.assets.clear();
             for (key, vertices, indices) in chunks {
@@ -959,11 +1150,10 @@ impl ObjectRenderer {
 
     fn paint(&self, pass: &mut wgpu::RenderPass<'static>, transparent: bool) {
         let Some(instances) = self.instances.as_ref() else { return };
-        pass.set_pipeline(if transparent { &self.transparent_pipeline } else { &self.pipeline });
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, instances.slice(..));
-        for (index, draw) in self.draws.iter().enumerate() {
-            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { continue };
+        let emit = |draw: &GpuDrawItem, pass: &mut wgpu::RenderPass<'static>, index: usize| {
+            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { return };
             pass.set_vertex_buffer(0, asset.vertices.slice(..));
             pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
             // Each draw reads its own slot in the shared instance buffer.
@@ -972,6 +1162,40 @@ impl ObjectRenderer {
                 0,
                 index as u32..index as u32 + 1,
             );
+        };
+        if transparent {
+            pass.set_pipeline(&self.transparent_pipeline);
+            for (index, draw) in self.draws.iter().enumerate() {
+                emit(draw, pass, index);
+            }
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        for (index, draw) in self.draws.iter().enumerate() {
+            if !draw.ghost {
+                emit(draw, pass, index);
+            }
+        }
+        // Ghost layer: blended, depth-test-disabled, after the opaque scene.
+        pass.set_pipeline(&self.ghost_pipeline);
+        pass.set_bind_group(0, &self.ghost_bind_group, &[]);
+        for (index, draw) in self.draws.iter().enumerate() {
+            if draw.ghost {
+                emit(draw, pass, index);
+            }
+        }
+    }
+
+    fn paint_ghost(&self, pass: &mut wgpu::RenderPass<'static>) {
+        let Some(instances) = self.instances.as_ref() else { return };
+        pass.set_pipeline(&self.ghost_pipeline);
+        pass.set_bind_group(0, &self.ghost_bind_group, &[]);
+        pass.set_vertex_buffer(1, instances.slice(..));
+        for (index, draw) in self.draws.iter().enumerate() {
+            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { continue };
+            pass.set_vertex_buffer(0, asset.vertices.slice(..));
+            pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(draw.index_start..draw.index_start + draw.index_count, 0, index as u32..index as u32 + 1);
         }
     }
 }
@@ -1572,10 +1796,17 @@ impl SceneTarget {
 
 /// Display-only drag preview state: the world transform plus which display
 /// bodies it applies to.
+struct GhostObject(Arc<Mutex<ObjectRenderer>>);
+
+impl Clone for GhostObject {
+    fn clone(&self) -> Self { Self(self.0.clone()) }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewState {
     transform: [[f32; 4]; 4],
     scope: PreviewScope,
+    alpha: f32,
 }
 
 /// Stable GPU/display facts for the debug overlay.
@@ -1608,6 +1839,8 @@ pub struct GpuViewport {
     #[allow(dead_code)] // Kept for future resource creation after GPU init.
     device: wgpu::Device,
     object: Arc<Mutex<ObjectRenderer>>,
+    ghost_object: GhostObject,
+    ghost_alpha: f32,
     scene: Arc<Mutex<Option<SceneTarget>>>,
     view: ViewSettings,
     chrome_visible: bool,
@@ -1754,6 +1987,14 @@ impl GpuViewport {
             reversed_depth,
         )));
         rs.renderer.write().callback_resources.insert(object.clone());
+        let ghost_object = GhostObject(Arc::new(Mutex::new(ObjectRenderer::install(
+            &rs.device,
+            rs.target_format,
+            msaa_samples(),
+            depth_format(&rs.device, true),
+            reversed_depth,
+        ))));
+        rs.renderer.write().callback_resources.insert(ghost_object.clone());
         Some(Self {
             adapter: adapter_info.name,
             backend: format!("{:?}", adapter_info.backend),
@@ -1775,6 +2016,8 @@ impl GpuViewport {
             },
             device: rs.device.clone(),
             object,
+            ghost_object,
+            ghost_alpha: 1.0,
             scene,
             view: ViewSettings::default(),
             chrome_visible: true,
@@ -1842,15 +2085,16 @@ impl GpuViewport {
             // old per-triangle expansion tripled the vertex count and cost ~0.7 s on
             // a 3.3M-triangle forest. Per-face colour modes still expand, because a
             // shared position may need a different colour per triangle.
+            let ignore_look = self.view.ignore_look_colors;
             let uniform = if self.view.face_colours {
                 None
-            } else if display.face_colors.is_empty() {
+            } else if ignore_look || display.face_colors.is_empty() {
                 Some([0.17, 0.18, 0.195])
             } else {
                 let first = display.face_colors[0];
                 display.face_colors.iter().all(|colour| *colour == first).then_some(first)
             };
-            let indexed = uniform.and_then(|colour| indexed_object_mesh(mesh, colour));
+            let indexed = uniform.and_then(|colour| smoothed_object_mesh(mesh, colour));
             if let Some((vertices, indices)) = indexed {
                 object_vertices = vertices;
                 object_indices = indices;
@@ -1866,6 +2110,8 @@ impl GpuViewport {
                     let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
                     let colour = if self.view.face_colours {
                         face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
+                    } else if ignore_look {
+                        [0.17, 0.18, 0.195]
                     } else {
                         display
                             .face_colors
@@ -1896,6 +2142,34 @@ impl GpuViewport {
         }
     }
 
+    /// Upload the standalone edit ghost mesh. This is deliberately a second
+    /// object renderer: the branch never becomes part of the breakpoint scene.
+    pub fn set_ghost_mesh(&mut self, display: Option<&DisplayMesh>, color: [u8; 3]) {
+        let color = color.map(|channel| f32::from(channel) / 255.0);
+        if let Ok(mut ghost) = self.ghost_object.0.lock() {
+            let geometry = display.and_then(|display| {
+                smoothed_object_mesh(&display.mesh, color)
+                    .or_else(|| flat_object_mesh(&display.mesh, color))
+            });
+            let (vertices, indices) = geometry.unwrap_or_default();
+            ghost.set_mesh(vertices, indices);
+            ghost.set_ghost_alpha(self.ghost_alpha);
+        }
+    }
+
+    pub fn set_ghost_transform(&mut self, transform: Option<[[f32; 4]; 4]>, alpha: f32) {
+        self.ghost_alpha = alpha;
+        if let Ok(mut ghost) = self.ghost_object.0.lock() {
+            ghost.set_ghost_alpha(alpha);
+            ghost.set_transform(transform, None, alpha);
+        }
+    }
+
+    pub fn clear_ghost(&mut self) {
+        self.set_ghost_mesh(None, [97, 148, 199]);
+        self.set_ghost_transform(None, 1.0);
+    }
+
     /// Preview a transform edit without touching the merged mesh or the scene
     /// geometry.
     ///
@@ -1909,18 +2183,24 @@ impl GpuViewport {
         transform: Option<[[f32; 4]; 4]>,
         display: Option<&DisplayMesh>,
         scope: PreviewScope,
+        alpha: f32,
     ) {
         let Some(display) = display else {
-            self.preview = transform.map(|transform| PreviewState { transform, scope });
+            self.preview = transform.map(|transform| PreviewState { transform, scope, alpha });
             if let Ok(mut renderer) = self.object.lock() {
-                renderer.set_transform(transform, None);
+                renderer.set_transform(transform, None, 1.0);
             }
             return;
         };
         // A body scope that happens to cover every triangle can use the
         // whole-mesh path as well.
         let scope = self.scope_for_display(display, scope);
-        let next = transform.map(|transform| PreviewState { transform, scope });
+        let next = transform.map(|transform| PreviewState { transform, scope, alpha });
+        // The ghost alpha uniform must be current even when the preview state
+        // itself is unchanged (e.g. the static overlay was already installed).
+        if let Ok(mut renderer) = self.object.lock() {
+            renderer.set_ghost_alpha(alpha);
+        }
         if self.preview == next {
             return;
         }
@@ -1937,7 +2217,11 @@ impl GpuViewport {
             .as_ref()
             .and_then(|scope| self.affected_ranges(display, scope));
         if let Ok(mut renderer) = self.object.lock() {
-            renderer.set_transform(transform, affected.as_deref());
+            renderer.set_transform(
+                transform,
+                affected.as_deref(),
+                self.preview.as_ref().map_or(1.0, |preview| preview.alpha),
+            );
         }
         let base_bounds = self.display_bounds;
         self.bounds = match &self.preview {
@@ -2093,7 +2377,9 @@ impl GpuViewport {
                     scene.pbr_tri(pc.to_f32(), fallback.to_f32(), surface);
                 }
             }
-            if self.view.edges {
+            // Zebra is a continuity view: B-rep edge overlays are suppressed so
+            // their dark strokes are not mistaken for stripe breaks.
+            if self.view.edges && !self.view.zebra {
                 for display_edge in &display.edges {
                     let moved = moves(&display_edge.id);
                     for (index, pair) in display_edge.points.windows(2).enumerate() {
@@ -2301,6 +2587,7 @@ impl GpuViewport {
         };
         GpuCallback {
             object,
+            ghost_alpha: self.ghost_alpha,
             background: self.background,
             view: self.view,
             chrome_visible: self.chrome_visible,
@@ -2371,6 +2658,7 @@ fn crop_view_proj(vp: [[f32; 4]; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
 /// One viewport draw as an egui paint callback.
 pub struct GpuCallback {
     pub object: ObjectUniforms,
+    pub ghost_alpha: f32,
     pub background: [u8; 4],
     pub view: ViewSettings,
     #[allow(dead_code)] // Reserved for GPU chrome rendering.
@@ -2406,6 +2694,13 @@ impl CallbackTrait for GpuCallback {
         if let Some(object) = resources.get::<Arc<Mutex<ObjectRenderer>>>() {
             if let Ok(mut object) = object.lock() {
                 object.prepare(device, queue, &self.object);
+            }
+        }
+        if let Some(ghost) = resources.get::<GhostObject>() {
+            if let Ok(mut ghost) = ghost.0.lock() {
+                let mut uniforms = self.object;
+                uniforms.params[0] = self.ghost_alpha;
+                ghost.prepare(device, queue, &uniforms);
             }
         }
         {
@@ -2472,6 +2767,11 @@ impl CallbackTrait for GpuCallback {
                     pass.draw(0..3, 0..1);
                     if let Ok(object) = object.lock() {
                         object.paint(&mut pass, self.view.translucent);
+                    }
+                    if let Some(ghost) = resources.get::<GhostObject>() {
+                        if let Ok(ghost) = ghost.0.lock() {
+                            ghost.paint_ghost(&mut pass);
+                        }
                     }
                     renderer.paint(
                         &self.frame,
@@ -2598,6 +2898,8 @@ mod tests {
             transform: identity_matrix(),
             index_start: 0,
             index_count: 3,
+            alpha: 1.0,
+            ghost: false,
         };
         let instance = draw.instance();
         assert_eq!(instance.model, identity_matrix());
@@ -2605,15 +2907,53 @@ mod tests {
     }
 
     #[test]
+    fn branch_ghost_scope_selects_only_the_branch_triangles() {
+        use nodecraft_protocol::Mesh as NodeMesh;
+        let tri = |group: &str| NodeMesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            faces: vec![[0, 1, 2]],
+            face_groups: vec![group.to_owned()],
+            ..NodeMesh::default()
+        };
+        let merged = nodecraft_mesh::merge_meshes(vec![tri("face:0"), tri("face:0")]);
+        let display = crate::adapter::display_mesh(&merged);
+        let ranges = affected_triangle_ranges(
+            &display,
+            &PreviewScope::Bodies(vec!["body:0:".to_owned()]),
+        );
+        assert_eq!(ranges, Some(vec![(0, 1)]), "face ids: {:?}", display.face_ids);
+    }
+
+    #[test]
+    fn object_shader_applies_per_instance_alpha() {
+        assert!(
+            OBJECT_SHADER.contains("u.params.x * in.alpha"),
+            "the fragment shader must multiply the layer alpha by the instance alpha"
+        );
+        let draw = GpuDrawItem {
+            asset_key: 1,
+            transform: identity_matrix(),
+            index_start: 0,
+            index_count: 3,
+            alpha: 0.45,
+            ghost: true,
+        };
+        assert_eq!(draw.instance().alpha, 1.0);
+    }
+
+    #[test]
     fn instance_payload_is_two_column_major_matrices() {
-        // Pod-derived and attribute offsets assume exactly 128 bytes with the
-        // normal matrix starting at offset 64.
-        assert_eq!(std::mem::size_of::<GpuInstance>(), 128);
+        // Two column-major matrices (128 bytes), then the per-instance ghost
+        // alpha with three padding floats.
+        assert_eq!(std::mem::size_of::<GpuInstance>(), 144);
         assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[4].offset, 64);
         assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[7].offset, 112);
-        for attribute in &OBJECT_INSTANCE_ATTRIBUTES {
+        for attribute in &OBJECT_INSTANCE_ATTRIBUTES[..8] {
             assert_eq!(attribute.format, wgpu::VertexFormat::Float32x4);
         }
+        assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[8].offset, 128);
+        assert_eq!(OBJECT_INSTANCE_ATTRIBUTES[8].format, wgpu::VertexFormat::Float32);
         assert_eq!(object_instance_layout().step_mode, wgpu::VertexStepMode::Instance);
     }
 

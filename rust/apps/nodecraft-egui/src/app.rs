@@ -6,6 +6,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod evaluation;
+mod preview_worker;
 mod document_ops;
 mod settings;
 mod settings_ui;
@@ -16,6 +17,7 @@ use tabs::{DocumentTab, TabDrag};
 use theme_editor::*;
 use document_ops::*;
 use evaluation::EvalWorker;
+use preview_worker::{PreviewRequest, PreviewWorker};
 pub(crate) use tool_dock::tool_dock_style;
 use tool_dock::{ToolDockFocus, ToolItem, tool_dock_height, tool_dock_rect};
 use settings::{ActivitySettings, apply_saved_theme, choose_startup_document, default_document, load_app_settings, save_app_settings};
@@ -207,10 +209,17 @@ struct GizmoDragPreview {
     chain: nodecraft_session::placement::Affine3,
     /// Display bodies the edit feeds, also resolved once at drag start.
     scope: PreviewScope,
+    /// Placement from the edited branch's local space into the viewed target's
+    /// space at drag start. Branch previews combine this with the drag delta.
+    base_transform: nodecraft_session::placement::Affine3,
     /// Pre-boolean bodies shown while dragging a branch merged by a Boolean.
     /// The merged result has no per-operand provenance, so the drag displays
     /// the inputs instead; the Boolean re-evaluates on release.
     preview_mesh: Option<Mesh>,
+    /// The preview mesh is the edited branch input, not the merged breakpoint
+    /// body. Draw it solid over the breakpoint mesh as a faint ghost, and map
+    /// only the node's own delta onto it.
+    branch_preview: bool,
 }
 
 /// What to do once a native file dialog closes.
@@ -242,6 +251,7 @@ type EvalKey = (
     Option<String>,
     Option<(String, String)>,
     Option<String>,
+    Option<String>,
     Vec<String>,
     bool,
 );
@@ -253,6 +263,7 @@ fn eval_key(
     selection: &Option<String>,
     comparison: &Option<(String, String)>,
     ghost_input: &Option<String>,
+    edit_preview: &Option<String>,
     validation_targets: &[String],
     run_exporters: bool,
 ) -> EvalKey {
@@ -263,6 +274,7 @@ fn eval_key(
         selection.clone(),
         comparison.clone(),
         ghost_input.clone(),
+        edit_preview.clone(),
         validation_targets.to_vec(),
         run_exporters,
     )
@@ -284,6 +296,18 @@ fn comparison_for_selection(
 
 
 /// The upstream input mesh to ghost under a selected feature's result.
+fn transform_edit_input(document: &GraphDocument, edit_target: &str) -> Option<String> {
+    let node = document.nodes.iter().find(|node| node.id == edit_target)?;
+    if node.node_type != "translate" {
+        return None;
+    }
+    document
+        .connections
+        .iter()
+        .find(|link| link.to == node.id && link.input == "shape")
+        .map(|link| link.from.clone())
+}
+
 fn feature_ghost_input(document: &GraphDocument, selected: &str) -> Option<String> {
     let node = document.nodes.iter().find(|node| node.id == selected)?;
     let port = nodecraft_node_contract::preview_input_if_active(&node.node_type, &node.values)?;
@@ -294,6 +318,141 @@ fn feature_ghost_input(document: &GraphDocument, selected: &str) -> Option<Strin
         .map(|link| link.from.clone())
 }
 
+/// What a double-click activation does for a node type.
+///
+/// This is deliberately the single policy point for double-click behaviour. If
+/// activation later grows modes (for example opening a linked-part document or
+/// entering a subnet), add the mode here and handle it in `activate_node`; do not
+/// spread node-type checks through the canvas or the action dispatcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeActivation {
+    /// Groups switch the canvas into the group's network.
+    EnterGroup,
+    /// Everything else becomes the explicit edit target and reveals its inspector.
+    EditNode,
+}
+
+fn node_activation(node_type: &str) -> NodeActivation {
+    if node_type == "group" {
+        NodeActivation::EnterGroup
+    } else {
+        NodeActivation::EditNode
+    }
+}
+
+fn selection_is_edit_target(
+    selected_nodes: &HashSet<String>,
+    edit_target: Option<&str>,
+) -> bool {
+    selected_nodes.len() == 1 && edit_target == selected_nodes.iter().next().map(String::as_str)
+}
+
+fn ghost_alpha(view: &crate::viewport::ViewSettings) -> f32 {
+    view.ghost_opacity.clamp(0.0, 1.0)
+}
+
+/// Dim the breakpoint mesh for edit mode. The branch is uploaded separately as
+/// the ghost layer; it must never be merged into this scene mesh.
+fn dim_breakpoint_mesh(breakpoint: &Mesh) -> Mesh {
+    let mut mesh = breakpoint.clone();
+    if mesh.face_groups.len() != mesh.faces.len() {
+        mesh.face_groups = (0..mesh.faces.len()).map(|index| format!("face:{index}")).collect();
+    }
+    let colors = if mesh.face_colors.is_empty() {
+        vec![[0.32, 0.34, 0.37]; mesh.faces.len()]
+    } else {
+        mesh.face_colors.clone()
+    };
+    mesh.face_colors = colors
+        .into_iter()
+        .map(|color| color.map(|channel| channel * 0.45))
+        .collect();
+    mesh
+}
+
+/// Shared placement frame for a transform node relative to the displayed
+/// target. The gizmo and the edit ghost must consume this one resolution;
+/// computing their chains separately is how a gizmo can end up at a different
+/// pivot from the geometry it edits.
+struct TransformFrame {
+    chain: nodecraft_session::placement::Affine3,
+    placement: nodecraft_session::placement::Affine3,
+    pivot: [f64; 3],
+    axes_basis: nodecraft_session::placement::Affine3,
+}
+
+fn transform_frame(
+    document: &GraphDocument,
+    selected: &str,
+    target: &str,
+) -> Option<TransformFrame> {
+    use nodecraft_session::placement::{transform_chain, Affine3};
+    let node = document.nodes.iter().find(|node| node.id == selected)?;
+    if node.node_type != "translate" || node.suppressed {
+        return None;
+    }
+    let chain = if selected == target {
+        Affine3::identity()
+    } else {
+        transform_chain(document, selected, target)?
+    };
+    let value = |key: &str| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let local = node.values.get("space").and_then(serde_json::Value::as_str) == Some("local");
+    let axes_basis = if local {
+        chain.compose(Affine3::rotation(&node.values))
+    } else {
+        chain
+    };
+    Some(TransformFrame {
+        chain,
+        placement: chain.compose(Affine3::from_node(node)?),
+        pivot: chain.apply_point([value("x"), value("y"), value("z")]),
+        axes_basis,
+    })
+}
+
+/// The one transform-ghost description: a two-body overlay mesh where body 0 is
+/// the edited branch (ghost layer) and body 1 is the dimmed, stationary
+/// breakpoint. This is the only constructor for transform ghosts.
+struct TransformGhost {
+    base: Mesh,
+    branch: Mesh,
+    base_transform: nodecraft_session::placement::Affine3,
+    /// Opacity snapshot taken when the ghost is created. Live view-setting
+    /// changes still update the active preview through Viewport::set_view.
+    alpha: f32,
+}
+
+fn transform_ghost_for(
+    document: &GraphDocument,
+    edit_target: &str,
+    target: &str,
+    edit_preview: Option<&Mesh>,
+    breakpoint: Option<&Mesh>,
+    alpha: f32,
+) -> Option<TransformGhost> {
+    if edit_target == target {
+        return None;
+    }
+    let node = document.nodes.iter().find(|node| node.id == edit_target)?;
+    if node.node_type != "translate" || node.suppressed {
+        return None;
+    }
+    if NodeCraftApp::transform_input_contains_sketch(document, edit_target) {
+        return None;
+    }
+    let preview = edit_preview?;
+    let breakpoint = breakpoint?;
+    let frame = transform_frame(document, edit_target, target)?;
+    Some(TransformGhost {
+        base: dim_breakpoint_mesh(breakpoint),
+        branch: preview.clone(),
+        base_transform: frame.placement,
+        alpha: alpha.clamp(0.0, 1.0),
+    })
+}
+
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     active_session_revision: u64,
@@ -302,6 +461,9 @@ pub struct NodeCraftApp {
     next_document_id: u64,
     selected_nodes: HashSet<String>,
     selected_connections: HashSet<ConnectionKey>,
+    /// The node explicitly entered for editing. Selection alone never opens a
+    /// gizmo; double-clicking a node sets this independent edit target.
+    edit_target: Option<String>,
     viewer_breakpoint: Option<String>,
     /// Selection remembered while the tool dock is open; the canvas click-away
     /// that opens the dock clears `selected_nodes` before the tool item is chosen.
@@ -331,6 +493,9 @@ pub struct NodeCraftApp {
     kernel_fixes: bool,
     cable_routing: CableRouting,
     eval_worker: EvalWorker,
+    preview_worker: PreviewWorker,
+    preview_next: u64,
+    preview_pending: Option<u64>,
     eval_next: u64,
     eval_pending: Option<u64>,
     /// Bumped whenever the active session is installed. The evaluation cache is
@@ -341,8 +506,13 @@ pub struct NodeCraftApp {
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
-    /// Boolean operand bodies for the pre-merge drag display.
-    pre_merge: Option<engine_bridge::PreMerge>,
+    /// Display mesh for the node being edited, used by a branch-scoped transform
+    /// preview when the breakpoint mesh is geometrically merged.
+    edit_preview: Option<Mesh>,
+    /// Which node's transform input produced `edit_preview`.
+    edit_preview_target: Option<String>,
+    /// One retry is allowed when an evaluation reports the edit target but no
+    /// preview mesh, so a dropped/queued preview request is not permanent.
     viewport: Viewport,
     node_editor: NodeEditor,
     status: String,
@@ -542,6 +712,7 @@ impl NodeCraftApp {
             documents: DocumentStore::new(),
             next_document_id: 1,
             selected_nodes: HashSet::new(),
+            edit_target: None,
             selected_connections: HashSet::new(),
             viewer_breakpoint: None,
             tool_add_source: None,
@@ -563,6 +734,9 @@ impl NodeCraftApp {
             kernel_fixes: settings.kernel_fixes,
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
             eval_worker: EvalWorker::new(),
+            preview_worker: PreviewWorker::new(),
+            preview_next: 0,
+            preview_pending: None,
             eval_next: 0,
             eval_pending: None,
             session_generation: 0,
@@ -570,7 +744,8 @@ impl NodeCraftApp {
             eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
             mesh: None,
-            pre_merge: None,
+            edit_preview: None,
+            edit_preview_target: None,
             viewport,
             node_editor,
             status: "Ready".to_owned(),
@@ -648,6 +823,10 @@ impl NodeCraftApp {
         let Some(session) = self.session.as_ref() else { return };
         let document = session.document();
         self.selected_nodes.retain(|id| document.nodes.iter().any(|node| &node.id == id));
+        let clear_edit_target = self
+            .edit_target
+            .as_ref()
+            .is_some_and(|id| !document.nodes.iter().any(|node| &node.id == id));
         if self
             .viewer_breakpoint
             .as_ref()
@@ -663,6 +842,9 @@ impl NodeCraftApp {
                     && connection.out == key.out
             })
         });
+        if clear_edit_target {
+            self.clear_edit_target();
+        }
     }
 
     fn export_document(&mut self) {
@@ -1133,8 +1315,83 @@ impl NodeCraftApp {
         }
     }
 
+    /// Enter a node through a double-click.
+    ///
+    /// Selection is handled separately and always runs first; activation then
+    /// decides what "enter" means. Keep this as the one place that policy lives.
+    fn activate_node(&mut self, id: &str) {
+        let Some(node_type) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.document().nodes.iter().find(|node| node.id == id))
+            .map(|node| node.node_type.clone())
+        else {
+            return;
+        };
+        match node_activation(&node_type) {
+            NodeActivation::EnterGroup => self.enter_group(id),
+            NodeActivation::EditNode => {
+                self.selected_nodes.clear();
+                self.selected_nodes.insert(id.to_owned());
+                self.selected_connections.clear();
+                let expected = self.session.as_ref().and_then(|session| {
+                    transform_edit_input(session.document(), id)
+                });
+                if self.edit_preview_target != expected {
+                    self.edit_preview = None;
+                    self.edit_preview_target = None;
+                    // The selection prefetch may have produced the same key but
+                    // not the branch mesh; force the main pass to refresh.
+                    self.last_eval_key = None;
+                }
+                self.edit_target = Some(id.to_owned());
+                if self.edit_preview.is_none()
+                    && self.preview_pending.is_none()
+                    && let Some(input) = expected
+                {
+                    self.request_transform_preview(&input);
+                }
+                self.open_inspector();
+                self.status = format!("Editing {id}");
+                self.evaluate();
+            }
+        }
+    }
+
+    /// Branch ghost overlay shown while a transform edit target is active.
+    ///
+    /// Only used when the breakpoint result has consumed the edited branch
+    /// (no per-body provenance). The raw input mesh is placed through the same
+    /// downstream chain the gizmo uses, then drawn over a dimmed breakpoint mesh.
+    fn transform_ghost(&self) -> Option<TransformGhost> {
+        if self.gizmo_drag.is_some() {
+            return None;
+        }
+        let session = self.session.as_ref()?;
+        transform_ghost_for(
+            session.document(),
+            self.edit_target.as_deref()?,
+            self.eval_target.as_deref()?,
+            self.edit_preview.as_ref(),
+            self.mesh.as_ref(),
+            ghost_alpha(&self.viewport.view()),
+        )
+    }
+
+    fn refresh_edit_overlay(&mut self) {
+        let Some(ghost) = self.transform_ghost() else {
+            return;
+        };
+        self.viewport.set_edit_ghost(
+            &ghost.base,
+            &ghost.branch,
+            ghost.base_transform.to_column_major_f32(),
+            ghost.alpha,
+        );
+    }
+
     fn selected_transform_gizmo(&self) -> Option<Gizmo> {
-        if self.selected_nodes.len() != 1 {
+        if !selection_is_edit_target(&self.selected_nodes, self.edit_target.as_deref()) {
             return None;
         }
         let selected_id = self.selected_nodes.iter().next()?.clone();
@@ -1144,45 +1401,26 @@ impl NodeCraftApp {
         if node.node_type != "translate" {
             return None;
         }
+        // Use the target that the viewport is actually displaying, not the
+        // separate viewer-breakpoint state.
+        let target = self.eval_target.as_deref()?;
+        let frame = transform_frame(document, &selected_id, target)?;
         let value = |key: &str| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        let x = value("x");
-        let y = value("y");
-        let z = value("z");
-        let chain = self
-            .viewer_breakpoint
-            .as_deref()
-            .filter(|target| *target != selected_id)
-            .and_then(|target| {
-                nodecraft_session::placement::transform_chain(document, &selected_id, target)
-            })
-            .unwrap_or_else(nodecraft_session::placement::Affine3::identity);
-        let local = node.values.get("space").and_then(serde_json::Value::as_str) == Some("local");
-        // In local mode x/y/z are along the node's rotated axes. Compose that
-        // rotation with the downstream chain once and use it everywhere: pivot,
-        // triad orientation, and inverse drag mapping.
-        let axes_basis = if local {
-            chain.compose(nodecraft_session::placement::Affine3::rotation(&node.values))
-        } else {
-            chain
-        };
         let axes = [
-            axes_basis.apply_vector([1.0, 0.0, 0.0]),
-            axes_basis.apply_vector([0.0, 1.0, 0.0]),
-            axes_basis.apply_vector([0.0, 0.0, 1.0]),
+            frame.axes_basis.apply_vector([1.0, 0.0, 0.0]),
+            frame.axes_basis.apply_vector([0.0, 1.0, 0.0]),
+            frame.axes_basis.apply_vector([0.0, 0.0, 1.0]),
         ];
         Some(Gizmo {
             node_id: selected_id,
-            // Space changes only the manipulator axes. Values stay in the
-            // parent/world frame, so the pivot and drag mapping never include
-            // the node's own rotation.
-            pivot: chain.apply_point([x, y, z]),
-            x,
-            y,
-            z,
+            pivot: frame.pivot,
+            x: value("x"),
+            y: value("y"),
+            z: value("z"),
             rx: value("rx"),
             ry: value("ry"),
             rz: value("rz"),
-            world_to_local: chain.inverse_linear(),
+            world_to_local: frame.chain.inverse_linear(),
             axes,
         })
     }
@@ -1210,88 +1448,43 @@ impl NodeCraftApp {
         false
     }
 
-    /// Whether `source` feeds `target` through the graph (including itself).
-    fn graph_feeds(document: &GraphDocument, source: &str, target: &str) -> bool {
-        let mut seen = HashSet::new();
-        let mut stack = vec![source.to_owned()];
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            if id == target {
-                return true;
-            }
-            for link in document.connections.iter().filter(|link| link.from == id) {
-                stack.push(link.to.clone());
-            }
-        }
-        false
-    }
-
     fn begin_gizmo_preview(&self, node: &GraphNode) -> Option<GizmoDragPreview> {
-        use nodecraft_session::placement::{
-            preview_body_scope, transform_chain, Affine3, PreviewBodyScope,
-        };
+        use nodecraft_session::placement::Affine3;
         if node.node_type != "translate" {
             return None;
         }
         let session = self.session.as_ref()?;
         let document = session.document();
-        // Sketch/spline geometry has no exact Part body layout, so the GPU
-        // preview cannot scope it: the fallback transforms the whole display
-        // mesh (moving unrelated geometry). Let evaluation drive the drag
-        // instead of using a GPU preview for that topology.
-        if Self::transform_input_contains_sketch(document, &node.id) {
-            return None;
-        }
         let target = self.eval_target.as_deref()?;
-        let chain = if target == node.id {
-            // The edited node is the displayed target: its own placement is the
-            // whole delta.
-            Affine3::identity()
-        } else {
-            transform_chain(document, &node.id, target)?
-        };
-        // A Boolean union has no per-operand bodies in its merged display. For
-        // a drag on one branch, show the two pre-merge inputs and move only the
-        // edited one; the Boolean itself is re-evaluated when the drag ends.
-        let pre_merge = self.pre_merge.as_ref().and_then(|pre| {
-            let feeds_a = Self::graph_feeds(document, &node.id, &pre.a.0);
-            let feeds_b = Self::graph_feeds(document, &node.id, &pre.b.0);
-            if feeds_a == feeds_b {
-                return None;
-            }
-            let prefix = if feeds_a { "body:0:" } else { "body:1:" };
-            let with_groups = |mesh: &Mesh| {
-                let mut mesh = mesh.clone();
-                if mesh.face_groups.len() != mesh.faces.len() {
-                    mesh.face_groups = (0..mesh.faces.len()).map(|index| format!("face:{index}")).collect();
-                }
-                mesh
-            };
-            let mesh = nodecraft_mesh::merge_meshes(vec![with_groups(&pre.a.1), with_groups(&pre.b.1)]);
-            Some((mesh, PreviewScope::Bodies(vec![prefix.to_owned()])))
-        });
-        let (scope, preview_mesh) = match pre_merge {
-            Some((mesh, scope)) => (scope, Some(mesh)),
-            None => {
-                let scope = match preview_body_scope(document, &node.id, target) {
-                    Some(PreviewBodyScope::All) => PreviewScope::All,
-                    Some(PreviewBodyScope::Prefixes(prefixes)) => PreviewScope::Bodies(prefixes),
-                    // No per-body provenance: a fast display preview cannot move
-                    // only the edited branch. Let evaluation drive the drag result
-                    // instead of moving the whole merged body.
-                    None => return None,
-                };
-                (scope, None)
-            }
-        };
+        if target == node.id {
+            // Editing the displayed transform itself: the merged breakpoint body
+            // is the thing being moved, so its own placement is the whole delta.
+            return Some(GizmoDragPreview {
+                node_id: node.id.clone(),
+                start_values: node.values.clone(),
+                chain: Affine3::identity(),
+                scope: PreviewScope::All,
+                base_transform: Affine3::identity(),
+                preview_mesh: None,
+                branch_preview: false,
+            });
+        }
+        // Any upstream edit point uses the single transform-ghost path. If the
+        // branch mesh is not ready, show no preview rather than falling back to
+        // the breakpoint mesh.
+        let frame = transform_frame(document, &node.id, target)?;
+        let ghost = self.transform_ghost();
         Some(GizmoDragPreview {
             node_id: node.id.clone(),
             start_values: node.values.clone(),
-            chain,
-            scope,
-            preview_mesh,
+            chain: frame.chain,
+            scope: PreviewScope::All,
+            base_transform: frame.placement,
+            // The branch mesh may still be in flight. The drag values can start
+            // immediately; `attach_pending_edit_ghost` adds the visual when the
+            // preview evaluation returns.
+            preview_mesh: ghost.map(|ghost| ghost.branch),
+            branch_preview: true,
         })
     }
 
@@ -1309,15 +1502,17 @@ impl NodeCraftApp {
                         .map(|node| node.values.clone())
                 });
                 current.map(|current| {
-                    (
-                        nodecraft_session::placement::preview_transform(
-                            drag.chain,
-                            &drag.start_values,
-                            &current,
-                        )
-                        .to_column_major_f32(),
-                        drag.scope.clone(),
-                    )
+                    let delta = nodecraft_session::placement::preview_transform(
+                        drag.chain,
+                        &drag.start_values,
+                        &current,
+                    );
+                    let matrix = if drag.branch_preview {
+                        delta.compose(drag.base_transform).to_column_major_f32()
+                    } else {
+                        delta.to_column_major_f32()
+                    };
+                    (matrix, drag.scope.clone())
                 })
             }
             None => None,
@@ -1325,7 +1520,63 @@ impl NodeCraftApp {
         let (matrix, scope) = resolved
             .map(|(matrix, scope)| (Some(matrix), scope))
             .unwrap_or((None, PreviewScope::All));
-        self.viewport.set_preview_transform(matrix, scope);
+        let alpha = self
+            .gizmo_drag
+            .as_ref()
+            .is_some_and(|drag| drag.branch_preview)
+            .then(|| ghost_alpha(&self.viewport.view()))
+            .unwrap_or(1.0);
+        if self
+            .gizmo_drag
+            .as_ref()
+            .is_some_and(|drag| drag.branch_preview)
+        {
+            self.viewport.update_ghost_transform(matrix, alpha);
+        } else {
+            self.viewport.set_preview_transform_with_alpha(matrix, scope, alpha);
+        }
+    }
+
+    /// If an upstream drag started before the branch preview mesh arrived,
+    /// attach the ghost as soon as the evaluation delivers it.
+    fn attach_pending_edit_ghost(&mut self) {
+        let Some(edit_preview) = self.edit_preview.clone() else { return };
+        let Some(drag) = self.gizmo_drag.as_ref() else { return };
+        if !drag.branch_preview || drag.preview_mesh.is_some() {
+            return;
+        }
+        let (Some(edit_target), Some(target)) = (self.edit_target.clone(), self.eval_target.clone()) else {
+            return;
+        };
+        let Some(session) = self.session.as_ref() else { return };
+        let document = session.document();
+        let ghost = transform_ghost_for(
+            document,
+            &edit_target,
+            &target,
+            Some(&edit_preview),
+            self.mesh.as_ref(),
+            ghost_alpha(&self.viewport.view()),
+        );
+        let Some(ghost) = ghost else { return };
+        let current = document
+            .nodes
+            .iter()
+            .find(|node| node.id == drag.node_id)
+            .map(|node| node.values.clone());
+        let Some(current) = current else { return };
+        let delta = nodecraft_session::placement::preview_transform(
+            drag.chain,
+            &drag.start_values,
+            &current,
+        );
+        let matrix = delta.compose(drag.base_transform).to_column_major_f32();
+        let alpha = ghost_alpha(&self.viewport.view());
+        let branch = ghost.branch.clone();
+        self.viewport.set_edit_ghost(&ghost.base, &branch, matrix, alpha);
+        if let Some(drag) = self.gizmo_drag.as_mut() {
+            drag.preview_mesh = Some(branch);
+        }
     }
 
     /// Consume one frame of transform-triad state: write the live values to the
@@ -1354,7 +1605,17 @@ impl NodeCraftApp {
             self.gizmo_edited = false;
             self.gizmo_publish_pending = false;
             if let Some(mesh) = self.gizmo_drag.as_ref().and_then(|drag| drag.preview_mesh.clone()) {
-                self.viewport.set_mesh_preserving_camera(Some(&mesh));
+                if self
+                    .gizmo_drag
+                    .as_ref()
+                    .is_some_and(|drag| drag.branch_preview)
+                {
+                    // Base dim mesh is already installed by edit mode; upload the
+                    // branch only to the standalone ghost renderer.
+                    self.viewport.set_ghost_mesh(&mesh);
+                } else {
+                    self.viewport.set_mesh_preserving_camera(Some(&mesh));
+                }
             }
         }
         if let Some(node) = selected_node
@@ -1841,6 +2102,47 @@ impl NodeCraftApp {
         self.egui_ctx.request_repaint();
     }
 
+    /// Leave node editing and restore the authoritative breakpoint display.
+    fn clear_edit_target(&mut self) {
+        if self.edit_target.take().is_some() {
+            self.edit_preview = None;
+            self.edit_preview_target = None;
+            self.viewport.clear_edit_ghost();
+            self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
+        }
+    }
+
+    fn reset_inspector_node(&mut self, node: &GraphNode) {
+        let mut changed = false;
+        for change in inspector::reset_values(node) {
+            let command = Command::SetValue {
+                node: node.id.clone(),
+                field: change.field,
+                value: change.value,
+            };
+            changed |= self.apply_commands(&[command], Some(&format!("reset:{}", node.id)));
+        }
+        if changed {
+            self.evaluate();
+        }
+    }
+
+    /// Open the inspector without closing it. Double-clicking a node enters its
+    /// editor, so the node panel must be visible even if the user collapsed it.
+    fn open_inspector(&mut self) {
+        if self.inspector_open {
+            return;
+        }
+        self.inspector_open = true;
+        self.inspector_reflow = true;
+        self.inspector_animation = Some(InspectorAnimation {
+            started: Instant::now(),
+            from: self.inspector_reveal,
+            to: 1.0,
+        });
+        self.egui_ctx.request_repaint();
+    }
+
     fn advance_layout_animation(&mut self, ctx: &egui::Context) {
         let Some(animation) = &self.layout_animation else { return };
         let progress = (animation.started.elapsed().as_secs_f32()
@@ -2004,6 +2306,11 @@ impl NodeCraftApp {
                     self.selected_nodes.insert(id);
                     self.selected_connections.clear();
                     self.sync_comparison_target();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::EditNode(id) => {
+                    self.activate_node(&id);
+                    self.egui_ctx.request_repaint();
                     "{\"ok\":true}".to_owned()
                 }
                 control_server::Command::BeginSelection { node, field } => {
@@ -2241,6 +2548,9 @@ impl eframe::App for NodeCraftApp {
                     .panel_screen_rect()
                     .is_some_and(|rect| rect.contains(pointer))
             });
+        if !typing && ui.ctx().input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.clear_edit_target();
+        }
         if !typing
             && pointer_over_node_canvas
             && ui.ctx().input(|input| input.modifiers.command && input.key_pressed(egui::Key::A))
@@ -2953,22 +3263,8 @@ impl eframe::App for NodeCraftApp {
         }
 
         let theme = crate::theme::get();
-        let inspector_info = {
-            let mut info = format!(
-                "Evaluation: {:.1} ms\nCache: {} hits / {} misses",
-                self.evaluation_ms, self.cache_hits, self.cache_misses
-            );
-            if let Some(mesh) = &self.mesh {
-                info.push_str(&format!(
-                    "\nMesh: {} verts / {} tris / {} edges",
-                    mesh.vertices.len(),
-                    mesh.faces.len(),
-                    mesh.brep_edges.len()
-                ));
-            }
-            info
-        };
         let mut toggle_inspector = false;
+        let mut reset_inspector = false;
         egui::Area::new(egui::Id::new("inspector-panel"))
             .order(egui::Order::Foreground)
             .fixed_pos(inspector_rect.min)
@@ -3060,47 +3356,9 @@ impl eframe::App for NodeCraftApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    let (chevron_rect, chevron) = ui.allocate_exact_size(
-                                        egui::Vec2::splat(26.0),
-                                        egui::Sense::click(),
-                                    );
-                                    let chevron = chevron.on_hover_text(&inspector_info);
-                                    if chevron.hovered() || chevron.dragged() {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    }
-                                    if chevron.hovered() {
-                                        ui.painter().circle_filled(
-                                            chevron_rect.center(),
-                                            13.0,
-                                            theme.with_alpha(theme.highlight, 26),
-                                        );
-                                    }
-                                    let colour = theme.color(if chevron.hovered() {
-                                        theme.text
-                                    } else {
-                                        theme.muted
-                                    });
-                                    let angle = if self.inspector_open {
-                                        std::f32::consts::FRAC_PI_2
-                                    } else {
-                                        0.0
-                                    };
-                                    let rotate = |v: egui::Vec2| {
-                                        egui::vec2(
-                                            v.x * angle.cos() - v.y * angle.sin(),
-                                            v.x * angle.sin() + v.y * angle.cos(),
-                                        )
-                                    };
-                                    let centre = chevron_rect.center();
-                                    let tip = centre + rotate(egui::vec2(3.0, 0.0));
-                                    let top = centre + rotate(egui::vec2(-3.0, -4.0));
-                                    let bottom = centre + rotate(egui::vec2(-3.0, 4.0));
-                                    let stroke = egui::Stroke::new(1.5, colour);
-                                    ui.painter().line_segment([top, tip], stroke);
-                                    ui.painter().line_segment([tip, bottom], stroke);
-                                    if chevron.clicked() {
-                                        toggle_inspector = true;
-                                    }
+                                    // Reserve room for the absolutely centred reset
+                                    // control placed against the full header below.
+                                    ui.add_space(30.0);
                                     if !inspector_badge.is_empty() {
                                         ui.label(
                                             egui::RichText::new(&inspector_badge)
@@ -3111,13 +3369,23 @@ impl eframe::App for NodeCraftApp {
                                 },
                             );
                         });
-                        // Double-clicking anywhere in the header toggles the
-                        // inspector, including over the disclosure chevron.
+                        // Double-clicking the header still toggles the inspector;
+                        // the visible disclosure chevron has been replaced by the
+                        // reset action.
                         let header_bottom = ui.cursor().min.y;
                         let header_rect = egui::Rect::from_min_max(
                             egui::pos2(panel_rect.left(), header_top),
                             egui::pos2(panel_rect.right(), header_bottom),
                         );
+                        let reset_rect = egui::Rect::from_center_size(
+                            // Use the frame's inner content edge, not the panel
+                            // border, so the icon keeps the 16px header inset.
+                            egui::pos2(ui.max_rect().right() - 13.0, header_rect.center().y),
+                            egui::vec2(26.0, 26.0),
+                        );
+                        if inspector::reset_icon_button_at(ui, reset_rect).clicked() {
+                            reset_inspector = true;
+                        }
                         let header_double_clicked = ui.ctx().input(|input| {
                             if !input.pointer.button_double_clicked(egui::PointerButton::Primary) {
                                 return false;
@@ -3342,11 +3610,18 @@ impl eframe::App for NodeCraftApp {
             }
         }
 
+        if reset_inspector
+            && let Some(node) = selected_node.clone()
+        {
+            self.reset_inspector_node(&node);
+        }
+
         for action in editor_actions {
             match action {
                 NodeEditorAction::SelectNode { id, additive } => {
                     // Selection is independent of the viewer breakpoint. Only the
                     // eye control changes what the engine/viewport evaluates.
+                    self.clear_edit_target();
                     if !additive {
                         self.selected_nodes.clear();
                         self.selected_nodes.insert(id);
@@ -3354,13 +3629,26 @@ impl eframe::App for NodeCraftApp {
                         self.selected_nodes.insert(id);
                     }
                     self.selected_connections.clear();
+                    if self.edit_target.is_none()
+                        && self.selected_nodes.len() == 1
+                        && let Some(session) = &self.session
+                        && let Some(input) = self
+                            .selected_nodes
+                            .iter()
+                            .next()
+                            .and_then(|id| transform_edit_input(session.document(), id))
+                    {
+                        self.request_transform_preview(&input);
+                    }
                 }
                 NodeEditorAction::SetLassoSelection { nodes, .. } => {
                     self.selected_nodes = nodes;
                     self.selected_connections.clear();
+                    self.clear_edit_target();
                 }
                 NodeEditorAction::SelectCable { key, additive } => {
                     self.selected_nodes.clear();
+                    self.clear_edit_target();
                     if !additive {
                         self.selected_connections.clear();
                     }
@@ -3439,6 +3727,9 @@ impl eframe::App for NodeCraftApp {
                 }
                 NodeEditorAction::EnterGroup { id } => {
                     self.enter_group(&id);
+                }
+                NodeEditorAction::ActivateNode { id } => {
+                    self.activate_node(&id);
                 }
                 NodeEditorAction::SetViewerBreakpoint { id } => {
                     // The eye controls the viewer only; it never mutates selection.
@@ -3530,6 +3821,7 @@ impl eframe::App for NodeCraftApp {
                     self.apply_commands(&commands, Some("move:nodes"));
                 }
                 NodeEditorAction::Deselect => {
+                    self.clear_edit_target();
                     // The floating tool dock sits over the canvas; clicking it is
                     // not a click-away from the current selection.
                     let pointer = ui.ctx().input(|input| input.pointer.interact_pos());
@@ -3781,8 +4073,8 @@ mod tests {
     fn replaced_sessions_get_a_new_evaluation_identity() {
         let selection = Some("extrude".to_owned());
         let comparison = None;
-        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &[], false);
-        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &[], false);
+        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false);
+        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false);
         assert_ne!(first, replacement, "a replaced session must not reuse the old result");
     }
 
@@ -4045,6 +4337,141 @@ mod tests {
         assert!((progress_fraction(&EvalProgress { total: 10, done: 5 }) - 0.5).abs() < 1e-6);
         assert_eq!(progress_fraction(&EvalProgress { total: 10, done: 20 }), 1.0);
         assert_eq!(progress_fraction(&EvalProgress { total: 0, done: 0 }), 0.0);
+    }
+
+    #[test]
+    fn transform_edit_preview_uses_the_transform_input() {
+        let node = |id: &str, node_type: &str| GraphNode {
+            id: id.into(),
+            node_type: node_type.into(),
+            values: Default::default(),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("preview-input");
+        document.nodes = vec![node("box", "primitive"), node("move", "translate")];
+        document.connections = vec![GraphConnection {
+            from: "box".into(),
+            to: "move".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        assert_eq!(
+            transform_edit_input(&document, "move").as_deref(),
+            Some("box")
+        );
+        assert_eq!(transform_edit_input(&document, "box"), None);
+    }
+
+    #[test]
+    fn edit_overlay_has_separate_branch_and_breakpoint_bodies() {
+        let tri = Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            faces: vec![[0, 1, 2]],
+            ..Mesh::default()
+        };
+        let overlay = dim_breakpoint_mesh(&tri);
+        assert_eq!(overlay.faces.len(), 1);
+        assert_eq!(overlay.face_groups.len(), 1);
+        assert_eq!(overlay.face_colors.len(), 1);
+        assert!(overlay.face_colors[0][0] < 0.32, "{:?}", overlay.face_colors);
+    }
+
+    #[test]
+    fn ghost_alpha_follows_the_view_setting() {
+        let mut view = crate::viewport::ViewSettings::default();
+        assert!((ghost_alpha(&view) - 0.45).abs() < 1.0e-6);
+        view.ghost_opacity = 0.8;
+        assert!((ghost_alpha(&view) - 0.8).abs() < 1.0e-6);
+        view.ghost_opacity = -1.0;
+        assert_eq!(ghost_alpha(&view), 0.0);
+        view.ghost_opacity = 2.0;
+        assert_eq!(ghost_alpha(&view), 1.0);
+    }
+
+    #[test]
+    fn gizmo_frame_uses_the_displayed_target_chain() {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("frame");
+        document.nodes = vec![
+            node("torus", "solid", serde_json::json!({"primitiveType": "torus"})),
+            node("move", "translate", serde_json::json!({"rx": 90.0, "z": 6.0})),
+            node("box", "solid", serde_json::json!({"primitiveType": "box"})),
+            node("move2", "translate", serde_json::json!({"x": -24.0})),
+            node("boolean", "boolean", serde_json::json!({"mode": "subtract"})),
+            node("post", "translate", serde_json::json!({"x": 22.0})),
+            node("look", "look", serde_json::json!({})),
+        ];
+        document.connections = vec![
+            GraphConnection { from: "torus".into(), to: "move".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
+            GraphConnection { from: "box".into(), to: "move2".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "move2".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+            GraphConnection { from: "boolean".into(), to: "post".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "post".into(), to: "look".into(), input: "shape".into(), out: "shape".into() },
+        ];
+        let frame = transform_frame(&document, "move", "look").expect("frame");
+        assert_eq!(frame.pivot, [22.0, 0.0, 6.0]);
+        assert_eq!(frame.placement.apply_point([0.0, 0.0, 0.0]), [22.0, 0.0, 6.0]);
+    }
+
+    #[test]
+    fn deep_transform_overlay_uses_the_input_mesh() {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("overlay-plan");
+        document.nodes = vec![
+            node("box", "solid", serde_json::json!({"primitiveType": "box"})),
+            node("move", "translate", serde_json::json!({"x": -24.0})),
+            node("sphere", "solid", serde_json::json!({"primitiveType": "sphere"})),
+            node("boolean", "boolean", serde_json::json!({"mode": "union"})),
+            node("fillet", "fillet", serde_json::json!({})),
+            node("look", "look", serde_json::json!({})),
+        ];
+        document.connections = vec![
+            GraphConnection { from: "box".into(), to: "move".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
+            GraphConnection { from: "sphere".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+            GraphConnection { from: "boolean".into(), to: "fillet".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "fillet".into(), to: "look".into(), input: "shape".into(), out: "shape".into() },
+        ];
+        let preview = Mesh { vertices: vec![[0.0; 3]], faces: vec![[0, 0, 0]], ..Mesh::default() };
+        let breakpoint = preview.clone();
+        let plan = transform_ghost_for(&document, "move", "look", Some(&preview), Some(&breakpoint), 0.45);
+        assert!(plan.is_some(), "deep transform should get a branch overlay");
+        assert!((plan.unwrap().alpha - 0.45).abs() < 1.0e-6);
+        let plan = transform_ghost_for(&document, "move", "boolean", Some(&preview), Some(&breakpoint), 0.45);
+        assert!(plan.is_some(), "a Boolean breakpoint should also get the branch overlay");
+    }
+
+    #[test]
+    fn double_click_activation_policy_is_one_place() {
+        assert_eq!(node_activation("group"), NodeActivation::EnterGroup);
+        assert_eq!(node_activation("translate"), NodeActivation::EditNode);
+        assert_eq!(node_activation("boolean"), NodeActivation::EditNode);
+    }
+
+    #[test]
+    fn selection_alone_does_not_activate_an_edit_target() {
+        let selected = HashSet::from(["move".to_owned()]);
+        assert!(!selection_is_edit_target(&selected, None));
+        assert!(!selection_is_edit_target(&selected, Some("other")));
+        assert!(selection_is_edit_target(&selected, Some("move")));
     }
 
     #[test]
