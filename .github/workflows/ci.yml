@@ -28,7 +28,3 @@ jobs:
         run: >-
           cargo test --manifest-path rust/Cargo.toml
           -p nodecraft-egui -p nodecraft-node-canvas -p nodecraft-session
-      - name: Test engine library
-        run: >-
-          cargo test --manifest-path rust/Cargo.toml
-          -p nodecraft-engine --lib

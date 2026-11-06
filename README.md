@@ -39,11 +39,11 @@ cargo run --release -p nodecraft-egui -- samples/spline-showcase.nodecraft
 cargo test -p nodecraft-egui
 cargo test -p nodecraft-node-canvas
 cargo test -p nodecraft-session
-cargo test -p nodecraft-engine --lib
 ```
 
-Some integration tests in the private development tree use large STEP
-corpora that are not included in this public source snapshot.
+Engine library tests reference the private STEP fixture corpus
+(`tests/Sample AP203 Data Files`) and are therefore run in the private
+development tree rather than this public snapshot.
 
 ## Repository layout
 
