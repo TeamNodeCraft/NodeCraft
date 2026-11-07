@@ -32,7 +32,7 @@ fn app_and_engine_do_not_import_upstream_layers_directly() {
         "use solidcore_convert::",
     ];
     let mut offenders = Vec::new();
-    for crate_dir in ["apps/nodecraft-egui/src", "crates/nodecraft-engine/src"] {
+    for crate_dir in ["apps/nodecraft/src", "crates/nodecraft-engine/src"] {
         let mut files = Vec::new();
         source_files(&rust.join(crate_dir), &mut files);
         for file in files {
@@ -54,7 +54,7 @@ fn app_and_engine_do_not_import_upstream_layers_directly() {
 #[test]
 fn app_does_not_depend_on_upstream_layer_crates_directly() {
     let rust = rust_root();
-    let manifest = std::fs::read_to_string(rust.join("apps/nodecraft-egui/Cargo.toml"))
+    let manifest = std::fs::read_to_string(rust.join("apps/nodecraft/Cargo.toml"))
         .expect("app manifest");
     let forbidden = ["solidcore =", "solidcore-ops", "solidcore-tess", "solidcore-convert"];
     let mut offenders = Vec::new();

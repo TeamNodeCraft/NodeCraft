@@ -1,6 +1,6 @@
 [workspace]
 members = [
-  "apps/nodecraft-egui",
+  "apps/nodecraft",
   "crates/nodecraft-protocol",
   "crates/nodecraft-node-contract",
   "crates/nodecraft-kernel",

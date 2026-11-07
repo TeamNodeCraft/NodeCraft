@@ -48,6 +48,9 @@
 
 ### App
 
+- Renamed the desktop application package and binary from `nodecraft-egui` to
+  `nodecraft`; the macOS bundle is now `NodeCraft.app` with the `NodeCraft`
+  executable.
 - The inspector disclosure chevron was replaced by a themed, centred reset
   control.
 

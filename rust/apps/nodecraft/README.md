@@ -1,6 +1,6 @@
-# nodecraft-egui
+# NodeCraft app
 
-First slice of the Swift/WebView front-end port to a native Rust egui application.
+Native Rust front end, ported from the original Swift/WebView application.
 
 ## Status
 
@@ -17,7 +17,7 @@ Working:
 - CPU viewport built on `solidcraft-render` (`Camera`, `Scene`, `Canvas`)
 - NodeCraft mesh/edge conversion through `solidcraft-geom`
 - fit / iso / front / top camera commands
-- headless smoke check: `nodecraft-egui --check path.nodecraft`
+- headless smoke check: `nodecraft --check path.nodecraft`
 
 Not yet ported:
 
@@ -41,8 +41,8 @@ IDs, and offsets them from their original positions.
 ## Run
 
 ```sh
-cargo run -p nodecraft-egui -- ../samples/step-import.nodecraft
-cargo run -p nodecraft-egui -- --check ../samples/step-import.nodecraft
+cargo run -p nodecraft -- ../samples/step-import.nodecraft
+cargo run -p nodecraft -- --check ../samples/step-import.nodecraft
 ```
 
 ## Dependency policy
@@ -68,7 +68,7 @@ pins the exact commit; update with:
 
 Do not edit files under `.cargo/git/checkouts` or copy `solidcraft-geom`,
 `solidcraft-render` or `solidcraft-gpu` into this repository. UI changes belong in
-`rust/apps/nodecraft-egui`.
+`rust/apps/nodecraft`.
 
 If a SolidCraft UI component must be modified, vendor only the UI crate (for
 example `solidcraft-ui-egui`) under `rust/vendor/`, record its upstream revision
@@ -77,7 +77,7 @@ solidcore code stay upstream and are changed only with an upstream PR.
 
 ## Port map
 
-| Swift/WebView | egui port |
+| Swift/WebView | Rust front end |
 |---|---|
 | AppKit window and menus | eframe viewport / egui `MenuBar` |
 | graph canvas (`app.js`) | future egui node editor |
@@ -94,7 +94,7 @@ The UI colours live in `assets/theme.json`. The embedded JSON is the default.
 Override it for a local build or run with either:
 
 ```sh
-NODECRAFT_THEME=/path/to/theme.json ./build/nodecraft-egui.app/Contents/MacOS/nodecraft-egui
+NODECRAFT_THEME=/path/to/theme.json ./build/NodeCraft.app/Contents/MacOS/nodecraft
 ```
 
 or place `theme.json` in:

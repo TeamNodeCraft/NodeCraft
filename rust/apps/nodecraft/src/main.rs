@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! NodeCraft egui front end.
+//! NodeCraft native front end.
 //!
 //! This is the first slice of the Swift/WebView front-end port. The authority is
 //! still the existing NodeCraft session/evaluation engine; the UI only sends graph
@@ -63,7 +63,7 @@ fn main() -> eframe::Result {
         }
     }
     if render_model && screenshot.is_none() {
-        eprintln!("usage: nodecraft-egui --render-model <output.png> <document.nodecraft>");
+        eprintln!("usage: nodecraft --render-model <output.png> <document.nodecraft>");
         std::process::exit(2);
     }
     let initial = args.first().cloned().map(PathBuf::from);
@@ -105,7 +105,7 @@ fn main() -> eframe::Result {
 /// Headless smoke check used by CI and by the first-port acceptance test.
 fn check(path: Option<PathBuf>) -> eframe::Result {
     let Some(path) = path else {
-        eprintln!("usage: nodecraft-egui --check <document.nodecraft>");
+        eprintln!("usage: nodecraft --check <document.nodecraft>");
         std::process::exit(2);
     };
     let document: nodecraft_session::GraphDocument = serde_json::from_str(

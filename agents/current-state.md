@@ -5,7 +5,7 @@ SolidCore/SMLib for exact geometry.
 
 ## Working
 
-- native egui application and macOS bundle build
+- native Rust application and macOS `NodeCraft.app` bundle build
 - flat node graph with stable IDs, undo/redo and linked documents
 - scoped evaluation through an explicit per-tab viewer breakpoint; selecting a
   node does not move it
@@ -58,7 +58,7 @@ the one failure is the documented sphere seam in nodecraft-mesh:
 Individual suites:
 
 ```text
-nodecraft-egui          123 passed
+nodecraft          123 passed
 nodecraft-engine        121 passed / 1 ignored
 nodecraft-mesh           18 passed / 1 failed / 1 ignored (lib)
 nodecraft-mesh           mesh_quality 4 passed

@@ -2,7 +2,7 @@
 
 ## SolidCraft
 
-The `nodecraft-egui` branch consumes unmodified `solidcraft-geom`,
+The `nodecraft` branch consumes unmodified `solidcraft-geom`,
 `solidcraft-render` and optionally `solidcraft-gpu` from
 https://github.com/tangency-labs/solidcraft.
 
@@ -17,7 +17,7 @@ The sketch line-type icons under
 
 ## SolidCraft transform gizmo
 
-The transform gizmo in `rust/apps/nodecraft-egui/src/viewer_gizmo.rs` is
+The transform gizmo in `rust/apps/nodecraft/src/viewer_gizmo.rs` is
 adapted from SolidCraft's `crates/ui-egui/src/gizmo.rs`.
 
 SolidCraft is Copyright (c) 2026 SolidCraft contributors and is licensed under
@@ -50,15 +50,15 @@ THIS SOFTWARE.
 
 ## Inter
 
-The egui front end bundles the Inter variable font from the Inter project
+The application bundles the Inter variable font from the Inter project
 (https://github.com/rsms/inter) at
-`rust/apps/nodecraft-egui/assets/InterVariable.ttf`, matching the Inter family
+`rust/apps/nodecraft/assets/InterVariable.ttf`, matching the Inter family
 used by the Swift/WebView front end.
 
 Copyright (c) 2016 The Inter Project Authors.
 
 Inter is licensed under the SIL Open Font License, Version 1.1. The full license
-text is included at `rust/apps/nodecraft-egui/assets/Inter-LICENSE.txt`.
+text is included at `rust/apps/nodecraft/assets/Inter-LICENSE.txt`.
 
 
 ## Icon assets

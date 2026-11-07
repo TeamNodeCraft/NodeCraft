@@ -1,4 +1,4 @@
-# egui app model–view semantics
+# NodeCraft app model–view semantics
 
 ## Ownership
 
@@ -37,7 +37,7 @@ coalesced under `move:nodes`; layout cleanup is one `cleanup-layout` transaction
 ## Theme
 
 The app owns the JSON theme at
-`rust/apps/nodecraft-egui/assets/theme.json` and exposes it through
+`rust/apps/nodecraft/assets/theme.json` and exposes it through
 `crate::theme`. The canvas receives a `CanvasTheme` palette; it does not load
 or read the app theme file itself.
 

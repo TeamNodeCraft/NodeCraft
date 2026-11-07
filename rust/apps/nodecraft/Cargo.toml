@@ -1,9 +1,9 @@
 [package]
-name = "nodecraft-egui"
+name = "nodecraft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "NodeCraft egui front end"
+description = "NodeCraft native front end"
 publish = false
 
 [features]

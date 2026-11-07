@@ -17,26 +17,26 @@ macOS-only.
 ## Build
 
 ```sh
-cargo build --release -p nodecraft-egui
+cargo build --release -p nodecraft
 ```
 
 Build a macOS app bundle:
 
 ```sh
-./scripts/build-nodecraft-egui-app.sh
-open build/nodecraft-egui.app
+./scripts/build-nodecraft-app.sh
+open build/NodeCraft.app
 ```
 
 ## Run
 
 ```sh
-cargo run --release -p nodecraft-egui -- samples/spline-showcase.nodecraft
+cargo run --release -p nodecraft -- samples/spline-showcase.nodecraft
 ```
 
 ## Tests
 
 ```sh
-cargo test -p nodecraft-egui
+cargo test -p nodecraft
 cargo test -p nodecraft-node-canvas
 cargo test -p nodecraft-session
 ```
@@ -48,7 +48,7 @@ development tree rather than this public snapshot.
 ## Repository layout
 
 ```text
-rust/apps/nodecraft-egui   desktop application
+rust/apps/nodecraft   desktop application
 rust/crates/               engine, node canvas, geometry, I/O crates
 vendor/fluent              icon assets
 samples/                   small runnable example documents

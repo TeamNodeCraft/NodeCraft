@@ -2028,6 +2028,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodecraft"
+version = "0.0.1"
+dependencies = [
+ "arboard",
+ "bytemuck",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "egui_extras",
+ "glyphon",
+ "image",
+ "lyon",
+ "mimalloc",
+ "nodecraft-dock",
+ "nodecraft-engine",
+ "nodecraft-mesh",
+ "nodecraft-node-canvas",
+ "nodecraft-node-contract",
+ "nodecraft-protocol",
+ "nodecraft-search",
+ "nodecraft-session",
+ "nodecraft-worker",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "rfd",
+ "serde",
+ "serde_json",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
+ "solidcraft-geom 0.40.0-rc.2 (git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c)",
+ "solidcraft-gpu",
+ "solidcraft-render",
+]
+
+[[package]]
 name = "nodecraft-blend"
 version = "0.0.1"
 dependencies = [
@@ -2067,40 +2101,6 @@ dependencies = [
  "egui",
  "egui_extras",
  "nodecraft-node-canvas",
-]
-
-[[package]]
-name = "nodecraft-egui"
-version = "0.0.1"
-dependencies = [
- "arboard",
- "bytemuck",
- "eframe",
- "egui",
- "egui-wgpu",
- "egui_extras",
- "glyphon",
- "image",
- "lyon",
- "mimalloc",
- "nodecraft-dock",
- "nodecraft-engine",
- "nodecraft-mesh",
- "nodecraft-node-canvas",
- "nodecraft-node-contract",
- "nodecraft-protocol",
- "nodecraft-search",
- "nodecraft-session",
- "nodecraft-worker",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "rfd",
- "serde",
- "serde_json",
- "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
- "solidcraft-geom 0.40.0-rc.2 (git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c)",
- "solidcraft-gpu",
- "solidcraft-render",
 ]
 
 [[package]]

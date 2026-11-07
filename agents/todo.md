@@ -249,7 +249,7 @@ then +7 blend end-section/smooth-vertex fixes. The pin is applied.
 
 ## Refactor `app.rs`
 
-`rust/apps/nodecraft-egui/src/app.rs` was ~8,100 lines. It is now ~4,500
+`rust/apps/nodecraft/src/app.rs` was ~8,100 lines. It is now ~4,500
 lines after extracting lifecycle/ownership units into `app/` modules. The
 target was roughly 3,500–4,500 lines with the central draw order still in one
 place; that target is met.
@@ -282,7 +282,7 @@ Acceptance:
 - each extraction is a separate, behavior-preserving commit;
 - no duplicated helpers or visibility-only copies;
 - unit tests move with their module, and app-level tests stay in `app.rs`;
-- `cargo test -p nodecraft-egui` stays green after every step;
+- `cargo test -p nodecraft` stays green after every step;
 - `app.rs` ends up containing the app struct, shared state, central `ui()`
       draw order and high-level coordination only.
 
