@@ -22,6 +22,7 @@ pub fn color_picker(
     rgba: [u8; 4],
     style: ColorPickerStyle,
 ) -> Option<[u8; 4]> {
+    ui.spacing_mut().interact_size.y = 16.0;
     let state_id = id.with("state");
     let mut state = ui
         .data(|data| data.get_temp::<ColorWheelState>(state_id))

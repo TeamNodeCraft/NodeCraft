@@ -99,6 +99,23 @@
 - Removed the retired Swift/WKWebView front end, worker queue, Swift test and
   legacy build script. The Rust app and `scripts/build-app.sh` are the single
   macOS build path.
+- The tab-strip "+" stays anchored to the rightmost tab slot while a tab is
+  dragged; the drag ghost no longer expands the strip.
+- Dragged document tabs stay flat in the tab strip instead of lifting upward;
+  the drop shadow remains for separation.
+- Native macOS window movement is disabled while the pointer is over the
+  document tab strip or a tab drag is active, so tab reordering no longer
+  moves the window.
+- The settings bar uses only the native macOS close light (minimize/zoom hidden)
+  via the same per-OS window-chrome entry points; Windows/Linux keep the custom
+  close control.
+- macOS native traffic lights are centered vertically in the 50 px app bar,
+  spaced 23 px apart with a 16 px left inset.
+- macOS now uses the native traffic lights over the custom app bar instead of
+  flat custom circles. The window-chrome helper has per-OS modules with the
+  same main-window entry points; Windows and Linux keep native chrome.
+- Slider rails have circular end caps as well as round handles; the colour picker uses the
+  same compact slider sizing inside its menu-styled popup.
 - Extracted the HSV colour wheel and luminosity/opacity controls into the
   `nodecraft-color-picker` crate; the app keeps the popup, hex field and theme
   integration.

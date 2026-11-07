@@ -364,12 +364,9 @@ impl NodeCraftApp {
             return (None, None, None);
         }
         let gap = 4.0;
-        let mut total = meta.iter().map(|tab| tab.width + gap).sum::<f32>();
-        if let Some(drag) = &self.tab_drag
-            && let Some(tab) = meta.iter().find(|tab| tab.id == drag.id)
-        {
-            total += tab.width + gap;
-        }
+        // Keep the strip at the real tab layout width. The dragged tab ghost
+        // follows the pointer and must not push the "+" button to the right.
+        let total = meta.iter().map(|tab| tab.width + gap).sum::<f32>();
         let (strip, _) = ui.allocate_exact_size(egui::vec2(total, 30.0), egui::Sense::hover());
         self.tab_strip = Some(strip);
         // Tabs live in a foreground layer so they sit above the title-bar drag
@@ -564,7 +561,10 @@ impl NodeCraftApp {
         {
             let tab = &meta[index];
             let x = pointer.x - drag.grab_offset;
-            let rect = egui::Rect::from_min_size(egui::pos2(x, strip.min.y - 3.0), egui::vec2(tab.width, 32.0));
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(x, strip.min.y),
+                egui::vec2(tab.width, 30.0),
+            );
             ui.painter().rect_filled(
                 rect.translate(egui::vec2(0.0, 3.0)),
                 egui::CornerRadius::same(8),

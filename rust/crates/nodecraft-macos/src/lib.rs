@@ -24,7 +24,7 @@ use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
-    NSString, NSURL,
+    NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 
 static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
@@ -238,4 +238,92 @@ pub fn round_settings_window() {
     round_window("NodeCraft Settings");
 }
 
+fn position_standard_button(
+    button: &objc2_app_kit::NSButton,
+    x: f64,
+    center_from_top: f64,
+) {
+    let Some(host) = (unsafe { button.superview() }) else {
+        return;
+    };
+    let frame = button.frame();
+    let y = if host.isFlipped() {
+        center_from_top - frame.size.height * 0.5
+    } else {
+        host.bounds().size.height - center_from_top - frame.size.height * 0.5
+    };
+    button.setFrame(NSRect::new(
+        NSPoint::new(x, y),
+        frame.size,
+    ));
+}
 
+/// Show and align the three standard traffic lights in the main app bar.
+pub fn show_main_traffic_lights() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != "NodeCraft" {
+            continue;
+        }
+        let buttons = [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ];
+        for (index, kind) in buttons.into_iter().enumerate() {
+            let Some(button) = window.standardWindowButton(kind) else {
+                continue;
+            };
+            button.setHidden(false);
+            position_standard_button(&button, 16.0 + index as f64 * 23.0, 25.0);
+        }
+    }
+}
+
+/// Show only the native close button in the settings title bar.
+pub fn show_settings_close_light() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != "NodeCraft Settings" {
+            continue;
+        }
+        for kind in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
+            if let Some(button) = window.standardWindowButton(kind) {
+                button.setHidden(true);
+            }
+        }
+        if let Some(button) = window.standardWindowButton(NSWindowButton::CloseButton) {
+            button.setHidden(false);
+            position_standard_button(&button, 15.0, 20.0);
+        }
+    }
+}
+
+/// Prevent the native titlebar from stealing a drag that began in an egui
+/// control such as the document tab strip.
+pub fn set_main_window_movable(movable: bool) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() == "NodeCraft" {
+            window.setMovable(movable);
+        }
+    }
+}

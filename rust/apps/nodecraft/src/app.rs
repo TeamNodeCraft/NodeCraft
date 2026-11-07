@@ -729,6 +729,7 @@ impl NodeCraftApp {
         let persisted_recent = recent_files.clone();
         #[cfg(target_os = "macos")]
         nodecraft_macos::round_main_window();
+        crate::window_chrome::prepare_main_window();
         let mut app = Self {
             session: None,
             active_session_revision: 0,
@@ -2588,10 +2589,20 @@ impl NodeCraftApp {
             });
             return;
         }
+        crate::window_chrome::prepare_main_window();
         self.accept_dropped_files(ui.ctx());
         self.poll_control();
         #[cfg(target_os = "macos")]
         self.poll_open_documents();
+        // The native macOS titlebar must not start a window move when the
+        // press begins on the document tab strip. The tab strip rect comes
+        // from the previous frame, which is enough because the pointer must
+        // already be over it before pressing.
+        let pointer = ui.ctx().pointer_latest_pos();
+        let over_tabs = pointer.is_some_and(|pointer| {
+            self.tab_strip.is_some_and(|strip| strip.contains(pointer))
+        });
+        crate::window_chrome::set_main_window_draggable(!over_tabs && self.tab_drag.is_none());
         if let Some(direction) = titlebar::resize_direction(ui.ctx()) {
             ui.ctx().set_cursor_icon(titlebar::resize_cursor(direction));
             if ui.ctx().input(|input| input.pointer.primary_pressed()) {
@@ -2744,42 +2755,7 @@ impl NodeCraftApp {
                             || bar_drag_right.is_some_and(|response| response.drag_started()))
                         && titlebar::resize_direction(ui.ctx()).is_none();
 
-                    #[cfg(target_os = "macos")]
-                    {
-                        let (lights, _) = ui.allocate_exact_size(
-                            egui::vec2(76.0, 50.0),
-                            egui::Sense::hover(),
-                        );
-                        let colors = [
-                            titlebar::CLOSE_LIGHT_COLOR,
-                            titlebar::MINIMIZE_LIGHT_COLOR,
-                            titlebar::ZOOM_LIGHT_COLOR,
-                        ];
-                        for (index, color) in colors.into_iter().enumerate() {
-                            let center = egui::Pos2::new(
-                                lights.min.x + 16.0 + index as f32 * 20.0,
-                                lights.center().y,
-                            );
-                            let command = match index {
-                                0 => egui::ViewportCommand::Close,
-                                1 => egui::ViewportCommand::Minimized(true),
-                                _ => {
-                                    let fullscreen = ui.ctx().input(|input| {
-                                        input.viewport().fullscreen.unwrap_or(false)
-                                    });
-                                    egui::ViewportCommand::Fullscreen(!fullscreen)
-                                }
-                            };
-                            titlebar::window_button(
-                                ui,
-                                center,
-                                color,
-                                egui::Id::new(("app-bar-light", index)),
-                                command,
-                            );
-                        }
-                    }
-
+                    ui.add_space(crate::window_chrome::main_bar_controls_width());
                     ui.add_space(4.0);
                     ui.strong("NodeCraft");
                     ui.add_space(8.0);
@@ -4053,12 +4029,16 @@ fn configure_style(ctx: &egui::Context) {
         spread: 0,
         color: egui::Color32::from_black_alpha(150),
     };
+    visuals.handle_shape = egui::style::HandleShape::Circle;
     visuals.override_text_color = Some(text);
     visuals.widgets.noninteractive.bg_fill = panel;
     visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, muted);
     visuals.widgets.inactive.bg_fill = control;
     visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border_hi);
+    // The slider rail uses this same radius. At the default 8 px rail height,
+    // 4 px makes the rail's end caps circular instead of rounded rectangles.
+    visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text);
     visuals.widgets.hovered.bg_fill = border;
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border_hi);
@@ -4076,6 +4056,9 @@ fn configure_style(ctx: &egui::Context) {
         const MIN_UI_TEXT_SIZE: f32 = 12.0;
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        // Round slider handles with a slightly smaller track/handle than egui's
+        // default. Menus can override this locally, so the picker does too.
+        style.spacing.interact_size.y = 16.0;
         // Labels are UI chrome, not data. TextEdit/DragValue remain selectable.
         style.interaction.selectable_labels = false;
         style.text_styles.insert(

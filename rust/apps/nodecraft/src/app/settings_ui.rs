@@ -540,7 +540,7 @@ fn settings_viewport_builder() -> egui::ViewportBuilder {
         .with_resizable(true)
         // Settings must stay readable above the main window.
         .with_always_on_top()
-        .with_decorations(false);
+        .with_decorations(cfg!(target_os = "macos"));
     #[cfg(target_os = "macos")]
     let builder = builder
         .with_fullsize_content_view(true)
@@ -566,13 +566,18 @@ fn settings_title_bar(
     );
     ui.painter()
         .rect_filled(titlebar, 0.0, theme.color(theme.window));
+    crate::window_chrome::prepare_settings_window();
     let close_center = egui::pos2(titlebar.min.x + 22.0, titlebar.center().y);
-    let close = titlebar::close_light(
-        ui,
-        close_center,
-        ui.make_persistent_id("settings-title-close"),
-    );
-    let title_start = close_center.x + 20.0;
+    let close = if crate::window_chrome::settings_uses_native_close() {
+        false
+    } else {
+        titlebar::close_light(
+            ui,
+            close_center,
+            ui.make_persistent_id("settings-title-close"),
+        )
+    };
+    let title_start = crate::window_chrome::settings_title_start();
     let drag_rect = egui::Rect::from_min_max(
         egui::pos2(title_start, titlebar.min.y),
         titlebar.max,

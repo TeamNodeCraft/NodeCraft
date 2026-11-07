@@ -26,6 +26,7 @@ mod inspector;
 mod viewport;
 mod viewport_grid;
 mod viewer_gizmo;
+mod window_chrome;
 
 use std::path::PathBuf;
 
@@ -92,13 +93,7 @@ fn run() -> eframe::Result {
         .with_inner_size([1440.0, 900.0])
         .with_min_inner_size([960.0, 600.0])
         .with_title("NodeCraft");
-    #[cfg(target_os = "macos")]
-    let viewport = viewport
-        .with_decorations(false)
-        .with_fullsize_content_view(true)
-        .with_title_shown(false)
-        .with_titlebar_buttons_shown(false)
-        .with_titlebar_shown(false);
+    let viewport = window_chrome::configure_main_viewport(viewport);
     let options = eframe::NativeOptions {
         viewport,
         // The SolidCraft viewport needs a depth buffer in eframe's pass. Matching the
