@@ -375,9 +375,14 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
     let mut state = ui
         .data(|data| data.get_temp::<ColorWheelState>(state_id))
         .filter(|state| state.rgba == rgba)
-        .unwrap_or_else(|| ColorWheelState {
-            hsva: Hsva::from(crate::theme::get().color(rgba)),
-            rgba,
+        .unwrap_or_else(|| {
+            // Build HSV from opaque RGB. Converting the themed `Color32`
+            // through premultiplied alpha makes low-alpha colours lose RGB
+            // precision and can visibly saturate the wheel.
+            ColorWheelState {
+                hsva: hsva_from_rgba(rgba),
+                rgba,
+            }
         });
 
     let size = 188.0;
@@ -483,6 +488,17 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
 }
 
 
+fn hsva_from_rgba(rgba: [u8; 4]) -> egui::ecolor::Hsva {
+    let mut hsva = egui::ecolor::Hsva::from_srgba_unmultiplied([
+        rgba[0],
+        rgba[1],
+        rgba[2],
+        255,
+    ]);
+    hsva.a = f32::from(rgba[3]) / 255.0;
+    hsva
+}
+
 fn hsva_rgba(hsva: egui::ecolor::Hsva, alpha: u8) -> [u8; 4] {
     let color = egui::Color32::from(egui::ecolor::Hsva::new(
         hsva.h,
@@ -510,6 +526,16 @@ mod tests {
     #[test]
     fn alpha_is_the_only_channel_replaced() {
         assert_eq!(replace_alpha([12, 34, 56, 78], 128), [12, 34, 56, 128]);
+    }
+
+    #[test]
+    fn low_alpha_does_not_change_hsv_rgb() {
+        let opaque = hsva_from_rgba([142, 142, 147, 255]);
+        let faint = hsva_from_rgba([142, 142, 147, 13]);
+        assert!((opaque.h - faint.h).abs() < f32::EPSILON);
+        assert!((opaque.s - faint.s).abs() < f32::EPSILON);
+        assert!((opaque.v - faint.v).abs() < f32::EPSILON);
+        assert!((faint.a - 13.0 / 255.0).abs() < 1.0e-6);
     }
 
     #[test]
