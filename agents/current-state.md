@@ -31,7 +31,7 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e` (latest
+- SolidCore pinned at `f8685cdc441e93164ae7f07675d07dc7eb1971c9` (latest
   `main` as of 2026-11-07)
 - SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
 - `configure_solidcore_fixes` applies the same upstream fix profile to our

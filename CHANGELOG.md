@@ -4,9 +4,9 @@
 
 ### SolidCore integration
 
-- Updated SolidCore to `a00676f5` (latest `main`) and the SolidCraft sketch
-  stack to `871014f9`. The SolidCore delta includes the blend end-section and
-  smooth-vertex run-on fixes.
+- Updated SolidCore to `f8685cdc` (latest `main`) and the SolidCraft sketch
+  stack to `871014f9`. The latest delta includes blend exact-class continuity,
+  noisy-cylinder rounds, offset sheet reach, and a surface clamp fix.
 - The upstream fix profile now also configures the `solidcore-ops` session, so
   Boolean, shell, offset and blend calls run with the same fixes as direct
   kernel work.

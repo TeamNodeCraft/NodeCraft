@@ -4,7 +4,7 @@ Priority order is approximate.
 
 ## Current state (2026-11-07)
 
-- SolidCore is pinned at `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e` (latest
+- SolidCore is pinned at `f8685cdc441e93164ae7f07675d07dc7eb1971c9` (latest
   `main`, +491 commits over `3ed61947`).
 - SolidCraft sketch stack is pinned at
   `871014f955a76fd308ce156e68c93e6372906005`.
@@ -30,10 +30,11 @@ Priority order is approximate.
 - Workspace tests: 846 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
-## SolidCore a00676f5 pin bump (completed)
+## SolidCore f8685cdc pin bump (completed)
 
-Upstream moved from `3ed61947` to `a00676f5`: +491 commits to `5458b142`,
-then +7 blend end-section/smooth-vertex fixes. The pin is applied.
+Upstream moved from `3ed61947` to `f8685cdc`: +491 commits to `5458b142`,
+then +7 blend end-section/smooth-vertex fixes, then +6 blend/offset/surface
+fixes. The pin is applied.
 
 - [x] Update every workspace SolidCore pin together; member manifests stay on
       `workspace = true`.
@@ -543,7 +544,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e`:
+      Reproduction at current pin `f8685cdc441e93164ae7f07675d07dc7eb1971c9`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`
