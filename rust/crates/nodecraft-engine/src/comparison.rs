@@ -18,13 +18,214 @@ pub(crate) struct DifferenceMeshes {
 
 /// Approximate display-surface difference used when the exact Boolean
 /// difference is unavailable (for example a G2 fillet whose surface
-/// intersection is not ported). A triangle is kept as a ghost when its centre is
-/// farther than `tolerance` from the other display surface.
+/// intersection is not ported).
+///
+/// Faces are compared, not individual triangles: a face is kept when a vote of
+/// points on it is far enough from the other display surface. This gives the
+/// overlay the face boundary of the real body instead of a triangle-soup
+/// outline, and a shared surface stays out of the ghost even when the two
+/// tessellations differ at the chord error.
 pub fn surface_difference(before: &Mesh, after: &Mesh) -> DifferenceMeshes {
-    let tolerance = mesh_diagonal(before, after) * 1.0e-3;
+    let tolerance = mesh_diagonal(before, after) * 2.0e-3;
     DifferenceMeshes {
-        removed: far_triangles(before, after, tolerance),
-        added: far_triangles(after, before, tolerance),
+        removed: changed_faces(before, after, tolerance),
+        added: changed_faces(after, before, tolerance),
+    }
+}
+
+/// More than this fraction of a face's samples must be off the other surface
+/// before the face is treated as changed. Tangent rows of facets lie within the
+/// tolerance, so a small blend is still found while a kept curved face is not
+/// drawn as removed material.
+const FACE_SAMPLE_LIMIT: usize = 24;
+
+fn changed_faces(source: &Mesh, target: &Mesh, tolerance: f64) -> Mesh {
+    if source.faces.is_empty() || target.faces.is_empty() {
+        return Mesh::default();
+    }
+    let Some(index) = SurfaceIndex::new(target, tolerance) else {
+        return Mesh::default();
+    };
+    let face_of = face_indices(source);
+    let face_count = face_of.iter().copied().max().map_or(0, |face| face as usize + 1);
+    let mut centroids: Vec<Vec<[f64; 3]>> = vec![Vec::new(); face_count];
+    for (triangle_index, triangle) in source.faces.iter().enumerate() {
+        let face = face_of[triangle_index] as usize;
+        let Some([a, b, c]) = triangle_points(source, triangle) else { continue };
+        centroids[face].push([
+            (a[0] + b[0] + c[0]) / 3.0,
+            (a[1] + b[1] + c[1]) / 3.0,
+            (a[2] + b[2] + c[2]) / 3.0,
+        ]);
+    }
+    let mut changed: Vec<bool> = vec![false; face_count];
+    for (face, points) in centroids.iter().enumerate() {
+        if points.is_empty() {
+            continue;
+        }
+        // Sample every centroid of a small face; spread a large face's samples
+        // by the golden ratio so a row of facets cannot dominate the vote.
+        let samples: Vec<&[f64; 3]> = if points.len() <= FACE_SAMPLE_LIMIT {
+            points.iter().collect()
+        } else {
+            let len = points.len() as f64;
+            (0..FACE_SAMPLE_LIMIT)
+                .filter_map(|i| points.get(((i as f64 * 0.618_033_988_75).fract() * len) as usize))
+                .collect()
+        };
+        let off = samples.iter().filter(|point| !index.contains(***point)).count();
+        changed[face] = off * 8 > samples.len();
+    }
+    let mut vertices = Vec::new();
+    let mut faces = Vec::new();
+    for (triangle_index, triangle) in source.faces.iter().enumerate() {
+        let face = face_of[triangle_index] as usize;
+        if !changed.get(face).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some([a, b, c]) = triangle_points(source, triangle) else { continue };
+        let base = vertices.len() as u32;
+        vertices.extend_from_slice(&[a.map(|v| v as f32), b.map(|v| v as f32), c.map(|v| v as f32)]);
+        faces.push([base, base + 1, base + 2]);
+    }
+    Mesh { vertices, faces, ..Mesh::default() }
+}
+
+fn face_indices(mesh: &Mesh) -> Vec<u32> {
+    if mesh.face_groups.len() != mesh.faces.len() {
+        return (0..mesh.faces.len() as u32).collect();
+    }
+    let mut ids = std::collections::HashMap::new();
+    mesh.face_groups
+        .iter()
+        .map(|group| {
+            let next = ids.len() as u32;
+            *ids.entry(group.as_str()).or_insert(next)
+        })
+        .collect()
+}
+
+fn triangle_points(mesh: &Mesh, triangle: &[u32; 3]) -> Option<[[f64; 3]; 3]> {
+    let point = |index: u32| {
+        mesh.vertices.get(index as usize).map(|p| {
+            [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]
+        })
+    };
+    Some([point(triangle[0])?, point(triangle[1])?, point(triangle[2])?])
+}
+
+/// A spatial index of a mesh's triangles, used to ask whether a point lies on its
+/// surface within the tessellation tolerance.
+struct SurfaceIndex {
+    tris: Vec<[[f64; 3]; 3]>,
+    tol: f64,
+    lo: [f64; 3],
+    cell: [f64; 3],
+    res: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl SurfaceIndex {
+    const BUDGET: usize = 4_000_000;
+
+    fn new(mesh: &Mesh, tolerance: f64) -> Option<Self> {
+        let tris: Vec<[[f64; 3]; 3]> = mesh
+            .faces
+            .iter()
+            .filter_map(|triangle| triangle_points(mesh, triangle))
+            .collect();
+        if tris.is_empty() {
+            return None;
+        }
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for triangle in &tris {
+            for point in triangle {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+        }
+        let tol = tolerance.max(1.0e-9);
+        let lo = min.map(|value| value - tol);
+        let ext = [
+            max[0] - min[0] + 2.0 * tol,
+            max[1] - min[1] + 2.0 * tol,
+            max[2] - min[2] + 2.0 * tol,
+        ];
+        let mut res = ((tris.len() as f64).cbrt().round() as usize).clamp(1, 48);
+        loop {
+            let cell = [ext[0] / res as f64, ext[1] / res as f64, ext[2] / res as f64];
+            let mut index = SurfaceIndex {
+                tris: Vec::new(),
+                tol,
+                lo,
+                cell,
+                res,
+                cells: vec![Vec::new(); res * res * res],
+            };
+            let mut entries = 0usize;
+            let mut overflow = false;
+            'fill: for (triangle_index, triangle) in tris.iter().enumerate() {
+                let (a, b) = index.range(triangle);
+                for x in a[0]..=b[0] {
+                    for y in a[1]..=b[1] {
+                        for z in a[2]..=b[2] {
+                            entries += 1;
+                            if entries > Self::BUDGET && res > 1 {
+                                overflow = true;
+                                break 'fill;
+                            }
+                            if let Some(cell) = index.cells.get_mut((x * res + y) * res + z) {
+                                cell.push(triangle_index as u32);
+                            }
+                        }
+                    }
+                }
+            }
+            if !overflow || res == 1 {
+                index.tris = tris;
+                return Some(index);
+            }
+            res /= 2;
+        }
+    }
+
+    fn cell_of(&self, value: f64, axis: usize) -> usize {
+        let lo = self.lo.get(axis).copied().unwrap_or(0.0);
+        let cell = self.cell.get(axis).copied().unwrap_or(1.0);
+        let index = ((value - lo) / cell).floor();
+        if index.is_finite() {
+            (index.max(0.0) as usize).min(self.res - 1)
+        } else {
+            0
+        }
+    }
+
+    fn range(&self, triangle: &[[f64; 3]; 3]) -> ([usize; 3], [usize; 3]) {
+        let mut min = [0usize; 3];
+        let mut max = [0usize; 3];
+        for axis in 0..3 {
+            let values = triangle.map(|point| point[axis]);
+            let lo = values[0].min(values[1]).min(values[2]) - self.tol;
+            let hi = values[0].max(values[1]).max(values[2]) + self.tol;
+            min[axis] = self.cell_of(lo, axis);
+            max[axis] = self.cell_of(hi, axis);
+        }
+        (min, max)
+    }
+
+    fn contains(&self, point: [f64; 3]) -> bool {
+        let x = self.cell_of(point[0], 0);
+        let y = self.cell_of(point[1], 1);
+        let z = self.cell_of(point[2], 2);
+        let Some(cell) = self.cells.get((x * self.res + y) * self.res + z) else {
+            return false;
+        };
+        cell.iter().filter_map(|index| self.tris.get(*index as usize)).any(|triangle| {
+            point_triangle_distance(point, &triangle[0].map(|v| v as f32), &triangle[1].map(|v| v as f32), &triangle[2].map(|v| v as f32)) < self.tol
+        })
     }
 }
 
@@ -46,46 +247,6 @@ fn mesh_diagonal(a: &Mesh, b: &Mesh) -> f64 {
     let dy = max[1] - min[1];
     let dz = max[2] - min[2];
     (dx * dx + dy * dy + dz * dz).sqrt().max(1.0e-9)
-}
-
-fn far_triangles(source: &Mesh, target: &Mesh, tolerance: f64) -> Mesh {
-    if source.faces.is_empty() || target.faces.is_empty() {
-        return Mesh::default();
-    }
-    let pair_count = source.faces.len().saturating_mul(target.faces.len());
-    let stride = (pair_count / 32_000_000).max(1);
-    let mut vertices = Vec::new();
-    let mut faces = Vec::new();
-    for triangle in &source.faces {
-        let Some(a) = source.vertices.get(triangle[0] as usize) else { continue };
-        let Some(b) = source.vertices.get(triangle[1] as usize) else { continue };
-        let Some(c) = source.vertices.get(triangle[2] as usize) else { continue };
-        let centroid = [
-            (f64::from(a[0]) + f64::from(b[0]) + f64::from(c[0])) / 3.0,
-            (f64::from(a[1]) + f64::from(b[1]) + f64::from(c[1])) / 3.0,
-            (f64::from(a[2]) + f64::from(b[2]) + f64::from(c[2])) / 3.0,
-        ];
-        let far = target
-            .faces
-            .iter()
-            .step_by(stride)
-            .all(|other| {
-                let Some(oa) = target.vertices.get(other[0] as usize) else { return true };
-                let Some(ob) = target.vertices.get(other[1] as usize) else { return true };
-                let Some(oc) = target.vertices.get(other[2] as usize) else { return true };
-                point_triangle_distance(centroid, oa, ob, oc) > tolerance
-            });
-        if far {
-            let base = vertices.len() as u32;
-            vertices.extend_from_slice(&[*a, *b, *c]);
-            faces.push([base, base + 1, base + 2]);
-        }
-    }
-    Mesh {
-        vertices,
-        faces,
-        ..Mesh::default()
-    }
 }
 
 fn point_triangle_distance(
@@ -220,6 +381,35 @@ mod tests {
             faces: vec![[0, 1, 2]],
             ..Mesh::default()
         }
+    }
+
+    fn quad(offset: f32, group: &str) -> Mesh {
+        Mesh {
+            vertices: vec![
+                [offset, 0.0, 0.0],
+                [offset + 1.0, 0.0, 0.0],
+                [offset + 1.0, 1.0, 0.0],
+                [offset, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            face_groups: vec![group.to_owned(); 2],
+            ..Mesh::default()
+        }
+    }
+
+    #[test]
+    fn surface_difference_keeps_whole_faces_not_triangle_soup() {
+        let kept = quad(0.0, "kept");
+        let moved = quad(5.0, "moved");
+        let mut before = kept.clone();
+        before.vertices.extend_from_slice(&moved.vertices);
+        before.faces.extend(moved.faces.iter().map(|face| face.map(|index| index + 4)));
+        before.face_groups.extend(moved.face_groups.clone());
+        let after = kept.clone();
+        let difference = surface_difference(&before, &after);
+        assert_eq!(difference.removed.faces.len(), 2, "only the moved face is removed");
+        assert!(difference.removed.face_groups.is_empty(), "approximate difference has no synthetic face groups");
+        assert!(difference.added.faces.is_empty(), "the kept surface is unchanged");
     }
 
     #[test]

@@ -39,6 +39,9 @@ SolidCore/SMLib for exact geometry.
 - exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; an invalid result reports the upstream
   `CheckReport` text
+- the approximate feature ghost is face-classified with a spatial surface index
+  and drawn as a see-through overlay, so a re-meshed curved face does not ghost
+  through the result in triangle slivers
 - refused fillet edges are reported, not silently dropped from a multi-edge
   selection
 - ghost face/edge colours live in the theme palette; the inspector reset action
@@ -51,7 +54,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  844 passed / 1 failed / 11 ignored
+  845 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate

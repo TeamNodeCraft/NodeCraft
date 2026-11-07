@@ -44,6 +44,10 @@
 - Zebra analysis is a striped-skybox reflection with crease-aware smoothed
   normals and derivative antialiasing.
 - Added `Ignore Look colours` for display without Look-authored face colours.
+- The approximate feature-difference overlay now classifies whole faces with a
+  spatial surface index instead of per-triangle centroid tests. Curved faces
+  re-meshed by a fillet no longer produce a jagged triangle-soup outline, and
+  the overlay still shows the feature from both sides.
 - The display popup has a fixed width, aligned columns and no slider jitter.
 
 ### App

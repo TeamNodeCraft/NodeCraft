@@ -261,7 +261,9 @@ pub fn display_mesh_with_difference(
                 .collect();
             if edges.is_empty() {
                 // Some difference bodies arrive with no BRep edge metadata.
-                // Fall back to the boundary edges of their display triangles.
+                // The approximate difference now selects whole faces, so the
+                // fallback boundary is the face boundary rather than the
+                // per-triangle soup outline.
                 edges.extend(boundary_edges(&mesh_triangles(added)));
                 edges.extend(boundary_edges(&mesh_triangles(removed)));
             }

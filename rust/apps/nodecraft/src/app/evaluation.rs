@@ -515,7 +515,12 @@ impl NodeCraftApp {
                 } else if let Some((added, removed)) = exact {
                     let added = self.reframe_comparison(&selected, added);
                     let removed = self.reframe_comparison(&selected, removed);
-                    self.viewport.set_selection_comparison_mesh(&after, &before, &added, &removed);
+                    self.viewport.set_selection_comparison_mesh(
+                        &after,
+                        &before,
+                        &added,
+                        &removed,
+                    );
                 } else {
                     let empty = Mesh::default();
                     self.viewport.set_selection_comparison_mesh(&after, &before, &empty, &before);
