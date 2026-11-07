@@ -48,6 +48,9 @@
   spatial surface index instead of per-triangle centroid tests. Curved faces
   re-meshed by a fillet no longer produce a jagged triangle-soup outline, and
   the overlay still shows the feature from both sides.
+- G2/G3 fillet overlays skip the unsupported exact Boolean difference directly;
+  failed exact comparisons are cached too. Selecting the test fillet graph went
+  from a 1.27 s failed exact comparison to a ~0.1 s cached evaluation.
 - The display popup has a fixed width, aligned columns and no slider jitter.
 
 ### Viewport

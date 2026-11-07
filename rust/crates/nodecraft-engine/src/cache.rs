@@ -59,6 +59,7 @@ pub struct EngineCache {
     failure_hits: u64,
     comparisons: HashMap<CacheKey, DifferenceMeshes>,
     comparison_order: VecDeque<CacheKey>,
+    comparison_failures: HashMap<CacheKey, String>,
     comparison_bytes: usize,
     comparison_hits: u64,
     imports: HashMap<(String, u64, u64), Arc<nodecraft_mesh::StepImport>>,
@@ -73,7 +74,7 @@ impl Default for EngineCache {
 impl EngineCache {
     #[must_use]
     pub fn new() -> Self {
-        Self { meshes: HashMap::new(), mesh_order: std::collections::VecDeque::new(), mesh_bytes: 0, mesh_limit: MESH_CACHE_BYTES, breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, body_meshes: HashMap::new(), body_mesh_order: std::collections::VecDeque::new(), body_mesh_bytes: 0, failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, comparisons: HashMap::new(), comparison_order: VecDeque::new(), comparison_bytes: 0, comparison_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
+        Self { meshes: HashMap::new(), mesh_order: std::collections::VecDeque::new(), mesh_bytes: 0, mesh_limit: MESH_CACHE_BYTES, breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, body_meshes: HashMap::new(), body_mesh_order: std::collections::VecDeque::new(), body_mesh_bytes: 0, failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, comparisons: HashMap::new(), comparison_order: VecDeque::new(), comparison_failures: HashMap::new(), comparison_bytes: 0, comparison_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
     }
 
     #[must_use]
@@ -94,7 +95,22 @@ impl EngineCache {
         self.comparisons.get(key).cloned()
     }
 
+    #[must_use]
+    pub(crate) fn difference_failure(&self, key: &CacheKey) -> Option<String> {
+        self.comparison_failures.get(key).cloned()
+    }
+
+    pub(crate) fn insert_difference_failure(&mut self, key: CacheKey, error: String) {
+        if self.comparison_failures.len() >= 1024 {
+            if let Some(oldest) = self.comparison_failures.keys().next().cloned() {
+                self.comparison_failures.remove(&oldest);
+            }
+        }
+        self.comparison_failures.insert(key, error);
+    }
+
     pub(crate) fn insert_difference(&mut self, key: CacheKey, difference: DifferenceMeshes) {
+        self.comparison_failures.remove(&key);
         let bytes = difference_bytes(&difference);
         if let Some(old) = self.comparisons.insert(key.clone(), difference) {
             self.comparison_bytes = self.comparison_bytes.saturating_sub(difference_bytes(&old));

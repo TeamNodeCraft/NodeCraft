@@ -27,7 +27,7 @@ Priority order is approximate.
   remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 845 passed / 1 failed / 11 ignored. The single failure is the
+- Workspace tests: 846 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
 ## SolidCore a00676f5 pin bump (completed)

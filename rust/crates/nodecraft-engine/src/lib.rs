@@ -1962,6 +1962,22 @@ fn respond(
     (output.response, output.cache, output.diagnostics)
 }
 
+fn exact_comparison_unsupported(request: &Request, targets: &[String]) -> bool {
+    let Some(after) = targets.get(1) else {
+        return false;
+    };
+    let Some(node) = request.nodes.iter().find(|node| &node.id == after) else {
+        return false;
+    };
+    if node.node_type != "fillet" {
+        return false;
+    }
+    node.values
+        .get("continuity")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|continuity| continuity.eq_ignore_ascii_case("g2") || continuity.eq_ignore_ascii_case("g3"))
+}
+
 fn comparison_cache_key(request: &Request, targets: &[String]) -> Option<(String, String)> {
     let key = |id: &str| {
         let node = node(request, id)?;
@@ -2105,14 +2121,23 @@ fn evaluate_mode(
             let before = eval.evaluate_part(&targets[0]).ok()?;
             let after = eval.evaluate_part(&targets[1]).ok()?;
             let cache_key = comparison_cache_key(&request, targets);
-            let difference = if let Some(key) = &cache_key {
-                if let Some(cached) = eval.cache.difference(key) {
+            let difference = if exact_comparison_unsupported(&request, targets) {
+                // G2/G3 fillets use a curved interface whose exact surface
+                // intersection is not ported. Attempting the Boolean difference
+                // costs over a second and then fails; classify the display
+                // surfaces directly instead.
+                Err("exact difference is not supported for this fillet continuity".to_owned())
+            } else if let Some(key) = &cache_key {
+                if let Some(failure) = eval.cache.difference_failure(key) {
+                    Err(failure)
+                } else if let Some(cached) = eval.cache.difference(key) {
                     eval.cache.note_difference_hit();
                     Ok(cached)
                 } else {
                     let result = compare_parts(&before, &after);
-                    if let Ok(ref difference) = result {
-                        eval.cache.insert_difference(key.clone(), difference.clone());
+                    match &result {
+                        Ok(difference) => eval.cache.insert_difference(key.clone(), difference.clone()),
+                        Err(error) => eval.cache.insert_difference_failure(key.clone(), error.clone()),
                     }
                     result
                 }
@@ -3775,6 +3800,31 @@ mod tests {
             assert!(!mesh.faces.is_empty(), "{kind}: empty mesh");
             assert!(!mesh.vertices.is_empty(), "{kind}: empty vertices");
         }
+    }
+
+    #[test]
+    fn g2_fillet_difference_skips_the_unsupported_exact_boolean() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["fillet"],
+            "meshTargets": ["fillet"],
+            "nodes": [
+                {"id": "shape", "type": "primitive", "values": {"primitiveType": "box"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "G2", "length": 1.0}}
+            ],
+            "connections": [{"from": "shape", "to": "fillet", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        assert!(exact_comparison_unsupported(&request, &["shape".into(), "fillet".into()]));
+        let circular: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["fillet"],
+            "nodes": [
+                {"id": "shape", "type": "primitive", "values": {"primitiveType": "box"}},
+                {"id": "fillet", "type": "fillet", "values": {"continuity": "", "length": 1.0}}
+            ],
+            "connections": [{"from": "shape", "to": "fillet", "in": "shape", "out": "shape"}]
+        })).expect("request");
+        assert!(!exact_comparison_unsupported(&circular, &["shape".into(), "fillet".into()]));
     }
 
     /// Boolean nodes work directly on NodeCraft primitives, including translated ones.
