@@ -106,12 +106,12 @@ pub struct GraphDocument {
     pub interface: GraphInterface,
 }
 
-fn default_schema_version() -> u32 { 2 }
+fn default_schema_version() -> u32 { 1 }
 
 impl GraphDocument {
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self { schema_version: 2, id: id.into(), nodes: Vec::new(), connections: Vec::new(), interface: GraphInterface::default() }
+        Self { schema_version: 1, id: id.into(), nodes: Vec::new(), connections: Vec::new(), interface: GraphInterface::default() }
     }
 
     fn node_map(&self) -> Result<BTreeMap<&str, &GraphNode>, SessionError> {

@@ -14,7 +14,7 @@ SolidCore/SMLib for exact geometry.
   grammar and dimensional evaluator; numeric fields use a thin unit-kind
   adapter that shows the source expression while focused and the evaluated
   number otherwise; expressions persist in each node's `expressions` map
-  (`schemaVersion: 2`, with legacy `values._expressions` migrated on load)
+  (`schemaVersion: 1`, with legacy `values._expressions` migrated on load)
 - `.nodecraft` document association and Finder open events on
   macOS
 - flat node graph with stable IDs, undo/redo and linked documents

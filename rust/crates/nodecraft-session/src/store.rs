@@ -27,7 +27,6 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut document: GraphDocument = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
     for node in &mut document.nodes { canonicalize_node(node); }
-    document.schema_version = 2;
     document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(document)
 }
@@ -37,7 +36,6 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
 pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> {
     let mut document = document.clone();
     for node in &mut document.nodes { canonicalize_node(node); }
-    document.schema_version = 2;
     document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     let value = serde_json::to_value(&document).map_err(|error| error.to_string())?;
     save_value_atomic(path, &value)
@@ -47,7 +45,6 @@ pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> 
 pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &GraphDocument) -> Result<(), String> {
     let mut canonical = document.clone();
     for node in &mut canonical.nodes { canonicalize_node(node); }
-    canonical.schema_version = 2;
     canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     value["nodes"] = serde_json::to_value(&canonical.nodes).map_err(|error| error.to_string())?;
     value["connections"] = serde_json::to_value(&canonical.connections).map_err(|error| error.to_string())?;

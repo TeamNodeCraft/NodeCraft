@@ -82,7 +82,7 @@
   click is detected from the field's previous rect so DragValue cannot seed its
   editor with the formatted number first. Expressions are saved in the node's
   JSON at the node level as `expressions`, so the source survives save/reload.
-  All tracked test documents are now `schemaVersion: 2`. The legacy
+  All tracked test documents are now `schemaVersion: 1`. The legacy
   `.solidnode` and `values._expressions` compatibility paths were removed.
   Invalid expressions do not change the stored number (no NaN/0 is committed);
   SolidCraft stores the source and blocks apply, while this numeric-value adapter

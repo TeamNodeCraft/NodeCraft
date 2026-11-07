@@ -67,7 +67,7 @@ the node's free-form `values` object:
 ```
 
 The converter has been removed. Existing tracked test documents were rewritten
-to the node-level format, and new documents use `schemaVersion: 2`.
+to the node-level format, and new documents use `schemaVersion: 1`.
 
 Problems with the old shape:
 
@@ -85,7 +85,7 @@ Target V1 shape:
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 1,
   "nodes": [
     {
       "id": "n76",
@@ -119,8 +119,8 @@ Rules for the migration:
 - [x] Add round-trip tests for expressions and node hashes.
 - [ ] Decide whether expression source belongs in linked-part content hashes or
       only in the local project revision.
-- [x] Bump `schemaVersion` to 2 and document the format change before V1 freezes
-      the file format.
+- [x] Keep `schemaVersion: 1`; no version churn before V1 freezes the file
+      format.
 
 ## Remaining after this pass
 
