@@ -122,6 +122,53 @@ Rules for the migration:
 - [x] Keep `schemaVersion: 1`; no version churn before V1 freezes the file
       format.
 
+### SolidCraft document comparison (options for V1)
+
+SolidCraft's design JSON is a parametric feature document. NodeCraft's is a
+node graph, so feature/assembly fields are not directly transferable, but its
+top-level document fields are a useful checklist.
+
+SolidCraft top-level fields include:
+
+- `format` (`solidcraft/N`) plus `format_pending`, with an incremental
+  migration ladder;
+- `name`, `units` and free-form `metadata`;
+- `params` (`name`, `expr`, `unit`, `comment`, `model`);
+- `features`, plus optional `marker` and `next_id`;
+- optional view/document state such as `named_views`, `visibility`, `render`,
+  appearances, materials, assemblies and configurations.
+
+NodeCraft currently has `schemaVersion`, `id`, `nodes`, `connections` and
+`interface`. Candidate additions, in priority order:
+
+- [ ] Add optional document `name`.
+- [ ] Add optional `units` (default `"mm"`) for display and project metadata.
+- [ ] Add optional free-form `metadata` for author/project/plugin data.
+- [ ] Add document-level `parameters` so named formulas can be reused by numbox
+      expressions. Compare with parameter nodes before choosing the model.
+- [ ] Add optional node `name`; today the inspector title is derived from type.
+- [ ] Decide whether camera/visibility state belongs in the document or only in
+      tab/app settings. SolidCraft saves named views and browser visibility.
+- [ ] Decide between the current dual `values` + `expressions` storage, a
+      source-only expression form, and explicit `{value, expr}` pairs.
+- [ ] Decide whether to keep numeric `schemaVersion` or adopt a
+      `"nodecraft/N"` format string before V1 freezes the format.
+
+Do not copy SolidCraft's feature-specific model wholesale:
+
+- `features`, `param_names`, `body_names`, `edge_names`/`face_names`;
+- `components`, `occurrences`, `assembly`, joints;
+- sheet metal, plastic, configurations, user materials;
+- timeline `marker` rollback.
+
+Preferred near-term order:
+
+1. `name`, `units`, `metadata`;
+2. document parameters and expression lookup;
+3. optional node names;
+4. view/visibility decision;
+5. expression-storage and versioning decision.
+
 ## Remaining after this pass
 
 - [ ] Republish the public snapshot with the docs and integration work.
