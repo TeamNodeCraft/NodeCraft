@@ -7,6 +7,7 @@
 
 use crate::{canonicalize_node, ContentHash, GraphDocument, Session, SessionError};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -57,7 +58,7 @@ pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &
 /// Atomic save for a document envelope that carries editor metadata (view state)
 /// beside the graph. The caller is responsible for canonical graph validation.
 pub fn save_value_atomic(path: &Path, value: &serde_json::Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    let bytes = pretty_json(value).into_bytes();
     let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| format!("{}: invalid file name", path.display()))?;
     let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     let result = (|| -> Result<(), String> {
@@ -264,11 +265,87 @@ impl DocumentStore {
     }
 }
 
+/// Pretty JSON that keeps small values inline. `serde_json::to_vec_pretty`
+/// expands every array element and object field to its own line, which makes
+/// point lists, connections and interface arrays unnecessarily tall.
+fn pretty_json(value: &Value) -> String {
+    let mut output = String::new();
+    write_pretty(value, 0, &mut output);
+    output.push('\n');
+    output
+}
+
+const INLINE_LIMIT: usize = 120;
+
+fn write_pretty(value: &Value, depth: usize, output: &mut String) {
+    if depth > 0
+        && let Some(inline) = inline_json(value)
+    {
+        output.push_str(&inline);
+        return;
+    }
+    match value {
+        Value::Array(items) => {
+            output.push_str("[\n");
+            for (index, item) in items.iter().enumerate() {
+                output.push_str(&"  ".repeat(depth + 1));
+                write_pretty(item, depth + 1, output);
+                if index + 1 < items.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            output.push_str(&"  ".repeat(depth));
+            output.push(']');
+        }
+        Value::Object(fields) => {
+            output.push_str("{\n");
+            for (index, (key, field)) in fields.iter().enumerate() {
+                output.push_str(&"  ".repeat(depth + 1));
+                output.push_str(&serde_json::to_string(key).expect("json key"));
+                output.push_str(": ");
+                write_pretty(field, depth + 1, output);
+                if index + 1 < fields.len() {
+                    output.push(',');
+                }
+                output.push('\n');
+            }
+            output.push_str(&"  ".repeat(depth));
+            output.push('}');
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            output.push_str(&serde_json::to_string(value).expect("json scalar"));
+        }
+    }
+}
+
+fn inline_json(value: &Value) -> Option<String> {
+    let text = serde_json::to_string(value).ok()?;
+    (text.len() <= INLINE_LIMIT).then_some(text)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{GraphConnection, GraphInterface, GraphNode};
     use serde_json::json;
+
+    #[test]
+    fn saved_json_keeps_small_arrays_and_objects_inline() {
+        let value = serde_json::json!({
+            "points": [
+                {"x": 1.0, "y": 2.0},
+                {"x": 3.0, "y": 4.0}
+            ],
+            "interface": {"inputs": [], "outputs": ["canopy"]},
+            "long": vec!["x"; 200]
+        });
+        let text = pretty_json(&value);
+        assert!(text.contains(r#"{"x":1.0,"y":2.0}"#), "{text}");
+        assert!(text.contains(r#"{"inputs":[],"outputs":["canopy"]}"#), "{text}");
+        assert!(text.contains("\"long\": [\n"), "large arrays still expand:\n{text}");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), value);
+    }
 
     fn test_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
