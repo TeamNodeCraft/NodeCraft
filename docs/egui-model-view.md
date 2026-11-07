@@ -44,9 +44,15 @@ or read the app theme file itself.
 ## Evaluation
 
 - Evaluation runs on a background worker with the engine cache resident there.
+- Exact and display are separate phases: the exact result reports errors and
+  status first, then display tessellation runs against the warmed Part cache.
 - Only the newest request ID is applied.
 - The renderer keeps the previous mesh until a newer result is accepted.
 - Stale results can never overwrite a newer graph revision.
+- The transform edit ghost uses a separate branch-only `PreviewWorker`; it does
+  not move or wait for the breakpoint mesh.
+- Refused fillet edges and failed upstream validity checks propagate as node
+  errors rather than partial display geometry.
 
 ## GPU fallbacks
 

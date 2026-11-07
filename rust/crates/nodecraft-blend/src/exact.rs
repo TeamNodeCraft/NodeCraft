@@ -71,6 +71,17 @@ pub const fn port_units() -> &'static [&'static str] {
     PORT_UNITS
 }
 
+/// Reject a fillet result that the upstream validity checker does not accept.
+/// The report text is the kernel's own; do not reduce it to a status number.
+fn validate_result(kernel: &mut Kernel, brep: &Brep) -> Result<(), String> {
+    let report = nodecraft_layers::check_kernel_brep(kernel, brep)?;
+    if report.is_valid() {
+        Ok(())
+    } else {
+        Err(format!("fillet result failed solidcore check: {report}"))
+    }
+}
+
 /// Exact circular fillet of the selected edges from node `values`.
 ///
 /// Uses solidcore's public `fillet_edges` entry point; this is the modeling
@@ -99,61 +110,21 @@ pub fn fillet_brep_exact_with_kernel(
     if primary.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let fallback = crate::edge::select_edges_from_values(kernel, brep, values).ok();
-    let mut selected = primary;
-    let mut used_fallback = false;
-    loop {
-        match fillet_selection(kernel, brep, &selected, &treatment) {
-            Ok(result) => return Ok(result),
-            Err(error) => {
-                // A closed join can be made of a blendable edge and a smooth
-                // neighbour. Drop the refused smooth edge and round the rest.
-                if let Some(index) = refused_smooth_edge(&error) {
-                    let before = selected.len();
-                    selected.retain(|selection| selection.edge.index() != index);
-                    if selected.len() < before && !selected.is_empty() {
-                        continue;
-                    }
-                }
-                if !used_fallback
-                    && error.contains("Smooth")
-                    && fallback.as_ref().is_some_and(|fallback| fallback != &selected)
-                {
-                    used_fallback = true;
-                    selected = fallback.clone().expect("checked above");
-                    continue;
-                }
-                if error.contains("status 1001") && !selected.is_empty() {
-                    match fillet_selection_ops(kernel, brep, &selected, &treatment) {
-                        Ok(result) => return Ok(result),
-                        Err(ops_error) => {
-                            if let Some(index) = refused_smooth_edge(&ops_error) {
-                                let before = selected.len();
-                                selected.retain(|selection| selection.edge.index() != index);
-                                if selected.len() < before && !selected.is_empty() {
-                                    continue;
-                                }
-                            }
-                            return Err(format!("{error}; ops blend: {ops_error}"));
-                        }
-                    }
-                }
-                return Err(error);
+    // A refused edge is an upstream modelling refusal, not permission to round
+    // a subset. Returning the error keeps the node from silently showing a
+    // partial fillet around a join.
+    let result = match fillet_selection(kernel, brep, &primary, &treatment) {
+        Ok(result) => result,
+        Err(error) if error.contains("status 1001") => {
+            match fillet_selection_ops(kernel, brep, &primary, &treatment) {
+                Ok(result) => result,
+                Err(ops_error) => return Err(format!("{error}; ops blend: {ops_error}")),
             }
         }
-    }
-}
-
-/// The kernel's smooth-edge refusal names the refused `EdgeId`. Parse it so the
-/// smooth part of a join can be skipped while the blendable part is rounded.
-fn refused_smooth_edge(error: &str) -> Option<u32> {
-    if !error.contains("Smooth") {
-        return None;
-    }
-    let start = error.find("EdgeId(")? + "EdgeId(".len();
-    let tail = &error[start..];
-    let end = tail.find(')')?;
-    tail[..end].parse().ok()
+        Err(error) => return Err(error),
+    };
+    validate_result(kernel, &result)?;
+    Ok(result)
 }
 
 /// Route the same round through `solidcore-ops::blend`, which drives the kernel's
@@ -188,24 +159,7 @@ fn fillet_selection_ops(
         Continuity::G3 => return Err("G3 needs the direct fillet path".into()),
     };
     if let Err(error) = blend(&body, kind, &edges, &[treatment.length], &[], Corners::Filled) {
-        let text = error.to_string();
-        // Map the ops record-edge index back to the kernel edge id so the caller
-        // can drop a smooth member of a join and retry the blendable rest.
-        if text.contains("has no blend") && text.contains("Smooth") {
-            if let Some(start) = text.find("edge ").map(|index| index + "edge ".len()) {
-                let tail = &text[start..];
-                let end = tail.find(|ch: char| !ch.is_ascii_digit()).unwrap_or(tail.len());
-                if let Ok(record_index) = tail[..end].parse::<usize>() {
-                    if let Some(kernel_edge) = order.edges.get(record_index) {
-                        return Err(format!(
-                            "solidcore-ops blend refused EdgeId({}) as Smooth",
-                            kernel_edge.index()
-                        ));
-                    }
-                }
-            }
-        }
-        return Err(text);
+        return Err(error.to_string());
     }
     let (record, _) = body.to_record().map_err(|error| error.to_string())?;
     let (result, _) = solidcore_convert::brep::to_kernel(kernel, &record, true)

@@ -72,26 +72,53 @@ Undo/redo restores the authoritative document revision.
 
 ## Evaluation today
 
-The egui app runs one evaluation worker thread:
+The app runs two independent workers plus a bounded mesher pool.
+
+### EvalWorker: exact, then display
 
 ```text
 UI edit -> EvalJob(session document + linked documents)
         -> newest job wins; older queued jobs are discarded
         -> expand linked parts into one flat graph
-        -> engine evaluates the target closure
+        -> exact phase: SolidCore B-rep / Part evaluation
+        -> exact result (errors, status, previous mesh retained)
+        -> display phase: solidcore-tess against the warmed Part cache
         -> mesh/error/timing response
         -> UI replaces the displayed result
 ```
 
-`nodecraft_engine::evaluate(request, cache)` currently performs both:
+The exact and display phases are separate calls on the same worker thread. The
+exact phase is the authority; display meshes and their caches are disposable.
+Display work is not yet fully concurrent: it is cancelled only when a queued job
+exists at the exact/display boundary.
 
-1. SolidCore/SMLib B-rep work
-2. display-mesh tessellation
+### PreviewWorker
 
-inside one worker call. The worker catches kernel panics, drops a poisoned cache
-and reports a node error rather than killing the process.
+The transform edit ghost does not wait for the breakpoint evaluation. Selecting
+a translate node sends a branch-only preview request to its own worker:
 
-This is deliberately described as a limitation, not an architecture to copy.
+```text
+preview target = transform input node
+  -> own thread
+  -> own EngineCache / FlatGraphCache
+  -> exact + display for that branch only
+  -> ghost mesh
+```
+
+The main breakpoint mesh is never moved. The ghost is a standalone object
+renderer with its own buffers, opacity uniform and depth state, composited over
+a dimmed breakpoint. Crease-smoothed normals drive the zebra reflection analysis.
+
+### Mesher pool
+
+`nodecraft-engine` owns a bounded `MesherPool`. Body tessellation is submitted
+per body and awaited by the evaluation worker. Evaluated Part/Boolean/shell and
+STEP import display paths use `nodecraft-layers` / `solidcore-tess`; the legacy
+`nodecraft-mesh` curved tessellator remains only as a STEP fallback for analytic
+edge curves that `solidcore-convert` cannot yet record.
+
+The worker catches kernel panics, drops a poisoned cache and reports a node error
+rather than killing the process.
 
 ## Linked documents and nesting
 

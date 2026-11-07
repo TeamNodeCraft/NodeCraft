@@ -497,7 +497,7 @@ pub fn brep_display_mesh_with_senses(
 /// the downward use for a face and the B-rep face list is not guaranteed to keep the
 /// file's face order once a face has been split. The file's `same_sense` flag is the
 /// authority: it says whether the outward normal agrees with the surface normal.
-fn orient_mesh_to_senses(kernel: &Kernel, brep: &Brep, mesh: &mut Mesh, senses: &[bool]) {
+pub(crate) fn orient_mesh_to_senses(kernel: &Kernel, brep: &Brep, mesh: &mut Mesh, senses: &[bool]) {
     let faces = brep.face_list();
     if faces.len() != senses.len() {
         return;

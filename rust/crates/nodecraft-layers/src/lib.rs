@@ -24,6 +24,34 @@ use solidcore_tess::MeshTolerance;
 
 pub use solidcore_ops::BooleanOp;
 
+/// Validate a kernel B-rep through the upstream ops body and its
+/// `solidcore::topology::brep::validation` checks.
+///
+/// The returned report is the kernel's own text; callers should surface
+/// `CheckReport` rather than translating individual failure numbers.
+pub fn check_kernel_brep(
+    kernel: &mut Kernel,
+    brep: &KernelBrep,
+) -> Result<solidcore_ops::CheckReport, String> {
+    let mut copy = brep
+        .clone_standing_for_self()
+        .map_err(|error| format!("check copy: {error}"))?;
+    let (record, _) = solidcore_convert::brep::to_record(kernel, &mut copy)
+        .map_err(|error| format!("check record: {error}"))?;
+    let (body, _) = solidcore_ops::Body::from_record(&record, true)
+        .map_err(|error| format!("check body: {error}"))?;
+    body.check(solidcore_ops::CheckLevel::Geometry)
+        .map_err(|error| format!("solidcore check: {error}"))
+}
+
+/// Configure the process-wide `solidcore-ops` session with the same upstream
+/// fix profile the application applies to its own kernels. Ops operations
+/// (Boolean, shell, offset, blend) otherwise run with the upstream default.
+pub fn configure_session_fixes(fixes: &[&str]) -> Result<(), String> {
+    solidcore_ops::session::set_fixes(fixes.iter().copied())
+        .map_err(|error| format!("solidcore-ops fixes: {error}"))
+}
+
 /// A tessellated record in the shape NodeCraft needs: protocol triangle data
 /// plus the display-only edge polylines the viewport will draw once the record
 /// is the rendering source of truth.

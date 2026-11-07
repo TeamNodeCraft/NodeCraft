@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased — 2026-11-07
+
+### SolidCore integration
+
+- Updated SolidCore to `5458b142` (latest `main`, +491 commits) and the
+  SolidCraft sketch stack to `871014f9`.
+- The upstream fix profile now also configures the `solidcore-ops` session, so
+  Boolean, shell, offset and blend calls run with the same fixes as direct
+  kernel work.
+- STEP import now tessellates imported bodies through
+  `nodecraft-layers` / `solidcore-tess`, like every evaluated Part. The legacy
+  STEP mesher remains only as a fallback for analytic edge curves
+  `solidcore-convert` cannot yet record.
+- Exact fillet results are validated through `solidcore-ops::check`; invalid
+  results report the upstream `CheckReport` text.
+- A selected fillet edge refused by SolidCore as `Smooth` is no longer dropped
+  to produce a partial round; the refusal reaches the node error.
+
+### Ghost editing
+
+- Transform ghosts come from a dedicated branch-only `PreviewWorker` with its
+  own cache. The breakpoint evaluation no longer delays the preview.
+- The ghost solid keeps its transform across mesh re-uploads.
+- Ghost face and edge colours moved into the theme palette.
+
+### Viewport
+
+- Zebra analysis is a striped-skybox reflection with crease-aware smoothed
+  normals and derivative antialiasing.
+- Added `Ignore Look colours` for display without Look-authored face colours.
+- The display popup has a fixed width, aligned columns and no slider jitter.
+
+### App
+
+- The inspector disclosure chevron was replaced by a themed, centred reset
+  control.
+
+
 ## Unreleased — 2026-11-05
 
 ### Build

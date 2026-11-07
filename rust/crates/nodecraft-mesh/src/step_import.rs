@@ -1,4 +1,9 @@
-//! Official STEP import: step-import -> step-brep -> nodecraft-mesh.
+//! Official STEP import: step-import -> step-brep -> solidcore-tess.
+//!
+//! Assembly placement, body metadata and diagnostics live in this module; the
+//! display triangles themselves come from the upstream layer through
+//! `nodecraft-layers` / `solidcore-tess`, the same mesher every evaluated Part
+//! node uses.
 //!
 //! This replaces the NodeCraft dependency on `solidcore-stepio` for the worker.
 //!
@@ -374,20 +379,52 @@ fn body_display_mesh(
     };
     let mut effective = if extent > 0.0 { requested.min(extent * factor).max(1.0e-9) } else { requested };
     crate::set_display_tolerance(Some(effective));
-    let options = crate::CurvedTessOptions {
-        max_normal_angle_deg: 4.0,
-        ..crate::CurvedTessOptions::default()
-    };
     let render = |brep: &solidcore::topology::Brep| -> Result<Mesh, String> {
-        crate::set_display_tolerance(Some(effective));
-        let result = crate::brep_display_mesh_with_senses(
-            kernel,
-            brep,
-            &options,
-            Some(&senses),
-        );
-        crate::set_display_tolerance(Some(requested));
-        result
+        // Display tessellation belongs to the upstream layer just like every
+        // evaluated Part node: convert the imported kernel B-rep to the record
+        // form and let solidcore-tess plan/evaluate it. STEP assembly placement
+        // and diagnostics stay in this importer.
+        let mut copy = brep
+            .clone_standing_for_self()
+            .map_err(|error| format!("display copy: {error}"))?;
+        let mut tess_kernel = solidcore::kernel::Kernel::default();
+        // The local LOD factor can ask for a sub-micrometre sag on a small
+        // imported body. solidcore-tess's planner then spends seconds on a
+        // planar face that needs none of it, while producing the same triangles.
+        // Keep the upstream tessellation at viewport-meaningful sag.
+        const MIN_TESSELLATION_SAG: f64 = 0.05;
+        match nodecraft_layers::tessellate_kernel(
+            &mut tess_kernel,
+            &mut copy,
+            effective.max(MIN_TESSELLATION_SAG),
+        ) {
+            Ok(mut display) => {
+                // Imported same_sense flags remain authoritative over stale face uses.
+                crate::orient_mesh_to_senses(kernel, brep, &mut display.mesh, &senses);
+                Ok(display.mesh)
+            }
+            Err(error) => {
+                // STEP imported before the record layer can carry analytic edge
+                // curves with no B-spline form (NIST CTC-01 is one). Keep the
+                // legacy tessellator as an explicit display-only fallback until
+                // solidcore-convert can record those curves.
+                crate::set_display_tolerance(Some(effective));
+                let options = crate::CurvedTessOptions {
+                    max_normal_angle_deg: 4.0,
+                    ..crate::CurvedTessOptions::default()
+                };
+                let result = crate::brep_display_mesh_with_senses(
+                    kernel,
+                    brep,
+                    &options,
+                    Some(&senses),
+                );
+                crate::set_display_tolerance(Some(requested));
+                result.map_err(|local| {
+                    format!("upstream tessellation: {error}; legacy fallback: {local}")
+                })
+            }
+        }
     };
     let mut mesh = render(&brep)?;
     if mesh_has_invalid_coordinates(&mesh) {

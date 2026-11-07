@@ -11,12 +11,15 @@ SolidCore/SMLib for exact geometry.
   node does not move it
 - node canvas with card/cable selection, delete and layout modes
 - GPU viewport with SolidCraft rendering, grid, axes, display modes and theme
-- STEP import through the SolidCore stack; older reader paths remain for
-  comparison
+- STEP import through the SolidCore stack; imported bodies display through
+  `nodecraft-layers` / `solidcore-tess` (with an explicit legacy fallback for
+  analytic edge curves that `solidcore-convert` cannot yet record)
 - JSON-backed dark theme, first-run creation and corrupt-theme repair
 - native OS settings viewport with display and diagnostic sections
 - macOS-style menus with modeless popup rows
 - public snapshot build and GitHub Actions matrix for macOS/Linux/Windows
+- branch-only transform preview on a dedicated `PreviewWorker` with its own
+  evaluation/cache, so the edit ghost does not wait behind the breakpoint pass
 - Geometry graph value carrying exact BRep solids and sketches
 - Geometry-native primitive, translate, mirror, combine, Boolean, STEP import,
   extrude, sketch, spline, loft, surfaceloft, shell and scatter evaluation
@@ -25,28 +28,41 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `3ed6194755cc2a3298882373ff465adeb443485a`
-- SolidCraft sketch stack pinned at `d7cad1005a7ab8ed948d7c8cca666230e988c579`
+- SolidCore pinned at `5458b142ac95d9d4a3f553888e58d3c536b21631` (latest
+  `main` as of 2026-11-07)
+- SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
+- `configure_solidcore_fixes` applies the same upstream fix profile to our
+  kernels and the `solidcore-ops` session (Boolean/shell/offset/blend)
+- exact fillet results are validated through `solidcore-ops::check`; an invalid
+  result reports the upstream `CheckReport` text
+- refused fillet edges are reported, not silently dropped from a multi-edge
+  selection
+- ghost face/edge colours live in the theme palette; the inspector reset action
+  replaces the old disclosure chevron
 - STEP planar import normalizes closed-solid winding after new face-use-aware exports
 
 ## Test baseline
 
-Latest local baseline after the 2026-11-06 cleanup:
+Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  808 passed / 1 failed / 11 ignored
+  839 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate
+```
 
-targeted:
-  nodecraft-egui          108 passed
-  nodecraft-node-canvas    54 passed / 4 ignored
-  nodecraft-session        53 passed
-  nodecraft-engine        114 passed / 1 ignored
-  nodecraft-node-contract   5 passed
-  nodecraft-blend           8 unit + 5 integration
+Individual suites:
+
+```text
+nodecraft-egui          123 passed
+nodecraft-engine        120 passed / 1 ignored
+nodecraft-mesh           18 passed / 1 failed / 1 ignored (lib)
+nodecraft-mesh           mesh_quality 4 passed
+nodecraft-blend          8 unit + integration suites
+nodecraft-node-canvas    full canvas suite
+nodecraft-session        full session suite
 ```
 
 `solidcore-stepio` contains a 46-fixture SMLib mass-reference test that takes
@@ -59,15 +75,18 @@ matrix. Some private fixture tests may be skipped there.
 ## Runtime shape
 
 The app is a command client over a flat, acyclic graph. The session owns the
-document revision and dirty set; an evaluation worker owns the persistent engine
-cache and currently performs exact B-rep work plus display tessellation in one
-call. See [How NodeCraft works](architecture.md).
+document revision and dirty set. Evaluation runs in two phases on the app
+`EvalWorker`: exact B-rep work first, then display tessellation against the
+warmed Part cache. A separate branch-only `PreviewWorker` resolves the transform
+input for the edit ghost, and a bounded mesher pool performs body tessellation.
+See [How NodeCraft works](architecture.md).
 
-The evaluator is split internally now: `exact_eval.rs` owns Part/B-rep
-construction and `display_eval.rs` owns display meshing and mesh caching, with
-cache, primitive, look, bypass and comparison concerns in their own modules.
-The remaining architectural work is to give exact and display work independent
-bounded pools and a scheduler rather than wrapping one worker call.
+The evaluator is split internally: `exact_eval.rs` owns Part/B-rep construction
+and `display_eval.rs` owns display meshing and mesh caching, with cache,
+primitive, look, bypass and comparison concerns in their own modules. Display
+work is not yet fully concurrent: the `EvalWorker` is still sequential after the
+exact phase, and stale display work is cancelled only when a queued job exists at
+the exact/display boundary.
 
 ## Known shell limitations
 
@@ -90,6 +109,18 @@ Shelling is not yet general. Current state:
 
 The next shell work is per-input option selection, volume/area validation for
 curved primitives, and contextual face editing from the inspector.
+
+## Known geometry limitations
+
+- A partial fillet around a multi-edge torus/cylinder join is still an upstream
+  seam/edge-use problem (SolidCore #2826 remains open; #2863 is merged). NodeCraft
+  now reports the upstream `Smooth` refusal instead of silently landing a
+  partial round.
+- STEP bodies whose edge curves have no B-spline form cannot yet be
+  recorded by `solidcore-convert`; STEP import falls back to the legacy display
+  tessellator for those bodies only.
+- `nodecraft-mesh`'s pole-free sphere tessellation still fails its manifold seam
+  assertion; this is the single workspace test failure above.
 
 ## Node error discovery
 

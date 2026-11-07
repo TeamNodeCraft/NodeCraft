@@ -2,72 +2,71 @@
 
 Priority order is approximate.
 
-## Current state (2026-11-06)
+## Current state (2026-11-07)
 
-- SolidCore is pinned at `3ed6194755cc2a3298882373ff465adeb443485a`
-  (+217 commits over the previous `a39659e3` pin).
-- Engine display branches and comparison ghosts use
-  `nodecraft-layers` / `solidcore-tess`; the engine has no local
-  `brep_display_mesh` calls.
-- Comparison and Boolean operand/export/extrude operation paths use
-  `solidcore-ops` Booleans.
-- The app evaluates in two phases: exact result first (errors/status, previous
-  mesh retained), then display against the warmed Part cache.
-- Part-target Boolean and shell remain kernel-side: ops output reorders edge ids
-  and drops Look colour attributes until upstream exposes provenance/attribute
-  support.
-- G2-fillet top-face shell still fails on the current pin with
-  `solidcore-ops shell: the result is not a closed solid`.
-- Public snapshot is at `2214358` and needs a republish for the pin/ops/evaluation
-  work after it.
-- Tests at this state: engine 120 passed / 1 ignored, egui 112 passed,
-  node-canvas 54 passed / 4 ignored, layers 11 passed, workspace
-  `--all-targets` check clean.
+- SolidCore is pinned at `5458b142ac95d9d4a3f553888e58d3c536b21631` (latest
+  `main`, +491 commits over `3ed61947`).
+- SolidCraft sketch stack is pinned at
+  `871014f955a76fd308ce156e68c93e6372906005`.
+- Evaluated Part, comparison and STEP import display meshes use
+  `nodecraft-layers` / `solidcore-tess`. STEP keeps a legacy fallback only for
+  analytic edge curves that `solidcore-convert` cannot yet record.
+- The app evaluates in two phases: exact result first, then display against the
+  warmed Part cache. A separate branch-only `PreviewWorker` supplies transform
+  ghost meshes without waiting for the breakpoint pass.
+- The `solidcore-ops` session receives the same upstream fix profile as
+  NodeCraft kernels.
+- Fillet refusals are no longer converted into partial successes. Exact fillet
+  results are checked through `solidcore-ops::check`; invalid results report the
+  upstream `CheckReport` text.
+- A partial round around a multi-edge torus/cylinder join remains an upstream
+  issue (SolidCore #2826, open; #2863 merged). The application now surfaces the
+  refusal instead of hiding it.
+- Primitive fast paths for `wedge`, `partialSphere` and `partialTorus`, plus a
+  few legacy helpers, still use the local `nodecraft-mesh` mesher because they
+  have no exact closed B-rep yet.
+- The public snapshot is generated from committed `HEAD`; republish after
+  integration work with `./scripts/publish-public.sh`.
+- Workspace tests: 839 passed / 1 failed / 11 ignored. The single failure is the
+  documented `nodecraft-mesh` pole-free sphere seam assertion.
 
-## SolidCore 3ed61947 pin bump (completed)
+## SolidCore 5458b142 pin bump (completed)
 
-Upstream moved from `a39659e3` to `3ed6194755cc` — **217 commits ahead** —
-including golden-policy changes, NaN bit-pattern canonicalisation,
-blend/fillet golden cases and fuzz-refusal corrections. The bump is applied.
+Upstream moved from `3ed61947` to `5458b142` (+491 commits), including blend,
+offset, Boolean, STEP P21 and tessellation work. The bump is applied.
 
-- [x] Fetch and diff `a39659e3...3ed6194755cc`; note changes to
-      `solidcore-ops`, `solidcore-convert`, `solidcore-tess`, boolean/blend and
-      STEP APIs.
-- [x] Update **every** workspace SolidCore pin together in `rust/Cargo.toml`;
-      member manifests stay on `workspace = true` and the pin guard passes.
-- [x] Run the layer/boundary gates: `nodecraft-layers`, full workspace
-      `--all-targets`, `nodecraft-engine --lib`, `nodecraft-worker`,
-      `nodecraft-mesh --test mesh_quality` and `nodecraft-step` all pass.
-- [x] Re-run the G2-fillet top-face shell reproduction. It still fails with
-      `solidcore-ops shell: the result is not a closed solid`; the new upstream
-      blend/golden work did not fix it.
-- [x] Re-run feature comparison: exact G2 ghost, planar chamfer cache, ops
-      Boolean difference and record-to-tess parity all pass.
-- [ ] Revisit the Part-target Boolean/shell migration when upstream exposes
-      public provenance attach/read or otherwise preserves application
-      attributes and edge identity.
+- [x] Update every workspace SolidCore pin together; member manifests stay on
+      `workspace = true`.
+- [x] Run app, engine, layers, solidcore and mesh gates.
+- [x] Carry the kernel fix profile into the `solidcore-ops` session.
+- [x] Update the SolidCraft sketch stack to `871014f9`.
+- [ ] Revisit Part-target Boolean/shell migration when upstream exposes public
+      provenance attach/read or otherwise preserves application attributes and
+      edge identity.
 
 ## Remaining after this pass
 
-- [ ] Make display work truly concurrent. The current EvalWorker is sequential
-      after the exact phase and still blocks on display; stale display work is
-      cancelled only when a queued job exists at the exact/display boundary.
-- [ ] Manually smoke-test the two-phase app: heavy-target edits, rapid edits,
-      tab switches during display, failed-node glow, export/clear-cache and
-      cache growth.
-- [ ] Republish the public snapshot with the SolidCore bump, ops Boolean work and
-      two-phase evaluation.
+- [ ] Republish the public snapshot with the docs and integration work.
+- [ ] Make display work truly concurrent. The `EvalWorker` is still sequential
+      after the exact phase; stale display work is cancelled only at the
+      exact/display boundary.
+- [ ] Remove the STEP legacy mesher fallback once `solidcore-convert` can record
+      analytic edge curves with no B-spline form.
+- [ ] Track SolidCore #2826 until multi-edge join fillets run continuously; add
+      the torus/cylinder case as an upstream regression.
+- [ ] Validate Boolean and shell results through `solidcore-ops::check` the same
+      way fillet results are validated.
+- [ ] Manually smoke-test heavy-target edits, rapid edits, tab switches during
+      display, failed-node glow, export/clear-cache and cache growth.
 - [ ] Finish the Part-target Boolean and shell ops migration once upstream
       provenance/attribute support is available.
-- [ ] Fillet/chamfer ops migration is **on hold**: the current
-      `nodecraft_blend` path works well for now. Revisit `solidcore-ops::blend`
-      only after a dedicated parity matrix (G1/G2/G3, mixed edges,
-      corners/setbacks, two-cylinder joins, chamfer angle/distance, failures).
+- [ ] Fillet/chamfer ops migration: keep the current direct-plus-ops path until
+      a parity matrix covers G1/G2/G3, mixed edges, corners/setbacks,
+      two-cylinder joins, chamfer angle/distance and failures.
 - [ ] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows
       before migrating them.
-- [ ] Retire the local STEP stack after the upstream record/ops importer lands.
-- [ ] Defer record-first exact data until upstream ops covers boolean, extrude,
-      loft, fillet and chamfer (see the record-cache section).
+- [ ] Migrate `wedge`, `partialSphere` and `partialTorus` display once exact
+      closed B-reps exist for them.
 - [ ] Keep dependency-crate warning cleanup as a separate low-priority item.
 
 ## Recently completed
@@ -544,7 +543,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `3ed6194755cc2a3298882373ff465adeb443485a`:
+      Reproduction at current pin `5458b142ac95d9d4a3f553888e58d3c536b21631`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

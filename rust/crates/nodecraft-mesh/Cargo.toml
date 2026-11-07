@@ -15,6 +15,7 @@ mesher-upstream = []
 solidcore = { workspace = true }
 nurbs-grid-mesh = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-step = { path = "../nodecraft-step" }
 step-assemblies = { path = "../step-assemblies" }
 step-import = { workspace = true }

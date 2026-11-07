@@ -11,6 +11,7 @@ solidcore-ops = { workspace = true }
 solidcore-record = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore" }
+nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-bool = { path = "../nodecraft-bool" }
 nodecraft-step = { path = "../nodecraft-step" }
 serde_json.workspace = true

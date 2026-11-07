@@ -52,6 +52,14 @@ static WORKLOAD_PROFILER_ENABLED: std::sync::atomic::AtomicBool =
 /// Configure the opt-in SolidCore kernel fixes used by new worker kernels.
 pub fn configure_solidcore_fixes(enabled: bool) {
     nodecraft_solidcore::kernel::configure_experimental_fixes(enabled);
+    let fixes: &[&str] = if enabled {
+        &nodecraft_solidcore::kernel::EXPERIMENTAL_FIX_NAMES
+    } else {
+        &[]
+    };
+    if let Err(error) = nodecraft_layers::configure_session_fixes(fixes) {
+        eprintln!("{error}");
+    }
 }
 
 #[must_use]

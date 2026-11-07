@@ -2,17 +2,6 @@
 
 These are current known failures or fragile areas. Verify before changing them.
 
-## Exact extrusion connectivity
-
-`rust/crates/nodecraft-extrude/tests/exact_extrude.rs`:
-
-```text
-legacy_linear_sweep_measures_exactly_but_is_not_connected
-```
-
-The test currently fails the connectivity assertion. Investigate the B-rep
-topology produced by the legacy linear sweep rather than weakening the test.
-
 ## Sphere seam
 
 `nodecraft-mesh` has a known failure:
@@ -22,6 +11,22 @@ sphere_no_pole has open or non-manifold seam edges
 ```
 
 Do not suppress the seam check to make the test green; fix the seam topology.
+
+## Partial multi-edge join fillet
+
+A constant-radius fillet on the torus/cylinder join can stop part-way around the
+join. SolidCore reports `EdgeNotBlendable { reason: Smooth }` for some join
+edges; the application now reports that refusal instead of dropping the refused
+edges and returning a partial round. Upstream issue:
+[tangency-labs/solidcore#2826](https://github.com/tangency-labs/solidcore/issues/2826).
+`#2863` is merged and present but does not cover this remaining case.
+
+## STEP analytic edge fallback
+
+`solidcore-convert` cannot record STEP edge curves that have no B-spline form.
+STEP import now uses `solidcore-tess` first and falls back to the legacy
+`nodecraft-mesh` tessellator only for those bodies; remove the fallback when the
+record conversion supports them.
 
 ## Grid zoom crossfade
 

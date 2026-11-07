@@ -10,6 +10,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static EXPERIMENTAL_FIXES: AtomicBool = AtomicBool::new(true);
 
+/// The upstream fix names NodeCraft enables as one profile. The same names are
+/// passed to the `solidcore-ops` session so kernel and ops work agree.
+pub const EXPERIMENTAL_FIX_NAMES: [&str; 3] = [
+    // B-rep point classification honours the current face trims while editing
+    // (WR-732 / #2503).
+    "brep_ray_classifies_current_trims",
+    // Curved-face blend corners and their certified setback fills (#2343).
+    "fillet_setback_beside_curved_faces",
+    // Chamfers meeting at a vertex are closed by their own corner event (#2345).
+    "fillet_chamfer_corner",
+];
+
 /// Configure the opt-in SolidCore fixes applied to newly created kernels.
 pub fn configure_experimental_fixes(enabled: bool) {
     EXPERIMENTAL_FIXES.store(enabled, Ordering::Relaxed);
@@ -25,13 +37,11 @@ pub fn apply_fixes(kernel: &mut Kernel) {
     if !experimental_fixes_enabled() {
         return;
     }
-    // B-rep point classification honours the current face trims while editing
-    // (WR-732 / #2503).
-    kernel.fixes.brep_ray_classifies_current_trims = true;
-    // Curved-face blend corners and their certified setback fills (#2343).
-    kernel.fixes.fillet_setback_beside_curved_faces = true;
-    // Chamfers meeting at a vertex are closed by their own corner event (#2345).
-    kernel.fixes.fillet_chamfer_corner = true;
+    for name in EXPERIMENTAL_FIX_NAMES {
+        if let Some(flag) = kernel.fixes.flag_mut(name) {
+            *flag = true;
+        }
+    }
 }
 
 /// A NodeCraft kernel with the standard fix profile.
@@ -56,9 +66,12 @@ mod tests {
 
     #[test]
     fn standard_profile_enables_the_new_kernel_fixes() {
-        let kernel = kernel();
+        let mut kernel = kernel();
         assert!(kernel.fixes.brep_ray_classifies_current_trims);
         assert!(kernel.fixes.fillet_setback_beside_curved_faces);
         assert!(kernel.fixes.fillet_chamfer_corner);
+        for name in EXPERIMENTAL_FIX_NAMES {
+            assert!(kernel.fixes.flag_mut(name).is_some(), "unknown fix {name}");
+        }
     }
 }
