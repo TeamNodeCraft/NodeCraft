@@ -379,34 +379,10 @@ impl Theme {
             "port_input" => self.port_input = value,
             "card" => self.card = value,
             "card_border" => self.card_border = value,
-            "cable" => {
-                let alpha_changed = self.cable[3] != value[3];
-                self.cable = value;
-                if alpha_changed {
-                    self.cable_selected[3] = value[3];
-                }
-            }
-            "cable_selected" => {
-                let alpha_changed = self.cable_selected[3] != value[3];
-                self.cable_selected = value;
-                if alpha_changed {
-                    self.cable[3] = value[3];
-                }
-            }
-            "cable_outline" => {
-                let alpha_changed = self.cable_outline[3] != value[3];
-                self.cable_outline = value;
-                if alpha_changed {
-                    self.cable_selected_outline[3] = value[3];
-                }
-            }
-            "cable_selected_outline" => {
-                let alpha_changed = self.cable_selected_outline[3] != value[3];
-                self.cable_selected_outline = value;
-                if alpha_changed {
-                    self.cable_outline[3] = value[3];
-                }
-            }
+            "cable" => self.cable = value,
+            "cable_selected" => self.cable_selected = value,
+            "cable_outline" => self.cable_outline = value,
+            "cable_selected_outline" => self.cable_selected_outline = value,
             "blur_tint" | "panel_glass" => self.blur_tint = value,
             "minimap_bg" => self.minimap_bg = value,
             "minimap_border" => self.minimap_border = value,
@@ -1394,20 +1370,6 @@ pub fn scroll_style_general() -> egui::style::ScrollStyle {
 #[cfg(test)]
 mod hex_color_tests {
     use super::Theme;
-
-    #[test]
-    fn cable_alpha_is_shared_between_normal_and_selected_states() {
-        let mut theme = Theme::default();
-        let mut cable = theme.cable;
-        cable[3] = 128;
-        assert!(theme.set_color("cable", cable));
-        assert_eq!(theme.cable_selected[3], 128);
-
-        let mut selected_outline = theme.cable_selected_outline;
-        selected_outline[3] = 64;
-        assert!(theme.set_color("cable_selected_outline", selected_outline));
-        assert_eq!(theme.cable_outline[3], 64);
-    }
 
     #[test]
     fn parses_six_digit_hex_and_preserves_alpha() {
