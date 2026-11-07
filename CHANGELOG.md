@@ -91,7 +91,9 @@
   edit state; stale entries are invalidated without touching egui data.
 - Fixed the theme colour picker so alpha is a byte-only edit (0.5 is 50%),
   derives HSV from opaque RGB so low alpha cannot saturate the hue, preserves
-  RGB in the hex field, and does not tint the round picker. The
+  RGB in the hex field, and does not tint the round picker. Cable/outline alpha
+  is shared between normal and selected states so selection no longer pins the
+  cable opaque. The
   luminosity control now changes the wheel's own brightness. The CPU cable
   fallback now uses the themed cable/outline colours, alpha and widths.
 - Document saves use compact pretty JSON: short arrays and small objects stay
