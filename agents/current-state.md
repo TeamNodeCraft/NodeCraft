@@ -11,9 +11,10 @@ SolidCore/SMLib for exact geometry.
   node does not move it
 - node canvas with card/cable selection, delete and layout modes
 - GPU viewport with SolidCraft rendering, grid, axes, display modes and theme
-- STEP import through the SolidCore stack; imported bodies display through
-  `nodecraft-layers` / `solidcore-tess` (with an explicit legacy fallback for
-  analytic edge curves that `solidcore-convert` cannot yet record)
+- STEP import through the SolidCore stack; imported bodies and all closed
+  primitives display through `nodecraft-layers` / `solidcore-tess` (with an
+  explicit legacy fallback for STEP analytic edge curves that
+  `solidcore-convert` cannot yet record)
 - JSON-backed dark theme, first-run creation and corrupt-theme repair
 - native OS settings viewport with display and diagnostic sections
 - macOS-style menus with modeless popup rows

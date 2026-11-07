@@ -112,10 +112,11 @@ a dimmed breakpoint. Crease-smoothed normals drive the zebra reflection analysis
 ### Mesher pool
 
 `nodecraft-engine` owns a bounded `MesherPool`. Body tessellation is submitted
-per body and awaited by the evaluation worker. Evaluated Part/Boolean/shell and
-STEP import display paths use `nodecraft-layers` / `solidcore-tess`; the legacy
-`nodecraft-mesh` curved tessellator remains only as a STEP fallback for analytic
-edge curves that `solidcore-convert` cannot yet record.
+per body and awaited by the evaluation worker. Evaluated Part/Boolean/shell,
+closed primitive and STEP import display paths use `nodecraft-layers` /
+`solidcore-tess`; the legacy `nodecraft-mesh` tessellator remains only for STEP
+analytic edge curves that `solidcore-convert` cannot yet record and for the
+wedge/partial primitives without exact closed B-reps.
 
 The worker catches kernel panics, drops a poisoned cache and reports a node error
 rather than killing the process.

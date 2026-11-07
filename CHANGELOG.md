@@ -14,6 +14,8 @@
   `nodecraft-layers` / `solidcore-tess`, like every evaluated Part. The legacy
   STEP mesher remains only as a fallback for analytic edge curves
   `solidcore-convert` cannot yet record.
+- Closed primitive display (`box`, `cylinder`, `cone`, `sphere`, `torus`,
+  `pyramid`, `sphereNoPole`) now uses the same upstream tessellator.
 - Exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; invalid results report the upstream `CheckReport`
   text.

@@ -370,39 +370,19 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default)
                 };
                 match kind {
-                    "box" => nodecraft_solidcore::box_mesh(
-                        number("length", 40.0),
-                        number("width", 40.0),
-                        number("height", 40.0),
-                    ),
-                    "cylinder" => nodecraft_solidcore::curved::cylinder_mesh(
-                        number("radius", 20.0),
-                        number("height", 40.0),
-                    ),
-                    "cone" => nodecraft_solidcore::curved::cone_mesh(
-                        number("bottomRadius", 20.0),
-                        number("topRadius", 0.0),
-                        number("height", 40.0),
-                    ),
-                    "sphere" => {
-                        nodecraft_solidcore::curved::sphere_mesh(number("radius", 20.0))
-                    }
-                    "torus" => nodecraft_solidcore::curved::torus_mesh(
-                        number("majorRadius", 15.0),
-                        number("minorRadius", 5.0),
-                    ),
+                    // Closed primitives have exact B-reps, so their display
+                    // mesh goes through the same upstream tessellator as every
+                    // evaluated Part. Wedge and partial primitives still need
+                    // the local mesh path until exact closed B-reps exist.
+                    "box" | "cylinder" | "cone" | "sphere" | "torus" | "pyramid"
+                    | "sphereNoPole" => self
+                        .cached_primitive_brep(&node)
+                        .and_then(|brep| display_mesh_for_brep(&brep)),
                     "wedge" => nodecraft_wedge::wedge_mesh(
                         number("length", 40.0),
                         number("width", 30.0),
                         number("height", 25.0),
                         number("topLength", 0.0),
-                    ),
-                    "pyramid" => nodecraft_solidcore::curved::pyramid_mesh(
-                        number("length", 40.0),
-                        number("height", 40.0),
-                    ),
-                    "sphereNoPole" => nodecraft_solidcore::curved::sphere_no_pole_mesh(
-                        number("radius", 20.0),
                     ),
                     "partialSphere" => nodecraft_solidcore::curved::partial_sphere_mesh(
                         number("radius", 20.0),
