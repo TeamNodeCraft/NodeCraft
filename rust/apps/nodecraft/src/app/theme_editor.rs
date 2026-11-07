@@ -360,19 +360,35 @@ const LUMINOSITY_GAMMA: f32 = 2.2;
 
 fn color_picker_slider(
     ui: &mut egui::Ui,
+    name: &str,
     icon: &'static [u8],
     image_id: &'static str,
     value: &mut f32,
+    width: f32,
 ) -> bool {
+    const ICON: f32 = 16.0;
+    const VALUE: f32 = 44.0;
     let theme = crate::theme::get();
     let svg = crate::app::tint_svg(icon, &crate::theme::Theme::hex(theme.icon));
+    ui.spacing_mut().slider_width = (width - ICON - VALUE - ui.spacing().item_spacing.x * 2.0)
+        .max(60.0);
     ui.horizontal(|ui| {
         ui.add(
             egui::Image::from_bytes(image_id, svg.into_bytes())
-                .fit_to_exact_size(egui::Vec2::splat(16.0)),
+                .fit_to_exact_size(egui::Vec2::splat(ICON)),
+        )
+        .on_hover_text(name);
+        let response = ui.add(egui::Slider::new(value, 0.0..=1.0).show_value(false));
+        ui.with_layout(
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.add_sized(
+                    [VALUE, ui.spacing().interact_size.y],
+                    egui::Label::new(format!("{value:.3}")),
+                );
+            },
         );
-        ui.add(egui::Slider::new(value, 0.0..=1.0).show_value(true))
-            .changed()
+        response.changed()
     })
     .inner
 }
@@ -494,13 +510,15 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
     );
 
     ui.add_space(6.0);
-    ui.spacing_mut().slider_width = size - 26.0;
+    ui.set_width(size);
     let mut luminosity = hsva.v.powf(1.0 / LUMINOSITY_GAMMA);
     if color_picker_slider(
         ui,
+        "Luminosity",
         include_bytes!("../../../../../vendor/fluent/brightness_high.svg"),
         "bytes://theme-luminosity.svg",
         &mut luminosity,
+        size,
     ) {
         hsva.v = luminosity.powf(LUMINOSITY_GAMMA);
         changed = true;
@@ -508,9 +526,11 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
     let mut alpha = f32::from(rgba[3]) / 255.0;
     let alpha_changed = color_picker_slider(
         ui,
+        "Opacity",
         include_bytes!("../../../../../vendor/iconify-design/opacity.svg"),
         "bytes://theme-opacity.svg",
         &mut alpha,
+        size,
     );
     let out_alpha = if alpha_changed {
         (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
