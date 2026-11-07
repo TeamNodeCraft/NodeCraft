@@ -3746,6 +3746,37 @@ mod tests {
         assert!((min[0] - -5.0).abs() < 1e-6 && (max[0] - 10.0).abs() < 1e-6, "{min:?} {max:?}");
     }
 
+    /// Every primitive display path must produce a non-empty mesh; the closed,
+    /// partial and wedge primitives now all have exact B-reps behind it.
+    #[test]
+    fn all_primitive_display_paths_render() {
+        for (kind, values) in [
+            ("box", serde_json::json!({"primitiveType":"box","length":20.0,"width":10.0,"height":8.0})),
+            ("cylinder", serde_json::json!({"primitiveType":"cylinder","radius":10.0,"height":20.0})),
+            ("cone", serde_json::json!({"primitiveType":"cone","bottomRadius":10.0,"topRadius":2.0,"height":20.0})),
+            ("sphere", serde_json::json!({"primitiveType":"sphere","radius":10.0})),
+            ("torus", serde_json::json!({"primitiveType":"torus","majorRadius":15.0,"minorRadius":4.0})),
+            ("pyramid", serde_json::json!({"primitiveType":"pyramid","length":20.0,"height":15.0})),
+            ("sphereNoPole", serde_json::json!({"primitiveType":"sphereNoPole","radius":10.0})),
+            ("partialSphere", serde_json::json!({"primitiveType":"partialSphere","radius":10.0,"startAngle":0.0,"endAngle":90.0})),
+            ("partialTorus", serde_json::json!({"primitiveType":"partialTorus","majorRadius":15.0,"minorRadius":4.0,"startAngle":0.0,"endAngle":90.0})),
+            ("wedge", serde_json::json!({"primitiveType":"wedge","length":20.0,"width":10.0,"height":8.0,"topLength":5.0})),
+        ] {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["p"],
+                "meshTargets": ["p"],
+                "nodes": [{"id": "p", "type": "primitive", "values": values, "cache": {"key": "p"}}],
+                "connections": []
+            })).expect("primitive request");
+            let (response, _, _) = respond(request, EngineCache::new());
+            assert!(response.node_errors.is_empty(), "{kind}: {:?}", response.node_errors);
+            let mesh = &response.meshes["p"].mesh;
+            assert!(!mesh.faces.is_empty(), "{kind}: empty mesh");
+            assert!(!mesh.vertices.is_empty(), "{kind}: empty vertices");
+        }
+    }
+
     /// Boolean nodes work directly on NodeCraft primitives, including translated ones.
     #[test]
     fn boolean_union_of_overlapping_primitives() {

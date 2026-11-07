@@ -8,3 +8,5 @@ license.workspace = true
 # tessellated analytically; the only dependency is the shared mesh protocol.
 [dependencies]
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+solidcore-record = { workspace = true }
+solidcore-ops = { workspace = true }

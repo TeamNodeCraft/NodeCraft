@@ -73,6 +73,16 @@ pub(crate) fn primitive_brep_with_kernel(
             number("endAngle", 90.0),
         )
         .map_err(|error| error.to_string()),
+        "wedge" => {
+            let body = nodecraft_wedge::wedge_body(
+                number("length", 40.0),
+                number("width", 30.0),
+                number("height", 25.0),
+                number("topLength", 0.0),
+            )?;
+            nodecraft_layers::body_to_kernel(kernel, &body)
+                .map_err(|error| format!("Wedge: {error}"))
+        }
         "partialTorus" => api::create_partial_torus(
             kernel,
             Point3::new(0.0, 0.0, 0.0),

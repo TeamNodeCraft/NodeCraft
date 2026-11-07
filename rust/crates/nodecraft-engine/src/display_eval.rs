@@ -375,15 +375,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     // evaluated Part. Wedge and partial primitives still need
                     // the local mesh path until exact closed B-reps exist.
                     "box" | "cylinder" | "cone" | "sphere" | "torus" | "pyramid"
-                    | "sphereNoPole" | "partialSphere" | "partialTorus" => self
+                    | "sphereNoPole" | "partialSphere" | "partialTorus" | "wedge" => self
                         .cached_primitive_brep(&node)
                         .and_then(|brep| display_mesh_for_brep(&brep)),
-                    "wedge" => nodecraft_wedge::wedge_mesh(
-                        number("length", 40.0),
-                        number("width", 30.0),
-                        number("height", 25.0),
-                        number("topLength", 0.0),
-                    ),
                     _ => self.kernel.primitive(kind, &node.values),
                 }
             }

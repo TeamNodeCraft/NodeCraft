@@ -323,6 +323,14 @@ fn mesh_has_invalid_coordinates(mesh: &Mesh) -> bool {
     })
 }
 
+/// Only the record layer's "analytic edge has no exact record" refusal may use
+/// the legacy display mesher. Any other upstream tessellation error is a real
+/// failure and must not be masked.
+fn needs_legacy_step_fallback(error: &str) -> bool {
+    error.contains("kernel to record")
+        && error.contains("no exact record")
+}
+
 fn body_display_mesh(
     kernel: &solidcore::kernel::Kernel,
     body: &step_import::model::Body,
@@ -403,7 +411,7 @@ fn body_display_mesh(
                 crate::orient_mesh_to_senses(kernel, brep, &mut display.mesh, &senses);
                 Ok(display.mesh)
             }
-            Err(error) => {
+            Err(error) if needs_legacy_step_fallback(&error) => {
                 // STEP imported before the record layer can carry analytic edge
                 // curves with no B-spline form (NIST CTC-01 is one). Keep the
                 // legacy tessellator as an explicit display-only fallback until
@@ -424,6 +432,7 @@ fn body_display_mesh(
                     format!("upstream tessellation: {error}; legacy fallback: {local}")
                 })
             }
+            Err(error) => Err(format!("upstream tessellation: {error}")),
         }
     };
     let mut mesh = render(&brep)?;
@@ -1057,6 +1066,17 @@ mod tests {
     use step_assemblies::write::{PlanarPart, planar_assembly_text};
 
     use super::*;
+
+    #[test]
+    fn only_unrecordable_analytic_curve_errors_use_the_legacy_fallback() {
+        assert!(needs_legacy_step_fallback(
+            "upstream tessellation: kernel to record: unsupported: an edge curve with no exact record"
+        ));
+        assert!(!needs_legacy_step_fallback(
+            "upstream tessellation: the operation failed: planner refused"
+        ));
+        assert!(!needs_legacy_step_fallback("kernel to record: display copy failed"));
+    }
 
     fn temp_path(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

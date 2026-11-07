@@ -2260,6 +2260,8 @@ name = "nodecraft-wedge"
 version = "0.0.1"
 dependencies = [
  "nodecraft-protocol",
+ "solidcore-ops",
+ "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=a00676f5c6e3a1e86cdb3b6d733ad662cf10202e)",
 ]
 
 [[package]]

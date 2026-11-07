@@ -19,6 +19,10 @@
 - Partial sphere and partial torus now have exact SolidCore B-reps, so they
   participate in exact evaluation, Boolean and export as well as upstream
   display tessellation.
+- The wedge now has an exact B-rep from `solidcore-ops` planar prism extrusion;
+  every primitive display path uses `solidcore-tess`.
+- The STEP legacy fallback is limited to the record layer's unrepresentable
+  analytic-curve refusal; other upstream tessellation errors are not masked.
 - Exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; invalid results report the upstream `CheckReport`
   text.

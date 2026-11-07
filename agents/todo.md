@@ -22,12 +22,12 @@ Priority order is approximate.
 - A partial round around a multi-edge torus/cylinder join remains an upstream
   issue (SolidCore #2826, open; #2863 merged). The application now surfaces the
   refusal instead of hiding it.
-- Closed primitives, partial sphere and partial torus now have exact B-reps and
-  use `solidcore-tess`. `wedge` and a few legacy helpers still use the local
-  `nodecraft-mesh` mesher.
+- All primitives, including wedge, partial sphere and partial torus, now have
+  exact B-reps and use `solidcore-tess`. The local `nodecraft-mesh` mesher
+  remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 839 passed / 1 failed / 11 ignored. The single failure is the
+- Workspace tests: 842 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
 ## SolidCore a00676f5 pin bump (completed)
@@ -66,8 +66,6 @@ then +7 blend end-section/smooth-vertex fixes. The pin is applied.
       two-cylinder joins, chamfer angle/distance and failures.
 - [ ] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows
       before migrating them.
-- [ ] Migrate `wedge` display once an exact closed B-rep exists. Closed
-      primitives, partial sphere and partial torus now use `solidcore-tess`.
 - [ ] Keep dependency-crate warning cleanup as a separate low-priority item.
 
 ## Recently completed

@@ -49,6 +49,7 @@
 //! ```
 
 use nodecraft_protocol::{BrepEdge, Mesh};
+use solidcore_record::{Loop2, Plane, Region2, Vec2};
 
 /// Build the centered display mesh for the NodeCraft wedge primitive.
 ///
@@ -63,6 +64,54 @@ use nodecraft_protocol::{BrepEdge, Mesh};
 /// Returns a message matching the Python worker's validation when a dimension is not
 /// finite, `length`, `width` or `height` is not positive, or `top_length` is outside
 /// `[0, length)`.
+/// Exact wedge body through `solidcore-ops` planar prism extrusion.
+///
+/// The wedge is the trapezoid in XZ extruded through the width: a flat top of
+/// `top_length` at `+height/2`, the full length at `-height/2`, and the high
+/// vertical face at `x = -length/2`. `top_length == 0` is the sharp triangular
+/// wedge.
+pub fn wedge_body(
+    length: f64,
+    width: f64,
+    height: f64,
+    top_length: f64,
+) -> Result<solidcore_ops::Body, String> {
+    if !(length.is_finite() && width.is_finite() && height.is_finite() && top_length.is_finite())
+    {
+        return Err("wedge dimensions must be finite".into());
+    }
+    if !(length > 0.0 && width > 0.0 && height > 0.0) {
+        return Err("wedge length, width and height must be positive".into());
+    }
+    if !(top_length >= 0.0 && top_length < length) {
+        return Err("wedge top_length must be at least 0 and less than the length".into());
+    }
+    let half_length = length * 0.5;
+    let half_height = height * 0.5;
+    // XZ sketch coordinates: u = x, v = -z. This order is counter-clockwise.
+    let bottom_high = Vec2::new(-half_length, -half_height);
+    let top_flat_far = Vec2::new(-half_length + top_length, -half_height);
+    let top_far = Vec2::new(half_length, half_height);
+    let top_high = Vec2::new(-half_length, half_height);
+    let mut points = vec![bottom_high];
+    if top_length > 0.0 {
+        points.push(top_flat_far);
+    }
+    points.push(top_far);
+    points.push(top_high);
+    let region = Region2 {
+        outer: Loop2::polygon(&points),
+        holes: Vec::new(),
+    };
+    solidcore_ops::prism::extrude_planar_regions(
+        &Plane::XZ,
+        &[region],
+        -width * 0.5,
+        width * 0.5,
+    )
+    .map_err(|error| format!("wedge extrusion: {error}"))
+}
+
 pub fn wedge_mesh(
     length: f64,
     width: f64,
@@ -676,6 +725,15 @@ mod tests {
                     assert!(dot(normal, *expected) > 1.0 - 1e-5);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn exact_wedge_bodies_have_the_expected_volume() {
+        for (top_length, expected) in [(0.0, 800.0), (5.0, 1000.0)] {
+            let body = wedge_body(20.0, 10.0, 8.0, top_length).expect("wedge body");
+            let volume = body.volume(1.0e-6).expect("volume");
+            assert!((volume - expected).abs() < 1.0e-6, "{top_length}: {volume}");
         }
     }
 }

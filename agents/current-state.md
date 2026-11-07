@@ -11,10 +11,10 @@ SolidCore/SMLib for exact geometry.
   node does not move it
 - node canvas with card/cable selection, delete and layout modes
 - GPU viewport with SolidCraft rendering, grid, axes, display modes and theme
-- STEP import through the SolidCore stack; imported bodies, closed primitives
-  and partial sphere/torus display through `nodecraft-layers` /
-  `solidcore-tess` (with an explicit legacy fallback for STEP analytic edge
-  curves that `solidcore-convert` cannot yet record)
+- STEP import through the SolidCore stack; imported bodies and every primitive
+  (including wedge, partial sphere and partial torus) display through
+  `nodecraft-layers` / `solidcore-tess` (with an explicit legacy fallback for
+  STEP analytic edge curves that `solidcore-convert` cannot yet record)
 - JSON-backed dark theme, first-run creation and corrupt-theme repair
 - native OS settings viewport with display and diagnostic sections
 - macOS-style menus with modeless popup rows
@@ -49,7 +49,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  839 passed / 1 failed / 11 ignored
+  842 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate
@@ -59,7 +59,7 @@ Individual suites:
 
 ```text
 nodecraft-egui          123 passed
-nodecraft-engine        120 passed / 1 ignored
+nodecraft-engine        121 passed / 1 ignored
 nodecraft-mesh           18 passed / 1 failed / 1 ignored (lib)
 nodecraft-mesh           mesh_quality 4 passed
 nodecraft-blend          8 unit + integration suites
