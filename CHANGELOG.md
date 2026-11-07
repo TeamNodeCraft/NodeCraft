@@ -16,6 +16,9 @@
   `solidcore-convert` cannot yet record.
 - Closed primitive display (`box`, `cylinder`, `cone`, `sphere`, `torus`,
   `pyramid`, `sphereNoPole`) now uses the same upstream tessellator.
+- Partial sphere and partial torus now have exact SolidCore B-reps, so they
+  participate in exact evaluation, Boolean and export as well as upstream
+  display tessellation.
 - Exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; invalid results report the upstream `CheckReport`
   text.

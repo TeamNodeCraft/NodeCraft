@@ -65,6 +65,23 @@ pub(crate) fn primitive_brep_with_kernel(
         }
         "sphere" => api::create_sphere(kernel, Point3::new(0.0, 0.0, 0.0), number("radius", 20.0)).map_err(|error| error.to_string()),
         "sphereNoPole" => api::create_sphere_no_pole(kernel, Point3::new(0.0, 0.0, 0.0), number("radius", 20.0)).map_err(|error| error.to_string()),
+        "partialSphere" => api::create_partial_sphere(
+            kernel,
+            Point3::new(0.0, 0.0, 0.0),
+            number("radius", 20.0),
+            number("startAngle", 0.0),
+            number("endAngle", 90.0),
+        )
+        .map_err(|error| error.to_string()),
+        "partialTorus" => api::create_partial_torus(
+            kernel,
+            Point3::new(0.0, 0.0, 0.0),
+            number("majorRadius", 15.0),
+            number("minorRadius", 5.0),
+            number("startAngle", 0.0),
+            number("endAngle", 90.0),
+        )
+        .map_err(|error| error.to_string()),
         "torus" => api::create_torus(kernel, Point3::new(0.0, 0.0, 0.0), number("majorRadius", 15.0), number("minorRadius", 5.0)).map_err(|error| error.to_string()),
         "pyramid" => {
             let (length, height) = (number("length", 40.0), number("height", 30.0));
