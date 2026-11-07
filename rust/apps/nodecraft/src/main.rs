@@ -10,7 +10,9 @@
 mod adapter;
 mod app;
 mod control_server;
+mod crash_report;
 mod engine_bridge;
+mod expression_input;
 mod file_dialog;
 mod hover;
 mod theme;
@@ -39,12 +41,28 @@ fn msaa_samples() -> u32 {
 }
 
 fn main() -> eframe::Result {
+    crash_report::install_hook();
+    match crash_report::catch(run) {
+        Some(result) => result,
+        None => {
+            std::process::exit(101);
+        }
+    }
+}
+
+fn run() -> eframe::Result {
     #[cfg(target_os = "macos")]
     nodecraft_macos::install_observer();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--check") {
         return check(args.get(1).map(PathBuf::from));
     }
+    let crash_test = args.iter().any(|arg| arg == "--crash-test");
+    if crash_test && std::env::var_os("NODECRAFT_DEV").is_none() {
+        eprintln!("--crash-test is a developer check; set NODECRAFT_DEV=1 to enable it");
+        std::process::exit(2);
+    }
+    args.retain(|arg| arg != "--crash-test");
     let render_model = args.iter().any(|arg| arg == "--render-model");
     let screenshot_flag = if render_model { "--render-model" } else { "--screenshot" };
     let screenshot = args
@@ -100,6 +118,7 @@ fn main() -> eframe::Result {
                 initial,
                 screenshot,
                 render_model,
+                crash_test,
             )))
         }),
     )

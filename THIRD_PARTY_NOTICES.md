@@ -15,6 +15,16 @@ The sketch line-type icons under
 `line-centerline.svg` and `line-infinite.svg` are adapted from SolidCraft's
 `assets/icons/ui/design/svg/model/` icons under the same license.
 
+## SolidCraft expression language
+
+The `nodecraft-expr` crate is a port of SolidCraft's
+`crates/doc/src/expr.rs` (reference develop
+`481687fff38057691faf84a6fd844e826c552a6c`): the grammar, dimensional values,
+units and tests are kept compatible, with a local error type.
+
+SolidCraft is Copyright (c) 2026 SolidCraft contributors and is licensed under
+either the MIT License or the Apache License, Version 2.0, at your option.
+
 ## SolidCraft transform gizmo
 
 The transform gizmo in `rust/apps/nodecraft/src/viewer_gizmo.rs` is

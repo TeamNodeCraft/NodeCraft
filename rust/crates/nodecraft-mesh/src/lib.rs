@@ -2219,7 +2219,9 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
     const CREASE_COSINE: f32 = 0.819_152_1; // 35 degrees
     let mut incidents: Vec<Vec<(usize, usize, [f32; 3])>> = vec![Vec::new(); mesh.vertices.len()];
     for (face_index, face) in mesh.faces.iter().enumerate() {
-        let Some(normal) = triangle_normals[face_index] else { continue };
+        // A degenerate triangle has no direction. Keep its corners in a
+        // fallback cluster so every face vertex has a normal sum to index.
+        let normal = triangle_normals[face_index].unwrap_or([0.0, 0.0, 1.0]);
         for (slot, vertex) in face.iter().enumerate() {
             if let Some(list) = incidents.get_mut(*vertex as usize) {
                 list.push((face_index, slot, normal));
@@ -2266,7 +2268,12 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
             } else {
                 let index = positions.len() as u32;
                 positions.push(mesh.vertices[*old as usize]);
-                let sum = cluster_sums[*old as usize][corner_cluster[face_index][slot]];
+                let cluster = corner_cluster[face_index][slot];
+                let sum = cluster_sums
+                    .get(*old as usize)
+                    .and_then(|clusters| clusters.get(cluster))
+                    .copied()
+                    .unwrap_or([0.0, 0.0, 1.0]);
                 let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
                 normals.push(if length > 1.0e-12 {
                     [sum[0] / length, sum[1] / length, sum[2] / length]
@@ -2586,6 +2593,20 @@ mod tests {
         assert!(split.vertices.len() > mesh.vertices.len());
         assert!(split.normals.iter().any(|normal| normal[2] > 0.99));
         assert!(split.normals.iter().any(|normal| normal[0] < -0.99));
+    }
+
+    #[test]
+    fn shading_split_tolerates_a_degenerate_triangle() {
+        let mesh = Mesh {
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            normals: vec![[0.0, 0.0, 1.0]; 3],
+            faces: vec![[0, 1, 2]],
+            face_groups: vec!["face:0".into()],
+            ..Mesh::default()
+        };
+        let split = split_shading_normals(&mesh);
+        assert_eq!(split.faces.len(), 1);
+        assert_eq!(split.normals.len(), split.vertices.len());
     }
 
     #[test]

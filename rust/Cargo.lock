@@ -2043,6 +2043,7 @@ dependencies = [
  "mimalloc",
  "nodecraft-dock",
  "nodecraft-engine",
+ "nodecraft-expr",
  "nodecraft-macos",
  "nodecraft-mesh",
  "nodecraft-node-canvas",
@@ -2128,6 +2129,13 @@ dependencies = [
  "step-assemblies",
  "step-nurbs",
  "step-schema",
+]
+
+[[package]]
+name = "nodecraft-expr"
+version = "0.0.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

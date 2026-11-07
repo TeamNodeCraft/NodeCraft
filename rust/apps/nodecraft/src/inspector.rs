@@ -74,6 +74,7 @@ enum Widget {
         min: Option<f64>,
         max: Option<f64>,
         step: f64,
+        kind: nodecraft_node_contract::NumberKind,
     },
     Choice(&'static [(&'static str, &'static str)]),
 }
@@ -310,16 +311,26 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                     .color(theme.with_alpha(theme.muted, 220)),
             );
             let x_response = ui.add(
-                egui::DragValue::new(x)
-                    .speed(0.5)
-                    .range(-10000.0..=10000.0)
-                    .prefix("X "),
+                crate::expression_input::number_drag(
+                    x,
+                    nodecraft_node_contract::NumberKind::Length,
+                    0.5,
+                    2,
+                    egui::Id::new(("spline-x", &node.id, index)),
+                )
+                .range(-10000.0..=10000.0)
+                .prefix("X "),
             );
             let y_response = ui.add(
-                egui::DragValue::new(y)
-                    .speed(0.5)
-                    .range(-10000.0..=10000.0)
-                    .prefix("Y "),
+                crate::expression_input::number_drag(
+                    y,
+                    nodecraft_node_contract::NumberKind::Length,
+                    0.5,
+                    2,
+                    egui::Id::new(("spline-y", &node.id, index)),
+                )
+                .range(-10000.0..=10000.0)
+                .prefix("Y "),
             );
             if ui.small_button("×").on_hover_text("Remove point").clicked() {
                 remove = Some(index);
@@ -400,8 +411,8 @@ fn contract_field_specs(fields: &[nodecraft_node_contract::NodeFieldSpec]) -> Ve
             let widget = match spec.kind {
                 nodecraft_node_contract::FieldKind::Text => Widget::Text,
                 nodecraft_node_contract::FieldKind::Switch => Widget::Switch,
-                nodecraft_node_contract::FieldKind::Number { min, max, step } => {
-                    Widget::Number { min, max, step }
+                nodecraft_node_contract::FieldKind::Number { min, max, step, kind } => {
+                    Widget::Number { min, max, step, kind }
                 }
                 nodecraft_node_contract::FieldKind::Choice(choices) => Widget::Choice(choices),
             };
@@ -539,6 +550,8 @@ fn draw_number(
     step: f64,
     min: Option<f64>,
     max: Option<f64>,
+    kind: nodecraft_node_contract::NumberKind,
+    id: egui::Id,
 ) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -572,10 +585,7 @@ fn draw_number(
         };
         let entry = ui.add_sized(
             [entry_width, button_size.y],
-            egui::DragValue::new(number)
-                .speed(step)
-                .fixed_decimals(decimals)
-                .max_decimals(3),
+            crate::expression_input::number_drag(number, kind, step, decimals, id),
         );
         if entry.changed() {
             clamp_number(number, min, max);
@@ -1099,9 +1109,17 @@ pub fn show(
                                 changed = true;
                             }
                         }
-                        Widget::Number { min, max, step } => {
+                        Widget::Number { min, max, step, kind } => {
                             let mut number = value.as_f64().unwrap_or(0.0);
-                            if draw_number(ui, &mut number, *step, *min, *max) {
+                            if draw_number(
+                                ui,
+                                &mut number,
+                                *step,
+                                *min,
+                                *max,
+                                *kind,
+                                egui::Id::new(("inspector-number", &node.id, &spec.key)),
+                            ) {
                                 value = Value::from(number);
                                 changed = true;
                             }

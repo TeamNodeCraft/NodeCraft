@@ -118,3 +118,16 @@ or place `theme.json` in:
 upstream/downstream cables; `highlight` is the related hover/highlight colour.
 `port_input` is the complementary orange used for input eyelets; output eyelets
 use `accent`.
+
+
+## Crash-dialog check
+
+The local panic dialog is exercised with the developer-only flag:
+
+```sh
+NODECRAFT_DEV=1 build/NodeCraft.app/Contents/MacOS/NodeCraft --crash-test
+```
+
+It panics on the first frame, catches the panic at the eframe boundary, and shows
+the local dialog. Nothing is sent anywhere. The dialog text is also written to
+`nodecraft-crash.log` in the system temp directory.

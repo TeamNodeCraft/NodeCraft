@@ -8,6 +8,12 @@ SolidCore/SMLib for exact geometry.
 - native Rust application and macOS `NodeCraft.app` bundle build; the
   application crate is `#![forbid(unsafe_code)]` and the audited
   `nodecraft-macos` crate is the only local FFI boundary
+- the application has a local panic dialog; panic text is shown in-process and
+  written to the temp directory, never sent
+- `nodecraft-expr` carries the SolidCraft-compatible parameter expression
+  grammar and dimensional evaluator; numeric fields use a thin unit-kind
+  adapter that keeps the typed expression visible in an input-only cache while
+  the value is unchanged
 - `.nodecraft` / `.solidnode` document association and Finder open events on
   macOS
 - flat node graph with stable IDs, undo/redo and linked documents
@@ -56,7 +62,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  848 passed / 1 failed / 11 ignored
+  870 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate

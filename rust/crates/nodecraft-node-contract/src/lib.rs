@@ -163,11 +163,18 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
 
 /// How a node value should be edited. UI crates map these to widgets; the
 /// contract never depends on egui.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumberKind {
+    Length,
+    Angle,
+    Unitless,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FieldKind {
     Text,
     Switch,
-    Number { min: Option<f64>, max: Option<f64>, step: f64 },
+    Number { min: Option<f64>, max: Option<f64>, step: f64, kind: NumberKind },
     Choice(&'static [(&'static str, &'static str)]),
 }
 
@@ -207,7 +214,39 @@ const fn field_number(
         key,
         label,
         default: FieldDefault::Number(default),
-        kind: FieldKind::Number { min, max, step },
+        kind: FieldKind::Number { min, max, step, kind: NumberKind::Length },
+    }
+}
+
+const fn field_angle(
+    key: &'static str,
+    label: &'static str,
+    default: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    step: f64,
+) -> NodeFieldSpec {
+    NodeFieldSpec {
+        key,
+        label,
+        default: FieldDefault::Number(default),
+        kind: FieldKind::Number { min, max, step, kind: NumberKind::Angle },
+    }
+}
+
+const fn field_unitless(
+    key: &'static str,
+    label: &'static str,
+    default: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    step: f64,
+) -> NodeFieldSpec {
+    NodeFieldSpec {
+        key,
+        label,
+        default: FieldDefault::Number(default),
+        kind: FieldKind::Number { min, max, step, kind: NumberKind::Unitless },
     }
 }
 
@@ -225,9 +264,9 @@ const TRANSLATE_FIELDS: &[NodeFieldSpec] = &[
     field_number("x", "Position X", 0.0, None, None, 0.01),
     field_number("y", "Position Y", 0.0, None, None, 0.01),
     field_number("z", "Position Z", 0.0, None, None, 0.01),
-    field_number("rx", "Rotation X°", 0.0, Some(-180.0), Some(180.0), 0.1),
-    field_number("ry", "Rotation Y°", 0.0, Some(-180.0), Some(180.0), 0.1),
-    field_number("rz", "Rotation Z°", 0.0, Some(-180.0), Some(180.0), 0.1),
+    field_angle("rx", "Rotation X°", 0.0, Some(-180.0), Some(180.0), 0.1),
+    field_angle("ry", "Rotation Y°", 0.0, Some(-180.0), Some(180.0), 0.1),
+    field_angle("rz", "Rotation Z°", 0.0, Some(-180.0), Some(180.0), 0.1),
 ];
 
 const BOOLEAN_FIELDS: &[NodeFieldSpec] = &[field_choice(
@@ -242,13 +281,13 @@ const EXTRUDE_FIELDS: &[NodeFieldSpec] = &[
     field_choice("operation", "Operation", "new", &[("new", "New"), ("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect")]),
 ];
 
-const LOFT_FIELDS: &[NodeFieldSpec] = &[field_number("ruled", "Ruled", 0.0, Some(0.0), Some(1.0), 1.0)];
+const LOFT_FIELDS: &[NodeFieldSpec] = &[field_unitless("ruled", "Ruled", 0.0, Some(0.0), Some(1.0), 1.0)];
 
 const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
     field_number("length", "Distance", 2.0, Some(0.0), None, 0.1),
     field_choice("chamferType", "Type", "equal", &[("equal", "Equal distance"), ("two-distance", "Two distances"), ("distance-angle", "Distance + angle")]),
     field_number("distance2", "Distance 2", 2.0, Some(0.0), None, 0.1),
-    field_number("angle", "Angle°", 45.0, Some(0.1), Some(179.9), 0.1),
+    field_angle("angle", "Angle°", 45.0, Some(0.1), Some(179.9), 0.1),
 ];
 
 const FILLET_FIELDS: &[NodeFieldSpec] = &[
@@ -271,17 +310,17 @@ const MIRROR_FIELDS: &[NodeFieldSpec] = &[
 
 const SCATTER_FIELDS: &[NodeFieldSpec] = &[
     field_switch("combine", "Combine", true),
-    field_number("count", "Count", 1000.0, None, None, 0.1),
+    field_unitless("count", "Count", 1000.0, None, None, 0.1),
     field_number("spanX", "Span X", 240.0, None, None, 0.1),
     field_number("spanY", "Span Y", 160.0, None, None, 0.1),
-    field_number("seed", "Seed", 1.0, None, None, 0.1),
+    field_unitless("seed", "Seed", 1.0, None, None, 0.1),
     field_choice("distribution", "Distribution", "random", &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")]),
-    field_number("minScale", "Min scale", 0.75, None, None, 0.1),
-    field_number("maxScale", "Max scale", 1.25, None, None, 0.1),
+    field_unitless("minScale", "Min scale", 0.75, None, None, 0.1),
+    field_unitless("maxScale", "Max scale", 1.25, None, None, 0.1),
 ];
 
 const SPLINE_FIELDS: &[NodeFieldSpec] = &[
-    field_number("degree", "Degree", 3.0, Some(1.0), Some(9.0), 1.0),
+    field_unitless("degree", "Degree", 3.0, Some(1.0), Some(9.0), 1.0),
     field_switch("control", "Control points", false),
     field_switch("periodic", "Closed", false),
 ];
@@ -337,15 +376,15 @@ const PYRAMID_FIELDS: &[NodeFieldSpec] = &[
 
 const PARTIAL_SPHERE_FIELDS: &[NodeFieldSpec] = &[
     field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1),
-    field_number("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
-    field_number("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
+    field_angle("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
+    field_angle("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
 ];
 
 const PARTIAL_TORUS_FIELDS: &[NodeFieldSpec] = &[
     field_number("majorRadius", "Major radius", 15.0, Some(0.0), None, 0.1),
     field_number("minorRadius", "Minor radius", 5.0, Some(0.0), None, 0.1),
-    field_number("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
-    field_number("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
+    field_angle("startAngle", "Start angle°", 0.0, Some(-180.0), Some(180.0), 1.0),
+    field_angle("endAngle", "End angle°", 90.0, Some(-180.0), Some(180.0), 1.0),
 ];
 
 /// Fields for a primitive kind. Unknown kinds fall back to the box so editing a

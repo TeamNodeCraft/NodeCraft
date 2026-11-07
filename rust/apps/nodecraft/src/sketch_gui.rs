@@ -399,9 +399,14 @@ impl SketchGui {
                                         .color(theme.with_alpha(theme.muted, 190)),
                                 );
                                 ui.add(
-                                    egui::DragValue::new(&mut self.fillet_radius)
-                                        .speed(0.1)
-                                        .range(0.01..=10_000.0),
+                                    crate::expression_input::number_drag(
+                                        &mut self.fillet_radius,
+                                        nodecraft_node_contract::NumberKind::Length,
+                                        0.1,
+                                        2,
+                                        egui::Id::new("sketch-fillet-radius"),
+                                    )
+                                    .range(0.01..=10_000.0),
                                 );
                                 let ready = self.selected_curves.len() == 2;
                                 let response = ui_shape::button(

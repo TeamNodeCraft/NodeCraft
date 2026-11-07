@@ -43,4 +43,5 @@ solidcraft-render = { git = "https://github.com/tangency-labs/solidcraft", rev =
 solidcraft-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "481687fff38057691faf84a6fd844e826c552a6c", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+nodecraft-expr = { path = "../../crates/nodecraft-expr" }
 nodecraft-macos = { path = "../../crates/nodecraft-macos" }

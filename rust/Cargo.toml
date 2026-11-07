@@ -11,6 +11,7 @@ members = [
   "crates/nodecraft-sweep",
   "crates/nodecraft-search",
   "crates/nodecraft-macos",
+  "crates/nodecraft-expr",
   "crates/nodecraft-dock",
   "crates/nodecraft-session",
   "crates/nodecraft-solidcore",
@@ -27,6 +28,11 @@ members = [
   "crates/solidcore-stepio",
 ]
 resolver = "2"
+
+[profile.release]
+# Keep file:line frames in release crash reports (the panic location is always
+# available; line tables make the surrounding stack useful too).
+debug = "line-tables-only"
 
 [workspace.package]
 edition = "2024"

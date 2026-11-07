@@ -1,0 +1,10 @@
+[package]
+name = "nodecraft-expr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SolidCraft-compatible parameter expression parser and evaluator"
+publish = false
+
+[dependencies]
+serde = { workspace = true }

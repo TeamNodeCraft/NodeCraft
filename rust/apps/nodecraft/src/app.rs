@@ -486,6 +486,8 @@ pub struct NodeCraftApp {
     node_error_messages: std::collections::BTreeMap<String, String>,
     difference_error: Option<String>,
     difference_approximate: bool,
+    /// Developer-only: panic on the first frame to exercise the local crash dialog.
+    crash_test: bool,
     feature_overlay: bool,
     engine_threads: usize,
     mesher_threads: usize,
@@ -605,6 +607,7 @@ impl NodeCraftApp {
         initial: Option<PathBuf>,
         screenshot: Option<PathBuf>,
         render_model: bool,
+        crash_test: bool,
     ) -> Self {
         // Installed before the first frame so node-type SVG icons can be loaded.
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -681,6 +684,7 @@ impl NodeCraftApp {
             node_error_messages: std::collections::BTreeMap::new(),
             difference_error: None,
             difference_approximate: false,
+            crash_test,
             feature_overlay: settings.feature_overlay,
             engine_threads: settings.engine_threads,
             mesher_threads: settings.mesher_threads,
@@ -2349,7 +2353,31 @@ impl NodeCraftApp {
 }
 
 impl eframe::App for NodeCraftApp {
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.logic_inner(ctx, frame);
+        }));
+        if let Err(payload) = guarded {
+            crate::crash_report::handle_payload(payload);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.ui_inner(ui, frame);
+        }));
+        if let Err(payload) = guarded {
+            crate::crash_report::handle_payload(payload);
+        }
+    }
+}
+
+impl NodeCraftApp {
+    fn logic_inner(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.crash_test {
+            self.crash_test = false;
+            panic!("NodeCraft crash-handler test");
+        }
         if self
             .tool_search_clear_due
             .is_some_and(|due| Instant::now() >= due)
@@ -2478,7 +2506,7 @@ impl eframe::App for NodeCraftApp {
         theme.color(theme.window).to_normalized_gamma_f32()
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui_inner(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.render_model {
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 let rect = ui.max_rect();

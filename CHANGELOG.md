@@ -62,6 +62,24 @@
 
 ### App
 
+- Release builds now keep line tables (`debug = "line-tables-only"`) and the app
+  bundle no longer strips them, so release crash reports name file:line frames.
+- Added a local crash dialog: a panic is caught at the frame boundary and shown
+  with its message, location and backtrace. Nothing is sent or uploaded; the
+  full text is also written to the system temp directory. The native alert shows
+  only a short summary so it cannot grow past the display. Developers can test it
+  with `NODECRAFT_DEV=1 nodecraft --crash-test`.
+- Fixed a mesh crash when a degenerate triangle left a vertex without a normal
+  cluster: the shading split now uses a fallback cluster and tolerates the
+  degenerate face.
+- Numeric fields accept SolidCraft-compatible expressions such as `40/2`,
+  `2 in` and `90 deg`, including inspector fields, spline points and the sketch
+  fillet radius. The parser and dimensional evaluator live in the new
+  `nodecraft-expr` crate; one small adapter supplies the unit-kind-specific
+  drag-value widget and keeps the typed expression visible in the box until the
+  stored value changes. The expression cache lives in an input-only thread-local
+  map rather than egui's global data map, so it cannot collide with DragValue's
+  edit state; stale entries are invalidated without touching egui data.
 - The application crate now has `#![forbid(unsafe_code)]`. macOS Objective-C
   interop moved to the small `nodecraft-macos` boundary crate, which exposes
   only safe functions; document-open handoff and window chrome remain there.
