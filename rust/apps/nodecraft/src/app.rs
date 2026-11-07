@@ -2281,8 +2281,7 @@ impl NodeCraftApp {
             if path
                 .extension()
                 .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("nodecraft")
-                    || extension.eq_ignore_ascii_case("solidnode"))
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nodecraft"))
             {
                 self.open(path);
             }

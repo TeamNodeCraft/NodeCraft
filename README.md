@@ -29,7 +29,7 @@ open build/NodeCraft.app
 
 ## Documents
 
-NodeCraft registers `.nodecraft` and `.solidnode` documents with macOS. Open one
+NodeCraft registers `.nodecraft` documents with macOS. Open one
 from Finder, or with:
 
 ```sh

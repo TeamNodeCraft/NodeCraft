@@ -1,6 +1,1935 @@
 {
-  "format": "nodecraft",
-  "version": 1,
+  "schemaVersion": 2,
+  "id": "train",
+  "nodes": [
+    {
+      "id": "n1",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 110,
+        "width": 45,
+        "height": 8
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 0
+    },
+    {
+      "id": "n2",
+      "type": "translate",
+      "values": {
+        "x": 0,
+        "y": 0,
+        "z": 11,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 0
+    },
+    {
+      "id": "n3",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 90,
+        "width": 36,
+        "height": 22
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 120
+    },
+    {
+      "id": "n4",
+      "type": "translate",
+      "values": {
+        "x": 0,
+        "y": 0,
+        "z": 22,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 120
+    },
+    {
+      "id": "n5",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 26,
+        "width": 34,
+        "height": 30
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 240
+    },
+    {
+      "id": "n6",
+      "type": "translate",
+      "values": {
+        "x": -32,
+        "y": 0,
+        "z": 34,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 240
+    },
+    {
+      "id": "n7",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 14,
+        "height": 46
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 360
+    },
+    {
+      "id": "n8",
+      "type": "translate",
+      "values": {
+        "x": 10,
+        "y": 0,
+        "z": 34,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 360
+    },
+    {
+      "id": "n9",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 6,
+        "height": 18
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 480
+    },
+    {
+      "id": "n10",
+      "type": "translate",
+      "values": {
+        "x": 24,
+        "y": 0,
+        "z": 53,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 480
+    },
+    {
+      "id": "n11",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cone",
+        "bottomRadius": 7,
+        "topRadius": 4,
+        "height": 4
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 600
+    },
+    {
+      "id": "n12",
+      "type": "translate",
+      "values": {
+        "x": 24,
+        "y": 0,
+        "z": 63,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 600
+    },
+    {
+      "id": "n13",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 6,
+        "width": 42,
+        "height": 12
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 720
+    },
+    {
+      "id": "n14",
+      "type": "translate",
+      "values": {
+        "x": 49,
+        "y": 0,
+        "z": 16,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 720
+    },
+    {
+      "id": "n15",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 13,
+        "width": 8,
+        "height": 8
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 840
+    },
+    {
+      "id": "n16",
+      "type": "translate",
+      "values": {
+        "x": -51.5,
+        "y": 0,
+        "z": 18,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 840
+    },
+    {
+      "id": "n17",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 48,
+        "width": 32,
+        "height": 20
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 2400
+    },
+    {
+      "id": "n18",
+      "type": "translate",
+      "values": {
+        "x": -82,
+        "y": 0,
+        "z": 20,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2400
+    },
+    {
+      "id": "n19",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 86,
+        "width": 5,
+        "height": 3
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 980
+    },
+    {
+      "id": "n20",
+      "type": "translate",
+      "values": {
+        "x": 0,
+        "y": -19.5,
+        "z": 18.5,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 980
+    },
+    {
+      "id": "n21",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 86,
+        "width": 5,
+        "height": 3
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 980
+    },
+    {
+      "id": "n22",
+      "type": "translate",
+      "values": {
+        "x": 0,
+        "y": 19.5,
+        "z": 18.5,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 980
+    },
+    {
+      "id": "n23",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 5,
+        "height": 5
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1000
+    },
+    {
+      "id": "n24",
+      "type": "translate",
+      "values": {
+        "x": 47,
+        "y": 0,
+        "z": 34,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1000
+    },
+    {
+      "id": "n25",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "box",
+        "length": 40,
+        "width": 26,
+        "height": 7
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1020
+    },
+    {
+      "id": "n26",
+      "type": "translate",
+      "values": {
+        "x": -82,
+        "y": 0,
+        "z": 32.5,
+        "rx": 0,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1020
+    },
+    {
+      "id": "n27",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 11,
+        "height": 5
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1400
+    },
+    {
+      "id": "n28",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 2.5,
+        "height": 44
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1520
+    },
+    {
+      "id": "n29",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "torus",
+        "majorRadius": 14.5,
+        "minorRadius": 1.4
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1640
+    },
+    {
+      "id": "n30",
+      "type": "primitive",
+      "values": {
+        "primitiveType": "cylinder",
+        "radius": 0.8,
+        "height": 74
+      },
+      "suppressed": false,
+      "x": 0,
+      "y": 1760
+    },
+    {
+      "id": "n31",
+      "type": "translate",
+      "values": {
+        "x": -6,
+        "y": 0,
+        "z": 34,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1640
+    },
+    {
+      "id": "n32",
+      "type": "translate",
+      "values": {
+        "x": 16,
+        "y": 0,
+        "z": 34,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1640
+    },
+    {
+      "id": "n33",
+      "type": "translate",
+      "values": {
+        "x": 6,
+        "y": -16.5,
+        "z": 40,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1760
+    },
+    {
+      "id": "n34",
+      "type": "translate",
+      "values": {
+        "x": 6,
+        "y": 16.5,
+        "z": 40,
+        "rx": 0,
+        "ry": 90,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1760
+    },
+    {
+      "id": "n35",
+      "type": "translate",
+      "values": {
+        "x": -28,
+        "y": -20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1400
+    },
+    {
+      "id": "n36",
+      "type": "translate",
+      "values": {
+        "x": -28,
+        "y": 20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1500
+    },
+    {
+      "id": "n37",
+      "type": "translate",
+      "values": {
+        "x": 28,
+        "y": -20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1600
+    },
+    {
+      "id": "n38",
+      "type": "translate",
+      "values": {
+        "x": 28,
+        "y": 20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1700
+    },
+    {
+      "id": "n39",
+      "type": "translate",
+      "values": {
+        "x": -28,
+        "y": 0,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1800
+    },
+    {
+      "id": "n40",
+      "type": "translate",
+      "values": {
+        "x": 28,
+        "y": 0,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 1900
+    },
+    {
+      "id": "n41",
+      "type": "translate",
+      "values": {
+        "x": -72,
+        "y": -20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2000
+    },
+    {
+      "id": "n42",
+      "type": "translate",
+      "values": {
+        "x": -72,
+        "y": 20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2100
+    },
+    {
+      "id": "n43",
+      "type": "translate",
+      "values": {
+        "x": -92,
+        "y": -20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2200
+    },
+    {
+      "id": "n44",
+      "type": "translate",
+      "values": {
+        "x": -92,
+        "y": 20,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2300
+    },
+    {
+      "id": "n45",
+      "type": "translate",
+      "values": {
+        "x": -72,
+        "y": 0,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2400
+    },
+    {
+      "id": "n46",
+      "type": "translate",
+      "values": {
+        "x": -92,
+        "y": 0,
+        "z": 11,
+        "rx": 90,
+        "ry": 0,
+        "rz": 0
+      },
+      "suppressed": false,
+      "x": 300,
+      "y": 2500
+    },
+    {
+      "id": "n47",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 0
+    },
+    {
+      "id": "n48",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 110
+    },
+    {
+      "id": "n49",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 220
+    },
+    {
+      "id": "n50",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 330
+    },
+    {
+      "id": "n51",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 440
+    },
+    {
+      "id": "n52",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 550
+    },
+    {
+      "id": "n53",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 660
+    },
+    {
+      "id": "n54",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 770
+    },
+    {
+      "id": "n55",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 880
+    },
+    {
+      "id": "n56",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 990
+    },
+    {
+      "id": "n57",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 1100
+    },
+    {
+      "id": "n58",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 1210
+    },
+    {
+      "id": "n59",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 1320
+    },
+    {
+      "id": "n60",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 620,
+      "y": 1430
+    },
+    {
+      "id": "n61",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 1540
+    },
+    {
+      "id": "n62",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 1650
+    },
+    {
+      "id": "n63",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 1760
+    },
+    {
+      "id": "n64",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 1870
+    },
+    {
+      "id": "n65",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 1980
+    },
+    {
+      "id": "n66",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 2090
+    },
+    {
+      "id": "n67",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 870,
+      "y": 2200
+    },
+    {
+      "id": "n68",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1120,
+      "y": 2310
+    },
+    {
+      "id": "n69",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1120,
+      "y": 2420
+    },
+    {
+      "id": "n70",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1120,
+      "y": 2530
+    },
+    {
+      "id": "n71",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1120,
+      "y": 2640
+    },
+    {
+      "id": "n72",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1370,
+      "y": 2750
+    },
+    {
+      "id": "n73",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1370,
+      "y": 2860
+    },
+    {
+      "id": "n74",
+      "type": "fuse",
+      "values": {
+        "mode": "union"
+      },
+      "suppressed": false,
+      "x": 1620,
+      "y": 2970
+    },
+    {
+      "id": "n75",
+      "type": "chamfer",
+      "values": {
+        "mode": "fillet",
+        "length": 0.8,
+        "continuity": "",
+        "chamferType": "equal",
+        "distance2": 0.8,
+        "angle": 45,
+        "edges": [
+          {
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              0.0,
+              18.0,
+              33.0
+            ],
+            "fingerprint": {
+              "end": [
+                45.0,
+                18.0,
+                33.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -45.0,
+                18.0,
+                33.0
+              ]
+            },
+            "id": "edge:288a7bc1752c",
+            "kind": "line",
+            "length": 90.0,
+            "ordinal": 19,
+            "relativeCenter": [
+              0.6583851,
+              0.9,
+              0.5076923
+            ],
+            "relativeLength": 0.5017764,
+            "segments": [
+              [
+                8034,
+                8035
+              ]
+            ],
+            "topologyCount": 300,
+            "tracking": {
+              "end": [
+                45.0,
+                18.0,
+                33.0
+              ],
+              "faceAreas": [
+                1048.5566407598626,
+                1176.4979852436115
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  3.469446951953614e-18,
+                  1.0,
+                  2.7755575615628914e-17
+                ],
+                [
+                  1.5612511283791264e-17,
+                  1.3877787807814455e-17,
+                  1.0
+                ]
+              ],
+              "kind": "line",
+              "length": 90.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 90.0,
+              "start": [
+                -45.0,
+                18.0,
+                33.0
+              ]
+            }
+          },
+          {
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              0.0,
+              -18.0,
+              33.0
+            ],
+            "fingerprint": {
+              "end": [
+                45.0,
+                -18.0,
+                33.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -45.0,
+                -18.0,
+                33.0
+              ]
+            },
+            "id": "edge:6e977366812b",
+            "kind": "line",
+            "length": 90.0,
+            "ordinal": 23,
+            "relativeCenter": [
+              0.6583851,
+              0.1,
+              0.5076923
+            ],
+            "relativeLength": 0.5017764,
+            "segments": [
+              [
+                8042,
+                8043
+              ]
+            ],
+            "topologyCount": 300,
+            "tracking": {
+              "end": [
+                45.0,
+                -18.0,
+                33.0
+              ],
+              "faceAreas": [
+                1048.5566407598626,
+                1176.4979852436109
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  1.5612511283791264e-17,
+                  1.3877787807814455e-17,
+                  1.0
+                ],
+                [
+                  3.469446951953614e-18,
+                  -1.0,
+                  2.7755575615628914e-17
+                ]
+              ],
+              "kind": "line",
+              "length": 90.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 90.0,
+              "start": [
+                -45.0,
+                -18.0,
+                33.0
+              ]
+            }
+          },
+          {
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              -82.0,
+              -16.0,
+              30.0
+            ],
+            "fingerprint": {
+              "end": [
+                -58.0,
+                -16.0,
+                30.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -106.0,
+                -16.0,
+                30.0
+              ]
+            },
+            "id": "edge:fed76db53f33",
+            "kind": "line",
+            "length": 48.0,
+            "ordinal": 117,
+            "relativeCenter": [
+              0.1490683,
+              0.1444444,
+              0.4615385
+            ],
+            "relativeLength": 0.2676141,
+            "segments": [
+              [
+                9088,
+                9089
+              ]
+            ],
+            "topologyCount": 300,
+            "tracking": {
+              "end": [
+                -58.0,
+                -16.0,
+                30.0
+              ],
+              "faceAreas": [
+                495.9999999999995,
+                930.6385096442644
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  3.469446951953615e-17,
+                  -0.0,
+                  1.0
+                ],
+                [
+                  0.0,
+                  -1.0,
+                  0.0
+                ]
+              ],
+              "kind": "line",
+              "length": 48.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 48.0,
+              "start": [
+                -106.0,
+                -16.0,
+                30.0
+              ]
+            }
+          },
+          {
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              -82.0,
+              16.0,
+              30.0
+            ],
+            "fingerprint": {
+              "end": [
+                -58.0,
+                16.0,
+                30.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -106.0,
+                16.0,
+                30.0
+              ]
+            },
+            "id": "edge:f277c94eae42",
+            "kind": "line",
+            "length": 48.0,
+            "ordinal": 118,
+            "relativeCenter": [
+              0.1490683,
+              0.8555556,
+              0.4615385
+            ],
+            "relativeLength": 0.2676141,
+            "segments": [
+              [
+                9090,
+                9091
+              ]
+            ],
+            "topologyCount": 300,
+            "tracking": {
+              "end": [
+                -58.0,
+                16.0,
+                30.0
+              ],
+              "faceAreas": [
+                495.9999999999995,
+                930.6385096442642
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  3.469446951953615e-17,
+                  -0.0,
+                  1.0
+                ],
+                [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              ],
+              "kind": "line",
+              "length": 48.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 48.0,
+              "start": [
+                -106.0,
+                16.0,
+                30.0
+              ]
+            }
+          }
+        ]
+      },
+      "suppressed": false,
+      "x": 1900,
+      "y": 0
+    },
+    {
+      "id": "n76",
+      "type": "chamfer",
+      "values": {
+        "mode": "chamfer",
+        "length": 0.8,
+        "continuity": "",
+        "chamferType": "equal",
+        "distance2": 0.8,
+        "angle": 45,
+        "edges": [
+          {
+            "aliases": [
+              "edge(n3/plane/X-|n5/plane/Z+)",
+              "edge(n5/plane/X-|n5/plane/Z+)",
+              "edge(n15/plane/X+|n5/plane/Z+)"
+            ],
+            "axis": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "center": [
+              -45.0,
+              0.0,
+              49.0
+            ],
+            "fingerprint": {
+              "end": [
+                -45.0,
+                17.0,
+                49.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -45.0,
+                -17.0,
+                49.0
+              ]
+            },
+            "id": "edge:f1c59df3c65d",
+            "kind": "line",
+            "length": 34.0,
+            "name": "edge(n3/plane/X-|n5/plane/Z+)",
+            "ordinal": 29,
+            "relativeCenter": [
+              0.378882,
+              0.5,
+              0.7538462
+            ],
+            "relativeLength": 0.18956,
+            "segments": [
+              [
+                8318,
+                8319
+              ]
+            ],
+            "topologyCount": 312,
+            "tracking": {
+              "end": [
+                -45.0,
+                17.0,
+                49.0
+              ],
+              "faceAreas": [
+                884.0,
+                1135.725309649149
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  -1.0,
+                  6.938893903907228e-17,
+                  -9.71445146547012e-17
+                ],
+                [
+                  8.326672684688674e-17,
+                  6.93889390390723e-18,
+                  1.0
+                ]
+              ],
+              "kind": "line",
+              "length": 34.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 34.0,
+              "start": [
+                -45.0,
+                -17.0,
+                49.0
+              ]
+            }
+          },
+          {
+            "aliases": [
+              "edge(n5/plane/Y+|n5/plane/Z+)",
+              "edge(n21/plane/Y-|n5/plane/Z+)"
+            ],
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              -32.0,
+              17.0,
+              49.0
+            ],
+            "fingerprint": {
+              "end": [
+                -19.0,
+                17.0,
+                49.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -45.0,
+                17.0,
+                49.0
+              ]
+            },
+            "id": "edge:6612fb9f6dab",
+            "kind": "line",
+            "length": 26.0,
+            "name": "edge(n5/plane/Y+|n5/plane/Z+)",
+            "ordinal": 31,
+            "relativeCenter": [
+              0.4596273,
+              0.8777778,
+              0.7538462
+            ],
+            "relativeLength": 0.1449576,
+            "segments": [
+              [
+                8322,
+                8323
+              ]
+            ],
+            "topologyCount": 312,
+            "tracking": {
+              "end": [
+                -19.0,
+                17.0,
+                49.0
+              ],
+              "faceAreas": [
+                401.0120048038434,
+                884.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  -2.7755575615628914e-17,
+                  1.0,
+                  -6.9388939039072276e-18
+                ],
+                [
+                  8.326672684688674e-17,
+                  6.93889390390723e-18,
+                  1.0
+                ]
+              ],
+              "kind": "line",
+              "length": 26.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 26.0,
+              "start": [
+                -45.0,
+                17.0,
+                49.0
+              ]
+            }
+          },
+          {
+            "aliases": [
+              "edge(n5/plane/X+|n5/plane/Z+)"
+            ],
+            "axis": [
+              0.0,
+              1.0,
+              0.0
+            ],
+            "center": [
+              -19.0,
+              0.0,
+              49.0
+            ],
+            "fingerprint": {
+              "end": [
+                -19.0,
+                17.0,
+                49.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -19.0,
+                -17.0,
+                49.0
+              ]
+            },
+            "id": "edge:9583f3034cb4",
+            "kind": "line",
+            "length": 34.0,
+            "name": "edge(n5/plane/X+|n5/plane/Z+)",
+            "ordinal": 33,
+            "relativeCenter": [
+              0.5403727,
+              0.5,
+              0.7538462
+            ],
+            "relativeLength": 0.18956,
+            "segments": [
+              [
+                8326,
+                8327
+              ]
+            ],
+            "topologyCount": 312,
+            "tracking": {
+              "end": [
+                -19.0,
+                17.0,
+                49.0
+              ],
+              "faceAreas": [
+                540.500712539703,
+                884.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  1.0,
+                  -2.0816681711721685e-17,
+                  2.0816681711721685e-17
+                ],
+                [
+                  8.326672684688674e-17,
+                  6.93889390390723e-18,
+                  1.0
+                ]
+              ],
+              "kind": "line",
+              "length": 34.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 34.0,
+              "start": [
+                -19.0,
+                -17.0,
+                49.0
+              ]
+            }
+          },
+          {
+            "aliases": [
+              "edge(n5/plane/Y-|n5/plane/Z+)",
+              "edge(n19/plane/Y+|n5/plane/Z+)"
+            ],
+            "axis": [
+              1.0,
+              0.0,
+              0.0
+            ],
+            "center": [
+              -32.0,
+              -17.0,
+              49.0
+            ],
+            "fingerprint": {
+              "end": [
+                -19.0,
+                -17.0,
+                49.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "start": [
+                -45.0,
+                -17.0,
+                49.0
+              ]
+            },
+            "id": "edge:4a5b410b7041",
+            "kind": "line",
+            "length": 26.0,
+            "name": "edge(n5/plane/Y-|n5/plane/Z+)",
+            "ordinal": 35,
+            "relativeCenter": [
+              0.4596273,
+              0.1222222,
+              0.7538462
+            ],
+            "relativeLength": 0.1449576,
+            "segments": [
+              [
+                8330,
+                8331
+              ]
+            ],
+            "topologyCount": 312,
+            "tracking": {
+              "end": [
+                -19.0,
+                -17.0,
+                49.0
+              ],
+              "faceAreas": [
+                401.01200480384387,
+                884.0
+              ],
+              "faceKinds": [
+                "plane",
+                "plane"
+              ],
+              "faceNormals": [
+                [
+                  8.326672684688674e-17,
+                  6.93889390390723e-18,
+                  1.0
+                ],
+                [
+                  -2.7755575615628914e-17,
+                  -1.0,
+                  -6.9388939039072276e-18
+                ]
+              ],
+              "kind": "line",
+              "length": 26.0,
+              "profile": [
+                [
+                  0.0,
+                  0.0
+                ],
+                [
+                  0.125,
+                  0.0
+                ],
+                [
+                  0.25,
+                  0.0
+                ],
+                [
+                  0.375,
+                  0.0
+                ],
+                [
+                  0.5,
+                  0.0
+                ],
+                [
+                  0.625,
+                  0.0
+                ],
+                [
+                  0.75,
+                  0.0
+                ],
+                [
+                  0.875,
+                  0.0
+                ],
+                [
+                  1.0,
+                  0.0
+                ]
+              ],
+              "profileLength": 26.0,
+              "start": [
+                -45.0,
+                -17.0,
+                49.0
+              ]
+            }
+          }
+        ]
+      },
+      "suppressed": false,
+      "x": 2180,
+      "y": 0
+    }
+  ],
   "connections": [
     {
       "from": "n1",
@@ -525,2324 +2454,8 @@
       "in": "shape"
     }
   ],
-  "nodes": [
-    {
-      "id": "n1",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 110,
-        "width": 45,
-        "height": 8
-      },
-      "x": 0,
-      "y": 0,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n2",
-      "type": "translate",
-      "values": {
-        "x": 0,
-        "y": 0,
-        "z": 11,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 0,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n3",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 90,
-        "width": 36,
-        "height": 22
-      },
-      "x": 0,
-      "y": 120,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n4",
-      "type": "translate",
-      "values": {
-        "x": 0,
-        "y": 0,
-        "z": 22,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 120,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n5",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 26,
-        "width": 34,
-        "height": 30
-      },
-      "x": 0,
-      "y": 240,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n6",
-      "type": "translate",
-      "values": {
-        "x": -32,
-        "y": 0,
-        "z": 34,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 240,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n7",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 14,
-        "height": 46
-      },
-      "x": 0,
-      "y": 360,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n8",
-      "type": "translate",
-      "values": {
-        "x": 10,
-        "y": 0,
-        "z": 34,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 360,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n9",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 6,
-        "height": 18
-      },
-      "x": 0,
-      "y": 480,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n10",
-      "type": "translate",
-      "values": {
-        "x": 24,
-        "y": 0,
-        "z": 53,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 480,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n11",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cone",
-        "bottomRadius": 7,
-        "topRadius": 4,
-        "height": 4
-      },
-      "x": 0,
-      "y": 600,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n12",
-      "type": "translate",
-      "values": {
-        "x": 24,
-        "y": 0,
-        "z": 63,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 600,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n13",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 6,
-        "width": 42,
-        "height": 12
-      },
-      "x": 0,
-      "y": 720,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n14",
-      "type": "translate",
-      "values": {
-        "x": 49,
-        "y": 0,
-        "z": 16,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 720,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n15",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 13,
-        "width": 8,
-        "height": 8
-      },
-      "x": 0,
-      "y": 840,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n16",
-      "type": "translate",
-      "values": {
-        "x": -51.5,
-        "y": 0,
-        "z": 18,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 840,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n17",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 48,
-        "width": 32,
-        "height": 20
-      },
-      "x": 0,
-      "y": 2400,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n18",
-      "type": "translate",
-      "values": {
-        "x": -82,
-        "y": 0,
-        "z": 20,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2400,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n19",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 86,
-        "width": 5,
-        "height": 3
-      },
-      "x": 0,
-      "y": 980,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n20",
-      "type": "translate",
-      "values": {
-        "x": 0,
-        "y": -19.5,
-        "z": 18.5,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 980,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n21",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 86,
-        "width": 5,
-        "height": 3
-      },
-      "x": 0,
-      "y": 980,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n22",
-      "type": "translate",
-      "values": {
-        "x": 0,
-        "y": 19.5,
-        "z": 18.5,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 980,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n23",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 5,
-        "height": 5
-      },
-      "x": 0,
-      "y": 1000,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n24",
-      "type": "translate",
-      "values": {
-        "x": 47,
-        "y": 0,
-        "z": 34,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1000,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n25",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 40,
-        "width": 26,
-        "height": 7
-      },
-      "x": 0,
-      "y": 1020,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n26",
-      "type": "translate",
-      "values": {
-        "x": -82,
-        "y": 0,
-        "z": 32.5,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1020,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n27",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 11,
-        "height": 5
-      },
-      "x": 0,
-      "y": 1400,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n28",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 2.5,
-        "height": 44
-      },
-      "x": 0,
-      "y": 1520,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n29",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "torus",
-        "majorRadius": 14.5,
-        "minorRadius": 1.4
-      },
-      "x": 0,
-      "y": 1640,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n30",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 0.8,
-        "height": 74
-      },
-      "x": 0,
-      "y": 1760,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n31",
-      "type": "translate",
-      "values": {
-        "x": -6,
-        "y": 0,
-        "z": 34,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1640,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n32",
-      "type": "translate",
-      "values": {
-        "x": 16,
-        "y": 0,
-        "z": 34,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1640,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n33",
-      "type": "translate",
-      "values": {
-        "x": 6,
-        "y": -16.5,
-        "z": 40,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1760,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n34",
-      "type": "translate",
-      "values": {
-        "x": 6,
-        "y": 16.5,
-        "z": 40,
-        "rx": 0,
-        "ry": 90,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1760,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n35",
-      "type": "translate",
-      "values": {
-        "x": -28,
-        "y": -20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1400,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n36",
-      "type": "translate",
-      "values": {
-        "x": -28,
-        "y": 20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1500,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n37",
-      "type": "translate",
-      "values": {
-        "x": 28,
-        "y": -20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1600,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n38",
-      "type": "translate",
-      "values": {
-        "x": 28,
-        "y": 20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1700,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n39",
-      "type": "translate",
-      "values": {
-        "x": -28,
-        "y": 0,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1800,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n40",
-      "type": "translate",
-      "values": {
-        "x": 28,
-        "y": 0,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 1900,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n41",
-      "type": "translate",
-      "values": {
-        "x": -72,
-        "y": -20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2000,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n42",
-      "type": "translate",
-      "values": {
-        "x": -72,
-        "y": 20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2100,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n43",
-      "type": "translate",
-      "values": {
-        "x": -92,
-        "y": -20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2200,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n44",
-      "type": "translate",
-      "values": {
-        "x": -92,
-        "y": 20,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2300,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n45",
-      "type": "translate",
-      "values": {
-        "x": -72,
-        "y": 0,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2400,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n46",
-      "type": "translate",
-      "values": {
-        "x": -92,
-        "y": 0,
-        "z": 11,
-        "rx": 90,
-        "ry": 0,
-        "rz": 0
-      },
-      "x": 300,
-      "y": 2500,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n47",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 0,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n48",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 110,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n49",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 220,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n50",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 330,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n51",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 440,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n52",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 550,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n53",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 660,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n54",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 770,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n55",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 880,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n56",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 990,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n57",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 1100,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n58",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 1210,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n59",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 1320,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n60",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 620,
-      "y": 1430,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n61",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 1540,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n62",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 1650,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n63",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 1760,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n64",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 1870,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n65",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 1980,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n66",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 2090,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n67",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 870,
-      "y": 2200,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n68",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1120,
-      "y": 2310,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n69",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1120,
-      "y": 2420,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n70",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1120,
-      "y": 2530,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n71",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1120,
-      "y": 2640,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n72",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1370,
-      "y": 2750,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n73",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1370,
-      "y": 2860,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n74",
-      "type": "fuse",
-      "values": {
-        "mode": "union"
-      },
-      "x": 1620,
-      "y": 2970,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n75",
-      "type": "chamfer",
-      "values": {
-        "mode": "fillet",
-        "length": 0.8,
-        "continuity": "",
-        "chamferType": "equal",
-        "distance2": 0.8,
-        "angle": 45,
-        "edges": [
-          {
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              0.0,
-              18.0,
-              33.0
-            ],
-            "fingerprint": {
-              "end": [
-                45.0,
-                18.0,
-                33.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -45.0,
-                18.0,
-                33.0
-              ]
-            },
-            "id": "edge:288a7bc1752c",
-            "kind": "line",
-            "length": 90.0,
-            "ordinal": 19,
-            "relativeCenter": [
-              0.6583851,
-              0.9,
-              0.5076923
-            ],
-            "relativeLength": 0.5017764,
-            "segments": [
-              [
-                8034,
-                8035
-              ]
-            ],
-            "topologyCount": 300,
-            "tracking": {
-              "end": [
-                45.0,
-                18.0,
-                33.0
-              ],
-              "faceAreas": [
-                1048.5566407598626,
-                1176.4979852436115
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  3.469446951953614e-18,
-                  1.0,
-                  2.7755575615628914e-17
-                ],
-                [
-                  1.5612511283791264e-17,
-                  1.3877787807814455e-17,
-                  1.0
-                ]
-              ],
-              "kind": "line",
-              "length": 90.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 90.0,
-              "start": [
-                -45.0,
-                18.0,
-                33.0
-              ]
-            }
-          },
-          {
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              0.0,
-              -18.0,
-              33.0
-            ],
-            "fingerprint": {
-              "end": [
-                45.0,
-                -18.0,
-                33.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -45.0,
-                -18.0,
-                33.0
-              ]
-            },
-            "id": "edge:6e977366812b",
-            "kind": "line",
-            "length": 90.0,
-            "ordinal": 23,
-            "relativeCenter": [
-              0.6583851,
-              0.1,
-              0.5076923
-            ],
-            "relativeLength": 0.5017764,
-            "segments": [
-              [
-                8042,
-                8043
-              ]
-            ],
-            "topologyCount": 300,
-            "tracking": {
-              "end": [
-                45.0,
-                -18.0,
-                33.0
-              ],
-              "faceAreas": [
-                1048.5566407598626,
-                1176.4979852436109
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  1.5612511283791264e-17,
-                  1.3877787807814455e-17,
-                  1.0
-                ],
-                [
-                  3.469446951953614e-18,
-                  -1.0,
-                  2.7755575615628914e-17
-                ]
-              ],
-              "kind": "line",
-              "length": 90.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 90.0,
-              "start": [
-                -45.0,
-                -18.0,
-                33.0
-              ]
-            }
-          },
-          {
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              -82.0,
-              -16.0,
-              30.0
-            ],
-            "fingerprint": {
-              "end": [
-                -58.0,
-                -16.0,
-                30.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -106.0,
-                -16.0,
-                30.0
-              ]
-            },
-            "id": "edge:fed76db53f33",
-            "kind": "line",
-            "length": 48.0,
-            "ordinal": 117,
-            "relativeCenter": [
-              0.1490683,
-              0.1444444,
-              0.4615385
-            ],
-            "relativeLength": 0.2676141,
-            "segments": [
-              [
-                9088,
-                9089
-              ]
-            ],
-            "topologyCount": 300,
-            "tracking": {
-              "end": [
-                -58.0,
-                -16.0,
-                30.0
-              ],
-              "faceAreas": [
-                495.9999999999995,
-                930.6385096442644
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  3.469446951953615e-17,
-                  -0.0,
-                  1.0
-                ],
-                [
-                  0.0,
-                  -1.0,
-                  0.0
-                ]
-              ],
-              "kind": "line",
-              "length": 48.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 48.0,
-              "start": [
-                -106.0,
-                -16.0,
-                30.0
-              ]
-            }
-          },
-          {
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              -82.0,
-              16.0,
-              30.0
-            ],
-            "fingerprint": {
-              "end": [
-                -58.0,
-                16.0,
-                30.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -106.0,
-                16.0,
-                30.0
-              ]
-            },
-            "id": "edge:f277c94eae42",
-            "kind": "line",
-            "length": 48.0,
-            "ordinal": 118,
-            "relativeCenter": [
-              0.1490683,
-              0.8555556,
-              0.4615385
-            ],
-            "relativeLength": 0.2676141,
-            "segments": [
-              [
-                9090,
-                9091
-              ]
-            ],
-            "topologyCount": 300,
-            "tracking": {
-              "end": [
-                -58.0,
-                16.0,
-                30.0
-              ],
-              "faceAreas": [
-                495.9999999999995,
-                930.6385096442642
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  3.469446951953615e-17,
-                  -0.0,
-                  1.0
-                ],
-                [
-                  0.0,
-                  1.0,
-                  0.0
-                ]
-              ],
-              "kind": "line",
-              "length": 48.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 48.0,
-              "start": [
-                -106.0,
-                16.0,
-                30.0
-              ]
-            }
-          }
-        ]
-      },
-      "x": 1900,
-      "y": 0,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    },
-    {
-      "id": "n76",
-      "type": "chamfer",
-      "values": {
-        "mode": "chamfer",
-        "length": 0.8,
-        "continuity": "",
-        "chamferType": "equal",
-        "distance2": 0.8,
-        "angle": 45,
-        "edges": [
-          {
-            "aliases": [
-              "edge(n3/plane/X-|n5/plane/Z+)",
-              "edge(n5/plane/X-|n5/plane/Z+)",
-              "edge(n15/plane/X+|n5/plane/Z+)"
-            ],
-            "axis": [
-              0.0,
-              1.0,
-              0.0
-            ],
-            "center": [
-              -45.0,
-              0.0,
-              49.0
-            ],
-            "fingerprint": {
-              "end": [
-                -45.0,
-                17.0,
-                49.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -45.0,
-                -17.0,
-                49.0
-              ]
-            },
-            "id": "edge:f1c59df3c65d",
-            "kind": "line",
-            "length": 34.0,
-            "name": "edge(n3/plane/X-|n5/plane/Z+)",
-            "ordinal": 29,
-            "relativeCenter": [
-              0.378882,
-              0.5,
-              0.7538462
-            ],
-            "relativeLength": 0.18956,
-            "segments": [
-              [
-                8318,
-                8319
-              ]
-            ],
-            "topologyCount": 312,
-            "tracking": {
-              "end": [
-                -45.0,
-                17.0,
-                49.0
-              ],
-              "faceAreas": [
-                884.0,
-                1135.725309649149
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  -1.0,
-                  6.938893903907228e-17,
-                  -9.71445146547012e-17
-                ],
-                [
-                  8.326672684688674e-17,
-                  6.93889390390723e-18,
-                  1.0
-                ]
-              ],
-              "kind": "line",
-              "length": 34.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 34.0,
-              "start": [
-                -45.0,
-                -17.0,
-                49.0
-              ]
-            }
-          },
-          {
-            "aliases": [
-              "edge(n5/plane/Y+|n5/plane/Z+)",
-              "edge(n21/plane/Y-|n5/plane/Z+)"
-            ],
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              -32.0,
-              17.0,
-              49.0
-            ],
-            "fingerprint": {
-              "end": [
-                -19.0,
-                17.0,
-                49.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -45.0,
-                17.0,
-                49.0
-              ]
-            },
-            "id": "edge:6612fb9f6dab",
-            "kind": "line",
-            "length": 26.0,
-            "name": "edge(n5/plane/Y+|n5/plane/Z+)",
-            "ordinal": 31,
-            "relativeCenter": [
-              0.4596273,
-              0.8777778,
-              0.7538462
-            ],
-            "relativeLength": 0.1449576,
-            "segments": [
-              [
-                8322,
-                8323
-              ]
-            ],
-            "topologyCount": 312,
-            "tracking": {
-              "end": [
-                -19.0,
-                17.0,
-                49.0
-              ],
-              "faceAreas": [
-                401.0120048038434,
-                884.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  -2.7755575615628914e-17,
-                  1.0,
-                  -6.9388939039072276e-18
-                ],
-                [
-                  8.326672684688674e-17,
-                  6.93889390390723e-18,
-                  1.0
-                ]
-              ],
-              "kind": "line",
-              "length": 26.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 26.0,
-              "start": [
-                -45.0,
-                17.0,
-                49.0
-              ]
-            }
-          },
-          {
-            "aliases": [
-              "edge(n5/plane/X+|n5/plane/Z+)"
-            ],
-            "axis": [
-              0.0,
-              1.0,
-              0.0
-            ],
-            "center": [
-              -19.0,
-              0.0,
-              49.0
-            ],
-            "fingerprint": {
-              "end": [
-                -19.0,
-                17.0,
-                49.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -19.0,
-                -17.0,
-                49.0
-              ]
-            },
-            "id": "edge:9583f3034cb4",
-            "kind": "line",
-            "length": 34.0,
-            "name": "edge(n5/plane/X+|n5/plane/Z+)",
-            "ordinal": 33,
-            "relativeCenter": [
-              0.5403727,
-              0.5,
-              0.7538462
-            ],
-            "relativeLength": 0.18956,
-            "segments": [
-              [
-                8326,
-                8327
-              ]
-            ],
-            "topologyCount": 312,
-            "tracking": {
-              "end": [
-                -19.0,
-                17.0,
-                49.0
-              ],
-              "faceAreas": [
-                540.500712539703,
-                884.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  1.0,
-                  -2.0816681711721685e-17,
-                  2.0816681711721685e-17
-                ],
-                [
-                  8.326672684688674e-17,
-                  6.93889390390723e-18,
-                  1.0
-                ]
-              ],
-              "kind": "line",
-              "length": 34.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 34.0,
-              "start": [
-                -19.0,
-                -17.0,
-                49.0
-              ]
-            }
-          },
-          {
-            "aliases": [
-              "edge(n5/plane/Y-|n5/plane/Z+)",
-              "edge(n19/plane/Y+|n5/plane/Z+)"
-            ],
-            "axis": [
-              1.0,
-              0.0,
-              0.0
-            ],
-            "center": [
-              -32.0,
-              -17.0,
-              49.0
-            ],
-            "fingerprint": {
-              "end": [
-                -19.0,
-                -17.0,
-                49.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "start": [
-                -45.0,
-                -17.0,
-                49.0
-              ]
-            },
-            "id": "edge:4a5b410b7041",
-            "kind": "line",
-            "length": 26.0,
-            "name": "edge(n5/plane/Y-|n5/plane/Z+)",
-            "ordinal": 35,
-            "relativeCenter": [
-              0.4596273,
-              0.1222222,
-              0.7538462
-            ],
-            "relativeLength": 0.1449576,
-            "segments": [
-              [
-                8330,
-                8331
-              ]
-            ],
-            "topologyCount": 312,
-            "tracking": {
-              "end": [
-                -19.0,
-                -17.0,
-                49.0
-              ],
-              "faceAreas": [
-                401.01200480384387,
-                884.0
-              ],
-              "faceKinds": [
-                "plane",
-                "plane"
-              ],
-              "faceNormals": [
-                [
-                  8.326672684688674e-17,
-                  6.93889390390723e-18,
-                  1.0
-                ],
-                [
-                  -2.7755575615628914e-17,
-                  -1.0,
-                  -6.9388939039072276e-18
-                ]
-              ],
-              "kind": "line",
-              "length": 26.0,
-              "profile": [
-                [
-                  0.0,
-                  0.0
-                ],
-                [
-                  0.125,
-                  0.0
-                ],
-                [
-                  0.25,
-                  0.0
-                ],
-                [
-                  0.375,
-                  0.0
-                ],
-                [
-                  0.5,
-                  0.0
-                ],
-                [
-                  0.625,
-                  0.0
-                ],
-                [
-                  0.75,
-                  0.0
-                ],
-                [
-                  0.875,
-                  0.0
-                ],
-                [
-                  1.0,
-                  0.0
-                ]
-              ],
-              "profileLength": 26.0,
-              "start": [
-                -45.0,
-                -17.0,
-                49.0
-              ]
-            }
-          }
-        ]
-      },
-      "x": 2180,
-      "y": 0,
-      "suppressed": false,
-      "cache": {
-        "key": null,
-        "state": "dirty",
-        "upstream": []
-      }
-    }
-  ],
-  "viewedNodes": {
-    "1": "n76",
-    "2": "n76"
-  },
-  "view": {
-    "zoom": 0.65,
-    "pan": {
-      "x": -350,
-      "y": 620
-    }
+  "interface": {
+    "inputs": [],
+    "outputs": []
   }
 }

@@ -16,17 +16,6 @@ pub fn canonicalize_document(document: &mut GraphDocument) {
 /// node's mode/space/identity and are needed by the UI and content hash.
 pub fn canonicalize_node(node: &mut GraphNode) {
     if !node.values.is_object() { node.values = json!({}); }
-    // Legacy documents stored expressions under values._expressions. Move them
-    // to the node-level map and never serialize the reserved value key again.
-    if let Some(legacy) = node.values.as_object_mut().and_then(|values| values.remove("_expressions")) {
-        if let Value::Object(legacy) = legacy {
-            for (field, source) in legacy {
-                if let Value::String(source) = source {
-                    node.expressions.entry(field).or_insert(source);
-                }
-            }
-        }
-    }
     // Older documents stored fillets as chamfer nodes with mode: "fillet".
     if node.node_type == "chamfer"
         && node.values.get("mode").and_then(serde_json::Value::as_str) == Some("fillet")

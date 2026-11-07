@@ -27,7 +27,6 @@
             <key>CFBundleTypeExtensions</key>
             <array>
                 <string>nodecraft</string>
-                <string>solidnode</string>
             </array>
         </dict>
     </array>
@@ -45,7 +44,6 @@
                 <key>public.filename-extension</key>
                 <array>
                     <string>nodecraft</string>
-                    <string>solidnode</string>
                 </array>
                 <key>public.mime-type</key><string>application/json</string>
             </dict>

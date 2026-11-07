@@ -1,7 +1,6 @@
 {
-  "format": "nodecraft",
-  "schemaVersion": 1,
-  "version": 2,
+  "schemaVersion": 2,
+  "id": "solids-showcase",
   "nodes": [
     {
       "id": "box",
@@ -406,7 +405,8 @@
       "out": "shape"
     }
   ],
-  "viewedNodes": {
-    "1": "showcase"
+  "interface": {
+    "inputs": [],
+    "outputs": []
   }
 }

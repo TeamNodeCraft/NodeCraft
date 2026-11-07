@@ -315,26 +315,6 @@ mod tests {
         save_atomic(&path, &doc).expect("save");
         let loaded = load(&path).expect("load");
         assert_eq!(loaded.nodes[0].expressions["length"], "2/1");
-        assert!(loaded.nodes[0].values.get("_expressions").is_none());
-        std::fs::remove_dir_all(dir).ok();
-    }
-
-    #[test]
-    fn legacy_expressions_move_from_values_on_load() {
-        let dir = test_dir();
-        let path = dir.join("legacy.nodecraft");
-        std::fs::write(
-            &path,
-            r#"{"schemaVersion":1,"id":"legacy","nodes":[{"id":"a","type":"primitive","values":{"primitiveType":"box","_expressions":{"length":"2/1"}},"suppressed":false,"x":0.0,"y":0.0}],"connections":[]}"#,
-        )
-        .expect("write");
-        let loaded = load(&path).expect("load");
-        assert_eq!(loaded.nodes[0].expressions["length"], "2/1");
-        assert!(loaded.nodes[0].values.get("_expressions").is_none());
-        save_atomic(&path, &loaded).expect("save");
-        let text = std::fs::read_to_string(&path).expect("saved text");
-        assert!(text.contains("\"expressions\""));
-        assert!(!text.contains("_expressions"));
         std::fs::remove_dir_all(dir).ok();
     }
 

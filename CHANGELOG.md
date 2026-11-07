@@ -82,11 +82,11 @@
   click is detected from the field's previous rect so DragValue cannot seed its
   editor with the formatted number first. Expressions are saved in the node's
   JSON at the node level as `expressions`, so the source survives save/reload.
-  Legacy `values._expressions` is migrated on load; new documents use
-  `schemaVersion: 2`. The legacy `.solidnode` fixture was migrated to the new
-  node-level shape as well. Invalid expressions do not change the stored number (no NaN/0 is committed); SolidCraft
-  stores the source and blocks apply, while this numeric-value adapter discards
-  invalid text on focus loss. The expression cache lives in an input-only thread-local
+  All tracked test documents are now `schemaVersion: 2`. The legacy
+  `.solidnode` and `values._expressions` compatibility paths were removed.
+  Invalid expressions do not change the stored number (no NaN/0 is committed);
+  SolidCraft stores the source and blocks apply, while this numeric-value adapter
+  discards invalid text on focus loss. The expression cache lives in an input-only thread-local
   map rather than egui's global data map, so it cannot collide with DragValue's
   edit state; stale entries are invalidated without touching egui data.
 - Node evaluation errors now float at the bottom of the 3D viewer instead of
@@ -98,7 +98,7 @@
 - Renamed the desktop application package and binary from `nodecraft-egui` to
   `nodecraft`; the macOS bundle is now `NodeCraft.app` with the `NodeCraft`
   executable.
-- Registered `.nodecraft` and `.solidnode` documents with macOS. Finder opens
+- Registered `.nodecraft` documents with macOS. Finder opens
   them as app tabs, including documents opened while the app is already
   running.
 - The inspector disclosure chevron was replaced by a themed, centred reset

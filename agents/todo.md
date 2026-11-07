@@ -27,7 +27,7 @@ Priority order is approximate.
   remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 879 passed / 1 failed / 11 ignored. The single failure is the
+- Workspace tests: 878 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
 ## SolidCore f8685cdc pin bump (completed)
@@ -66,8 +66,8 @@ the node's free-form `values` object:
 }
 ```
 
-It is now migrated to the node-level format on load and never written by the
-current app. New documents use `schemaVersion: 2`.
+The converter has been removed. Existing tracked test documents were rewritten
+to the node-level format, and new documents use `schemaVersion: 2`.
 
 Problems with the old shape:
 
@@ -114,9 +114,9 @@ Rules for the migration:
       only an expression does not invalidate geometry caches unnecessarily.
 - [ ] Preserve invalid source and report it in the UI; do not silently drop or
       repair user-edited expressions on load.
-- [x] Add a schema/version migration that reads legacy
-      `values._expressions` and writes `node.expressions`.
-- [x] Add round-trip and legacy-migration tests for expressions and node hashes.
+- [x] Remove the legacy converter and rewrite the existing tracked documents to
+      the node-level format.
+- [x] Add round-trip tests for expressions and node hashes.
 - [ ] Decide whether expression source belongs in linked-part content hashes or
       only in the local project revision.
 - [x] Bump `schemaVersion` to 2 and document the format change before V1 freezes
