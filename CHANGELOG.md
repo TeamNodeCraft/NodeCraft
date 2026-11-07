@@ -96,6 +96,8 @@
   cable opaque. The
   luminosity control now changes the wheel's own brightness. The CPU cable
   fallback now uses the themed cable/outline colours, alpha and widths.
+- The colour picker uses luminosity and opacity icons beside its sliders,
+  with the wheel above and the sliders beneath it.
 - Cable edge anti-aliasing is now pixel-sized instead of proportional to cable
   width, so thick zoomed-in cables stay sharp. The colour wheel updates its
   luminosity continuously instead of through a 64-step texture cache.

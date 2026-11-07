@@ -358,6 +358,25 @@ fn make_color_wheel_image(radius: f32, size: f32, value: f32) -> egui::ColorImag
 /// gamma-decoded to HSV value, giving much finer control near black.
 const LUMINOSITY_GAMMA: f32 = 2.2;
 
+fn color_picker_slider(
+    ui: &mut egui::Ui,
+    icon: &'static [u8],
+    image_id: &'static str,
+    value: &mut f32,
+) -> bool {
+    let theme = crate::theme::get();
+    let svg = crate::app::tint_svg(icon, &crate::theme::Theme::hex(theme.icon));
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Image::from_bytes(image_id, svg.into_bytes())
+                .fit_to_exact_size(egui::Vec2::splat(16.0)),
+        );
+        ui.add(egui::Slider::new(value, 0.0..=1.0).show_value(true))
+            .changed()
+    })
+    .inner
+}
+
 #[derive(Clone, Copy)]
 struct ColorWheelState {
     hsva: egui::ecolor::Hsva,
@@ -475,19 +494,24 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
     );
 
     ui.add_space(6.0);
-    ui.spacing_mut().slider_width = 150.0;
+    ui.spacing_mut().slider_width = size - 26.0;
     let mut luminosity = hsva.v.powf(1.0 / LUMINOSITY_GAMMA);
-    if ui
-        .add(egui::Slider::new(&mut luminosity, 0.0..=1.0).text("Luminosity"))
-        .changed()
-    {
+    if color_picker_slider(
+        ui,
+        include_bytes!("../../../../../vendor/fluent/brightness_high.svg"),
+        "bytes://theme-luminosity.svg",
+        &mut luminosity,
+    ) {
         hsva.v = luminosity.powf(LUMINOSITY_GAMMA);
         changed = true;
     }
     let mut alpha = f32::from(rgba[3]) / 255.0;
-    let alpha_changed = ui
-        .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("Alpha"))
-        .changed();
+    let alpha_changed = color_picker_slider(
+        ui,
+        include_bytes!("../../../../../vendor/iconify-design/opacity.svg"),
+        "bytes://theme-opacity.svg",
+        &mut alpha,
+    );
     let out_alpha = if alpha_changed {
         (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
     } else {
