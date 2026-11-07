@@ -1367,6 +1367,38 @@ mod tests {
         assert!(brep_is_connected_solid(&cylinder));
     }
 
+    #[test]
+    fn exact_extrude_matches_solidcore_ops_prism_volume() {
+        let mut kernel = Kernel::default();
+        let brep = box_brep(&mut kernel);
+        let top = face_with_normal(&kernel, &brep, Vec3::new(0.0, 0.0, 1.0));
+        let extruded = extrude_planar_face_exact(&mut kernel, &brep, top, 5.0).expect("extrude");
+        let extruded_volume = nodecraft_layers::kernel_volume(&mut kernel, &extruded)
+            .expect("extruded volume");
+
+        let region = solidcore_record::Region2 {
+            outer: solidcore_record::Loop2::polygon(&[
+                solidcore_record::Vec2::new(0.0, 0.0),
+                solidcore_record::Vec2::new(10.0, 0.0),
+                solidcore_record::Vec2::new(10.0, 4.0),
+                solidcore_record::Vec2::new(0.0, 4.0),
+            ]),
+            holes: Vec::new(),
+        };
+        let prism = solidcore_ops::prism::extrude_planar_regions(
+            &solidcore_record::Plane::XY,
+            &[region],
+            20.0,
+            25.0,
+        )
+        .expect("ops prism");
+        let prism_volume = prism.volume(1.0e-7).expect("prism volume");
+
+        assert!((extruded_volume - 200.0).abs() < 1.0e-6, "{extruded_volume}");
+        assert!((prism_volume - 200.0).abs() < 1.0e-6, "{prism_volume}");
+        assert!((extruded_volume - prism_volume).abs() < 1.0e-6);
+    }
+
     /// Documents the pinned solidcore capped-sweep defect: both sweep routes produce
     /// correct geometry but not a connected solid yet. Unignore once solidcore's cap
     /// creation/stitching produces one shell.

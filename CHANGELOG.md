@@ -23,6 +23,9 @@
   every primitive display path uses `solidcore-tess`.
 - The STEP legacy fallback is limited to the record layer's unrepresentable
   analytic-curve refusal; other upstream tessellation errors are not masked.
+- Extrude/prism and loft/sweep volume parity tests now cover the upstream ops
+  paths. Display evaluation cancels cooperatively between nodes when a newer
+  edit arrives.
 - Exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; invalid results report the upstream `CheckReport`
   text.

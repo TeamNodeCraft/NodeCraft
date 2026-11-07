@@ -89,8 +89,9 @@ UI edit -> EvalJob(session document + linked documents)
 
 The exact and display phases are separate calls on the same worker thread. The
 exact phase is the authority; display meshes and their caches are disposable.
-Display work is not yet fully concurrent: it is cancelled only when a queued job
-exists at the exact/display boundary.
+Display work is not yet fully concurrent. A newer edit cancels it cooperatively:
+the display evaluator checks the revision token between nodes and the mesher
+checks it per body, but display still runs on the exact worker.
 
 ### PreviewWorker
 

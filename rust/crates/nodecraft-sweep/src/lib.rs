@@ -113,4 +113,18 @@ mod tests {
         assert_eq!(body.counts().expect("counts"), [6, 12, 8]);
         assert!((body.volume(1.0e-3).expect("volume") - 96.0).abs() < 1.0e-6);
     }
+
+    #[test]
+    fn loft_between_two_square_sections_has_the_expected_volume() {
+        let square = square(10.0);
+        let bottom = Plane::XY;
+        let top = Plane {
+            origin: Vec3::new(0.0, 0.0, 10.0),
+            ..Plane::XY
+        };
+        let body = loft_on_planes(&[(square.clone(), bottom), (square, top)], 1, true)
+            .expect("ops loft");
+        let volume = body.volume(1.0e-7).expect("volume");
+        assert!((volume - 1000.0).abs() < 1.0e-6, "{volume}");
+    }
 }

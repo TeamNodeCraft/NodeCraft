@@ -27,7 +27,7 @@ Priority order is approximate.
   remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 842 passed / 1 failed / 11 ignored. The single failure is the
+- Workspace tests: 844 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
 ## SolidCore a00676f5 pin bump (completed)
@@ -51,8 +51,8 @@ then +7 blend end-section/smooth-vertex fixes. The pin is applied.
 
 - [ ] Republish the public snapshot with the docs and integration work.
 - [ ] Make display work truly concurrent. The `EvalWorker` is still sequential
-      after the exact phase; stale display work is cancelled only at the
-      exact/display boundary.
+      after the exact phase; a newer edit now cancels display cooperatively
+      between nodes/mesher bodies, but display still runs on the exact worker.
 - [ ] Remove the STEP legacy mesher fallback once `solidcore-convert` can record
       analytic edge curves with no B-spline form.
 - [ ] Track SolidCore #2826 until multi-edge join fillets run continuously; add
@@ -64,8 +64,9 @@ then +7 blend end-section/smooth-vertex fixes. The pin is applied.
 - [ ] Fillet/chamfer ops migration: keep the current direct-plus-ops path until
       a parity matrix covers G1/G2/G3, mixed edges, corners/setbacks,
       two-cylinder joins, chamfer angle/distance and failures.
-- [ ] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows
-      before migrating them.
+- [x] Check `solidcore-ops::prism`/`sweep` against the extrude/loft workflows.
+      Extrude/prism and loft volume parity tests pass; migration waits on a
+      larger topology/attribute parity matrix.
 - [ ] Keep dependency-crate warning cleanup as a separate low-priority item.
 
 ## Recently completed

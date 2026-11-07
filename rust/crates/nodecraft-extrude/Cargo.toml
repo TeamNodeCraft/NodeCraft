@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[dev-dependencies]
+nodecraft-layers = { path = "../nodecraft-layers" }
+solidcore-ops = { workspace = true }
+solidcore-record = { workspace = true }
+
 [dependencies]
 solidcore = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }

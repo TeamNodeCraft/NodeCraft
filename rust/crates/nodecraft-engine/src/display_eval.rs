@@ -233,6 +233,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     }
 
     pub(crate) fn evaluate(&mut self, node_id: &str) -> Option<Mesh> {
+        // A newer edit cancels the display pass. Check between nodes so the
+        // exact worker is not held up by the rest of a stale graph.
+        if crate::kernel_pool::current_revision_token().is_cancelled() {
+            return None;
+        }
         if let Some(mesh) = self.objects.get(node_id) {
             return Some(mesh.clone());
         }

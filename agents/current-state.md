@@ -49,7 +49,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  842 passed / 1 failed / 11 ignored
+  844 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate
@@ -85,10 +85,10 @@ See [How NodeCraft works](architecture.md).
 
 The evaluator is split internally: `exact_eval.rs` owns Part/B-rep construction
 and `display_eval.rs` owns display meshing and mesh caching, with cache,
-primitive, look, bypass and comparison concerns in their own modules. Display
-work is not yet fully concurrent: the `EvalWorker` is still sequential after the
-exact phase, and stale display work is cancelled only when a queued job exists at
-the exact/display boundary.
+primitive, look, bypass and comparison concerns in their own modules. Display work is not yet fully concurrent: the `EvalWorker` is still sequential
+after the exact phase. A newer edit cancels the display pass cooperatively; the
+evaluator checks the revision token between nodes and the mesher checks it per
+body.
 
 ## Known shell limitations
 
