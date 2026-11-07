@@ -321,7 +321,12 @@ pub(super) fn theme_palette_row(
     );
 }
 
-pub(super) fn make_color_wheel_texture(ctx: &egui::Context, radius: f32, size: f32) -> egui::TextureHandle {
+pub(super) fn make_color_wheel_texture(
+    ctx: &egui::Context,
+    radius: f32,
+    size: f32,
+    value: f32,
+) -> egui::TextureHandle {
     use egui::ecolor::Hsva;
     const WHEEL_SIZE: usize = 256;
     let radius_px = WHEEL_SIZE as f32 * (radius / size);
@@ -340,7 +345,9 @@ pub(super) fn make_color_wheel_texture(ctx: &egui::Context, radius: f32, size: f
                 let saturation = (distance / radius_px).clamp(0.0, 1.0);
                 // Fixed full HSV value: luminosity is a separate control and
                 // must never feed back into the wheel.
-                pixels.push(egui::Color32::from(Hsva::new(hue, saturation, 1.0, 1.0)));
+                // The wheel is a value map, never an alpha preview: keep it
+                // opaque and apply the current luminosity through HSV value.
+                pixels.push(egui::Color32::from(Hsva::new(hue, saturation, value, 1.0)));
             }
         }
     }
@@ -383,13 +390,14 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
 
     // Circular HSV hue/saturation wheel at fixed full value. Hue/saturation,
     // luminosity and alpha are independent controls with no feedback path.
+    let wheel_value = (hsva.v.clamp(0.0, 1.0) * 64.0).round() / 64.0;
     let texture = {
         let ctx = ui.ctx().clone();
-        let id = egui::Id::new("theme-color-wheel-gradient");
+        let id = egui::Id::new(("theme-color-wheel-gradient", (wheel_value * 64.0) as u8));
         if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
             texture
         } else {
-            let texture = make_color_wheel_texture(&ctx, radius, size);
+            let texture = make_color_wheel_texture(&ctx, radius, size, wheel_value);
             ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
             texture
         }
@@ -448,21 +456,65 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
         hsva.v = luminosity.powf(LUMINOSITY_GAMMA);
         changed = true;
     }
-    let mut alpha = hsva.a;
-    if ui
+    let mut alpha = f32::from(rgba[3]) / 255.0;
+    let alpha_changed = ui
         .add(egui::Slider::new(&mut alpha, 0.0..=1.0).text("Alpha"))
-        .changed()
-    {
-        hsva.a = alpha;
-        changed = true;
-    }
-    if changed {
-        let color = egui::Color32::from(Hsva::new(hsva.h, hsva.s, hsva.v, hsva.a));
-        let out = color.to_srgba_unmultiplied();
+        .changed();
+    let out_alpha = if alpha_changed {
+        (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        rgba[3]
+    };
+    if changed || alpha_changed {
+        let out = if changed {
+            hsva_rgba(hsva, out_alpha)
+        } else {
+            // Alpha edits are byte-only: RGB stays exactly as the theme has it,
+            // so the hex editor never shows a colour shift.
+            replace_alpha(rgba, out_alpha)
+        };
+        hsva.a = f32::from(out_alpha) / 255.0;
         state.hsva = hsva;
         state.rgba = out;
         ui.data_mut(|data| data.insert_temp(state_id, state));
         return Some(out);
     }
     None
+}
+
+
+fn hsva_rgba(hsva: egui::ecolor::Hsva, alpha: u8) -> [u8; 4] {
+    let color = egui::Color32::from(egui::ecolor::Hsva::new(
+        hsva.h,
+        hsva.s,
+        hsva.v,
+        1.0,
+    ));
+    let [r, g, b, _] = color.to_srgba_unmultiplied();
+    [r, g, b, alpha]
+}
+
+fn replace_alpha(rgba: [u8; 4], alpha: u8) -> [u8; 4] {
+    [rgba[0], rgba[1], rgba[2], alpha]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alpha_half_is_byte_128() {
+        assert_eq!((0.5_f32 * 255.0).round() as u8, 128);
+    }
+
+    #[test]
+    fn alpha_is_the_only_channel_replaced() {
+        assert_eq!(replace_alpha([12, 34, 56, 78], 128), [12, 34, 56, 128]);
+    }
+
+    #[test]
+    fn hsva_rgba_keeps_the_requested_alpha() {
+        let hsva = egui::ecolor::Hsva::new(0.3, 0.6, 0.7, 0.25);
+        assert_eq!(hsva_rgba(hsva, 128)[3], 128);
+    }
 }

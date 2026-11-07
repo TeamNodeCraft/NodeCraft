@@ -1496,20 +1496,30 @@ impl NodeEditor {
                         )
                         .polyline(64);
                         let key = ConnectionKey::from_connection(connection);
+                        let selected = selected_connections.contains(&key);
+                        let core = if selected {
+                            self.theme.cable_selected
+                        } else {
+                            self.theme.cable
+                        };
+                        let outline = if selected {
+                            self.theme.cable_selected_outline
+                        } else {
+                            self.theme.cable_outline
+                        };
+                        let core_width = self.theme.cable_width.clamp(1.0, 32.0);
+                        let total_width =
+                            (core_width + self.theme.cable_outline_width.clamp(0.0, 15.0))
+                                .max(core_width);
+                        // The fallback must use the same theme colours, alpha and
+                        // widths as the GPU cable path.
                         painter.add(egui::Shape::line(
                             points.clone(),
-                            Stroke::new(18.0, self.theme.with_alpha(self.theme.window, 191)),
+                            Stroke::new(total_width, self.theme.color(outline)),
                         ));
                         painter.add(egui::Shape::line(
                             points,
-                            Stroke::new(
-                                7.0,
-                                self.theme.color(if selected_connections.contains(&key) {
-                                    self.theme.accent
-                                } else {
-                                    self.theme.cable
-                                }),
-                            ),
+                            Stroke::new(core_width, self.theme.color(core)),
                         ));
                     }
                     for node in &document.nodes {

@@ -89,6 +89,10 @@
   discards invalid text on focus loss. The expression cache lives in an input-only thread-local
   map rather than egui's global data map, so it cannot collide with DragValue's
   edit state; stale entries are invalidated without touching egui data.
+- Fixed the theme colour picker so alpha is a byte-only edit (0.5 is 50%),
+  preserves RGB in the hex field, and does not tint the round picker. The
+  luminosity control now changes the wheel's own brightness. The CPU cable
+  fallback now uses the themed cable/outline colours, alpha and widths.
 - Document saves use compact pretty JSON: short arrays and small objects stay
   inline while node and large collection structures remain expanded.
 - Node evaluation errors now float at the bottom of the 3D viewer instead of
