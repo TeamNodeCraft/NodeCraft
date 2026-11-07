@@ -1978,6 +1978,119 @@ fn exact_comparison_unsupported(request: &Request, targets: &[String]) -> bool {
         .is_some_and(|continuity| continuity.eq_ignore_ascii_case("g2") || continuity.eq_ignore_ascii_case("g3"))
 }
 
+/// Faces the exact result has that its input did not: for a fillet these are
+/// the blend faces. Surfaces are compared exactly through the kernel's own
+/// surface equality, so no display-triangle sampling or surface-kind guess is
+/// involved.
+fn generated_new_faces(
+    before: &Part,
+    after: &Part,
+) -> (
+    std::collections::HashSet<(usize, usize)>,
+    std::collections::HashSet<(usize, usize)>,
+) {
+    use nodecraft_solidcore::solidcore::surface::surface::SurfaceKind;
+    let blend_surface = |kind: &SurfaceKind| matches!(kind, SurfaceKind::BSpline(_) | SurfaceKind::ProceduralBlend(_) | SurfaceKind::BallPatch(_));
+    let kernel = nodecraft_solidcore::kernel::kernel();
+    let mut before_surfaces = Vec::new();
+    for body in &before.bodies {
+        for face_id in body.body.faces().ids() {
+            if let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(&body.body, face_id)
+                && blend_surface(surface.kind())
+            {
+                before_surfaces.push(surface);
+            }
+        }
+    }
+    let mut faces = std::collections::HashSet::new();
+    let mut edges = std::collections::HashSet::new();
+    for (body_index, body) in after.bodies.iter().enumerate() {
+        let mut generated = Vec::new();
+        for face_id in body.body.faces().ids() {
+            let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(&body.body, face_id) else {
+                continue;
+            };
+            if blend_surface(surface.kind())
+                && before_surfaces
+                    .iter()
+                    .all(|old| !surface.approx_eq(&kernel, old).unwrap_or(false))
+            {
+                generated.push(face_id);
+            }
+        }
+        if generated.is_empty() {
+            continue;
+        }
+        // Display face groups use the record's order, not the kernel's.
+        let Ok(mut copy) = body.body.clone_standing_for_self() else { continue };
+        let Ok((_record, order)) = solidcore_convert::brep::to_record(&mut nodecraft_solidcore::kernel::kernel(), &mut copy) else {
+            continue;
+        };
+        for face_id in generated {
+            if let Some(record_face) = order.faces.iter().position(|face| *face == face_id) {
+                faces.insert((body_index, record_face));
+            }
+            let Ok(loops) = nodecraft_solidcore::solidcore::topology::face::loops(&body.body, face_id, false, None) else {
+                continue;
+            };
+            for loop_id in loops {
+                let Ok(loop_edges) = nodecraft_solidcore::solidcore::topology::loopuse::loop_edges(&body.body, loop_id) else {
+                    continue;
+                };
+                for edge_id in loop_edges.into_iter().flatten() {
+                    if let Some(record_edge) = order.edges.iter().position(|edge| *edge == edge_id) {
+                        edges.insert((body_index, record_edge));
+                    }
+                }
+            }
+        }
+    }
+    (faces, edges)
+}
+
+/// Select the display triangles and BRep edges named by the generated face set.
+fn mesh_for_faces(
+    mesh: &nodecraft_protocol::Mesh,
+    faces: &std::collections::HashSet<(usize, usize)>,
+    edges: &std::collections::HashSet<(usize, usize)>,
+) -> nodecraft_protocol::Mesh {
+    if faces.is_empty() || mesh.face_groups.len() != mesh.faces.len() {
+        return nodecraft_protocol::Mesh::default();
+    }
+    let mut selected = nodecraft_protocol::Mesh {
+        // Keep the original vertex indices: the selected BRep edges index them.
+        vertices: mesh.vertices.clone(),
+        normals: mesh.normals.clone(),
+        ..nodecraft_protocol::Mesh::default()
+    };
+    for (triangle, group) in mesh.faces.iter().zip(&mesh.face_groups) {
+        let Some((body, face)) = group_entity(group, "face") else { continue };
+        if faces.contains(&(body, face)) {
+            selected.faces.push(*triangle);
+        }
+    }
+    selected.brep_edges = mesh
+        .brep_edges
+        .iter()
+        .filter(|edge| group_entity(&edge.id, "edge").is_some_and(|key| edges.contains(&key)))
+        .cloned()
+        .collect();
+    selected
+}
+
+/// `body:N:kind:M` (a merged body) or `kind:M` (a single body) as a key.
+fn group_entity(name: &str, kind: &str) -> Option<(usize, usize)> {
+    let (body, rest) = match name.rsplit_once("body:") {
+        Some((_, rest)) => rest.split_once(':')?,
+        None => ("0", name),
+    };
+    let (name_kind, index) = rest.split_once(':')?;
+    if name_kind != kind {
+        return None;
+    }
+    Some((body.parse().ok()?, index.parse().ok()?))
+}
+
 fn comparison_cache_key(request: &Request, targets: &[String]) -> Option<(String, String)> {
     let key = |id: &str| {
         let node = node(request, id)?;
@@ -2124,9 +2237,15 @@ fn evaluate_mode(
             let difference = if exact_comparison_unsupported(&request, targets) {
                 // G2/G3 fillets use a curved interface whose exact surface
                 // intersection is not ported. Attempting the Boolean difference
-                // costs over a second and then fails; classify the display
-                // surfaces directly instead.
-                Err("exact difference is not supported for this fillet continuity".to_owned())
+                // costs over a second and then fails. The exact fillet result
+                // already names its generated blend faces, so use those.
+                let (generated_faces, generated_edges) = generated_new_faces(&before, &after);
+                let added = mesh_for_faces(&after_display, &generated_faces, &generated_edges);
+                if added.faces.is_empty() {
+                    Err("exact difference is not supported for this fillet continuity".to_owned())
+                } else {
+                    Ok(comparison::DifferenceMeshes { removed: nodecraft_protocol::Mesh::default(), added })
+                }
             } else if let Some(key) = &cache_key {
                 if let Some(failure) = eval.cache.difference_failure(key) {
                     Err(failure)
@@ -3800,6 +3919,15 @@ mod tests {
             assert!(!mesh.faces.is_empty(), "{kind}: empty mesh");
             assert!(!mesh.vertices.is_empty(), "{kind}: empty vertices");
         }
+    }
+
+    #[test]
+    fn group_entity_reads_single_and_merged_names() {
+        assert_eq!(group_entity("face:7", "face"), Some((0, 7)));
+        assert_eq!(group_entity("body:2:face:7", "face"), Some((2, 7)));
+        assert_eq!(group_entity("edge:3", "edge"), Some((0, 3)));
+        assert_eq!(group_entity("body:1:edge:4", "edge"), Some((1, 4)));
+        assert_eq!(group_entity("body:1:face:4", "edge"), None);
     }
 
     #[test]

@@ -44,10 +44,12 @@
 - Zebra analysis is a striped-skybox reflection with crease-aware smoothed
   normals and derivative antialiasing.
 - Added `Ignore Look colours` for display without Look-authored face colours.
-- The approximate feature-difference overlay now classifies whole faces with a
-  spatial surface index instead of per-triangle centroid tests. Curved faces
-  re-meshed by a fillet no longer produce a jagged triangle-soup outline, and
-  the overlay still shows the feature from both sides.
+- G2/G3 fillet overlays now take the exact generated blend faces from the
+  fillet result. The faces are identified by surface equality and mapped
+  through the record face order, so the overlay shows only the fillet surface
+  rather than the whole body. Their exact B-rep boundary edges are drawn too.
+  The display-surface classifier remains the fallback when the exact result
+  has no generated faces.
 - G2/G3 fillet overlays skip the unsupported exact Boolean difference directly;
   failed exact comparisons are cached too. Selecting the test fillet graph went
   from a 1.27 s failed exact comparison to a ~0.1 s cached evaluation.
@@ -60,6 +62,9 @@
 
 ### App
 
+- The application crate now has `#![forbid(unsafe_code)]`. macOS Objective-C
+  interop moved to the small `nodecraft-macos` boundary crate, which exposes
+  only safe functions; document-open handoff and window chrome remain there.
 - Renamed the desktop application package and binary from `nodecraft-egui` to
   `nodecraft`; the macOS bundle is now `NodeCraft.app` with the `NodeCraft`
   executable.

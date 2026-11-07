@@ -486,7 +486,7 @@ impl NodeCraftApp {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                hide_settings_zoom_button();
+                nodecraft_macos::hide_settings_zoom_button();
             },
         );
         self.theme_rename_id = theme_rename_id;

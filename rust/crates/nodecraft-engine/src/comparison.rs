@@ -58,13 +58,15 @@ fn changed_faces(source: &Mesh, target: &Mesh, tolerance: f64) -> Mesh {
             (a[2] + b[2] + c[2]) / 3.0,
         ]);
     }
-    let mut changed: Vec<bool> = vec![false; face_count];
+    // A face that is more than half off the other surface is wholly new or
+    // removed (a fillet face): keep its clean face boundary. A face that is
+    // only partly off (the cylinder side when a rim fillet changes its edge) is
+    // split per triangle, so the overlay does not tint the whole body.
+    let mut whole_face: Vec<bool> = vec![false; face_count];
     for (face, points) in centroids.iter().enumerate() {
         if points.is_empty() {
             continue;
         }
-        // Sample every centroid of a small face; spread a large face's samples
-        // by the golden ratio so a row of facets cannot dominate the vote.
         let samples: Vec<&[f64; 3]> = if points.len() <= FACE_SAMPLE_LIMIT {
             points.iter().collect()
         } else {
@@ -74,16 +76,22 @@ fn changed_faces(source: &Mesh, target: &Mesh, tolerance: f64) -> Mesh {
                 .collect()
         };
         let off = samples.iter().filter(|point| !index.contains(***point)).count();
-        changed[face] = off * 8 > samples.len();
+        whole_face[face] = off * 2 > samples.len();
     }
     let mut vertices = Vec::new();
     let mut faces = Vec::new();
     for (triangle_index, triangle) in source.faces.iter().enumerate() {
         let face = face_of[triangle_index] as usize;
-        if !changed.get(face).copied().unwrap_or(false) {
+        let Some([a, b, c]) = triangle_points(source, triangle) else { continue };
+        // For a partly changed face, take a triangle only when its own centre is
+        // off the other surface. Testing a corner includes a large cylinder-side
+        // triangle whose centre still lies on the kept surface, which is what
+        // drew a rectangle around the real fillet.
+        let changed = whole_face.get(face).copied().unwrap_or(false)
+            || !index.contains(mid3(a, b, c));
+        if !changed {
             continue;
         }
-        let Some([a, b, c]) = triangle_points(source, triangle) else { continue };
         let base = vertices.len() as u32;
         vertices.extend_from_slice(&[a.map(|v| v as f32), b.map(|v| v as f32), c.map(|v| v as f32)]);
         faces.push([base, base + 1, base + 2]);
@@ -103,6 +111,10 @@ fn face_indices(mesh: &Mesh) -> Vec<u32> {
             *ids.entry(group.as_str()).or_insert(next)
         })
         .collect()
+}
+
+fn mid3(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
+    [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0]
 }
 
 fn triangle_points(mesh: &Mesh, triangle: &[u32; 3]) -> Option<[[f64; 3]; 3]> {
@@ -410,6 +422,44 @@ mod tests {
         assert_eq!(difference.removed.faces.len(), 2, "only the moved face is removed");
         assert!(difference.removed.face_groups.is_empty(), "approximate difference has no synthetic face groups");
         assert!(difference.added.faces.is_empty(), "the kept surface is unchanged");
+    }
+
+    #[test]
+    fn a_partly_changed_face_keeps_only_its_changed_triangles() {
+        // A 2×2 grid face: one corner triangle moves, the rest stays.
+        let mut before = Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0],
+                [0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0],
+            ],
+            faces: vec![
+                [0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4],
+                [3, 4, 7], [3, 7, 6], [4, 5, 8], [4, 8, 7],
+            ],
+            face_groups: vec!["side".to_owned(); 8],
+            ..Mesh::default()
+        };
+        // Move the top-right corner out of the plane; only its two triangles change.
+        before.vertices[2] = [2.0, 0.0, 5.0];
+        before.vertices[5] = [2.0, 1.0, 5.0];
+        before.vertices[8] = [2.0, 2.0, 5.0];
+        let after = Mesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0],
+                [0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0],
+            ],
+            faces: before.faces.clone(),
+            face_groups: before.face_groups.clone(),
+            ..Mesh::default()
+        };
+        let difference = surface_difference(&before, &after);
+        assert!(
+            difference.removed.faces.len() < before.faces.len(),
+            "a partly changed face must not put the whole body in the overlay"
+        );
+        assert!(!difference.removed.faces.is_empty(), "the changed triangles stay");
     }
 
     #[test]

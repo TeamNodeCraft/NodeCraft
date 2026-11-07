@@ -10,6 +10,7 @@ members = [
   "crates/nodecraft-layers",
   "crates/nodecraft-sweep",
   "crates/nodecraft-search",
+  "crates/nodecraft-macos",
   "crates/nodecraft-dock",
   "crates/nodecraft-session",
   "crates/nodecraft-solidcore",

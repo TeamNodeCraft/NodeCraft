@@ -587,52 +587,6 @@ pub struct NodeCraftApp {
     last_pointer: Option<egui::Pos2>,
 }
 
-#[cfg(target_os = "macos")]
-fn round_main_window() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSColor};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    for window in app.windows().iter() {
-        if window.title().to_string() != "NodeCraft" {
-            continue;
-        }
-        window.setOpaque(false);
-        window.setBackgroundColor(Some(&NSColor::clearColor()));
-        let Some(view) = window.contentView() else { continue };
-        view.setWantsLayer(true);
-        if let Some(layer) = view.layer() {
-            let radius = 16.0_f64;
-            let _: () = unsafe { objc2::msg_send![&layer, setCornerRadius: radius] };
-            let _: () = unsafe { objc2::msg_send![&layer, setMasksToBounds: true] };
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn hide_settings_zoom_button() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowButton};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    for window in app.windows().iter() {
-        if window.title().to_string() == "NodeCraft Settings" {
-            if let Some(button) = window.standardWindowButton(NSWindowButton::ZoomButton) {
-                button.setHidden(true);
-            }
-            if let Some(button) = window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
-                button.setHidden(true);
-            }
-        }
-    }
-}
-
 /// Whether the next mesh result should keep the current camera. A target change
 /// normally refits, but entering/leaving a topology selection explicitly asks to
 /// preserve the view so the inspector edit does not move the 3D viewport.
@@ -704,7 +658,7 @@ impl NodeCraftApp {
         viewport.set_view(persisted_view);
         let persisted_recent = recent_files.clone();
         #[cfg(target_os = "macos")]
-        round_main_window();
+        nodecraft_macos::round_main_window();
         let mut app = Self {
             session: None,
             active_session_revision: 0,
@@ -811,7 +765,7 @@ impl NodeCraftApp {
             last_pointer: None,
         };
         #[cfg(target_os = "macos")]
-        crate::macos_open::install(cc.egui_ctx.clone());
+        nodecraft_macos::install(cc.egui_ctx.clone());
         app.node_editor.set_cable_routing(app.cable_routing);
         if let Some(path) = choose_startup_document(initial, startup_recent, default_document()) {
             app.open(path);
@@ -2246,7 +2200,7 @@ impl NodeCraftApp {
 
     #[cfg(target_os = "macos")]
     fn poll_open_documents(&mut self) {
-        for path in crate::macos_open::take_pending() {
+        for path in nodecraft_macos::take_pending() {
             if path
                 .extension()
                 .and_then(|extension| extension.to_str())

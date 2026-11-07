@@ -2043,6 +2043,7 @@ dependencies = [
  "mimalloc",
  "nodecraft-dock",
  "nodecraft-engine",
+ "nodecraft-macos",
  "nodecraft-mesh",
  "nodecraft-node-canvas",
  "nodecraft-node-contract",
@@ -2050,9 +2051,6 @@ dependencies = [
  "nodecraft-search",
  "nodecraft-session",
  "nodecraft-worker",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
  "rfd",
  "serde",
  "serde_json",
@@ -2122,6 +2120,7 @@ dependencies = [
  "nodecraft-sweep",
  "nodecraft-wedge",
  "serde_json",
+ "solidcore-convert",
  "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f)",
  "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f8685cdc441e93164ae7f07675d07dc7eb1971c9)",
  "solidcraft-geom 0.40.0-rc.2 (git+https://github.com/tangency-labs/solidcraft?rev=481687fff38057691faf84a6fd844e826c552a6c)",
@@ -2165,6 +2164,16 @@ dependencies = [
  "solidcore-ops",
  "solidcore-record 0.1.0 (git+https://github.com/tangency-labs/solidcore?rev=f8685cdc441e93164ae7f07675d07dc7eb1971c9)",
  "solidcore-tess",
+]
+
+[[package]]
+name = "nodecraft-macos"
+version = "0.0.1"
+dependencies = [
+ "egui",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]

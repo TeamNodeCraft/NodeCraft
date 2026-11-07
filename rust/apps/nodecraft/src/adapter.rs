@@ -259,11 +259,10 @@ pub fn display_mesh_with_difference(
                 .into_iter()
                 .chain(comparison_edges(removed))
                 .collect();
-            if edges.is_empty() {
-                // Some difference bodies arrive with no BRep edge metadata.
-                // The approximate difference now selects whole faces, so the
-                // fallback boundary is the face boundary rather than the
-                // per-triangle soup outline.
+            if edges.is_empty() && (!added.face_groups.is_empty() || !removed.face_groups.is_empty()) {
+                // Some exact difference bodies arrive with no BRep edge
+                // metadata. Face-classified overlays have no face groups, so
+                // their triangle edges must never become a jagged outline.
                 edges.extend(boundary_edges(&mesh_triangles(added)));
                 edges.extend(boundary_edges(&mesh_triangles(removed)));
             }

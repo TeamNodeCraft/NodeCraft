@@ -5,7 +5,9 @@ SolidCore/SMLib for exact geometry.
 
 ## Working
 
-- native Rust application and macOS `NodeCraft.app` bundle build
+- native Rust application and macOS `NodeCraft.app` bundle build; the
+  application crate is `#![forbid(unsafe_code)]` and the audited
+  `nodecraft-macos` crate is the only local FFI boundary
 - `.nodecraft` / `.solidnode` document association and Finder open events on
   macOS
 - flat node graph with stable IDs, undo/redo and linked documents
@@ -39,9 +41,9 @@ SolidCore/SMLib for exact geometry.
 - exact fillet, Boolean, union, shell and offset results are validated through
   `solidcore-ops::check`; an invalid result reports the upstream
   `CheckReport` text
-- the approximate feature ghost is face-classified with a spatial surface index
-  and drawn as a see-through overlay, so a re-meshed curved face does not ghost
-  through the result in triangle slivers
+- G2/G3 feature ghosts use the exact fillet result's generated blend faces,
+  mapped through the record face order; the display-surface classifier remains
+  the fallback, so a fillet highlights its own surface rather than the body
 - refused fillet edges are reported, not silently dropped from a multi-edge
   selection
 - ghost face/edge colours live in the theme palette; the inspector reset action
@@ -54,7 +56,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  846 passed / 1 failed / 11 ignored
+  848 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate

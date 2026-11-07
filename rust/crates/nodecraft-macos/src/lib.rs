@@ -1,3 +1,10 @@
+//! The macOS platform boundary.
+//!
+//! This is the only NodeCraft crate that may contain `unsafe`: Finder /
+//! LaunchServices document handoff and the AppKit window-chrome calls need
+//! Objective-C interop. Every function below is a safe wrapper for the
+//! application crate, which forbids unsafe code.
+
 //! Finder / LaunchServices open-document handoff.
 //!
 //! Winit owns the application delegate, so replacing it is not safe. A launch
@@ -160,7 +167,7 @@ fn install_delegate_methods() {
 }
 
 /// Register the launch observer before the event loop starts.
-pub(crate) fn install_observer() {
+pub fn install_observer() {
     if OBSERVER.get().is_some() {
         return;
     }
@@ -183,15 +190,62 @@ pub(crate) fn install_observer() {
 }
 
 /// Set the context used to wake the UI after a document arrives.
-pub(crate) fn install(ctx: egui::Context) {
+pub fn install(ctx: egui::Context) {
     let _ = CONTEXT.set(ctx);
     install_delegate_methods();
 }
 
 /// Take documents delivered by macOS since the previous frame.
-pub(crate) fn take_pending() -> Vec<PathBuf> {
+pub fn take_pending() -> Vec<PathBuf> {
     PENDING
         .lock()
         .map(|mut pending| std::mem::take(&mut *pending))
         .unwrap_or_default()
+}
+
+
+/// Round the main window and make its background transparent.
+pub fn round_main_window() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSColor};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() != "NodeCraft" {
+            continue;
+        }
+        window.setOpaque(false);
+        window.setBackgroundColor(Some(&NSColor::clearColor()));
+        let Some(view) = window.contentView() else { continue };
+        view.setWantsLayer(true);
+        if let Some(layer) = view.layer() {
+            let radius = 16.0_f64;
+            let _: () = unsafe { msg_send![&layer, setCornerRadius: radius] };
+            let _: () = unsafe { msg_send![&layer, setMasksToBounds: true] };
+        }
+    }
+}
+
+/// Hide the zoom and minimize buttons on the settings window.
+pub fn hide_settings_zoom_button() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSWindowButton};
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    for window in app.windows().iter() {
+        if window.title().to_string() == "NodeCraft Settings" {
+            if let Some(button) = window.standardWindowButton(NSWindowButton::ZoomButton) {
+                button.setHidden(true);
+            }
+            if let Some(button) = window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
+                button.setHidden(true);
+            }
+        }
+    }
 }

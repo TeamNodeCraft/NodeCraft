@@ -18,6 +18,7 @@ nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-sweep = { path = "../nodecraft-sweep" }
+solidcore-convert = { workspace = true }
 solidcore-record = { workspace = true }
 solidcore-record-new = { package = "solidcore-record", git = "https://github.com/tangency-labs/solidcore", rev = "f5e8e9a29e0c9b7cf6c4040a5bc8878382b3c62f" }
 nodecraft-mesh = { path = "../nodecraft-mesh", default-features = false }

@@ -43,15 +43,4 @@ solidcraft-render = { git = "https://github.com/tangency-labs/solidcraft", rev =
 solidcraft-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "481687fff38057691faf84a6fd844e826c552a6c", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSNotification", "NSObject", "NSString", "NSURL"] }
-objc2-app-kit = { version = "0.3.2", features = [
-    "NSApplication",
-    "NSButton",
-    "NSColor",
-    "NSControl",
-    "NSResponder",
-    "NSView",
-    "NSWindow",
-    "objc2-quartz-core",
-] }
+nodecraft-macos = { path = "../../crates/nodecraft-macos" }
