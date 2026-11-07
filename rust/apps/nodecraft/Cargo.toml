@@ -32,6 +32,7 @@ nodecraft-protocol = { path = "../../crates/nodecraft-protocol" }
 nodecraft-session = { path = "../../crates/nodecraft-session", default-features = false }
 nodecraft-node-canvas = { path = "../../crates/nodecraft-node-canvas" }
 nodecraft-node-contract = { path = "../../crates/nodecraft-node-contract" }
+nodecraft-expr = { path = "../../crates/nodecraft-expr" }
 nodecraft-search = { path = "../../crates/nodecraft-search" }
 nodecraft-dock = { path = "../../crates/nodecraft-dock" }
 nodecraft-worker = { path = "../../crates/nodecraft-worker", default-features = false }
@@ -43,5 +44,4 @@ solidcraft-render = { git = "https://github.com/tangency-labs/solidcraft", rev =
 solidcraft-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "481687fff38057691faf84a6fd844e826c552a6c", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-nodecraft-expr = { path = "../../crates/nodecraft-expr" }
 nodecraft-macos = { path = "../../crates/nodecraft-macos" }
