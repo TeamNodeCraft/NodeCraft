@@ -28,13 +28,14 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `5458b142ac95d9d4a3f553888e58d3c536b21631` (latest
+- SolidCore pinned at `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e` (latest
   `main` as of 2026-11-07)
 - SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
 - `configure_solidcore_fixes` applies the same upstream fix profile to our
   kernels and the `solidcore-ops` session (Boolean/shell/offset/blend)
-- exact fillet results are validated through `solidcore-ops::check`; an invalid
-  result reports the upstream `CheckReport` text
+- exact fillet, Boolean, union, shell and offset results are validated through
+  `solidcore-ops::check`; an invalid result reports the upstream
+  `CheckReport` text
 - refused fillet edges are reported, not silently dropped from a multi-edge
   selection
 - ghost face/edge colours live in the theme palette; the inspector reset action

@@ -4,7 +4,7 @@ Priority order is approximate.
 
 ## Current state (2026-11-07)
 
-- SolidCore is pinned at `5458b142ac95d9d4a3f553888e58d3c536b21631` (latest
+- SolidCore is pinned at `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e` (latest
   `main`, +491 commits over `3ed61947`).
 - SolidCraft sketch stack is pinned at
   `871014f955a76fd308ce156e68c93e6372906005`.
@@ -30,16 +30,19 @@ Priority order is approximate.
 - Workspace tests: 839 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
-## SolidCore 5458b142 pin bump (completed)
+## SolidCore a00676f5 pin bump (completed)
 
-Upstream moved from `3ed61947` to `5458b142` (+491 commits), including blend,
-offset, Boolean, STEP P21 and tessellation work. The bump is applied.
+Upstream moved from `3ed61947` to `a00676f5`: +491 commits to `5458b142`,
+then +7 blend end-section/smooth-vertex fixes. The pin is applied.
 
 - [x] Update every workspace SolidCore pin together; member manifests stay on
       `workspace = true`.
 - [x] Run app, engine, layers, solidcore and mesh gates.
 - [x] Carry the kernel fix profile into the `solidcore-ops` session.
 - [x] Update the SolidCraft sketch stack to `871014f9`.
+- [x] Pull the next 7 upstream commits (blend end-section and smooth-vertex
+      run-on fixes) and validate Boolean/union/shell/offset results through
+      `solidcore-ops::check`.
 - [ ] Revisit Part-target Boolean/shell migration when upstream exposes public
       provenance attach/read or otherwise preserves application attributes and
       edge identity.
@@ -54,8 +57,6 @@ offset, Boolean, STEP P21 and tessellation work. The bump is applied.
       analytic edge curves with no B-spline form.
 - [ ] Track SolidCore #2826 until multi-edge join fillets run continuously; add
       the torus/cylinder case as an upstream regression.
-- [ ] Validate Boolean and shell results through `solidcore-ops::check` the same
-      way fillet results are validated.
 - [ ] Manually smoke-test heavy-target edits, rapid edits, tab switches during
       display, failed-node glow, export/clear-cache and cache growth.
 - [ ] Finish the Part-target Boolean and shell ops migration once upstream
@@ -543,7 +544,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `5458b142ac95d9d4a3f553888e58d3c536b21631`:
+      Reproduction at current pin `a00676f5c6e3a1e86cdb3b6d733ad662cf10202e`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

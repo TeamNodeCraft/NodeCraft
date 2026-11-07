@@ -24,6 +24,17 @@ use solidcore_tess::MeshTolerance;
 
 pub use solidcore_ops::BooleanOp;
 
+fn check_body(body: &solidcore_ops::Body) -> Result<(), String> {
+    let report = body
+        .check(solidcore_ops::CheckLevel::Geometry)
+        .map_err(|error| format!("solidcore check: {error}"))?;
+    if report.is_valid() {
+        Ok(())
+    } else {
+        Err(format!("result failed solidcore check: {report}"))
+    }
+}
+
 /// Validate a kernel B-rep through the upstream ops body and its
 /// `solidcore::topology::brep::validation` checks.
 ///
@@ -226,6 +237,7 @@ fn kernel_body_edit(
     let (body, order) = solidcore_ops::Body::from_record(&record, true)
         .map_err(|error| format!("record to ops body: {error}"))?;
     edit(&body, &order)?;
+    check_body(&body)?;
     let (record, _order) = body
         .to_record()
         .map_err(|error| format!("ops body to record: {error}"))?;
@@ -303,6 +315,7 @@ pub fn boolean_records(
     solidcore_ops::boolean::boolean(a, b, op)
         .map_err(|error| format!("solidcore-ops boolean: {error}"))?
         .map(|body| {
+            check_body(&body)?;
             body.to_record()
                 .map(|(record, _)| record)
                 .map_err(|error| format!("ops boolean to record: {error}"))
@@ -323,6 +336,7 @@ pub fn union_records(records: &[RecordBrep]) -> Result<Option<RecordBrep>, Strin
     }
     let body = solidcore_ops::boolean::union_all(bodies)
         .map_err(|error| format!("solidcore-ops union: {error}"))?;
+    check_body(&body)?;
     body.to_record()
         .map(|(record, _)| Some(record))
         .map_err(|error| format!("ops union to record: {error}"))

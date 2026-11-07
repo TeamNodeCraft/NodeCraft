@@ -4,8 +4,9 @@
 
 ### SolidCore integration
 
-- Updated SolidCore to `5458b142` (latest `main`, +491 commits) and the
-  SolidCraft sketch stack to `871014f9`.
+- Updated SolidCore to `a00676f5` (latest `main`) and the SolidCraft sketch
+  stack to `871014f9`. The SolidCore delta includes the blend end-section and
+  smooth-vertex run-on fixes.
 - The upstream fix profile now also configures the `solidcore-ops` session, so
   Boolean, shell, offset and blend calls run with the same fixes as direct
   kernel work.
@@ -13,8 +14,9 @@
   `nodecraft-layers` / `solidcore-tess`, like every evaluated Part. The legacy
   STEP mesher remains only as a fallback for analytic edge curves
   `solidcore-convert` cannot yet record.
-- Exact fillet results are validated through `solidcore-ops::check`; invalid
-  results report the upstream `CheckReport` text.
+- Exact fillet, Boolean, union, shell and offset results are validated through
+  `solidcore-ops::check`; invalid results report the upstream `CheckReport`
+  text.
 - A selected fillet edge refused by SolidCore as `Smooth` is no longer dropped
   to produce a partial round; the refusal reaches the node error.
 

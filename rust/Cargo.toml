@@ -35,13 +35,13 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-solidcore-record = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-solidcore-convert = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-solidcore-tess = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-solidcore-ops = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-nurbs-grid-mesh = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-step-import = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-step-brep = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
-step-export = { git = "https://github.com/tangency-labs/solidcore", rev = "5458b142ac95d9d4a3f553888e58d3c536b21631" }
+solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+solidcore-record = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+solidcore-convert = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+solidcore-tess = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+solidcore-ops = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+nurbs-grid-mesh = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+step-import = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+step-brep = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
+step-export = { git = "https://github.com/tangency-labs/solidcore", rev = "a00676f5c6e3a1e86cdb3b6d733ad662cf10202e" }
 solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "871014f955a76fd308ce156e68c93e6372906005" }
