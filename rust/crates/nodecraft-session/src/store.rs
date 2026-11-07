@@ -26,6 +26,7 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut document: GraphDocument = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
     for node in &mut document.nodes { canonicalize_node(node); }
+    document.schema_version = 2;
     document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(document)
 }
@@ -35,6 +36,7 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
 pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> {
     let mut document = document.clone();
     for node in &mut document.nodes { canonicalize_node(node); }
+    document.schema_version = 2;
     document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     let value = serde_json::to_value(&document).map_err(|error| error.to_string())?;
     save_value_atomic(path, &value)
@@ -44,6 +46,7 @@ pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> 
 pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &GraphDocument) -> Result<(), String> {
     let mut canonical = document.clone();
     for node in &mut canonical.nodes { canonicalize_node(node); }
+    canonical.schema_version = 2;
     canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     value["nodes"] = serde_json::to_value(&canonical.nodes).map_err(|error| error.to_string())?;
     value["connections"] = serde_json::to_value(&canonical.connections).map_err(|error| error.to_string())?;
@@ -280,8 +283,8 @@ mod tests {
             schema_version: 1,
             id: "root".into(),
             nodes: vec![
-                GraphNode { id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 10.0, y: 20.0 },
-                GraphNode { id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 10.0, y: 20.0 },
+                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
             ],
             connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
             interface: GraphInterface::default(),
@@ -300,6 +303,38 @@ mod tests {
         assert_eq!(loaded.nodes[1].values["space"], "world");
         assert_eq!(loaded.connections.len(), 1);
         assert_eq!(document_hash(&loaded).unwrap(), document_hash(&original).unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn expression_text_survives_the_document_round_trip() {
+        let dir = test_dir();
+        let path = dir.join("part.nodecraft");
+        let mut doc = document();
+        doc.nodes[0].expressions.insert("length".into(), "2/1".into());
+        save_atomic(&path, &doc).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.nodes[0].expressions["length"], "2/1");
+        assert!(loaded.nodes[0].values.get("_expressions").is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn legacy_expressions_move_from_values_on_load() {
+        let dir = test_dir();
+        let path = dir.join("legacy.nodecraft");
+        std::fs::write(
+            &path,
+            r#"{"schemaVersion":1,"id":"legacy","nodes":[{"id":"a","type":"primitive","values":{"primitiveType":"box","_expressions":{"length":"2/1"}},"suppressed":false,"x":0.0,"y":0.0}],"connections":[]}"#,
+        )
+        .expect("write");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.nodes[0].expressions["length"], "2/1");
+        assert!(loaded.nodes[0].values.get("_expressions").is_none());
+        save_atomic(&path, &loaded).expect("save");
+        let text = std::fs::read_to_string(&path).expect("saved text");
+        assert!(text.contains("\"expressions\""));
+        assert!(!text.contains("_expressions"));
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -370,7 +405,7 @@ mod tests {
     fn published_document_is_visible_to_linked_roots_immediately() {
         let mut store = DocumentStore::new();
         let mut document = GraphDocument::new("child");
-        document.nodes.push(crate::GraphNode {
+        document.nodes.push(crate::GraphNode { expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: serde_json::json!({}),

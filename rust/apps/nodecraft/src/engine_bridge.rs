@@ -450,7 +450,7 @@ mod tests {
     use serde_json::json;
 
     fn node(id: &str) -> nodecraft_session::GraphNode {
-        nodecraft_session::GraphNode {
+        nodecraft_session::GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: "primitive".into(),
             values: json!({}),
@@ -661,7 +661,7 @@ mod tests {
         box_node.values = json!({"primitiveType": "box", "length": 10, "width": 10, "height": 10});
         linked.nodes.push(box_node);
         let mut host = GraphDocument::new("host");
-        host.nodes.push(nodecraft_session::GraphNode {
+        host.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "link".into(),
             node_type: "linkedpart".into(),
             values: json!({ "path": linked_path.to_string_lossy() }),
@@ -693,7 +693,7 @@ mod tests {
         nodecraft_session::store::save_atomic(&linked_path, &linked).expect("linked save");
 
         let mut host = GraphDocument::new("host");
-        host.nodes.push(nodecraft_session::GraphNode {
+        host.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "link".into(),
             node_type: "linkedpart".into(),
             values: json!({ "path": linked_path.to_string_lossy() }),

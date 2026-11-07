@@ -3576,7 +3576,7 @@ mod tests {
     use super::*;
 
     fn node_at(x: f64, y: f64) -> nodecraft_session::GraphNode {
-        nodecraft_session::GraphNode {
+        nodecraft_session::GraphNode { expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -3639,7 +3639,7 @@ mod tests {
     fn highlighted_edges_follow_the_chain_without_rescanning() {
         let mut document = GraphDocument::new("highlight-chain");
         for (id, x) in [("a", 0.0), ("b", 200.0), ("c", 400.0), ("d", 600.0)] {
-            document.nodes.push(nodecraft_session::GraphNode {
+            document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                 id: id.into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3665,7 +3665,7 @@ mod tests {
     fn selected_and_directly_connected_cables_sort_last() {
         let mut document = GraphDocument::new("cable-layering");
         for (id, x) in [("a", 0.0), ("b", 200.0), ("c", 400.0), ("d", 600.0)] {
-            document.nodes.push(nodecraft_session::GraphNode {
+            document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                 id: id.into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3705,7 +3705,7 @@ mod tests {
     fn cable_instances_are_built_from_connection_endpoints() {
         let mut document = GraphDocument::new("cables");
         document.nodes = vec![
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -3713,7 +3713,7 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3754,7 +3754,7 @@ mod tests {
     #[test]
     fn upward_cable_instances_carry_the_wrap_and_clear_the_cards() {
         let mut document = GraphDocument::new("cable-wrap");
-        let bottom = nodecraft_session::GraphNode {
+        let bottom = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "bottom".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -3762,7 +3762,7 @@ mod tests {
             x: 0.0,
             y: 300.0,
         };
-        let top = nodecraft_session::GraphNode {
+        let top = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "top".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -3817,7 +3817,7 @@ mod tests {
     #[test]
     fn cable_routing_style_changes_built_cables() {
         let mut document = GraphDocument::new("routing-style");
-        let bottom = nodecraft_session::GraphNode {
+        let bottom = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "bottom".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -3825,7 +3825,7 @@ mod tests {
             x: 0.0,
             y: 300.0,
         };
-        let top = nodecraft_session::GraphNode {
+        let top = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "top".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -3863,7 +3863,7 @@ mod tests {
     fn cable_width_and_outline_width_come_from_theme() {
         let mut document = GraphDocument::new("cable-width");
         document.nodes = vec![
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -3871,7 +3871,7 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3898,7 +3898,7 @@ mod tests {
     fn cable_alpha_comes_from_theme() {
         let mut document = GraphDocument::new("cable-alpha");
         document.nodes = vec![
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -3906,7 +3906,7 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3951,7 +3951,7 @@ mod tests {
             let mut document = GraphDocument::new("baseline-frame");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode {
+                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4028,7 +4028,7 @@ mod tests {
             let mut document = GraphDocument::new("hit-baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode {
+                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4099,7 +4099,7 @@ mod tests {
             let mut document = GraphDocument::new("activity-baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode {
+                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4156,7 +4156,7 @@ mod tests {
     #[test]
     fn cable_geometry_key_includes_port_names() {
         let mut document = GraphDocument::new("key-ports");
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4164,7 +4164,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
         });
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4238,7 +4238,7 @@ mod tests {
             let mut document = GraphDocument::new("baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode {
+                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4415,7 +4415,7 @@ mod tests {
         let mut document = GraphDocument::new("lasso");
         document.nodes = vec![
             node_at(0.0, 0.0),
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -4599,7 +4599,7 @@ mod tests {
     #[test]
     fn suppression_invalidates_cached_shape_instances() {
         use nodecraft_session::{GraphDocument, GraphInterface};
-        let mut node = nodecraft_session::GraphNode {
+        let mut node = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -4650,7 +4650,7 @@ mod tests {
 
     #[test]
     fn cable_hit_reconstructs_the_retained_gpu_wire_path() {
-        let from = nodecraft_session::GraphNode {
+        let from = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4658,7 +4658,7 @@ mod tests {
             x: 10.0,
             y: 20.0,
         };
-        let to = nodecraft_session::GraphNode {
+        let to = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4704,7 +4704,7 @@ mod tests {
             cable_hit(&document, panel, pan, zoom, cursor),
             Some(ConnectionKey::from_connection(&connection))
         );
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "c".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -4712,7 +4712,7 @@ mod tests {
             x: 900.0,
             y: 100.0,
         });
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "d".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4741,7 +4741,7 @@ mod tests {
 
     #[test]
     fn insertion_target_holds_through_small_path_moves() {
-        let from = nodecraft_session::GraphNode {
+        let from = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4749,7 +4749,7 @@ mod tests {
             x: 10.0,
             y: 20.0,
         };
-        let to = nodecraft_session::GraphNode {
+        let to = nodecraft_session::GraphNode { expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4826,7 +4826,7 @@ mod tests {
     fn newly_added_nodes_start_a_fade_in() {
         let mut editor = NodeEditor::default();
         let mut document = GraphDocument::new("fade");
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "a".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -4836,7 +4836,7 @@ mod tests {
         });
         editor.update_node_fades(&document);
         assert!(editor.node_fades.is_empty(), "initial nodes do not animate");
-        document.nodes.push(nodecraft_session::GraphNode {
+        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
             id: "b".into(),
             node_type: "chamfer".into(),
             values: Default::default(),

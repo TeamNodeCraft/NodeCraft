@@ -27,7 +27,7 @@ Priority order is approximate.
   remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 870 passed / 1 failed / 11 ignored. The single failure is the
+- Workspace tests: 879 passed / 1 failed / 11 ignored. The single failure is the
   documented `nodecraft-mesh` pole-free sphere seam assertion.
 
 ## SolidCore f8685cdc pin bump (completed)
@@ -47,6 +47,80 @@ fixes. The pin is applied.
 - [ ] Revisit Part-target Boolean/shell migration when upstream exposes public
       provenance attach/read or otherwise preserves application attributes and
       edge identity.
+
+## V1 document format: node-level expressions
+
+The old compatibility shape kept source expressions under a reserved key inside
+the node's free-form `values` object:
+
+```json
+{
+  "type": "chamfer",
+  "values": {
+    "length": 2,
+    "distance2": 0.8,
+    "_expressions": {
+      "length": "2/1"
+    }
+  }
+}
+```
+
+It is now migrated to the node-level format on load and never written by the
+current app. New documents use `schemaVersion: 2`.
+
+Problems with the old shape:
+
+- `_expressions` collides with the namespace of node value keys.
+- Expression metadata is sent to the engine inside `values`, even though the
+  engine only needs the evaluated number.
+- Node content hashes and cache invalidation currently include presentation
+  source text.
+- The format is not self-describing or schema-versioned.
+- Nested values use ad-hoc dotted keys such as `points.0.x`.
+- Invalid source has to be silently discarded or repaired because there is no
+  first-class place to preserve it.
+
+Target V1 shape:
+
+```json
+{
+  "schemaVersion": 2,
+  "nodes": [
+    {
+      "id": "n76",
+      "type": "chamfer",
+      "values": {
+        "length": 2,
+        "distance2": 0.8
+      },
+      "expressions": {
+        "length": "2/1"
+      }
+    }
+  ]
+}
+```
+
+Rules for the migration:
+
+- [x] Add `expressions: BTreeMap<String, String>` as a node-level sibling of
+      `values`; omit it when empty.
+- [x] Define canonical expression paths for nested fields (`points.0.x`,
+      `points.0.y`); a structured representation remains an option before V1.
+- [x] Keep expressions out of the worker `Node.values` conversion; the engine
+      continues to receive finite numbers only.
+- [x] Separate geometry/content hashes from document-source hashes so editing
+      only an expression does not invalidate geometry caches unnecessarily.
+- [ ] Preserve invalid source and report it in the UI; do not silently drop or
+      repair user-edited expressions on load.
+- [x] Add a schema/version migration that reads legacy
+      `values._expressions` and writes `node.expressions`.
+- [x] Add round-trip and legacy-migration tests for expressions and node hashes.
+- [ ] Decide whether expression source belongs in linked-part content hashes or
+      only in the local project revision.
+- [x] Bump `schemaVersion` to 2 and document the format change before V1 freezes
+      the file format.
 
 ## Remaining after this pass
 

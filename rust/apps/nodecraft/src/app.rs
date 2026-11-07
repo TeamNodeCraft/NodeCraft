@@ -113,6 +113,72 @@ struct EvalProgress {
     done: usize,
 }
 
+/// The part of the workspace that is actually the 3D viewer: between the node
+/// editor and the inspector overlay. Kept as one helper so overlay placement
+/// and hit-testing consumers agree on the viewport bounds.
+fn viewer_content_rect(
+    viewport: egui::Rect,
+    node_panel: egui::Rect,
+    inspector: egui::Rect,
+) -> egui::Rect {
+    let left = node_panel.right().max(viewport.left());
+    let right = inspector.left().min(viewport.right()).max(left);
+    egui::Rect::from_min_max(
+        egui::Pos2::new(left, viewport.top()),
+        egui::Pos2::new(right, viewport.bottom()),
+    )
+}
+
+/// Draw the selected node's evaluation error as a bottom-centered floating
+/// banner over the 3D viewer. The inspector no longer owns this state.
+fn show_viewer_error(
+    ctx: &egui::Context,
+    viewport: egui::Rect,
+    node_panel: egui::Rect,
+    inspector: egui::Rect,
+    error: &str,
+) {
+    if error.trim().is_empty() {
+        return;
+    }
+    let viewer = viewer_content_rect(viewport, node_panel, inspector);
+    if viewer.width() < 80.0 || viewer.height() < 40.0 {
+        return;
+    }
+    let max_width = (viewer.width() - 32.0).clamp(180.0, 560.0);
+    let theme = crate::theme::get();
+    egui::Area::new(egui::Id::new("viewer-node-error"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(viewer.center().x, viewer.bottom() - 16.0))
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .constrain(true)
+        .show(ctx, |ui| {
+            ui.set_max_width(max_width);
+            egui::Frame::new()
+                .fill(theme.with_alpha(theme.node_error, 34))
+                .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.node_error, 190)))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.set_max_width((max_width - 24.0).max(120.0));
+                    ui.label(
+                        egui::RichText::new("NODE ERROR")
+                            .size(10.0)
+                            .strong()
+                            .color(theme.color(theme.node_error)),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(error)
+                                .size(12.0)
+                                .color(theme.color(theme.text)),
+                        )
+                        .wrap(),
+                    );
+                });
+        });
+}
+
 fn progress_fraction(progress: &EvalProgress) -> f32 {
     if progress.total == 0 {
         return 0.0;
@@ -1077,7 +1143,7 @@ impl NodeCraftApp {
             }),
             None => serde_json::json!({}),
         };
-        let mut node = GraphNode {
+        let mut node = GraphNode { expressions: Default::default(),
             id: id.clone(),
             node_type: tool.node_type.to_owned(),
             values,
@@ -2082,6 +2148,13 @@ impl NodeCraftApp {
             };
             changed |= self.apply_commands(&[command], Some(&format!("reset:{}", node.id)));
         }
+        if !node.expressions.is_empty() {
+            let command = Command::SetExpressions {
+                node: node.id.clone(),
+                values: Default::default(),
+            };
+            changed |= self.apply_commands(&[command], Some(&format!("reset-expressions:{}", node.id)));
+        }
         if changed {
             self.evaluate();
         }
@@ -2147,7 +2220,7 @@ impl NodeCraftApp {
         let graph = pointer.and_then(|point| self.node_editor.graph_pos(point));
         let mut used: HashSet<String> = session.document().nodes.iter().map(|node| node.id.clone()).collect();
         let id = unique_node_id("step", &mut used);
-        let mut node = GraphNode {
+        let mut node = GraphNode { expressions: Default::default(),
             id: id.clone(),
             node_type: "stepimporter".to_owned(),
             values: serde_json::json!({ "path": path.display().to_string(), "heal": true }),
@@ -2249,7 +2322,7 @@ impl NodeCraftApp {
                 }
                 control_server::Command::OpenStep(path) => {
                     let mut document = GraphDocument::new("MCP");
-                    document.nodes.push(GraphNode {
+                    document.nodes.push(GraphNode { expressions: Default::default(),
                         id: "step".to_owned(),
                         node_type: "stepimporter".to_owned(),
                         values: serde_json::json!({ "path": path, "heal": true }),
@@ -3442,7 +3515,6 @@ impl NodeCraftApp {
                             ui.style_mut().visuals.widgets.active.corner_radius = bar_corner;
                             let active_selection =
                                 self.active_selection_field().map(str::to_owned);
-                            let node_error = self.node_error_messages.get(&node.id).cloned();
                             let reflow = self.inspector_reflow;
                             let mut scroll = egui::ScrollArea::vertical()
                                 .max_height(list_height)
@@ -3461,7 +3533,6 @@ impl NodeCraftApp {
                                         &surface_sections,
                                         active_selection.as_deref(),
                                         self.editing_sketch.as_deref() == Some(node.id.as_str()),
-                                        node_error.as_deref(),
                                     );
                                     if sketch_editing {
                                         self.sketch_gui.show_palette(ui);
@@ -3491,6 +3562,11 @@ impl NodeCraftApp {
             });
         if toggle_inspector {
             self.toggle_inspector();
+        }
+        if let Some(node) = &selected_node
+            && let Some(error) = self.node_error_messages.get(&node.id)
+        {
+            show_viewer_error(ui.ctx(), viewport_rect, node_panel_rect, inspector_rect, error);
         }
         if let (Some(output), Some(node)) = (inspector_output, &selected_node) {
             if output.delete {
@@ -3560,6 +3636,24 @@ impl NodeCraftApp {
                         value: change.value,
                     };
                     changed |= self.apply_commands(&[command], Some(&coalesce));
+                }
+                if !output.expressions.is_empty() {
+                    let mut expressions = node.expressions.clone();
+                    for (field, expression) in output.expressions {
+                        match expression {
+                            Some(expression) => {
+                                expressions.insert(field, expression);
+                            }
+                            None => {
+                                expressions.remove(&field);
+                            }
+                        }
+                    }
+                    let command = Command::SetExpressions {
+                        node: node.id.clone(),
+                        values: expressions,
+                    };
+                    changed |= self.apply_commands(&[command], Some(&format!("expressions:{}", node.id)));
                 }
                 if output.choose_linked_part {
                     self.start_dialog(
@@ -4140,7 +4234,7 @@ mod tests {
 
     fn history_fixture() -> GraphDocument {
         let nodes = vec![
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: json!({}),
@@ -4148,7 +4242,7 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
             },
-            nodecraft_session::GraphNode {
+            nodecraft_session::GraphNode { expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: json!({}),
@@ -4341,7 +4435,7 @@ mod tests {
 
     #[test]
     fn transform_edit_preview_uses_the_transform_input() {
-        let node = |id: &str, node_type: &str| GraphNode {
+        let node = |id: &str, node_type: &str| GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values: Default::default(),
@@ -4393,7 +4487,7 @@ mod tests {
 
     #[test]
     fn gizmo_frame_uses_the_displayed_target_chain() {
-        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values,
@@ -4426,7 +4520,7 @@ mod tests {
 
     #[test]
     fn deep_transform_overlay_uses_the_input_mesh() {
-        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values,
@@ -4476,7 +4570,7 @@ mod tests {
 
     #[test]
     fn transform_preview_is_skipped_for_sketch_inputs() {
-        let node = |id: &str, node_type: &str| GraphNode {
+        let node = |id: &str, node_type: &str| GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values: Default::default(),
@@ -4621,7 +4715,7 @@ mod tests {
     }
 
     fn clipboard_fixture() -> GraphDocument {
-        let node = |id: &str, node_type: &str, values: Value, x: f64| nodecraft_session::GraphNode {
+        let node = |id: &str, node_type: &str, values: Value, x: f64| nodecraft_session::GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values,
@@ -4780,14 +4874,14 @@ mod tests {
             .map(|node| node.y + f64::from(node_extent(node).height))
             .fold(f64::NEG_INFINITY, f64::max);
         let template = document.nodes[0].clone();
-        let first = GraphNode {
+        let first = GraphNode { expressions: Default::default(),
             id: "free-one".into(),
             ..template.clone()
         };
         let (x1, y1) = NodeCraftApp::free_node_placement(&document, &first);
         assert!(y1 >= max_y);
-        document.nodes.push(GraphNode { x: x1, y: y1, ..first.clone() });
-        let second = GraphNode {
+        document.nodes.push(GraphNode { expressions: Default::default(), x: x1, y: y1, ..first.clone() });
+        let second = GraphNode { expressions: Default::default(),
             id: "free-two".into(),
             ..template
         };
@@ -4936,6 +5030,19 @@ mod tests {
             x,
             source.x + f64::from(node_width(&source) - node_width(&added)) * 0.5
         );
+    }
+
+
+    #[test]
+    fn viewer_overlay_rect_excludes_panel_and_inspector() {
+        let viewport = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 700.0));
+        let node_panel = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(300.0, 700.0));
+        let inspector = egui::Rect::from_min_max(egui::pos2(700.0, 300.0), egui::pos2(1000.0, 700.0));
+        let viewer = viewer_content_rect(viewport, node_panel, inspector);
+        assert_eq!(viewer.left(), 300.0);
+        assert_eq!(viewer.right(), 700.0);
+        assert_eq!(viewer.top(), 0.0);
+        assert_eq!(viewer.bottom(), 700.0);
     }
 
     #[test]

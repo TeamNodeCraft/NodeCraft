@@ -12,8 +12,9 @@ SolidCore/SMLib for exact geometry.
   written to the temp directory, never sent
 - `nodecraft-expr` carries the SolidCraft-compatible parameter expression
   grammar and dimensional evaluator; numeric fields use a thin unit-kind
-  adapter that keeps the typed expression visible in an input-only cache while
-  the value is unchanged
+  adapter that shows the source expression while focused and the evaluated
+  number otherwise; expressions persist in each node's `expressions` map
+  (`schemaVersion: 2`, with legacy `values._expressions` migrated on load)
 - `.nodecraft` / `.solidnode` document association and Finder open events on
   macOS
 - flat node graph with stable IDs, undo/redo and linked documents
@@ -62,7 +63,7 @@ Verified on 2026-11-07:
 
 ```text
 cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  870 passed / 1 failed / 11 ignored
+  879 passed / 1 failed / 11 ignored
 
 the one failure is the documented sphere seam in nodecraft-mesh:
   remaining_ported_primitives_tessellate

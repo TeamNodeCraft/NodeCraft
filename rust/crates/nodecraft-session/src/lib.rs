@@ -68,6 +68,9 @@ pub struct GraphNode {
     pub x: f64,
     #[serde(default)]
     pub y: f64,
+    /// Source expressions by value field. Optional; empty maps are omitted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expressions: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,12 +106,12 @@ pub struct GraphDocument {
     pub interface: GraphInterface,
 }
 
-fn default_schema_version() -> u32 { 1 }
+fn default_schema_version() -> u32 { 2 }
 
 impl GraphDocument {
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self { schema_version: 1, id: id.into(), nodes: Vec::new(), connections: Vec::new(), interface: GraphInterface::default() }
+        Self { schema_version: 2, id: id.into(), nodes: Vec::new(), connections: Vec::new(), interface: GraphInterface::default() }
     }
 
     fn node_map(&self) -> Result<BTreeMap<&str, &GraphNode>, SessionError> {
@@ -225,6 +228,7 @@ impl std::error::Error for SessionError {}
 pub enum Command {
     SetValue { node: String, field: String, value: Value },
     RemoveValue { node: String, field: String },
+    SetExpressions { node: String, values: BTreeMap<String, String> },
     SetNodeType { node: String, #[serde(rename = "nodeType")] node_type: String },
     SetPosition { node: String, x: f64, y: f64 },
     SetSuppressed { node: String, suppressed: bool },
@@ -448,10 +452,23 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
                 effects.changed = true;
             }
         }
+        Command::SetExpressions { node, values } => {
+            let target = find_node_mut(document, node)?;
+            if &target.expressions == values { return Ok(inverse); }
+            inverse.push(Command::SetExpressions { node: node.clone(), values: target.expressions.clone() });
+            target.expressions = values.clone();
+            // Expressions are presentation/source metadata, not geometry
+            // content: do not seed a geometry invalidation for this command.
+            effects.changed = true;
+        }
         Command::SetNodeType { node, node_type } => {
             let target = find_node_mut(document, node)?;
             if &target.node_type == node_type { return Ok(inverse); }
             inverse.push(Command::SetNodeType { node: node.clone(), node_type: target.node_type.clone() });
+            if !target.expressions.is_empty() {
+                inverse.push(Command::SetExpressions { node: node.clone(), values: target.expressions.clone() });
+                target.expressions.clear();
+            }
             if let Some(values) = target.values.as_object() {
                 for (field, value) in values {
                     inverse.push(Command::SetValue { node: node.clone(), field: field.clone(), value: value.clone() });
@@ -611,7 +628,7 @@ mod tests {
     use super::*;
 
     fn node(id: &str, node_type: &str, values: Value, x: f64) -> GraphNode {
-        GraphNode { id: id.into(), node_type: node_type.into(), values, suppressed: false, x, y: 0.0 }
+        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x, y: 0.0 }
     }
 
     fn document() -> GraphDocument {
@@ -717,7 +734,7 @@ mod transaction_tests {
     use serde_json::json;
 
     fn node(id: &str) -> GraphNode {
-        GraphNode { id: id.into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode { expressions: Default::default(), id: id.into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 }
     }
 
     fn document() -> GraphDocument {
@@ -757,7 +774,7 @@ mod transaction_tests {
             ("b", "sketch", json!({})),
             ("c", "surfaceloft", json!({"sections": []})),
         ] {
-            graph.nodes.push(GraphNode {
+            graph.nodes.push(GraphNode { expressions: Default::default(),
                 id: id.into(),
                 node_type: node_type.into(),
                 values,
@@ -851,7 +868,7 @@ mod transaction_tests {
         let graph = GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![GraphNode {
+            nodes: vec![GraphNode { expressions: Default::default(),
                 id: "f".into(),
                 node_type: "chamfer".into(),
                 values: json!({"mode": "fillet", "length": 3}),
@@ -875,11 +892,11 @@ mod transaction_tests {
             schema_version: 1,
             id: "root".into(),
             nodes: vec![
-                GraphNode { id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "c".into(), node_type: "chamfer".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "d".into(), node_type: "exporter".into(), values: json!({"fileName": "part.step"}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "e".into(), node_type: "spline".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "c".into(), node_type: "chamfer".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "d".into(), node_type: "exporter".into(), values: json!({"fileName": "part.step"}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "e".into(), node_type: "spline".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
             ],
             connections: Vec::new(),
             interface: GraphInterface::default(),
@@ -902,7 +919,7 @@ mod reconnect_tests {
     use super::*;
 
     fn node(id: &str, node_type: &str) -> GraphNode {
-        GraphNode { id: id.into(), node_type: node_type.into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }
     }
 
     fn connect(from: &str, to: &str) -> Command {
@@ -931,6 +948,28 @@ mod reconnect_tests {
         let replaced = session.apply_commands(&[connect("p2", "t")]).unwrap();
         assert!(replaced.changed);
         assert!(replaced.dirty_nodes.contains(&"t".to_string()), "{:?}", replaced.dirty_nodes);
+    }
+
+    #[test]
+    fn expression_source_does_not_dirty_geometry() {
+        let mut document = GraphDocument::new("expressions");
+        document.nodes = vec![node("p", "primitive")];
+        let before = document.node_hashes().unwrap();
+        document.nodes[0].expressions.insert("length".into(), "2/1".into());
+        let after = document.node_hashes().unwrap();
+        assert_eq!(before, after, "source text is not geometry content");
+
+        let mut session = Session::new(document);
+        let change = session
+            .apply_commands(&[Command::SetExpressions {
+                node: "p".into(),
+                values: [("length".to_owned(), "3/1".to_owned())].into_iter().collect(),
+            }])
+            .unwrap();
+        assert!(change.changed);
+        assert!(change.dirty_nodes.is_empty(), "expressions do not invalidate geometry");
+        session.undo().unwrap();
+        assert_eq!(session.document().nodes[0].expressions["length"], "2/1");
     }
 
     #[test]

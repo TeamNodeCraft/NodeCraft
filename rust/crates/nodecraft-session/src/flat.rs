@@ -107,7 +107,7 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: id.into(),
-            nodes: vec![GraphNode {
+            nodes: vec![GraphNode { expressions: Default::default(),
                 id: "p".into(),
                 node_type: "primitive".into(),
                 values: json!({"primitiveType": "box", "length": value}),

@@ -242,8 +242,8 @@ mod tests {
             schema_version: 1,
             id: "root".into(),
             nodes: vec![
-                GraphNode { id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "b".into(), node_type: "translate".into(), values: json!({"x":5}), suppressed: false, x: 100.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":5}), suppressed: false, x: 100.0, y: 0.0 },
             ],
             connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
             interface: GraphInterface::default(),
@@ -293,9 +293,9 @@ mod command_tests {
     fn document() -> GraphDocument {
         GraphDocument { schema_version: 1, id: "root".into(), interface: GraphInterface::default(),
             nodes: vec![
-                GraphNode { id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "b".into(), node_type: "translate".into(), values: json!({"x":0}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "c".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":0}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "c".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
             ],
             connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
         }
@@ -345,7 +345,7 @@ mod command_tests {
         let linked = |id: &str, path: &std::path::Path| GraphDocument {
             schema_version: 1,
             id: id.into(),
-            nodes: vec![GraphNode {
+            nodes: vec![GraphNode { expressions: Default::default(),
                 id: "link".into(),
                 node_type: "linkedpart".into(),
                 values: json!({"path": path.to_string_lossy()}),
@@ -371,15 +371,15 @@ mod command_tests {
         let path = dir.join("bracket.nodecraft");
         let linked = GraphDocument {
             schema_version: 1, id: "bracket".into(),
-            nodes: vec![GraphNode { id: "p".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 }],
+            nodes: vec![GraphNode { expressions: Default::default(), id: "p".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 }],
             connections: Vec::new(), interface: GraphInterface::default(),
         };
         crate::store::save_atomic(&path, &linked).expect("save linked");
         let document = GraphDocument {
             schema_version: 1, id: "root".into(),
             nodes: vec![
-                GraphNode { id: "link".into(), node_type: "linkedpart".into(), values: json!({"path": path.to_string_lossy()}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { id: "t".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "link".into(), node_type: "linkedpart".into(), values: json!({"path": path.to_string_lossy()}), suppressed: false, x: 0.0, y: 0.0 },
+                GraphNode { expressions: Default::default(), id: "t".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
             ],
             connections: vec![GraphConnection { from: "link".into(), to: "t".into(), input: "shape".into(), out: "shape".into() }],
             interface: GraphInterface::default(),

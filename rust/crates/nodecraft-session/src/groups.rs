@@ -223,7 +223,7 @@ mod tests {
     use serde_json::json;
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
-        GraphNode {
+        GraphNode { expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values,

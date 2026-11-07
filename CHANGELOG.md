@@ -76,10 +76,22 @@
   `2 in` and `90 deg`, including inspector fields, spline points and the sketch
   fillet radius. The parser and dimensional evaluator live in the new
   `nodecraft-expr` crate; one small adapter supplies the unit-kind-specific
-  drag-value widget and keeps the typed expression visible in the box until the
-  stored value changes. The expression cache lives in an input-only thread-local
+  drag-value widget. While the field is focused it shows the source expression;
+  Return or focus loss switches to the evaluated number, and clicking again
+  restores the expression. Dragging or using the step buttons clears it. The
+  click is detected from the field's previous rect so DragValue cannot seed its
+  editor with the formatted number first. Expressions are saved in the node's
+  JSON at the node level as `expressions`, so the source survives save/reload.
+  Legacy `values._expressions` is migrated on load; new documents use
+  `schemaVersion: 2`. The legacy `.solidnode` fixture was migrated to the new
+  node-level shape as well. Invalid expressions do not change the stored number (no NaN/0 is committed); SolidCraft
+  stores the source and blocks apply, while this numeric-value adapter discards
+  invalid text on focus loss. The expression cache lives in an input-only thread-local
   map rather than egui's global data map, so it cannot collide with DragValue's
   edit state; stale entries are invalidated without touching egui data.
+- Node evaluation errors now float at the bottom of the 3D viewer instead of
+  occupying the top of the inspector. The error still remains in the status
+  bar for copy/context.
 - The application crate now has `#![forbid(unsafe_code)]`. macOS Objective-C
   interop moved to the small `nodecraft-macos` boundary crate, which exposes
   only safe functions; document-open handoff and window chrome remain there.

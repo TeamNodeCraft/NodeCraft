@@ -482,7 +482,7 @@ mod tests {
     use crate::{GraphConnection, GraphDocument, GraphNode};
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
-        GraphNode { id: id.into(), node_type: node_type.into(), values, suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x: 0.0, y: 0.0 }
     }
 
     fn link(from: &str, to: &str) -> GraphConnection {
@@ -811,7 +811,7 @@ mod tests {
         let mut document = GraphDocument::new("suppressed-chain");
         document.nodes = vec![
             node("move", "translate", serde_json::json!({"x": 1.0})),
-            GraphNode {
+            GraphNode { expressions: Default::default(),
                 id: "down".into(),
                 node_type: "translate".into(),
                 values: serde_json::json!({"x": 10.0}),

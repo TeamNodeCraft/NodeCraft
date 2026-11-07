@@ -130,7 +130,7 @@ pub(super) fn paste_plan(
     for node in &payload.nodes {
         let id = ids.get(&node.id).cloned().unwrap_or_else(|| node.id.clone());
         commands.push(Command::AddNode {
-            node: GraphNode {
+            node: GraphNode { expressions: Default::default(),
                 id,
                 x: origin_x + (node.x - min_x),
                 y: origin_y + (node.y - min_y),

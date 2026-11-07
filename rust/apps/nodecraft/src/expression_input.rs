@@ -11,10 +11,22 @@ use std::collections::HashMap;
 use nodecraft_expr::{eval_with, ExprError, Kind};
 use nodecraft_node_contract::NumberKind;
 
+#[derive(Clone, Default)]
+struct FieldState {
+    expression: Option<String>,
+    /// True after Return or focus loss; false while the user is editing.
+    show_number: bool,
+    was_focused: bool,
+    /// Last drawn rect, so a click can switch to expression text on the same
+    /// frame instead of seeding DragValue's editor with the formatted number.
+    rect: Option<egui::Rect>,
+    /// The expression text differs from the document and the inspector should
+    /// persist it in the node-level `expressions` map.
+    dirty_expression: bool,
+}
+
 thread_local! {
-    /// Expression text keyed by the field's stable egui id. Kept outside egui's
-    /// data map so it cannot collide with DragValue's own edit state.
-    static EXPRESSIONS: RefCell<HashMap<egui::Id, String>> = RefCell::new(HashMap::new());
+    static FIELDS: RefCell<HashMap<egui::Id, FieldState>> = RefCell::new(HashMap::new());
 }
 
 /// Parse an inspector number, accepting expressions such as `40/2`, `2 in` or
@@ -39,37 +51,110 @@ pub fn parse_number(text: &str, kind: NumberKind) -> Option<f64> {
 /// `id`, so the field continues to show `40/2` after commit. It is dropped when
 /// the stored number no longer matches the expression.
 pub fn number_drag<'a>(
+    ui: &egui::Ui,
     value: &'a mut f64,
     kind: NumberKind,
     step: f64,
     decimals: usize,
     id: egui::Id,
+    stored_expression: Option<&str>,
 ) -> egui::DragValue<'a> {
-    let mut shown = EXPRESSIONS.with(|cache| cache.borrow().get(&id).cloned());
-    if let Some(text) = shown.as_deref()
+    let widget_id = ui.next_auto_id();
+    let focused = ui.memory(|memory| memory.has_focus(widget_id));
+    let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+    let mut state = FIELDS.with(|fields| fields.borrow().get(&id).cloned().unwrap_or_default());
+    if !state.was_focused && !state.dirty_expression {
+        // The document owns the expression when the field is not being edited.
+        state.expression = stored_expression.map(str::to_owned);
+        state.show_number = true;
+    }
+    let clicked_inside = state.rect.is_some_and(|rect| {
+        ui.input(|input| {
+            input.pointer.primary_pressed()
+                && input.pointer.interact_pos().is_some_and(|point| rect.contains(point))
+        })
+    });
+    if clicked_inside || (focused && !state.was_focused) {
+        // Entering edit mode always starts from the source expression.
+        state.show_number = false;
+    } else if state.was_focused && !focused {
+        // Leaving the field commits the visible number.
+        state.show_number = true;
+    }
+    if enter && focused {
+        // Return commits even if the text editor keeps focus on this platform.
+        state.show_number = true;
+    }
+    state.was_focused = focused;
+    if let Some(text) = state.expression.as_deref()
         && !parse_number(text, kind).is_some_and(|parsed| close_enough(parsed, *value))
     {
-        EXPRESSIONS.with(|cache| cache.borrow_mut().remove(&id));
-        shown = None;
+        if state.expression.is_some() {
+            state.dirty_expression = true;
+        }
+        state.expression = None;
+        state.show_number = true;
+    }
+    let shown = if state.show_number { None } else { state.expression.clone() };
+    FIELDS.with(|fields| fields.borrow_mut().insert(id, state));
+    if enter && focused {
+        // Make the platform's TextEdit leave edit mode after Return so the
+        // formatter's number is the text shown next frame.
+        ui.memory_mut(|memory| memory.surrender_focus(widget_id));
     }
     let formatter = move |number: f64, _: std::ops::RangeInclusive<usize>| {
-        shown.clone().unwrap_or_else(|| format_number(number, decimals))
+        display_text(shown.as_deref(), number, decimals)
     };
+    let parser_ctx = ui.ctx().clone();
     egui::DragValue::new(value)
         .speed(step)
         .custom_formatter(formatter)
         .custom_parser(move |text| {
             let parsed = parse_number(text, kind);
-            EXPRESSIONS.with(|cache| {
-                let mut cache = cache.borrow_mut();
+            FIELDS.with(|fields| {
+                let mut fields = fields.borrow_mut();
+                let state = fields.entry(id).or_default();
                 if parsed.is_some() {
-                    cache.insert(id, text.to_owned());
+                    state.expression = Some(text.to_owned());
+                    state.dirty_expression = true;
+                    // Return commits to the number; normal text updates leave
+                    // the current display mode alone (typing is already in the
+                    // expression mode, and focus loss has already set the number).
+                    if parser_ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+                        state.show_number = true;
+                    }
                 } else {
-                    cache.remove(&id);
+                    state.expression = None;
+                    state.dirty_expression = true;
                 }
             });
             parsed
         })
+}
+
+/// Remember where the field was drawn, for the next frame's click detection.
+pub fn remember_rect(id: egui::Id, rect: egui::Rect) {
+    FIELDS.with(|fields| {
+        fields.borrow_mut().entry(id).or_default().rect = Some(rect);
+    });
+}
+
+/// Take an expression change that the inspector must persist, if any.
+pub fn take_expression_change(id: egui::Id) -> Option<Option<String>> {
+    FIELDS.with(|fields| {
+        let mut fields = fields.borrow_mut();
+        let state = fields.get_mut(&id)?;
+        if !state.dirty_expression {
+            return None;
+        }
+        state.dirty_expression = false;
+        Some(state.expression.clone())
+    })
+}
+
+/// What the box shows: the source expression, or the evaluated number.
+fn display_text(expression: Option<&str>, number: f64, decimals: usize) -> String {
+    expression.map_or_else(|| format_number(number, decimals), str::to_owned)
 }
 
 fn close_enough(a: f64, b: f64) -> bool {
@@ -121,6 +206,136 @@ mod tests {
         assert_eq!(parse_number("2 mm", NumberKind::Unitless), None);
     }
 
+
+    #[test]
+    fn the_focus_check_uses_the_drag_values_widget_id() {
+        let ctx = egui::Context::default();
+        let mut value = 1.0;
+        let id = egui::Id::new("expression-input-widget-id");
+        let mut expected = None;
+        let mut actual = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(300.0, 120.0))),
+                ..Default::default()
+            },
+            |ui| {
+                expected = Some(ui.next_auto_id());
+                actual = Some(ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None)).id);
+            },
+        );
+        output.textures_delta.clear();
+        assert_eq!(expected, actual);
+    }
+    #[test]
+    fn return_ends_keyboard_editing() {
+        use egui::{Event, Pos2, Rect, Vec2};
+        let ctx = egui::Context::default();
+        let mut value = 0.0;
+        let id = egui::Id::new("return-editing-test");
+        let mut widget = None;
+        let mut rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 24.0));
+        for step in 0..8 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 120.0))),
+                ..Default::default()
+            };
+            if step == 1 {
+                let at = rect.center();
+                input.events.push(Event::PointerMoved(at));
+                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+            }
+            if step == 2 { input.events.push(Event::Text("2".into())); }
+            if step == 3 { input.events.push(Event::Text("/".into())); }
+            if step == 4 { input.events.push(Event::Text("1".into())); }
+            if step == 5 {
+                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+            }
+            let mut output = ctx.run_ui(input, |ui| {
+                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
+                rect = response.rect;
+                widget = Some(response.id);
+            });
+            output.textures_delta.clear();
+        }
+        if let Some(widget) = widget {
+            assert!(!ctx.memory(|memory| memory.has_focus(widget)), "Return should leave text editing");
+        }
+        assert_eq!(value, 2.0);
+    }
+
+
+
+    #[test]
+    fn a_stored_expression_loads_in_number_mode() {
+        let ctx = egui::Context::default();
+        let mut value = 2.0;
+        let id = egui::Id::new("stored-expression-test");
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(300.0, 120.0))),
+                ..Default::default()
+            },
+            |ui| {
+                ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, Some("2/1")));
+            },
+        );
+        output.textures_delta.clear();
+        let state = FIELDS.with(|fields| fields.borrow().get(&id).cloned()).expect("field state");
+        assert_eq!(state.expression.as_deref(), Some("2/1"));
+        assert!(state.show_number, "a loaded field starts by showing the number");
+    }
+    #[test]
+    fn expression_is_restored_when_the_field_is_clicked_again() {
+        use egui::{Event, Pos2, Rect, Vec2};
+        let ctx = egui::Context::default();
+        let mut value = 0.0;
+        let id = egui::Id::new("expression-restore-test");
+        let mut rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(120.0, 24.0));
+        let mut show_after_return = None;
+        for step in 0..9 {
+            let mut input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 120.0))),
+                ..Default::default()
+            };
+            if step == 1 || step == 7 {
+                let at = rect.center();
+                input.events.push(Event::PointerMoved(at));
+                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+            }
+            if step == 2 { input.events.push(Event::Text("2".into())); }
+            if step == 3 { input.events.push(Event::Text("/".into())); }
+            if step == 4 { input.events.push(Event::Text("1".into())); }
+            if step == 5 {
+                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+            }
+            let mut output = ctx.run_ui(input, |ui| {
+                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
+                rect = response.rect;
+                remember_rect(id, rect);
+            });
+            output.textures_delta.clear();
+            if step == 6 {
+                show_after_return = FIELDS.with(|fields| fields.borrow().get(&id).map(|state| state.show_number));
+            }
+        }
+        assert_eq!(value, 2.0);
+        assert_eq!(show_after_return, Some(true), "Return should show the evaluated number");
+        let state = FIELDS.with(|fields| fields.borrow().get(&id).cloned()).expect("field state");
+        assert_eq!(state.expression.as_deref(), Some("2/1"));
+        assert!(!state.show_number, "clicking the field should show its expression again");
+    }
+    #[test]
+    fn expression_is_only_shown_while_focused() {
+        assert_eq!(display_text(Some("40/2"), 20.0, 2), "40/2");
+        assert_eq!(display_text(None, 20.0, 2), "20");
+        assert_eq!(display_text(None, 20.0, 2), "20");
+    }
+
     #[test]
     fn formatting_keeps_significant_values() {
         assert_eq!(format_number(20.0, 0), "20");
@@ -154,7 +369,7 @@ mod tests {
                 input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
             }
             let mut output = ctx.run_ui(input, |ui| {
-                let response = ui.add(number_drag(&mut value, NumberKind::Length, 0.1, 2, id));
+                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
                 rect = response.rect;
             });
             output.textures_delta.clear();

@@ -17,6 +17,8 @@ pub struct Change {
 #[derive(Default)]
 pub struct Output {
     pub changes: Vec<Change>,
+    /// Expression edits to persist under the node's reserved JSON map.
+    pub expressions: Vec<(String, Option<String>)>,
     pub choose_file: bool,
     pub choose_directory: bool,
     pub toggle_suppressed: bool,
@@ -310,28 +312,46 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                     .size(10.0)
                     .color(theme.with_alpha(theme.muted, 220)),
             );
+            let x_id = egui::Id::new(("spline-x", &node.id, index));
             let x_response = ui.add(
                 crate::expression_input::number_drag(
+                    ui,
                     x,
                     nodecraft_node_contract::NumberKind::Length,
                     0.5,
                     2,
-                    egui::Id::new(("spline-x", &node.id, index)),
+                    x_id,
+                    node.expressions
+                        .get(&format!("points.{index}.x"))
+                        .map(String::as_str),
                 )
                 .range(-10000.0..=10000.0)
                 .prefix("X "),
             );
+            crate::expression_input::remember_rect(x_id, x_response.rect);
+            if let Some(expression) = crate::expression_input::take_expression_change(x_id) {
+                output.expressions.push((format!("points.{index}.x"), expression));
+            }
+            let y_id = egui::Id::new(("spline-y", &node.id, index));
             let y_response = ui.add(
                 crate::expression_input::number_drag(
+                    ui,
                     y,
                     nodecraft_node_contract::NumberKind::Length,
                     0.5,
                     2,
-                    egui::Id::new(("spline-y", &node.id, index)),
+                    y_id,
+                    node.expressions
+                        .get(&format!("points.{index}.y"))
+                        .map(String::as_str),
                 )
                 .range(-10000.0..=10000.0)
                 .prefix("Y "),
             );
+            crate::expression_input::remember_rect(y_id, y_response.rect);
+            if let Some(expression) = crate::expression_input::take_expression_change(y_id) {
+                output.expressions.push((format!("points.{index}.y"), expression));
+            }
             if ui.small_button("×").on_hover_text("Remove point").clicked() {
                 remove = Some(index);
             }
@@ -476,10 +496,11 @@ pub fn reset_values(node: &GraphNode) -> Vec<Change> {
             values.insert(key.to_owned(), value.clone());
         }
     }
-    values
+    let mut changes: Vec<Change> = values
         .into_iter()
         .map(|(field, value)| Change { field, value })
-        .collect()
+        .collect();
+    changes
 }
 
 fn current_value(node: &GraphNode, spec: &FieldSpec) -> Value {
@@ -552,7 +573,8 @@ fn draw_number(
     max: Option<f64>,
     kind: nodecraft_node_contract::NumberKind,
     id: egui::Id,
-) -> bool {
+    stored_expression: Option<&str>,
+) -> (bool, Option<Option<String>>) {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -585,8 +607,17 @@ fn draw_number(
         };
         let entry = ui.add_sized(
             [entry_width, button_size.y],
-            crate::expression_input::number_drag(number, kind, step, decimals, id),
+            crate::expression_input::number_drag(
+                ui,
+                number,
+                kind,
+                step,
+                decimals,
+                id,
+                stored_expression,
+            ),
         );
+        crate::expression_input::remember_rect(id, entry.rect);
         if entry.changed() {
             clamp_number(number, min, max);
             changed = true;
@@ -607,7 +638,7 @@ fn draw_number(
             changed = true;
         }
     });
-    changed
+    (changed, crate::expression_input::take_expression_change(id))
 }
 
 pub fn node_title(node: &GraphNode) -> String {
@@ -758,29 +789,6 @@ fn description(ui: &mut Ui, text: &str) {
 
 /// Show an error for the selected node even when it is outside the viewed
 /// target closure. The canvas glow says where; this says why.
-fn error_banner(ui: &mut Ui, error: &str) {
-    let theme = crate::theme::get();
-    egui::Frame::new()
-        .fill(theme.with_alpha(theme.node_error, 28))
-        .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.node_error, 180)))
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::same(8))
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new("NODE ERROR")
-                    .size(10.0)
-                    .strong()
-                    .color(theme.color(theme.node_error)),
-            );
-            ui.label(
-                egui::RichText::new(error)
-                    .size(12.0)
-                    .color(theme.color(theme.text)),
-            );
-        });
-    ui.add_space(6.0);
-}
-
 fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
     ui.horizontal(|ui| {
@@ -973,12 +981,8 @@ pub fn show(
     sections: &[String],
     active_selection: Option<&str>,
     sketch_editing: bool,
-    node_error: Option<&str>,
 ) -> Output {
     let mut output = Output::default();
-    if let Some(error) = node_error {
-        error_banner(ui, error);
-    }
     if node.node_type == "stepimporter" {
         if let Some(name) = step_file_name(node) {
             let theme = crate::theme::get();
@@ -1111,17 +1115,25 @@ pub fn show(
                         }
                         Widget::Number { min, max, step, kind } => {
                             let mut number = value.as_f64().unwrap_or(0.0);
-                            if draw_number(
+                            let field_id = egui::Id::new(("inspector-number", &node.id, &spec.key));
+                            let stored_expression =
+                                node.expressions.get(&spec.key).map(String::as_str);
+                            let (number_changed, expression_change) = draw_number(
                                 ui,
                                 &mut number,
                                 *step,
                                 *min,
                                 *max,
                                 *kind,
-                                egui::Id::new(("inspector-number", &node.id, &spec.key)),
-                            ) {
+                                field_id,
+                                stored_expression,
+                            );
+                            if number_changed {
                                 value = Value::from(number);
                                 changed = true;
+                            }
+                            if let Some(expression) = expression_change {
+                                output.expressions.push((spec.key.clone(), expression));
                             }
                         }
                         Widget::Choice(choices) => {
@@ -1158,7 +1170,7 @@ mod tests {
     use super::*;
 
     fn node(node_type: &str, values: Value) -> GraphNode {
-        GraphNode {
+        GraphNode { expressions: Default::default(),
             id: "n".into(),
             node_type: node_type.into(),
             values,
@@ -1261,7 +1273,7 @@ mod tests {
 
     #[test]
     fn reset_values_restores_settings_but_preserves_asset_data() {
-        let look = GraphNode {
+        let look = GraphNode { expressions: Default::default(),
             id: "look".into(),
             node_type: "look".into(),
             values: serde_json::json!({"color": "#ff0000"}),
@@ -1273,7 +1285,7 @@ mod tests {
         assert!(reset.iter().any(|change| change.field == "color"
             && change.value == serde_json::json!("#7fa0cf")));
 
-        let spline = GraphNode {
+        let spline = GraphNode { expressions: Default::default(),
             id: "s".into(),
             node_type: "spline".into(),
             values: serde_json::json!({"degree": 5.0, "points": [[0.0, 0.0], [1.0, 1.0]]}),
@@ -1286,7 +1298,7 @@ mod tests {
         assert!(reset.iter().any(|change| change.field == "points"
             && change.value == serde_json::json!([[0.0, 0.0], [1.0, 1.0]])));
 
-        let fillet = GraphNode {
+        let fillet = GraphNode { expressions: Default::default(),
             id: "f".into(),
             node_type: "fillet".into(),
             values: serde_json::json!({"length": 9.0, "edges": [{"id": "edge:1"}]}),
