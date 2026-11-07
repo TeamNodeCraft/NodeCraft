@@ -35,6 +35,7 @@ nodecraft-node-contract = { path = "../../crates/nodecraft-node-contract" }
 nodecraft-expr = { path = "../../crates/nodecraft-expr" }
 nodecraft-search = { path = "../../crates/nodecraft-search" }
 nodecraft-dock = { path = "../../crates/nodecraft-dock" }
+nodecraft-color-picker = { path = "../../crates/nodecraft-color-picker" }
 nodecraft-worker = { path = "../../crates/nodecraft-worker", default-features = false }
 # Upstream view math/geometry. Keep these as git dependencies so they can be
 # updated independently of the app; only our UI adapter lives in this repository.

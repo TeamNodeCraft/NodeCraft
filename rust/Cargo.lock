@@ -2041,6 +2041,7 @@ dependencies = [
  "image",
  "lyon",
  "mimalloc",
+ "nodecraft-color-picker",
  "nodecraft-dock",
  "nodecraft-engine",
  "nodecraft-expr",
@@ -2092,6 +2093,13 @@ name = "nodecraft-cli"
 version = "0.0.1"
 dependencies = [
  "serde_json",
+]
+
+[[package]]
+name = "nodecraft-color-picker"
+version = "0.0.1"
+dependencies = [
+ "egui",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ mod settings;
 mod settings_ui;
 mod tabs;
 mod theme_editor;
+mod titlebar;
 mod tool_dock;
 use tabs::{DocumentTab, TabDrag};
 use theme_editor::*;
@@ -2591,8 +2592,8 @@ impl NodeCraftApp {
         self.poll_control();
         #[cfg(target_os = "macos")]
         self.poll_open_documents();
-        if let Some(direction) = window_resize_direction(ui.ctx()) {
-            ui.ctx().set_cursor_icon(resize_cursor(direction));
+        if let Some(direction) = titlebar::resize_direction(ui.ctx()) {
+            ui.ctx().set_cursor_icon(titlebar::resize_cursor(direction));
             if ui.ctx().input(|input| input.pointer.primary_pressed()) {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
             }
@@ -2741,7 +2742,7 @@ impl NodeCraftApp {
                     let bar_drag_started = cfg!(target_os = "macos")
                         && (bar_drag.drag_started()
                             || bar_drag_right.is_some_and(|response| response.drag_started()))
-                        && window_resize_direction(ui.ctx()).is_none();
+                        && titlebar::resize_direction(ui.ctx()).is_none();
 
                     #[cfg(target_os = "macos")]
                     {
@@ -2750,43 +2751,32 @@ impl NodeCraftApp {
                             egui::Sense::hover(),
                         );
                         let colors = [
-                            egui::Color32::from_rgb(255, 95, 86),
-                            egui::Color32::from_rgb(255, 189, 46),
-                            egui::Color32::from_rgb(39, 201, 63),
+                            titlebar::CLOSE_LIGHT_COLOR,
+                            titlebar::MINIMIZE_LIGHT_COLOR,
+                            titlebar::ZOOM_LIGHT_COLOR,
                         ];
                         for (index, color) in colors.into_iter().enumerate() {
                             let center = egui::Pos2::new(
                                 lights.min.x + 16.0 + index as f32 * 20.0,
                                 lights.center().y,
                             );
-                            let hit = egui::Rect::from_center_size(center, egui::Vec2::splat(18.0));
-                            let response = ui.interact(
-                                hit,
-                                egui::Id::new(("app-bar-light", index)),
-                                egui::Sense::click(),
-                            );
-                            let fill = if response.hovered() {
-                                color.gamma_multiply(1.15)
-                            } else {
-                                color
+                            let command = match index {
+                                0 => egui::ViewportCommand::Close,
+                                1 => egui::ViewportCommand::Minimized(true),
+                                _ => {
+                                    let fullscreen = ui.ctx().input(|input| {
+                                        input.viewport().fullscreen.unwrap_or(false)
+                                    });
+                                    egui::ViewportCommand::Fullscreen(!fullscreen)
+                                }
                             };
-                            ui.painter().circle_filled(center, 6.0, fill);
-                            if response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if response.clicked() {
-                                let command = match index {
-                                    0 => egui::ViewportCommand::Close,
-                                    1 => egui::ViewportCommand::Minimized(true),
-                                    _ => {
-                                        let fullscreen = ui.ctx().input(|input| {
-                                            input.viewport().fullscreen.unwrap_or(false)
-                                        });
-                                        egui::ViewportCommand::Fullscreen(!fullscreen)
-                                    }
-                                };
-                                ui.ctx().send_viewport_cmd(command);
-                            }
+                            titlebar::window_button(
+                                ui,
+                                center,
+                                color,
+                                egui::Id::new(("app-bar-light", index)),
+                                command,
+                            );
                         }
                     }
 
@@ -2944,7 +2934,7 @@ impl NodeCraftApp {
                         self.tab_strip.is_some_and(|tab_strip| tab_strip.contains(press))
                     });
                     if bar_drag_started && !started_on_tabs && self.tab_drag.is_none() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        titlebar::start_drag(ui);
                     }
                     let new_tab = ui
                         .add(
@@ -3985,41 +3975,6 @@ impl NodeCraftApp {
             );
         }
         self.show_tool_dock(ui.ctx(), workspace_rect, tool_connect_source);
-    }
-}
-
-fn window_resize_direction(ctx: &egui::Context) -> Option<egui::viewport::ResizeDirection> {
-    use egui::viewport::ResizeDirection;
-    let rect = ctx.input(|input| input.viewport_rect());
-    let pointer = ctx.pointer_latest_pos()?;
-    if !rect.contains(pointer) {
-        return None;
-    }
-    const EDGE: f32 = 5.0;
-    let west = pointer.x <= rect.left() + EDGE;
-    let east = pointer.x >= rect.right() - EDGE;
-    let north = pointer.y <= rect.top() + EDGE;
-    let south = pointer.y >= rect.bottom() - EDGE;
-    match (west, east, north, south) {
-        (true, _, true, _) => Some(ResizeDirection::NorthWest),
-        (_, true, true, _) => Some(ResizeDirection::NorthEast),
-        (true, _, _, true) => Some(ResizeDirection::SouthWest),
-        (_, true, _, true) => Some(ResizeDirection::SouthEast),
-        (true, _, _, _) => Some(ResizeDirection::West),
-        (_, true, _, _) => Some(ResizeDirection::East),
-        (_, _, true, _) => Some(ResizeDirection::North),
-        (_, _, _, true) => Some(ResizeDirection::South),
-        _ => None,
-    }
-}
-
-fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon {
-    use egui::viewport::ResizeDirection;
-    match direction {
-        ResizeDirection::North | ResizeDirection::South => egui::CursorIcon::ResizeVertical,
-        ResizeDirection::East | ResizeDirection::West => egui::CursorIcon::ResizeHorizontal,
-        ResizeDirection::NorthEast | ResizeDirection::SouthWest => egui::CursorIcon::ResizeNeSw,
-        ResizeDirection::NorthWest | ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
     }
 }
 

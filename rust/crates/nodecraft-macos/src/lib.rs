@@ -204,8 +204,7 @@ pub fn take_pending() -> Vec<PathBuf> {
 }
 
 
-/// Round the main window and make its background transparent.
-pub fn round_main_window() {
+fn round_window(title: &str) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSColor};
 
@@ -214,7 +213,7 @@ pub fn round_main_window() {
     };
     let app = NSApplication::sharedApplication(mtm);
     for window in app.windows().iter() {
-        if window.title().to_string() != "NodeCraft" {
+        if window.title().to_string() != title {
             continue;
         }
         window.setOpaque(false);
@@ -229,23 +228,14 @@ pub fn round_main_window() {
     }
 }
 
-/// Hide the zoom and minimize buttons on the settings window.
-pub fn hide_settings_zoom_button() {
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSApplication, NSWindowButton};
-
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    for window in app.windows().iter() {
-        if window.title().to_string() == "NodeCraft Settings" {
-            if let Some(button) = window.standardWindowButton(NSWindowButton::ZoomButton) {
-                button.setHidden(true);
-            }
-            if let Some(button) = window.standardWindowButton(NSWindowButton::MiniaturizeButton) {
-                button.setHidden(true);
-            }
-        }
-    }
+/// Round the main window and make its background transparent.
+pub fn round_main_window() {
+    round_window("NodeCraft");
 }
+
+/// Round the settings window with the same radius as the main window.
+pub fn round_settings_window() {
+    round_window("NodeCraft Settings");
+}
+
+

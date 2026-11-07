@@ -96,6 +96,27 @@
   cable opaque. The
   luminosity control now changes the wheel's own brightness. The CPU cable
   fallback now uses the themed cable/outline colours, alpha and widths.
+- Removed the retired Swift/WKWebView front end, worker queue, Swift test and
+  legacy build script. The Rust app and `scripts/build-app.sh` are the single
+  macOS build path.
+- Extracted the HSV colour wheel and luminosity/opacity controls into the
+  `nodecraft-color-picker` crate; the app keeps the popup, hex field and theme
+  integration.
+- Extracted cross-platform title-bar button, drag, resize and title helpers;
+  split the settings window shell, title bar and navigation out of the main
+  settings function. The settings custom bar now works on Windows and Linux as
+  well as macOS, with the same single close control and title.
+- The settings window now uses the app's custom macOS title bar and the same
+  16 px rounded, transparent window corners as the main window, with a single
+  close control and the unchanged “NodeCraft Settings” title.
+- The colour picker dismisses on any mouse press or scroll outside its popup,
+  while inside clicks/drags remain inside the picker. A transparent middle
+  layer consumes outside pointer input so settings controls do not hover or
+  receive the dismissing click.
+- The colour wheel selector keeps moving along the rim when a drag leaves the
+  wheel; the pointer distance is clamped to the radius. Canvas wire/lasso and
+  trackpad gestures are suppressed while the pointer is over a foreground
+  picker or popup.
 - The colour picker uses luminosity and opacity icons beside its sliders,
   with the wheel above and the two slider rows (icon, track, value) beneath it.
 - Cable edge anti-aliasing is now pixel-sized instead of proportional to cable

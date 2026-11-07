@@ -1,0 +1,8 @@
+[package]
+name = "nodecraft-color-picker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui = "0.36"

@@ -24,23 +24,7 @@ impl NodeCraftApp {
         let mut feature_overlay = self.feature_overlay;
         let mut cable_routing = self.cable_routing;
         let mut close = false;
-        let mut builder = egui::ViewportBuilder::default()
-            .with_title("NodeCraft Settings")
-            .with_inner_size([760.0, 620.0])
-            .with_min_inner_size([520.0, 400.0])
-            .with_resizable(true)
-            // Keep settings above the main NodeCraft window even if the main
-            // window is clicked or activated.
-            .with_always_on_top()
-            // Native OS chrome: keep close and minimize, hide maximize. The
-            // platform owns the button order/side and rounded window corners.
-            // macOS verified: close/minimize at left, no zoom, rounded corners.
-            // TODO(future agent): verify native button placement and rounded
-            // corners on Windows and Linux; keep OS chrome, not custom controls.
-            .with_decorations(true)
-            .with_close_button(true)
-            .with_minimize_button(false)
-            .with_maximize_button(false);
+        let mut builder = settings_viewport_builder();
         let parent_outer = ctx.input(|input| input.viewport().outer_rect);
         let monitor_size = ctx.input(|input| input.viewport().monitor_size);
         let mut center_once = !self.settings_open_last;
@@ -79,10 +63,20 @@ impl NodeCraftApp {
                         center_once = false;
                     }
                 }
-                let panel = ui.max_rect();
+                let full_rect = ui.max_rect();
+                if let Some(direction) = titlebar::resize_direction(ui.ctx()) {
+                    ui.ctx().set_cursor_icon(titlebar::resize_cursor(direction));
+                    if ui.ctx().input(|input| input.pointer.primary_pressed()) {
+                        ui.ctx()
+                            .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+                    }
+                }
+                let chrome = settings_title_bar(ui, &theme, full_rect);
+                close |= chrome.close;
+                let panel = chrome.content;
                 let left = egui::Rect::from_min_max(
                     panel.min,
-                    egui::pos2(panel.min.x + 124.0, panel.max.y),
+                    egui::pos2(panel.min.x + SETTINGS_SIDEBAR_WIDTH, panel.max.y),
                 );
                 let right = egui::Rect::from_min_max(
                     egui::pos2(left.max.x, panel.min.y),
@@ -90,51 +84,7 @@ impl NodeCraftApp {
                 );
                 ui.painter().rect_filled(left, 0.0, theme.color(theme.panel));
                 ui.painter().rect_filled(right, 0.0, theme.color(theme.window));
-
-                let tabs = [
-                    SettingsTab::Appearance,
-                    SettingsTab::Viewport,
-                    SettingsTab::Engine,
-                    SettingsTab::Diagnostics,
-                    SettingsTab::Keys,
-                ];
-                let mut tab_y = left.min.y + 12.0;
-                for candidate in tabs {
-                    let button = egui::Rect::from_min_size(
-                        egui::pos2(left.min.x + 10.0, tab_y),
-                        egui::vec2(104.0, 30.0),
-                    );
-                    let response = ui.interact(
-                        button,
-                        ui.make_persistent_id(("settings-tab", candidate.label())),
-                        egui::Sense::click(),
-                    );
-                    if response.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                    }
-                    if response.clicked() {
-                        tab = candidate;
-                    }
-                    if tab == candidate {
-                        ui.painter().rect_filled(
-                            button,
-                            egui::CornerRadius::same(7),
-                            theme.color(theme.accent),
-                        );
-                    }
-                    ui.painter().text(
-                        egui::pos2(button.min.x + 10.0, button.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        candidate.label(),
-                        egui::FontId::proportional(13.0),
-                        if tab == candidate {
-                            theme.color(theme.window)
-                        } else {
-                            theme.color(theme.muted)
-                        },
-                    );
-                    tab_y += 36.0;
-                }
+                tab = settings_navigation(ui, left, &theme, tab);
 
                 let palette_row_width = (right.width() - 64.0).max(300.0);
                 let mut content = ui.new_child(
@@ -486,7 +436,7 @@ impl NodeCraftApp {
                     }
                 }
                 #[cfg(target_os = "macos")]
-                nodecraft_macos::hide_settings_zoom_button();
+                nodecraft_macos::round_settings_window();
             },
         );
         self.theme_rename_id = theme_rename_id;
@@ -566,4 +516,133 @@ impl NodeCraftApp {
         self.settings_tab = tab;
     }
 
+}
+
+
+const SETTINGS_SIZE: egui::Vec2 = egui::vec2(760.0, 620.0);
+const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(520.0, 400.0);
+const SETTINGS_TITLEBAR_HEIGHT: f32 = 40.0;
+const SETTINGS_SIDEBAR_WIDTH: f32 = 124.0;
+
+const SETTINGS_TABS: [SettingsTab; 5] = [
+    SettingsTab::Appearance,
+    SettingsTab::Viewport,
+    SettingsTab::Engine,
+    SettingsTab::Diagnostics,
+    SettingsTab::Keys,
+];
+
+fn settings_viewport_builder() -> egui::ViewportBuilder {
+    let builder = egui::ViewportBuilder::default()
+        .with_title("NodeCraft Settings")
+        .with_inner_size(SETTINGS_SIZE)
+        .with_min_inner_size(SETTINGS_MIN_SIZE)
+        .with_resizable(true)
+        // Settings must stay readable above the main window.
+        .with_always_on_top()
+        .with_decorations(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .with_fullsize_content_view(true)
+        .with_title_shown(false)
+        .with_titlebar_buttons_shown(false)
+        .with_titlebar_shown(false);
+    builder
+}
+
+struct SettingsTitleBar {
+    content: egui::Rect,
+    close: bool,
+}
+
+fn settings_title_bar(
+    ui: &mut egui::Ui,
+    theme: &crate::theme::Theme,
+    full_rect: egui::Rect,
+) -> SettingsTitleBar {
+    let titlebar = egui::Rect::from_min_max(
+        full_rect.min,
+        egui::pos2(full_rect.max.x, full_rect.min.y + SETTINGS_TITLEBAR_HEIGHT),
+    );
+    ui.painter()
+        .rect_filled(titlebar, 0.0, theme.color(theme.window));
+    let close_center = egui::pos2(titlebar.min.x + 22.0, titlebar.center().y);
+    let close = titlebar::close_light(
+        ui,
+        close_center,
+        ui.make_persistent_id("settings-title-close"),
+    );
+    let title_start = close_center.x + 20.0;
+    let drag_rect = egui::Rect::from_min_max(
+        egui::pos2(title_start, titlebar.min.y),
+        titlebar.max,
+    );
+    if titlebar::drag_response(
+        ui,
+        drag_rect,
+        ui.make_persistent_id("settings-title-drag"),
+    )
+    .drag_started()
+    {
+        titlebar::start_drag(ui);
+    }
+    titlebar::title(
+        ui,
+        egui::pos2(title_start + 4.0, titlebar.center().y),
+        "NodeCraft Settings",
+        theme.color(theme.text),
+    );
+    SettingsTitleBar {
+        content: egui::Rect::from_min_max(
+            egui::pos2(full_rect.min.x, titlebar.max.y),
+            full_rect.max,
+        ),
+        close,
+    }
+}
+
+fn settings_navigation(
+    ui: &mut egui::Ui,
+    left: egui::Rect,
+    theme: &crate::theme::Theme,
+    mut active: SettingsTab,
+) -> SettingsTab {
+    let mut tab_y = left.min.y + 12.0;
+    for candidate in SETTINGS_TABS {
+        let button = egui::Rect::from_min_size(
+            egui::pos2(left.min.x + 10.0, tab_y),
+            egui::vec2(SETTINGS_SIDEBAR_WIDTH - 20.0, 30.0),
+        );
+        let response = ui.interact(
+            button,
+            ui.make_persistent_id(("settings-tab", candidate.label())),
+            egui::Sense::click(),
+        );
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if response.clicked() {
+            active = candidate;
+        }
+        if active == candidate {
+            ui.painter().rect_filled(
+                button,
+                egui::CornerRadius::same(7),
+                theme.color(theme.accent),
+            );
+        }
+        ui.painter().text(
+            egui::pos2(button.min.x + 10.0, button.center().y),
+            egui::Align2::LEFT_CENTER,
+            candidate.label(),
+            egui::FontId::proportional(13.0),
+            if active == candidate {
+                theme.color(theme.window)
+            } else {
+                theme.color(theme.muted)
+            },
+        );
+        tab_y += 36.0;
+    }
+    active
 }

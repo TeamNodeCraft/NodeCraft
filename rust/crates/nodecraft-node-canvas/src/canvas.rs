@@ -1027,7 +1027,14 @@ impl NodeEditor {
                 let canvas = panel_canvas(panel);
                 let mini = node_minimap_rect(panel);
                 let pointer = ui.ctx().pointer_latest_pos();
+                let canvas_layer = ui.layer_id();
+                let pointer_over_foreground = pointer.is_some_and(|pointer| {
+                    ui.ctx().layer_id_at(pointer).is_some_and(|layer| {
+                        layer.order >= egui::Order::Foreground && layer.id != canvas_layer.id
+                    })
+                });
                 if self.wire_drag.is_none()
+                    && !pointer_over_foreground
                     && pointer.is_some_and(|pointer| panel.contains(pointer))
                     && ui.ctx().input(|input| input.pointer.primary_pressed())
                 {
@@ -1048,6 +1055,7 @@ impl NodeEditor {
                 // pointer by several pixels. The node/minimap hit checks keep a
                 // normal node press or chrome click from starting a lasso.
                 if self.wire_drag.is_none()
+                    && !pointer_over_foreground
                     && ui.ctx().input(|input| input.pointer.primary_pressed())
                     && let Some(pointer) = pointer
                 {
@@ -1122,7 +1130,7 @@ impl NodeEditor {
                     .ctx()
                     .pointer_latest_pos()
                     .is_some_and(|pointer| panel.contains(pointer));
-                if pointer_over_panel {
+                if pointer_over_panel && !pointer_over_foreground {
                     let gesture = crate::gesture::TrackpadGesture::read(ui.ctx());
                     if (gesture.zoom - 1.0).abs() > f32::EPSILON {
                         let anchor = gesture.pointer.unwrap_or(canvas.center());

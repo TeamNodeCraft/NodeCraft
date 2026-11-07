@@ -13,6 +13,7 @@ members = [
   "crates/nodecraft-macos",
   "crates/nodecraft-expr",
   "crates/nodecraft-dock",
+  "crates/nodecraft-color-picker",
   "crates/nodecraft-session",
   "crates/nodecraft-solidcore",
   "crates/nodecraft-wedge",
