@@ -2384,13 +2384,21 @@ impl GpuViewport {
                     let moved = moves(&display_edge.id);
                     for (index, pair) in display_edge.points.windows(2).enumerate() {
                         let [a, b] = [pair[0], pair[1]];
+                        let start = world(a, moved);
+                        let end = world(b, moved);
+                        // A zero-length segment is a vertex marker in the line
+                        // shader: it draws a square/ball at the vertex.
+                        let delta = end - start;
+                        if delta.dot(delta) <= 1.0e-20 {
+                            continue;
+                        }
                         let normals = [
                             direction(display_edge.normals.get(index).copied().unwrap_or([0.0; 3]), moved),
                             direction(display_edge.normals.get(index + 1).copied().unwrap_or([0.0; 3]), moved),
                         ];
                         scene.lifted_line(
-                            world(a, moved).to_f32(),
-                            world(b, moved).to_f32(),
+                            start.to_f32(),
+                            end.to_f32(),
                             edge,
                             edge_width,
                             normals,

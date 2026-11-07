@@ -39,6 +39,15 @@ fn upstream_tess_meshes_a_record_box() {
     let groups: std::collections::HashSet<_> = display.mesh.face_groups.iter().collect();
     assert_eq!(groups.len(), 6, "one face group per B-rep face");
     assert_eq!(display.edge_polylines.len(), 12, "one polyline per B-rep edge");
+    for (edge, polyline) in display.edge_polylines.iter().enumerate() {
+        for pair in polyline.windows(2) {
+            assert!(
+                pair[0] != pair[1],
+                "edge {edge} has a zero-length segment at {:?}",
+                pair[0]
+            );
+        }
+    }
 
     let mut min = [f32::INFINITY; 3];
     let mut max = [f32::NEG_INFINITY; 3];

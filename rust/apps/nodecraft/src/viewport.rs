@@ -1356,6 +1356,9 @@ impl Viewport {
                 .filter_map(|point| self.project_to_viewport(*point, viewport))
                 .collect();
             for pair in points.windows(2) {
+                if pair[0].distance_sq(pair[1]) <= 1.0e-6 {
+                    continue;
+                }
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(2.0, edge_colour));
             }
         }
@@ -1409,6 +1412,9 @@ impl Viewport {
                 .filter_map(|point| self.project_to_viewport_body(*point, viewport, id))
                 .collect();
             for pair in points.windows(2) {
+                if pair[0].distance_sq(pair[1]) <= 1.0e-6 {
+                    continue;
+                }
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, colour));
             }
         };

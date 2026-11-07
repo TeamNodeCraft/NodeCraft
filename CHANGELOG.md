@@ -50,6 +50,11 @@
   the overlay still shows the feature from both sides.
 - The display popup has a fixed width, aligned columns and no slider jitter.
 
+### Viewport
+
+- Zero-length edge segments are skipped in GPU and 2D edge rendering, removing
+  the vertex marker/“ball” that appeared at duplicated polyline points.
+
 ### App
 
 - Renamed the desktop application package and binary from `nodecraft-egui` to
