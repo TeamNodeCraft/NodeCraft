@@ -4,8 +4,7 @@ Priority order is approximate.
 
 ## Current state (2026-11-07)
 
-- SolidCore is pinned at `f8685cdc441e93164ae7f07675d07dc7eb1971c9` (latest
-  `main`, +491 commits over `3ed61947`).
+- SolidCore is pinned at `0249e8e07238ec7faa756831d5181586d7b0b284` (latest `main`).
 - SolidCraft sketch stack is pinned at
   `871014f955a76fd308ce156e68c93e6372906005`.
 - Evaluated Part, comparison and STEP import display meshes use
@@ -27,12 +26,19 @@ Priority order is approximate.
   remains only for a few legacy helpers and the STEP analytic-curve fallback.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
-- Workspace tests: 879 passed / 1 failed / 11 ignored. The single failure is the
-  documented `nodecraft-mesh` pole-free sphere seam assertion.
+- Latest SolidCore pin targeted gates: app 134, engine 125 (+1 ignored), session
+  59 and layers pin tests pass. The last full workspace baseline before the pin
+  bump was 879 passed / 1 known `nodecraft-mesh` sphere seam failure / 11
+  ignored.
 
-## SolidCore f8685cdc pin bump (completed)
+## SolidCore 0249e8e pin bump (completed)
 
-Upstream moved from `3ed61947` to `f8685cdc`: +491 commits to `5458b142`,
+Updated the workspace from `f8685cdc` to `0249e8e`; targeted app, engine,
+layers and session tests pass. The SolidCraft sketch stack keeps its older
+`solidcore-record-new` alias, so the workspace now intentionally carries two
+record revisions.
+
+Upstream history from `3ed61947` to `f8685cdc`: +491 commits to `5458b142`,
 then +7 blend end-section/smooth-vertex fixes, then +6 blend/offset/surface
 fixes. The pin is applied.
 
@@ -665,7 +671,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `f8685cdc441e93164ae7f07675d07dc7eb1971c9`:
+      Reproduction at current pin `0249e8e07238ec7faa756831d5181586d7b0b284`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`
