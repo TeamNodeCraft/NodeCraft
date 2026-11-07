@@ -383,7 +383,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     | "sphereNoPole" | "partialSphere" | "partialTorus" | "wedge" => self
                         .cached_primitive_brep(&node)
                         .and_then(|brep| display_mesh_for_brep(&brep)),
-                    _ => self.kernel.primitive(kind, &node.values),
+                    _ => Err(format!("unsupported primitive kind {kind:?}")),
                 }
             }
             "exporter" => {

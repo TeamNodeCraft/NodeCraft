@@ -5,7 +5,7 @@
 //! `nodecraft-layers` / `solidcore-tess`, the same mesher every evaluated Part
 //! node uses.
 //!
-//! This replaces the NodeCraft dependency on `solidcore-stepio` for the worker.
+//! This is the worker's STEP import adapter.
 //!
 //! # Assemblies
 //!
@@ -274,7 +274,7 @@ fn import_step_inner(path: &str, stack: &mut Vec<PathBuf>) -> Result<StepImport,
 
 /// Builds the display mesh for the official reader's bodies without assembly placement.
 fn import_bodies(path: &str, model: &step_import::Model) -> Result<StepImport, String> {
-    let kernel = solidcore::kernel::Kernel::default();
+    let kernel = nodecraft_kernel_profile::kernel();
     let mut meshes = Vec::with_capacity(model.bodies.len());
     let mut body_names = Vec::with_capacity(model.bodies.len());
     let mut healed_bodies = 0usize;
@@ -321,14 +321,6 @@ fn mesh_has_invalid_coordinates(mesh: &Mesh) -> bool {
             .iter()
             .any(|coordinate| !coordinate.is_finite() || coordinate.abs() > 1_000_000.0)
     })
-}
-
-/// Only the record layer's "analytic edge has no exact record" refusal may use
-/// the legacy display mesher. Any other upstream tessellation error is a real
-/// failure and must not be masked.
-fn needs_legacy_step_fallback(error: &str) -> bool {
-    error.contains("kernel to record")
-        && error.contains("no exact record")
 }
 
 fn body_display_mesh(
@@ -395,7 +387,7 @@ fn body_display_mesh(
         let mut copy = brep
             .clone_standing_for_self()
             .map_err(|error| format!("display copy: {error}"))?;
-        let mut tess_kernel = solidcore::kernel::Kernel::default();
+        let mut tess_kernel = nodecraft_kernel_profile::kernel();
         // The local LOD factor can ask for a sub-micrometre sag on a small
         // imported body. solidcore-tess's planner then spends seconds on a
         // planar face that needs none of it, while producing the same triangles.
@@ -410,27 +402,6 @@ fn body_display_mesh(
                 // Imported same_sense flags remain authoritative over stale face uses.
                 crate::orient_mesh_to_senses(kernel, brep, &mut display.mesh, &senses);
                 Ok(display.mesh)
-            }
-            Err(error) if needs_legacy_step_fallback(&error) => {
-                // STEP imported before the record layer can carry analytic edge
-                // curves with no B-spline form (NIST CTC-01 is one). Keep the
-                // legacy tessellator as an explicit display-only fallback until
-                // solidcore-convert can record those curves.
-                crate::set_display_tolerance(Some(effective));
-                let options = crate::CurvedTessOptions {
-                    max_normal_angle_deg: 4.0,
-                    ..crate::CurvedTessOptions::default()
-                };
-                let result = crate::brep_display_mesh_with_senses(
-                    kernel,
-                    brep,
-                    &options,
-                    Some(&senses),
-                );
-                crate::set_display_tolerance(Some(requested));
-                result.map_err(|local| {
-                    format!("upstream tessellation: {error}; legacy fallback: {local}")
-                })
             }
             Err(error) => Err(format!("upstream tessellation: {error}")),
         }
@@ -478,8 +449,7 @@ fn premesh_bodies(
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
                 crate::set_display_tolerance(Some(requested));
-                crate::set_face_parallel(false);
-                let kernel = solidcore::kernel::Kernel::default();
+                let kernel = nodecraft_kernel_profile::kernel();
                 let mut local = Vec::new();
                 for index in (worker..entries.len()).step_by(workers) {
                     let (id, body) = entries[index];
@@ -575,7 +545,7 @@ fn import_assembly(
     let mut collector = AssemblyCollector {
         path,
         root: &root,
-        kernel: solidcore::kernel::Kernel::default(),
+        kernel: nodecraft_kernel_profile::kernel(),
         bodies,
         premesh,
         cache: BTreeMap::new(),
@@ -1066,17 +1036,6 @@ mod tests {
     use step_assemblies::write::{PlanarPart, planar_assembly_text};
 
     use super::*;
-
-    #[test]
-    fn only_unrecordable_analytic_curve_errors_use_the_legacy_fallback() {
-        assert!(needs_legacy_step_fallback(
-            "upstream tessellation: kernel to record: unsupported: an edge curve with no exact record"
-        ));
-        assert!(!needs_legacy_step_fallback(
-            "upstream tessellation: the operation failed: planner refused"
-        ));
-        assert!(!needs_legacy_step_fallback("kernel to record: display copy failed"));
-    }
 
     fn temp_path(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);

@@ -61,7 +61,7 @@ use solidcore::sweep::topology_sweep::store::SweepIdentities;
 use solidcore::topology::topology::{NotifyRecords, Topology};
 use solidcore::topology::{Brep, FaceId};
 use nodecraft_protocol::Mesh;
-use nodecraft_solidcore::curved::{CurvedTessOptions, brep_display_mesh};
+use nodecraft_mesh::{CurvedTessOptions, brep_display_mesh};
 
 /// Prefix of every error caused by a solidcore dependency that is not ported yet.
 ///
@@ -133,7 +133,7 @@ pub fn is_unported_error(message: &str) -> bool {
 /// A message from solidcore (non-finite or non-positive dimensions, or an unported
 /// constructor dependency).
 pub fn box_brep_at(origin: [f64; 3], length: f64, width: f64, height: f64) -> Result<Brep, String> {
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_kernel_profile::kernel();
     api::create_box(
         &mut kernel,
         Point3::new(origin[0], origin[1], origin[2]),
@@ -227,7 +227,7 @@ pub fn boolean_lists_batched(
 }
 
 pub fn boolean_breps(op: BooleanOp, a: Brep, b: Brep) -> Result<Brep, String> {
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_kernel_profile::kernel();
     boolean_breps_with_kernel(&mut kernel, op, a, b)
 }
 
@@ -276,7 +276,7 @@ pub fn display_mesh(brep: &Brep) -> Result<Mesh, String> {
 ///
 /// A message when the bridge cannot tessellate a face or the B-rep has no faces.
 pub fn display_mesh_with_options(brep: &Brep, options: &CurvedTessOptions) -> Result<Mesh, String> {
-    let kernel = Kernel::default();
+    let kernel = nodecraft_kernel_profile::kernel();
     brep_display_mesh(&kernel, brep, options)
         .map_err(|error| format!("nodecraft_solidcore curved display mesh: {error}"))
 }
@@ -290,7 +290,7 @@ pub fn display_mesh_with_options(brep: &Brep, options: &CurvedTessOptions) -> Re
 ///
 /// The Boolean error, or a display-tessellation error.
 pub fn boolean_mesh(op: BooleanOp, a: Brep, b: Brep) -> Result<Mesh, String> {
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_kernel_profile::kernel();
     let brep = boolean_with_kernel(&mut kernel, op, a, b)?;
     brep_display_mesh(&kernel, &brep, &CurvedTessOptions::default())
         .map_err(|error| format!("nodecraft_solidcore curved display mesh: {error}"))
@@ -633,7 +633,7 @@ pub fn shell_brep_with_options(
     options: ShellOptions,
     openings: &[FaceId],
 ) -> Result<Brep, String> {
-    let mut kernel = Kernel::default();
+    let mut kernel = nodecraft_kernel_profile::kernel();
     shell_brep_with_options_with_kernel(&mut kernel, brep, options, openings)
 }
 

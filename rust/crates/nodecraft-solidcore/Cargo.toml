@@ -4,14 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = []
-mesher-ours = []
-mesher-upstream = ["nodecraft-mesh/mesher-upstream"]
-
 [dependencies]
-nodecraft-mesh = { path = "../nodecraft-mesh", default-features = false }
-nurbs-grid-mesh = { workspace = true }
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 solidcore = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-step = { path = "../nodecraft-step" }

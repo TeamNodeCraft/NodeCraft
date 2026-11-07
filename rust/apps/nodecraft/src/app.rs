@@ -162,12 +162,38 @@ fn show_viewer_error(
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.set_max_width((max_width - 24.0).max(120.0));
-                    ui.label(
-                        egui::RichText::new("NODE ERROR")
-                            .size(10.0)
-                            .strong()
-                            .color(theme.color(theme.node_error)),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("NODE ERROR")
+                                .size(10.0)
+                                .strong()
+                                .color(theme.color(theme.node_error)),
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                let svg = tint_svg(
+                                    include_bytes!("../../../../vendor/iconify-design/copy.svg"),
+                                    &crate::theme::Theme::hex(theme.icon),
+                                );
+                                let response = ui.add(
+                                    egui::Image::from_bytes(
+                                        "bytes://viewer-error-copy.svg",
+                                        svg.into_bytes(),
+                                    )
+                                    .fit_to_exact_size(egui::Vec2::splat(14.0))
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("Copy error");
+                                if response.hovered() {
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                if response.clicked() {
+                                    ui.ctx().copy_text(error.to_owned());
+                                }
+                            },
+                        );
+                    });
                     ui.add(
                         egui::Label::new(
                             egui::RichText::new(error)

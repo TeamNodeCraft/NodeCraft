@@ -8,11 +8,6 @@ license.workspace = true
 name = "nodecraft-worker"
 path = "src/main.rs"
 
-[features]
-default = []
-mesher-ours = []
-mesher-upstream = ["nodecraft-engine/mesher-upstream", "nodecraft-session/mesher-upstream"]
-
 [dependencies]
 nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
 nodecraft-session = { path = "../nodecraft-session", default-features = false }

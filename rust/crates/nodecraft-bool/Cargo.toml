@@ -8,4 +8,6 @@ license.workspace = true
 solidcore = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore" }
+nodecraft-mesh = { path = "../nodecraft-mesh" }
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 serde_json.workspace = true

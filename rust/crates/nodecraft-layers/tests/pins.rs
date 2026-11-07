@@ -11,7 +11,6 @@ fn revs(text: &str) -> Vec<String> {
         .filter(|line| {
             let line = line.trim_start();
             line.starts_with("solidcore")
-                || line.starts_with("nurbs-grid-mesh")
                 || line.starts_with("step-import")
                 || line.starts_with("step-brep")
                 || line.starts_with("step-export")

@@ -147,25 +147,16 @@ mod planar_tests {
         if !std::path::Path::new(path).exists() { return; }
         let bodies = nodecraft_step::read_planar_solids(path).unwrap();
         let mut brep = brep_from_planar_body(&bodies[0]).unwrap();
-        let mut kernel = crate::kernel::kernel();
+        let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| key_of(entity).key };
         let volume = brep_volume(&kernel, &mut brep, 1e-6, &attrs).unwrap();
         let area = brep_area(&kernel, &mut brep, 1e-6).unwrap();
         assert!((volume.abs() - 60.0).abs() < 1e-4, "volume {volume}");
         assert!((area - 94.0).abs() < 1e-4, "area {area}");
-        let mesh = crate::curved::brep_display_mesh(&kernel, &brep, &crate::curved::CurvedTessOptions::default()).unwrap();
-        assert!(!mesh.faces.is_empty());
-        assert!(!mesh.vertices.is_empty());
     }
 }
 
-/// Builds a solidcore Brep from a STEP planar body and tessellates it for display.
-pub fn planar_body_display_mesh(body: &nodecraft_step::PlanarBody) -> Result<nodecraft_protocol::Mesh, String> {
-    let brep = brep_from_planar_body_exact(body).or_else(|_| brep_from_planar_body(body))?;
-    let kernel = crate::kernel::kernel();
-    crate::curved::brep_display_mesh(&kernel, &brep, &crate::curved::CurvedTessOptions::default())
-}
 
 
 fn loop_normal(points: &[[f64; 3]], loop_points: &[usize]) -> Vec3 {

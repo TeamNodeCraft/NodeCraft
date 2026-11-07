@@ -14,29 +14,29 @@ gpu-viewport = ["dep:solidcraft-gpu"]
 
 [dependencies]
 egui = "0.36"
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "__screenshot"] }
+eframe = { version = "0.36", features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "__screenshot"] }
 egui-wgpu = "0.36"
 rfd = "0.17"
 arboard = "3"
-image = { version = "0.25", default-features = false, features = ["png"] }
-egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+image = { version = "0.25", features = ["png"] }
+egui_extras = { version = "0.36", features = ["svg"] }
 bytemuck = "1"
-mimalloc = { version = "0.1", default-features = false }
+mimalloc = { version = "0.1" }
 lyon = "1.0"
 glyphon = "0.12"
 serde = { workspace = true }
 serde_json.workspace = true
-nodecraft-engine = { path = "../../crates/nodecraft-engine", default-features = false }
-nodecraft-mesh = { path = "../../crates/nodecraft-mesh", default-features = false }
+nodecraft-engine = { path = "../../crates/nodecraft-engine" }
+nodecraft-mesh = { path = "../../crates/nodecraft-mesh" }
 nodecraft-protocol = { path = "../../crates/nodecraft-protocol" }
-nodecraft-session = { path = "../../crates/nodecraft-session", default-features = false }
+nodecraft-session = { path = "../../crates/nodecraft-session" }
 nodecraft-node-canvas = { path = "../../crates/nodecraft-node-canvas" }
 nodecraft-node-contract = { path = "../../crates/nodecraft-node-contract" }
 nodecraft-expr = { path = "../../crates/nodecraft-expr" }
 nodecraft-search = { path = "../../crates/nodecraft-search" }
 nodecraft-dock = { path = "../../crates/nodecraft-dock" }
 nodecraft-color-picker = { path = "../../crates/nodecraft-color-picker" }
-nodecraft-worker = { path = "../../crates/nodecraft-worker", default-features = false }
+nodecraft-worker = { path = "../../crates/nodecraft-worker" }
 # Upstream view math/geometry. Keep these as git dependencies so they can be
 # updated independently of the app; only our UI adapter lives in this repository.
 solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "481687fff38057691faf84a6fd844e826c552a6c" }

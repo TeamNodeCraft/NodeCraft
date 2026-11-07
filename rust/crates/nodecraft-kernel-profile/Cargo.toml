@@ -1,0 +1,9 @@
+[package]
+name = "nodecraft-kernel-profile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "One SolidCore kernel fix profile for every NodeCraft layer"
+
+[dependencies]
+solidcore = { workspace = true }

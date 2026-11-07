@@ -1352,10 +1352,6 @@ mod tests {
         assert_eq!(brep.face_list().len(), 32);
         assert_eq!(brep.edge_list().len(), 87);
         assert_eq!(brep.vertex_list().len(), 58);
-        let kernel = crate::kernel::kernel();
-        let mesh = crate::curved::brep_display_mesh(&kernel, &brep, &crate::curved::CurvedTessOptions::default());
-        assert!(mesh.is_ok(), "{mesh:?}");
-        assert!(!mesh.unwrap().faces.is_empty());
     }
 
     /// Volume and area of a mixed B-rep through `SmApiBrepComputeMassProperties`

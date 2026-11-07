@@ -39,7 +39,7 @@
 //! declare the same unit this reduces to scaling the translation by `parent_mm`.
 //!
 //! This module is structure-only: it neither reads nor transforms geometry. Geometry
-//! import (planar, analytic, B-spline, mixed) stays in `solidcore-stepio`.
+//! import (planar, analytic, B-spline, mixed) stays in `nodecraft-mesh`/`nodecraft-solidcore`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

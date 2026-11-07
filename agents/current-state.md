@@ -22,10 +22,9 @@ SolidCore/SMLib for exact geometry.
   node does not move it
 - node canvas with card/cable selection, delete and layout modes
 - GPU viewport with SolidCraft rendering, grid, axes, display modes and theme
-- STEP import through the SolidCore stack; imported bodies and every primitive
+- STEP import through the official reader; imported bodies and every primitive
   (including wedge, partial sphere and partial torus) display through
-  `nodecraft-layers` / `solidcore-tess` (with an explicit legacy fallback for
-  STEP analytic edge curves that `solidcore-convert` cannot yet record)
+  `nodecraft-layers` / `solidcore-tess` only
 - JSON-backed dark theme, first-run creation and corrupt-theme repair
 - native OS settings viewport with display and diagnostic sections
 - macOS-style menus with modeless popup rows
@@ -40,7 +39,7 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `0249e8e07238ec7faa756831d5181586d7b0b284` (latest `main` as of 2026-11-07);
+- SolidCore pinned at `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50` (latest `main` as of 2026-11-08);
   `solidcore-record-new` remains at the older SolidCraft-compatible revision
 - SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
 - `configure_solidcore_fixes` applies the same upstream fix profile to our
@@ -59,31 +58,18 @@ SolidCore/SMLib for exact geometry.
 
 ## Test baseline
 
-Verified on 2026-11-07:
+Targeted after the `solidcore-tess` migration:
 
 ```text
-cargo test --workspace --exclude solidcore-stepio --no-fail-fast
-  879 passed / 1 failed / 11 ignored
-
-the one failure is the documented sphere seam in nodecraft-mesh:
-  remaining_ported_primitives_tessellate
+nodecraft          134 passed
+nodecraft-engine   125 passed / 1 ignored
+nodecraft-mesh      7 passed
+nodecraft-solidcore 48 passed / 1 ignored
+nodecraft-bool      20 passed
 ```
 
-Individual suites:
-
-```text
-nodecraft          123 passed
-nodecraft-engine        121 passed / 1 ignored
-nodecraft-mesh           18 passed / 1 failed / 1 ignored (lib)
-nodecraft-mesh           mesh_quality 4 passed
-nodecraft-blend          8 unit + integration suites
-nodecraft-node-canvas    full canvas suite
-nodecraft-session        full session suite
-```
-
-`solidcore-stepio` contains a 46-fixture SMLib mass-reference test that takes
-substantially longer than the rest of the workspace suite. Keep it in a separate
-slow tier rather than requiring it for every change.
+STEP import now uses the official reader and `solidcore-tess`; the old
+`solidcore-stepio` façade and local mesher have been removed.
 
 The public snapshot does not include the large STEP corpora used by the private
 matrix. Some private fixture tests may be skipped there.

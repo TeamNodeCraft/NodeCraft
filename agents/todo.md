@@ -2,9 +2,9 @@
 
 Priority order is approximate.
 
-## Current state (2026-11-07)
+## Current state (2026-11-08)
 
-- SolidCore is pinned at `0249e8e07238ec7faa756831d5181586d7b0b284` (latest `main`).
+- SolidCore is pinned at `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50` (latest `main`).
 - SolidCraft sketch stack is pinned at
   `871014f955a76fd308ce156e68c93e6372906005`.
 - Evaluated Part, comparison and STEP import display meshes use
@@ -22,8 +22,8 @@ Priority order is approximate.
   issue (SolidCore #2826, open; #2863 merged). The application now surfaces the
   refusal instead of hiding it.
 - All primitives, including wedge, partial sphere and partial torus, now have
-  exact B-reps and use `solidcore-tess`. The local `nodecraft-mesh` mesher
-  remains only for a few legacy helpers and the STEP analytic-curve fallback.
+  exact B-reps and use `solidcore-tess`; the local B-rep mesher and the
+  `solidcore-stepio` façade have been removed.
 - The public snapshot is generated from committed `HEAD`; republish after
   integration work with `./scripts/publish-public.sh`.
 - Latest SolidCore pin targeted gates: app 134, engine 125 (+1 ignored), session
@@ -31,9 +31,9 @@ Priority order is approximate.
   bump was 879 passed / 1 known `nodecraft-mesh` sphere seam failure / 11
   ignored.
 
-## SolidCore 0249e8e pin bump (completed)
+## SolidCore a445bda pin bump (completed)
 
-Updated the workspace from `f8685cdc` to `0249e8e`; targeted app, engine,
+Updated the workspace pin from `0249e8e` to `a445bda`; targeted app, engine,
 layers and session tests pass. The SolidCraft sketch stack keeps its older
 `solidcore-record-new` alias, so the workspace now intentionally carries two
 record revisions.
@@ -426,10 +426,9 @@ These are cross-cutting improvements, not individual feature requests.
       link. The policy is in [Agent Guide](README.md#build-hygiene): remove build
       artifacts only, never source or the nested public checkout.
 - [x] Record the actual workspace baseline after cleanup. Fast tier:
-      `cargo test --workspace --exclude solidcore-stepio --no-fail-fast`
-      → 808 passed, 1 failed (known sphere seam), 11 ignored. The
-      `solidcore-stepio` 46-fixture mass-reference test is now an explicit slow
-      tier. Results are in [Current state](current-state.md).
+      `cargo test --workspace --no-fail-fast`
+      → 808 passed, 1 failed (known sphere seam), 11 ignored. Results are in
+      [Current state](current-state.md).
 - [x] Make public CI match its README: add `nodecraft-engine --lib` and
       `nodecraft-session` to CI. The engine library tests use only public
       fixtures; the long STEP-corpus tests remain private/slow.
@@ -671,7 +670,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `0249e8e07238ec7faa756831d5181586d7b0b284`:
+      Reproduction at current pin `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

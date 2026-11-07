@@ -4,7 +4,15 @@
 
 ### SolidCore integration
 
-- Updated SolidCore to `0249e8e` (latest `main`). The SolidCraft sketch stack
+- Removed the old `solidcore-stepio` STEP façade and the local B-rep mesher.
+  STEP import now uses the official `step-import`/`step-brep` reader and all
+  display tessellation goes through `nodecraft-layers` / `solidcore-tess`.
+  `nodecraft-mesh` now keeps only STEP import, neutral mesh utilities and
+  thin compatibility wrappers.
+- Extracted the SolidCore kernel fix profile into a dependency-light crate so
+  primitive, STEP and Boolean construction use the same `UpstreamFixes` profile
+  without a dependency cycle through `nodecraft-solidcore`.
+- Updated SolidCore to `a445bda` (latest `main`). The SolidCraft sketch stack
   remains at `871014f9`; the older `solidcore-record` revision it needs stays
   isolated as `solidcore-record-new`.
 - The upstream fix profile now also configures the `solidcore-ops` session, so
@@ -141,6 +149,7 @@
   luminosity continuously instead of through a 64-step texture cache.
 - Document saves use compact pretty JSON: short arrays and small objects stay
   inline while node and large collection structures remain expanded.
+- Node evaluation errors now include a copy icon in their floating header.
 - Node evaluation errors now float at the bottom of the 3D viewer instead of
   occupying the top of the inspector. The error still remains in the status
   bar for copy/context.

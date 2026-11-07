@@ -4,18 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-default = []
-# Kept as no-op feature names for existing build commands. The upstream
-# nurbs-grid-mesh used by default is always the latest pinned SolidCore crate.
-mesher-ours = []
-mesher-upstream = []
-
 [dependencies]
 solidcore = { workspace = true }
-nurbs-grid-mesh = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-layers = { path = "../nodecraft-layers" }
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 nodecraft-step = { path = "../nodecraft-step" }
 step-assemblies = { path = "../step-assemblies" }
 step-import = { workspace = true }
