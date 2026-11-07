@@ -51,6 +51,9 @@
 - Renamed the desktop application package and binary from `nodecraft-egui` to
   `nodecraft`; the macOS bundle is now `NodeCraft.app` with the `NodeCraft`
   executable.
+- Registered `.nodecraft` and `.solidnode` documents with macOS. Finder opens
+  them as app tabs, including documents opened while the app is already
+  running.
 - The inspector disclosure chevron was replaced by a themed, centred reset
   control.
 

@@ -27,6 +27,17 @@ Build a macOS app bundle:
 open build/NodeCraft.app
 ```
 
+## Documents
+
+NodeCraft registers `.nodecraft` and `.solidnode` documents with macOS. Open one
+from Finder, or with:
+
+```sh
+open -a NodeCraft.app path/to/model.nodecraft
+```
+
+A document opened while NodeCraft is already running is added as a tab.
+
 ## Run
 
 ```sh

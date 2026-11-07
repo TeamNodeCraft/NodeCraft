@@ -20,6 +20,8 @@ mod gpu_backdrop;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_viewport;
 mod inspector;
+#[cfg(target_os = "macos")]
+mod macos_open;
 mod viewport;
 mod viewport_grid;
 mod viewer_gizmo;
@@ -38,6 +40,8 @@ fn msaa_samples() -> u32 {
 }
 
 fn main() -> eframe::Result {
+    #[cfg(target_os = "macos")]
+    macos_open::install_observer();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("--check") {
         return check(args.get(1).map(PathBuf::from));

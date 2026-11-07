@@ -38,6 +38,17 @@ connections whose endpoints are both selected. Paste accepts the same payload,
 a bare node array, or a single node description, gives new nodes collision-free
 IDs, and offsets them from their original positions.
 
+## Documents
+
+NodeCraft registers `.nodecraft` and `.solidnode` documents with macOS. Open one
+from Finder, or with:
+
+```sh
+open -a NodeCraft.app path/to/model.nodecraft
+```
+
+A document opened while NodeCraft is already running is added as a tab.
+
 ## Run
 
 ```sh

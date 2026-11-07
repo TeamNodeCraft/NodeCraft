@@ -14,5 +14,43 @@
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>NodeCraft Document</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>LSHandlerRank</key><string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.nodecraft.document</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>nodecraft</string>
+                <string>solidnode</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.nodecraft.document</string>
+            <key>UTTypeDescription</key><string>NodeCraft Document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.json</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>nodecraft</string>
+                    <string>solidnode</string>
+                </array>
+                <key>public.mime-type</key><string>application/json</string>
+            </dict>
+        </dict>
+    </array>
+
 </dict>
 </plist>

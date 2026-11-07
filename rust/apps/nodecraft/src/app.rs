@@ -810,6 +810,8 @@ impl NodeCraftApp {
             control_requests: control_server::start(cc.egui_ctx.clone()),
             last_pointer: None,
         };
+        #[cfg(target_os = "macos")]
+        crate::macos_open::install(cc.egui_ctx.clone());
         app.node_editor.set_cable_routing(app.cable_routing);
         if let Some(path) = choose_startup_document(initial, startup_recent, default_document()) {
             app.open(path);
@@ -2242,6 +2244,20 @@ impl NodeCraftApp {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn poll_open_documents(&mut self) {
+        for path in crate::macos_open::take_pending() {
+            if path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nodecraft")
+                    || extension.eq_ignore_ascii_case("solidnode"))
+            {
+                self.open(path);
+            }
+        }
+    }
+
     fn poll_control(&mut self) {
         while let Ok(request) = self.control_requests.try_recv() {
             let reply = match request.command {
@@ -2519,6 +2535,8 @@ impl eframe::App for NodeCraftApp {
         }
         self.accept_dropped_files(ui.ctx());
         self.poll_control();
+        #[cfg(target_os = "macos")]
+        self.poll_open_documents();
         if let Some(direction) = window_resize_direction(ui.ctx()) {
             ui.ctx().set_cursor_icon(resize_cursor(direction));
             if ui.ctx().input(|input| input.pointer.primary_pressed()) {

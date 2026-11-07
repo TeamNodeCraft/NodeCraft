@@ -6,6 +6,8 @@ SolidCore/SMLib for exact geometry.
 ## Working
 
 - native Rust application and macOS `NodeCraft.app` bundle build
+- `.nodecraft` / `.solidnode` document association and Finder open events on
+  macOS
 - flat node graph with stable IDs, undo/redo and linked documents
 - scoped evaluation through an explicit per-tab viewer breakpoint; selecting a
   node does not move it
