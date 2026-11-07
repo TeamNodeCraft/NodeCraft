@@ -4559,6 +4559,15 @@ mod tests {
     }
 
     #[test]
+    fn combine_icon_uses_the_vendor_tint_colour() {
+        let svg = colorized_icon_svg(
+            include_bytes!("../../../../vendor/iconify-design/nodes/combine.svg"),
+            [255, 0, 0, 255],
+        );
+        assert!(svg.contains("#ff0000"), "combine icon was not tinted");
+    }
+
+    #[test]
     fn primitive_icons_follow_the_selected_solid_type() {
         for (primitive, expected) in [
             ("box", "box"),
