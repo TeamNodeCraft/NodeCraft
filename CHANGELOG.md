@@ -96,6 +96,9 @@
   cable opaque. The
   luminosity control now changes the wheel's own brightness. The CPU cable
   fallback now uses the themed cable/outline colours, alpha and widths.
+- Cable edge anti-aliasing is now pixel-sized instead of proportional to cable
+  width, so thick zoomed-in cables stay sharp. The colour wheel updates its
+  luminosity continuously instead of through a 64-step texture cache.
 - Document saves use compact pretty JSON: short arrays and small objects stay
   inline while node and large collection structures remain expanded.
 - Node evaluation errors now float at the bottom of the 3D viewer instead of

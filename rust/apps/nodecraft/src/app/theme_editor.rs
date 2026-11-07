@@ -321,16 +321,18 @@ pub(super) fn theme_palette_row(
     );
 }
 
-pub(super) fn make_color_wheel_texture(
-    ctx: &egui::Context,
-    radius: f32,
-    size: f32,
+#[derive(Clone)]
+struct WheelTexture {
+    texture: egui::TextureHandle,
     value: f32,
-) -> egui::TextureHandle {
+}
+
+fn make_color_wheel_image(radius: f32, size: f32, value: f32) -> egui::ColorImage {
     use egui::ecolor::Hsva;
     const WHEEL_SIZE: usize = 256;
     let radius_px = WHEEL_SIZE as f32 * (radius / size);
     let center_px = WHEEL_SIZE as f32 * 0.5;
+    let value = value.clamp(0.0, 1.0);
     let mut pixels = Vec::with_capacity(WHEEL_SIZE * WHEEL_SIZE);
     for y in 0..WHEEL_SIZE {
         for x in 0..WHEEL_SIZE {
@@ -343,19 +345,13 @@ pub(super) fn make_color_wheel_texture(
                 let hue = dy.atan2(dx).rem_euclid(std::f32::consts::TAU)
                     / std::f32::consts::TAU;
                 let saturation = (distance / radius_px).clamp(0.0, 1.0);
-                // Fixed full HSV value: luminosity is a separate control and
-                // must never feed back into the wheel.
                 // The wheel is a value map, never an alpha preview: keep it
                 // opaque and apply the current luminosity through HSV value.
                 pixels.push(egui::Color32::from(Hsva::new(hue, saturation, value, 1.0)));
             }
         }
     }
-    ctx.load_texture(
-        "theme-color-wheel-gradient",
-        egui::ColorImage::new([WHEEL_SIZE, WHEEL_SIZE], pixels),
-        egui::TextureOptions::LINEAR,
-    )
+    egui::ColorImage::new([WHEEL_SIZE, WHEEL_SIZE], pixels)
 }
 
 /// Perceptual response for the luminosity slider: slider position is
@@ -395,17 +391,44 @@ pub(super) fn theme_color_wheel(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> 
 
     // Circular HSV hue/saturation wheel at fixed full value. Hue/saturation,
     // luminosity and alpha are independent controls with no feedback path.
-    let wheel_value = (hsva.v.clamp(0.0, 1.0) * 64.0).round() / 64.0;
+    let wheel_value = hsva.v.clamp(0.0, 1.0);
     let texture = {
         let ctx = ui.ctx().clone();
-        let id = egui::Id::new(("theme-color-wheel-gradient", (wheel_value * 64.0) as u8));
-        if let Some(texture) = ctx.data(|data| data.get_temp::<egui::TextureHandle>(id)) {
-            texture
-        } else {
-            let texture = make_color_wheel_texture(&ctx, radius, size, wheel_value);
-            ctx.data_mut(|data| data.insert_temp(id, texture.clone()));
-            texture
-        }
+        let id = egui::Id::new("theme-color-wheel-gradient");
+        let cached = ctx.data(|data| data.get_temp::<WheelTexture>(id));
+        let mut texture = match cached {
+            Some(cached) if (cached.value - wheel_value).abs() <= 1.0e-4 => cached.texture,
+            Some(mut cached) => {
+                // One texture with a full-precision value update avoids the
+                // quantized 64-step luminosity ladder.
+                cached.texture.set(
+                    make_color_wheel_image(radius, size, wheel_value),
+                    egui::TextureOptions::LINEAR,
+                );
+                cached.value = wheel_value;
+                let texture = cached.texture.clone();
+                ctx.data_mut(|data| data.insert_temp(id, cached));
+                texture
+            }
+            None => {
+                let texture = ctx.load_texture(
+                    "theme-color-wheel-gradient",
+                    make_color_wheel_image(radius, size, wheel_value),
+                    egui::TextureOptions::LINEAR,
+                );
+                ctx.data_mut(|data| {
+                    data.insert_temp(
+                        id,
+                        WheelTexture {
+                            texture: texture.clone(),
+                            value: wheel_value,
+                        },
+                    );
+                });
+                texture
+            }
+        };
+        texture
     };
     ui.painter().image(
         texture.id(),

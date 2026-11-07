@@ -410,8 +410,12 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
 fn fs(in: Out) -> @location(0) vec4<f32> {
   if (!inside_rounded(in.screen)) { discard; }
   let d = abs(in.side);
-  let outer = 1.0 - smoothstep(0.84, 1.0, d);
-  let core_mix = smoothstep(in.core_ratio - 0.08, in.core_ratio + 0.08, d);
+  // `side` is a normalized ribbon coordinate. Using a fixed fraction of it
+  // makes the AA band scale with cable width, so a wide zoomed-in cable looks
+  // soft. fwidth gives one pixel in the same coordinate space.
+  let aa = max(fwidth(d), 0.0001);
+  let outer = 1.0 - smoothstep(1.0 - aa, 1.0, d);
+  let core_mix = smoothstep(in.core_ratio - aa, in.core_ratio + aa, d);
   let colour = mix(in.core, in.outline, core_mix);
   return vec4<f32>(colour.rgb, colour.a * outer);
 }
