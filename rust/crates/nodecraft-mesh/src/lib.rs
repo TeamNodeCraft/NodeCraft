@@ -1,8 +1,8 @@
-//! Display-mesh utilities and official STEP import.
+//! Lightweight mesh utilities and official STEP import.
 //!
-//! Tessellation is owned by `solidcore-tess` through `nodecraft-layers`; the
-//! compatibility wrappers here exist only for callers that still need a mesh
-//! from a B-rep. No local tessellator remains.
+//! Tessellation is owned by `solidcore-tess` through `nodecraft-layers`; nothing in
+//! this crate meshes a B-rep. It keeps the shared display-tolerance state, the
+//! viewport's shading-normal split and STEP assembly import.
 
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
@@ -39,66 +39,6 @@ pub fn display_tolerance() -> f64 {
 
 /// Normal viewport max sag.
 pub const DEFAULT_DISPLAY_TOLERANCE: f64 = 0.35;
-
-/// Compatibility options for the display wrappers below. Only the sag is used;
-/// the grid fields are retained for callers that still pass them.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CurvedTessOptions {
-    pub u_segments: usize,
-    pub v_segments: usize,
-    pub loop_segments: usize,
-    pub bspline_tolerance: f64,
-    pub max_normal_angle_deg: f64,
-}
-
-impl Default for CurvedTessOptions {
-    fn default() -> Self {
-        Self {
-            u_segments: 16,
-            v_segments: 4,
-            loop_segments: 8,
-            bspline_tolerance: display_tolerance(),
-            max_normal_angle_deg: 0.0,
-        }
-    }
-}
-
-/// Tessellate a B-rep through `solidcore-tess` via the layer seam.
-pub fn brep_display_mesh(
-    _kernel: &Kernel,
-    brep: &Brep,
-    options: &CurvedTessOptions,
-) -> Result<Mesh, String> {
-    if brep.faces().len() == 0 {
-        return Err("display tessellation produced no triangles".into());
-    }
-    let mut tess_kernel = nodecraft_kernel_profile::kernel();
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("display copy: {error}"))?;
-    let sag = options.bspline_tolerance.max(0.05);
-    let mut mesh = nodecraft_layers::tessellate_kernel(&mut tess_kernel, &mut copy, sag)
-        .map(|display| display.mesh)?;
-    if mesh.faces.is_empty() {
-        return Err("display tessellation produced no triangles".into());
-    }
-    mesh.lightweight = true;
-    Ok(mesh)
-}
-
-/// [`brep_display_mesh`], with the STEP `same_sense` flags of every face.
-pub fn brep_display_mesh_with_senses(
-    kernel: &Kernel,
-    brep: &Brep,
-    options: &CurvedTessOptions,
-    senses: Option<&[bool]>,
-) -> Result<Mesh, String> {
-    let mut mesh = brep_display_mesh(kernel, brep, options)?;
-    if let Some(senses) = senses {
-        orient_mesh_to_senses(kernel, brep, &mut mesh, senses);
-    }
-    Ok(mesh)
-}
 
 pub(crate) fn orient_mesh_to_senses(kernel: &Kernel, brep: &Brep, mesh: &mut Mesh, senses: &[bool]) {
     let faces = brep.face_list();

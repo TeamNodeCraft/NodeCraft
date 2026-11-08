@@ -4,6 +4,22 @@
 
 ### SolidCore integration
 
+- Re-evaluate now clears the tab's flattened-graph and preview caches, resets
+  kernel memoisation, and bypasses every cache read so a coalesced or fresh
+  cache cannot answer any node during the rebuild.
+- Home/ISO now centres the shared world origin (0,0,0) in the unobstructed 3D
+  viewport and uses that same origin as the orbit pivot; the construction grid
+  consumes the same constant, so the grid centre and view centre cannot
+  diverge. Trackpad
+  navigation latches orbit or pan at gesture start, so releasing Shift during a
+  two-finger orbit no longer turns the remaining momentum into a pivot-moving
+  pan.
+- STEP import shows the detected application protocol and `FILE_SCHEMA` in the
+  importer inspector, with an explicit AP203/AP214/AP242 support note.
+- Removed the last display-tessellation compatibility wrappers; Boolean display
+  meshes now call `nodecraft-layers`/`solidcore-tess` directly.
+- Circular fillets now expose SolidCore's swept corner turn: two rounds at a
+  sharp side edge can meet as mitred (default) or swept sections.
 - Removed the old `solidcore-stepio` STEP façade and the local B-rep mesher.
   STEP import now uses the official `step-import`/`step-brep` reader and all
   display tessellation goes through `nodecraft-layers` / `solidcore-tess`.
@@ -12,7 +28,8 @@
 - Extracted the SolidCore kernel fix profile into a dependency-light crate so
   primitive, STEP and Boolean construction use the same `UpstreamFixes` profile
   without a dependency cycle through `nodecraft-solidcore`.
-- Updated SolidCore to `a445bda` (latest `main`). The SolidCraft sketch stack
+- Updated SolidCore to `45d6111` (latest `main`), including the setback and
+  projected-culling fixes. The SolidCraft sketch stack
   remains at `871014f9`; the older `solidcore-record` revision it needs stays
   isolated as `solidcore-record-new`.
 - The upstream fix profile now also configures the `solidcore-ops` session, so

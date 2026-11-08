@@ -40,7 +40,7 @@ pub mod faceted;
 pub use faceted::read_faceted_breps;
 pub mod multi;
 pub use multi::{import_solids, import_solids_partial, StepBody};
-pub use header::{read_header, validate_header, StepHeader};
+pub use header::{application_protocol, read_header, read_schema, validate_header, StepHeader};
 pub use style::{read_color, read_colors, read_layers, read_material_properties, read_material_property_values, read_materials, read_product_name, read_solid_names, read_style_names, set_color, set_layer, set_material, set_material_property, set_product_name};
 pub mod brep_export;
 pub use brep_export::{step_brep_to_planar_body, write_step_from_step_brep};

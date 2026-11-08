@@ -1703,6 +1703,8 @@ struct Eval<'req, 'prog> {
     kernel: ProceduralKernel,
     objects: HashMap<String, Mesh>,
     cache: EngineCache,
+    /// Developer rebuild: skip every cache read for this evaluation.
+    bypass_cache: bool,
     /// Exact-B-rep import diagnostics per `stepimporter` node (debug response only).
     step_diagnostics: HashMap<String, StepDiagnostics>,
     errors: BTreeMap<String, String>,
@@ -1733,6 +1735,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             kernel: ProceduralKernel,
             objects: HashMap::new(),
             cache: EngineCache::new(),
+            bypass_cache: request.bypass_cache,
             step_diagnostics: HashMap::new(),
             errors: BTreeMap::new(),
             order: Vec::new(),

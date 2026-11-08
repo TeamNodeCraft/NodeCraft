@@ -4,7 +4,7 @@ Priority order is approximate.
 
 ## Current state (2026-11-08)
 
-- SolidCore is pinned at `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50` (latest `main`).
+- SolidCore is pinned at `45d6111b909487e94edaec309a7673a3b73d4ae5` (latest `main`).
 - SolidCraft sketch stack is pinned at
   `871014f955a76fd308ce156e68c93e6372906005`.
 - Evaluated Part, comparison and STEP import display meshes use
@@ -181,8 +181,7 @@ Preferred near-term order:
 - [ ] Make display work truly concurrent. The `EvalWorker` is still sequential
       after the exact phase; a newer edit now cancels display cooperatively
       between nodes/mesher bodies, but display still runs on the exact worker.
-- [ ] Remove the STEP legacy mesher fallback once `solidcore-convert` can record
-      analytic edge curves with no B-spline form.
+- [x] Remove the STEP legacy mesher fallback; STEP display uses solidcore-tess.
 - [ ] Track SolidCore #2826 until multi-edge join fillets run continuously; add
       the torus/cylinder case as an upstream regression.
 - [ ] Manually smoke-test heavy-target edits, rapid edits, tab switches during
@@ -555,6 +554,14 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
 
 ## Exact geometry and STEP
 
+- [ ] Remove the top-bar debug Re-evaluate button once automatic content-hash
+      invalidation (and any record cache) is the production path. Do not couple
+      record-cache work to this temporary button.
+
+- [ ] When STEP import works again, verify the Step importer inspector shows the
+      detected application protocol and `FILE_SCHEMA`, and that its hover note
+      describes the AP203/AP214/AP242 support boundary. Add a UI smoke/regression
+      check for the label and cache refresh.
 - [ ] Clear the remaining official import regressions:
   - NIST ctc-01 unpaired edges
   - `MAPPED_ITEM` assembly transforms
@@ -571,6 +578,7 @@ See [Presentation scene graph](../docs/presentation-scene-graph.md).
 Wait for upstream record/convert/ops/tess APIs to settle before making records
 the authoritative exact value. Current kernel BReps remain authoritative; the
 record is currently rebuilt and discarded on every display/ops conversion.
+The next-generation coordinator below supersedes this as the target design.
 
 - [ ] When upstream stabilises, add **one** exact-cache entry shape rather than
       two independent caches:
@@ -589,6 +597,120 @@ record is currently rebuilt and discarded on every display/ops conversion.
       working representation.
 - [ ] Do not add a second independent record cache: one entry, one invalidation
       path, one memory budget.
+
+## Next-generation cache coordinator (outside the worker pool)
+
+Goal: one high-speed, content-addressed result cache owned by a coordinator or
+actor, not by a kernel thread. Kernels remain disposable per-worker scratch
+state; killing and respawning a worker must not lose or invalidate authoritative
+cache entries.
+
+### Invariants
+
+- The authoritative cache never lives in `Kernel`, a kernel caches object, a
+  thread-local, or an `Arc` pointer identity.
+- Cache values are immutable records or validated BReps owned by the coordinator.
+- Cache keys are derived from the record/job input and every behavior-changing
+  option, never from a worker id, thread id, allocation address or timestamp.
+- A worker may only commit a result after the job's cancellation token is still
+  current and validation has passed.
+- The debug rebuild is a cache-bypass escape hatch, not the production
+  invalidation path.
+
+### Key shape
+
+```text
+CacheKey = hash(
+    record schema/version,
+    canonical record bytes or record content hash,
+    operation identity,
+    operation parameters,
+    units and tolerances,
+    kernel options and fixes,
+    RNG seed
+)
+```
+
+- Canonicalize before hashing; hash once per immutable record and carry the hash
+  with it.
+- Include every input that can change the result. Missing one creates a stale
+  hit, which is worse than a miss.
+- Version the key format; old entries must be unreadable after a schema or
+  behavior change.
+- Use a strong, deterministic hash; never use pointer identity or `HashMap`
+  iteration order.
+
+### Coordinator API
+
+- `lookup(key) -> Option<Arc<Value>>`
+- `get_or_reserve(key) -> Hit | Reserved` with single-flight/dedup so concurrent
+  identical jobs compute once
+- `commit(key, generation, Arc<Value>)` only when current
+- `abandon(key, generation)` on cancellation/death; never leaves a poisoned entry
+- `evict` by byte budget and a clock/LRU policy
+- optional disk tier keyed by the same `CacheKey`, with a validated schema version
+
+### Worker lifecycle
+
+- Worker = kernel + job loop. No authoritative cache state.
+- Cancelling a job cancels its token; a late result is dropped, not committed.
+- Killing/respawning a worker creates a fresh kernel; it derives the kernel from
+  the record on demand.
+- In-flight reservations must be released if the worker dies; the coordinator
+  must not wait forever for a dead reservation.
+- Kernel memoisation caches are discarded with the worker and are never used to
+  answer a cache lookup.
+
+### Performance
+
+- Keep cache values as `Arc`; copy only at the kernel boundary.
+- Shard or actor-own the map to avoid a global mutex; no worker holds the lock
+  while executing.
+- Single-flight duplicate jobs; do not compute the same exact body twice.
+- Hash records once, not per lookup; cache the record hash beside the record.
+- Separate exact and display tiers, with independent byte budgets and eviction.
+- Admit by size/benefit: avoid caching one-off huge or cheap results if they
+  evict hot entries.
+- Zero-copy record → `solidcore-tess` where possible; remove per-request kernel →
+  record conversion.
+- Measure hit latency, miss overhead, peak bytes and worker restart cost on real
+  graphs, not microbenchmarks only.
+
+### Migration stages
+
+1. Define canonical record hashing and a versioned `CacheKey` type.
+2. Build the coordinator API and tests with a synthetic value type.
+3. Route one `EngineCache` family (exact BReps) through the coordinator.
+4. Replace pointer-keyed `body_mesh` entries with record-hash keys.
+5. Move Part/BRep/import/display tiers one at a time; keep single-flight and
+   cancellation semantics at every step.
+6. Add an optional disk tier only after in-memory behavior is stable.
+7. Remove per-tab/per-worker result caches only once the coordinator is the sole
+   authority.
+
+### Acceptance
+
+- The same record produces the same key across threads, tabs, worker respawns and
+  process restarts.
+- Killing a worker mid-job leaves no partial/poisoned cache entry.
+- Two concurrent identical jobs produce one computation and one cache entry.
+- A cache hit never needs a kernel; a miss can run on any worker.
+- Exact and display caches have independent, bounded memory budgets and measurable
+  eviction.
+- Debug rebuild bypasses all reads and still produces the same result.
+- A benchmark shows acceptable hit latency and no regression in full rebuild
+  time.
+
+### Open design questions
+
+- Per-document cache versus process-global cache; how to isolate tabs.
+- Whether the record itself or `Arc<Brep>` is the cached value, and where kernel
+  conversion is allowed.
+- Cost and location of record validation before commit.
+- Persistence format, versioning and disk eviction policy.
+- Whether the coordinator owns job scheduling or only cache reservations.
+- How to handle multiple placements/instances of the same body without
+  duplicating exact geometry.
 
 ## Viewer breakpoint and scopes
 
@@ -670,7 +792,7 @@ record is currently rebuilt and discarded on every display/ops conversion.
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50`:
+      Reproduction at current pin `45d6111b909487e94edaec309a7673a3b73d4ae5`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

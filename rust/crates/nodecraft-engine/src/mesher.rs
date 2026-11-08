@@ -10,7 +10,7 @@ use nodecraft_solidcore::solidcore::kernel::Kernel;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::collections::VecDeque;
 
 pub struct MeshResult {
@@ -29,6 +29,8 @@ struct Shared {
     queue: Mutex<VecDeque<Work>>,
     ready: Condvar,
     shutdown: AtomicBool,
+    /// Bumped to make every worker replace its kernel before its next job.
+    generation: AtomicU64,
 }
 
 impl Shared {
@@ -69,6 +71,7 @@ impl MesherPool {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         });
         let mut workers = Vec::with_capacity(threads.max(1));
         for index in 0..threads.max(1) {
@@ -77,7 +80,13 @@ impl MesherPool {
                 .name(format!("nodecraft-mesher-{index}"))
                 .spawn(move || {
                     let mut kernel: Kernel = crate::nodecraft_solidcore_kernel();
+                    let mut generation = 0;
                     while let Some(work) = shared.next() {
+                        let current = shared.generation.load(Ordering::Acquire);
+                        if current != generation {
+                            kernel = crate::nodecraft_solidcore_kernel();
+                            generation = current;
+                        }
                         if work.revision.token.is_cancelled() {
                             let _ = work.result.send(MeshResult {
                                 key: work.request.key,
@@ -134,6 +143,12 @@ impl MesherPool {
         self.workers.len()
     }
 
+    /// Make every worker discard its kernel and memoisation caches before its
+    /// next job.
+    pub fn reset_caches(&self) {
+        self.shared.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Queue one body request. The receiver carries the revision so stale
     /// results can be discarded by the coordinator.
     #[must_use]
@@ -185,4 +200,11 @@ pub fn shared_mesher() -> &'static MesherPool {
 #[must_use]
 pub fn mesher_initialized() -> bool {
     MESHER.get().is_some()
+}
+
+/// Reset the shared display-mesher kernels after an explicit rebuild.
+pub fn reset_mesher_caches() {
+    if let Some(pool) = MESHER.get() {
+        pool.reset_caches();
+    }
 }

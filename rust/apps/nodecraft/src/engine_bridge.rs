@@ -196,6 +196,7 @@ pub fn evaluate_flat_with_progress_comparison(
         None,
         &[],
         None,
+        false,
     )
 }
 
@@ -210,6 +211,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
     ghost_input: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
+    bypass_cache: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     evaluate_flat_with_progress_comparison_dirty_mode(
         document,
@@ -223,6 +225,7 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
         validation_targets,
         edit_preview,
         false,
+        bypass_cache,
     )
 }
 
@@ -240,6 +243,7 @@ pub fn evaluate_flat_exact(
     ghost_input: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
+    bypass_cache: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     evaluate_flat_with_progress_comparison_dirty_mode(
         document,
@@ -253,6 +257,7 @@ pub fn evaluate_flat_exact(
         validation_targets,
         edit_preview,
         true,
+        bypass_cache,
     )
 }
 
@@ -268,6 +273,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     validation_targets: &[String],
     edit_preview: Option<&str>,
     exact_only: bool,
+    bypass_cache: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
@@ -376,6 +382,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
         run_exporters,
         mesh_tolerance: None,
         comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
+        bypass_cache,
     };
     let output = if exact_only {
         nodecraft_engine::evaluate_exact(request, cache, progress)
@@ -492,12 +499,51 @@ mod tests {
             Some("ghost"),
             &[],
             None,
+            false,
         );
         let evaluation = evaluation.expect("evaluation");
         assert!(evaluation.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
         let ghost = evaluation.ghost.expect("ghost input mesh");
         assert!(!ghost.faces.is_empty(), "ghost input has no display mesh");
         assert_ne!(evaluation.mesh.unwrap().faces.len(), ghost.faces.len());
+    }
+
+    #[test]
+    fn bypass_cache_forces_a_full_rebuild() {
+        let mut document = GraphDocument::new("bypass-cache");
+        let mut target = node("target");
+        target.values = json!({"primitiveType": "box"});
+        document.nodes = vec![target];
+        let (first, cache) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "target".to_owned(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+            None,
+            false,
+        );
+        assert!(first.is_some());
+        let (second, _) = evaluate_flat_with_progress_comparison_dirty(
+            &document,
+            "target".to_owned(),
+            cache,
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+            None,
+            true,
+        );
+        let second = second.expect("bypass evaluation");
+        assert!(second.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
+        assert_eq!(second.cache_hits, 0, "bypass still read a cache entry");
     }
 
     #[test]
@@ -517,6 +563,7 @@ mod tests {
             None,
             &[],
             None,
+            false,
         );
         let exact = exact.expect("exact evaluation");
         assert!(!exact.display_complete);
@@ -532,6 +579,7 @@ mod tests {
             None,
             &[],
             None,
+            false,
         );
         let display = display.expect("display evaluation");
         assert!(display.display_complete);
@@ -570,6 +618,7 @@ mod tests {
             None,
             &[],
             Some("box"),
+            false,
         );
         let evaluation = evaluation.expect("evaluation");
         let preview = evaluation.edit_preview.expect("edit preview mesh");
@@ -596,6 +645,7 @@ mod tests {
             None,
             &["broken".to_owned()],
             None,
+            false,
         );
         let evaluation = evaluation.expect("evaluation");
         assert!(evaluation.error.is_none(), "{:?}", evaluation.error);

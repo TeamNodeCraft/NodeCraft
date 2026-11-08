@@ -11,6 +11,7 @@
 //! | `length` | chamfer distance 1, or fillet radius | `2` |
 //! | `distance2` | second chamfer distance (two-distance) | `length` |
 //! | `angle` | chamfer angle in degrees (distance-angle) | `45` |
+//! | `cornerTurn` | `"mitre"` or `"swept"` for the corners between circular fillets | `"mitre"` |
 //!
 //! [`EdgeTreatment::from_node_values`] parses that object strictly (unknown enum
 //! strings and non-numeric numbers are [`BlendError::InvalidInput`]) and
@@ -124,6 +125,38 @@ impl Continuity {
     }
 }
 
+/// How two circular fillets turn where they meet at a sharp side edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CornerTurn {
+    /// The rounds cross and meet in a mitre crease.
+    Mitre,
+    /// Each round ends on its section and the corner is the section revolved about
+    /// the side edge.
+    Swept,
+}
+
+impl CornerTurn {
+    /// Parse the node value (`"mitre"` or `"swept"`).
+    pub fn parse(value: &str) -> Result<Self, BlendError> {
+        match value {
+            "mitre" => Ok(Self::Mitre),
+            "swept" => Ok(Self::Swept),
+            other => Err(BlendError::InvalidInput(format!(
+                "unknown fillet corner turn {other:?}; expected \"mitre\" or \"swept\""
+            ))),
+        }
+    }
+
+    /// The node value of this corner turn.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mitre => "mitre",
+            Self::Swept => "swept",
+        }
+    }
+}
+
 /// One Edge-node treatment: the parsed, validated parameters of a chamfer or fillet.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EdgeTreatment {
@@ -139,6 +172,8 @@ pub struct EdgeTreatment {
     pub distance2: Option<f64>,
     /// Chamfer angle in degrees (node `angle`), defaulting to `45`.
     pub angle: Option<f64>,
+    /// How circular fillets meet at a sharp side edge (node `cornerTurn`).
+    pub corner_turn: CornerTurn,
 }
 
 impl Default for EdgeTreatment {
@@ -150,6 +185,7 @@ impl Default for EdgeTreatment {
             length: 2.0,
             distance2: None,
             angle: None,
+            corner_turn: CornerTurn::Mitre,
         }
     }
 }
@@ -177,6 +213,10 @@ impl EdgeTreatment {
             Some(text) => Continuity::parse(&text)?,
             None => Continuity::Circular,
         };
+        let corner_turn = match string_field(values, "cornerTurn")? {
+            Some(text) => CornerTurn::parse(&text)?,
+            None => CornerTurn::Mitre,
+        };
         let length = number_field(values, "length")?.unwrap_or(2.0);
         let distance2 = number_field(values, "distance2")?;
         let angle = number_field(values, "angle")?;
@@ -187,6 +227,7 @@ impl EdgeTreatment {
             length,
             distance2,
             angle,
+            corner_turn,
         })
     }
 
@@ -239,7 +280,18 @@ impl EdgeTreatment {
                     }
                 }
             }
-            EdgeMode::Fillet => Ok(()),
+            EdgeMode::Fillet => {
+                if self.corner_turn == CornerTurn::Swept
+                    && self.continuity != Continuity::Circular
+                {
+                    return Err(BlendError::missing_api(
+                        "swept fillet corner",
+                        "a swept fillet corner is only available for circular (G1) fillets",
+                        LAW_CONTINUITY.to_vec(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -286,5 +338,39 @@ fn number_field(values: &Value, key: &str) -> Result<Option<f64>, BlendError> {
         Some(other) => Err(BlendError::InvalidInput(format!(
             "edge node field {key:?} must be a number, got {other}"
         ))),
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn swept_corners_parse_and_are_limited_to_circular_fillets() {
+        let fillet = EdgeTreatment::from_node_values(&serde_json::json!({
+            "mode": "fillet",
+            "continuity": "",
+            "cornerTurn": "swept",
+            "length": 2.0
+        }))
+        .expect("valid fillet node");
+        assert_eq!(fillet.corner_turn, CornerTurn::Swept);
+        assert!(fillet.validate().is_ok());
+
+        let g2 = EdgeTreatment::from_node_values(&serde_json::json!({
+            "mode": "fillet",
+            "continuity": "G2",
+            "cornerTurn": "swept",
+            "length": 2.0
+        }))
+        .expect("parse G2");
+        assert!(g2.validate().is_err(), "swept is only for circular fillets");
+
+        let unknown = EdgeTreatment::from_node_values(&serde_json::json!({
+            "mode": "fillet",
+            "cornerTurn": "rounded"
+        }));
+        assert!(unknown.is_err(), "unknown turn is refused");
     }
 }

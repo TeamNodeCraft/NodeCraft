@@ -39,7 +39,7 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `a445bdaac60a980b0e9d1dba3ee28eb7ada44f50` (latest `main` as of 2026-11-08);
+- SolidCore pinned at `45d6111b909487e94edaec309a7673a3b73d4ae5` (latest `main` as of 2026-11-08);
   `solidcore-record-new` remains at the older SolidCraft-compatible revision
 - SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
 - `configure_solidcore_fixes` applies the same upstream fix profile to our
@@ -52,6 +52,7 @@ SolidCore/SMLib for exact geometry.
   the fallback, so a fillet highlights its own surface rather than the body
 - refused fillet edges are reported, not silently dropped from a multi-edge
   selection
+- circular fillets expose SolidCore's mitred or swept corner turn
 - ghost face/edge colours live in the theme palette; the inspector reset action
   replaces the old disclosure chevron
 - STEP planar import normalizes closed-solid winding after new face-use-aware exports

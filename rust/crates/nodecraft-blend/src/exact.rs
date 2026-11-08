@@ -49,7 +49,7 @@ use solidcore::topology::Brep;
 use crate::edge::EdgeSelection;
 use crate::error::BlendError;
 use crate::missing::{CHAMFER_API, EXECUTIVE, FILLET_API, LAW_CONTINUITY, PORT_UNITS};
-use crate::treatment::{Continuity, EdgeMode, EdgeTreatment};
+use crate::treatment::{Continuity, CornerTurn, EdgeMode, EdgeTreatment};
 
 /// The upstream calls an exact (B-rep) treatment of `mode` still needs.
 #[must_use]
@@ -113,15 +113,21 @@ pub fn fillet_brep_exact_with_kernel(
     // A refused edge is an upstream modelling refusal, not permission to round
     // a subset. Returning the error keeps the node from silently showing a
     // partial fillet around a join.
-    let result = match fillet_selection(kernel, brep, &primary, &treatment) {
-        Ok(result) => result,
-        Err(error) if error.contains("status 1001") => {
-            match fillet_selection_ops(kernel, brep, &primary, &treatment) {
-                Ok(result) => result,
-                Err(ops_error) => return Err(format!("{error}; ops blend: {ops_error}")),
+    // A swept corner is a session setting, so it needs the fuller ops blend path
+    // even when the direct constant-radius call would succeed.
+    let result = if treatment.corner_turn == CornerTurn::Swept {
+        fillet_selection_ops(kernel, brep, &primary, &treatment)?
+    } else {
+        match fillet_selection(kernel, brep, &primary, &treatment) {
+            Ok(result) => result,
+            Err(error) if error.contains("status 1001") => {
+                match fillet_selection_ops(kernel, brep, &primary, &treatment) {
+                    Ok(result) => result,
+                    Err(ops_error) => return Err(format!("{error}; ops blend: {ops_error}")),
+                }
             }
+            Err(error) => return Err(error),
         }
-        Err(error) => return Err(error),
     };
     validate_result(kernel, &result)?;
     Ok(result)
@@ -136,7 +142,7 @@ fn fillet_selection_ops(
     selections: &[crate::EdgeSelection],
     treatment: &EdgeTreatment,
 ) -> Result<Brep, String> {
-    use solidcore_ops::blend::{Blend, Corners, blend};
+    use solidcore_ops::blend::{Blend, Corners, Turn, blend_ordered};
     let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
         .map_err(|error| format!("{error:?}"))?;
     let (record, _) = solidcore_convert::brep::to_record(kernel, &mut working)
@@ -158,7 +164,20 @@ fn fillet_selection_ops(
         Continuity::G2 => Blend::Curvature,
         Continuity::G3 => return Err("G3 needs the direct fillet path".into()),
     };
-    if let Err(error) = blend(&body, kind, &edges, &[treatment.length], &[], Corners::Filled) {
+    let turn = match treatment.corner_turn {
+        CornerTurn::Mitre => Turn::Mitre,
+        CornerTurn::Swept => Turn::Swept,
+    };
+    if let Err(error) = blend_ordered(
+        &body,
+        &order,
+        kind,
+        &edges,
+        &[treatment.length],
+        &[],
+        Corners::Filled,
+        turn,
+    ) {
         return Err(error.to_string());
     }
     let (record, _) = body.to_record().map_err(|error| error.to_string())?;

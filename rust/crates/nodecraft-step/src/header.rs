@@ -28,9 +28,8 @@ fn quoted_values(line: &str) -> Vec<String> {
     out
 }
 
-/// Reads the ISO-10303-21 header fields.
-pub fn read_header(path: &str) -> Result<StepHeader, String> {
-    let text = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+/// Parses the ISO-10303-21 header fields from STEP text.
+fn parse_header(text: &str) -> StepHeader {
     let mut header = StepHeader {
         has_iso_start: text.trim_start().starts_with("ISO-10303-21;"),
         has_header: text.contains("HEADER;"),
@@ -53,7 +52,49 @@ pub fn read_header(path: &str) -> Result<StepHeader, String> {
             header.organization = values.get(4).cloned();
         }
     }
-    Ok(header)
+    header
+}
+
+/// Reads the ISO-10303-21 header fields.
+pub fn read_header(path: &str) -> Result<StepHeader, String> {
+    let text = fs::read_to_string(path).map_err(|error| format!("{path}: {error}"))?;
+    Ok(parse_header(&text))
+}
+
+/// Reads just the `FILE_SCHEMA` from the start of a STEP file.
+///
+/// Reads at most 128 KiB, so opening a large part in the inspector does not read
+/// its whole entity table. A header longer than that is refused as unread.
+pub fn read_schema(path: &str) -> Result<Option<String>, String> {
+    use std::io::Read;
+    const HEADER_LIMIT: u64 = 128 * 1024;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .map_err(|error| format!("{path}: {error}"))?
+        .take(HEADER_LIMIT)
+        .read_to_string(&mut text)
+        .map_err(|error| format!("{path}: {error}"))?;
+    if !text.contains("ENDSEC;") && !text.contains("DATA;") {
+        return Err(format!("{path}: header is longer than {HEADER_LIMIT} bytes"));
+    }
+    Ok(parse_header(&text).schema)
+}
+
+/// The common application protocol a `FILE_SCHEMA` value names.
+#[must_use]
+pub fn application_protocol(schema: &str) -> Option<&'static str> {
+    let upper = schema.to_ascii_uppercase();
+    if upper.contains("AP242") {
+        Some("AP242")
+    } else if upper.contains("AUTOMOTIVE_DESIGN") {
+        Some("AP214")
+    } else if upper.contains("CONFIG_CONTROL_DESIGN") || upper.contains("AP203") {
+        Some("AP203")
+    } else if upper.contains("AP238") {
+        Some("AP238")
+    } else {
+        None
+    }
 }
 
 /// Validates ISO framing and required header records.
@@ -98,6 +139,21 @@ mod tests {
         std::fs::write(&path, "ISO-10303-21;\nHEADER;\nFILE_SCHEMA(('AP214'));\nFILE_NAME('x','',(''),(''),'','','');\nENDSEC;\nEND-ISO-10303-21;\n").unwrap();
         assert!(validate_header(path.to_str().unwrap()).is_err());
     }
+    #[test]
+    fn read_schema_reads_only_the_header() {
+        let path = std::env::temp_dir().join(format!("sn-header-schema-only-{}.step", std::process::id()));
+        crate::write_box(path.to_str().unwrap(), 1.0, 1.0, 1.0).unwrap();
+        assert_eq!(read_schema(path.to_str().unwrap()).unwrap().as_deref(), Some("CONFIG_CONTROL_DESIGN"));
+    }
+
+    #[test]
+    fn application_protocol_names_the_common_schemas() {
+        assert_eq!(application_protocol("CONFIG_CONTROL_DESIGN"), Some("AP203"));
+        assert_eq!(application_protocol("AUTOMOTIVE_DESIGN"), Some("AP214"));
+        assert_eq!(application_protocol("AP242_MANAGED_MODEL_BASED_3D_ENGINEERING_MIM_LF"), Some("AP242"));
+        assert_eq!(application_protocol("SOMETHING_ELSE"), None);
+    }
+
     #[test]
     fn accepts_missing_file_name_metadata() {
         let path = std::env::temp_dir().join(format!("sn-header-no-name-{}.step", std::process::id()));

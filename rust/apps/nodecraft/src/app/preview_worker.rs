@@ -37,23 +37,32 @@ struct TabState {
     flat: nodecraft_session::flat::FlatGraphCache,
 }
 
+enum PreviewMessage {
+    Request(PreviewRequest),
+    Clear,
+}
+
 pub(super) struct PreviewWorker {
-    tx: Sender<PreviewRequest>,
+    tx: Sender<PreviewMessage>,
     rx: Receiver<PreviewResult>,
 }
 
 impl PreviewWorker {
     pub(super) fn new() -> Self {
-        let (tx, job_rx) = channel::<PreviewRequest>();
+        let (tx, job_rx) = channel::<PreviewMessage>();
         let (result_tx, rx) = channel();
         std::thread::Builder::new()
             .name("nodecraft-preview".into())
             .spawn(move || {
                 let mut states: HashMap<u64, TabState> = HashMap::new();
-                while let Ok(mut job) = job_rx.recv() {
+                while let Ok(mut message) = job_rx.recv() {
                     while let Ok(next) = job_rx.try_recv() {
-                        job = next;
+                        message = next;
                     }
+                    let PreviewMessage::Request(mut job) = message else {
+                        states.clear();
+                        continue;
+                    };
                     nodecraft_engine::kernel_pool::set_current_revision_token(job.token);
                     let mut state = states.remove(&job.tab_id).unwrap_or_default();
                     let target = job.target.clone();
@@ -76,6 +85,7 @@ impl PreviewWorker {
                                         None,
                                         &[],
                                         None,
+                                        false,
                                     );
                                 state.cache = next_cache;
                                 evaluation.and_then(|evaluation| evaluation.mesh)
@@ -107,7 +117,11 @@ impl PreviewWorker {
     }
 
     pub(super) fn request(&self, request: PreviewRequest) {
-        let _ = self.tx.send(request);
+        let _ = self.tx.send(PreviewMessage::Request(request));
+    }
+
+    pub(super) fn clear(&self) {
+        let _ = self.tx.send(PreviewMessage::Clear);
     }
 
     pub(super) fn try_recv(&self) -> Option<PreviewResult> {

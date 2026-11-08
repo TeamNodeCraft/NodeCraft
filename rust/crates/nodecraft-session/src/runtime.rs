@@ -155,6 +155,7 @@ impl GraphRuntime {
             run_exporters: false,
             mesh_tolerance,
             comparison_targets: None,
+            bypass_cache: false,
         };
         self.request_id += 1;
         let output = evaluate(request, std::mem::take(&mut self.cache), progress);

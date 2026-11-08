@@ -37,6 +37,10 @@ pub struct Request {
     /// `[before, after]` feature targets for an exact comparison payload.
     #[serde(default)]
     pub comparison_targets: Option<Vec<String>>,
+    /// Developer rebuild: ignore every cache entry, so each node is evaluated
+    /// again even when a fresh cache would be populated within the same pass.
+    #[serde(default)]
+    pub bypass_cache: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

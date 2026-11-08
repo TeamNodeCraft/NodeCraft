@@ -948,7 +948,14 @@ impl NodeCraftApp {
         None
     }
 
+    /// Developer/debug action: force a fresh evaluation and drop every result
+    /// cache. Production invalidation must come from the graph content hashes, so
+    /// this button is temporary and should not grow a record-cache dependency.
     fn reevaluate_non_export(&mut self) {
+        self.preview_worker.clear();
+        self.preview_pending = None;
+        self.edit_preview = None;
+        self.edit_preview_target = None;
         let Some(session) = &self.session else {
             self.error = Some("No document loaded".to_owned());
             self.status = "Re-evaluate failed".to_owned();
@@ -2964,11 +2971,12 @@ impl NodeCraftApp {
                             self.export_document();
                         }
                         ui.add_space(6.0);
-                        let (runner_rect, runner) = ui.allocate_exact_size(
+                        let (runner_rect, _) = ui.allocate_exact_size(
                             egui::Vec2::splat(28.0),
-                            egui::Sense::click(),
+                            egui::Sense::hover(),
                         );
-                        let tint = crate::theme::Theme::hex(if runner.hovered() {
+                        let runner_hovered = ui.rect_contains_pointer(runner_rect);
+                        let tint = crate::theme::Theme::hex(if runner_hovered {
                             theme.icon_hover
                         } else {
                             theme.icon
@@ -2980,12 +2988,14 @@ impl NodeCraftApp {
                             "bytes://nodecraft-reevaluate.svg",
                             svg.into_bytes(),
                         )
-                        .fit_to_exact_size(egui::Vec2::splat(16.0));
-                        ui.put(runner_rect.shrink(6.0), image);
+                        .fit_to_exact_size(egui::Vec2::splat(16.0))
+                        .sense(egui::Sense::click());
+                        let runner = ui
+                            .put(runner_rect, image)
+                            .on_hover_text("Re-evaluate graph without running exporters");
                         if runner.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                        let runner = runner.on_hover_text("Re-evaluate graph without running exporters");
                         if runner.clicked() {
                             self.reevaluate_non_export();
                         }

@@ -15,6 +15,18 @@ use crate::viewport_grid::{grid_lines, GridKind};
 use crate::gpu_viewport::GpuViewport;
 use solidcraft_geom::prelude::*;
 
+/// The shared world origin used by both the XY construction grid and the
+/// Home/ISO framing. Keeping one constant makes the view centre and the grid
+/// origin the same point by construction.
+const VIEW_ORIGIN: solidcore_record_new::Vec3 = solidcore_record_new::Vec3::ZERO;
+
+fn lens_shift_for_visible(full: egui::Rect, visible: egui::Rect) -> [f32; 2] {
+    [
+        2.0 * (visible.center().x - full.center().x) / full.width().max(1.0),
+        -2.0 * (visible.center().y - full.center().y) / full.height().max(1.0),
+    ]
+}
+
 fn center_distance(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
 }
@@ -195,6 +207,10 @@ pub struct Viewport {
     /// NDC projection offset used to place the pivot at the visible viewport
     /// centre while leaving `camera.target` at the model centre.
     lens_shift: [f32; 2],
+    /// The navigation mode latched at the start of a trackpad gesture: `true`
+    /// for orbit, `false` for pan. A Shift release or missed modifier event
+    /// must not switch a gesture from orbiting to panning halfway through.
+    trackpad_orbit: Option<bool>,
     texture: Option<egui::TextureHandle>,
     dirty: bool,
     last_size: [usize; 2],
@@ -303,6 +319,7 @@ impl Default for Viewport {
             source_mesh: None,
             view: ViewSettings::default(),
             lens_shift: [0.0, 0.0],
+            trackpad_orbit: None,
             texture: None,
             dirty: true,
             last_size: [0, 0],
@@ -629,10 +646,33 @@ impl Viewport {
         self.dirty = true;
     }
 
-    /// Fit the model into the unobstructed viewport region and center it there.
-    /// `full` is the whole 3D viewport; `visible` is the part not covered by
-    /// the floating node/tool panels.
-    pub fn fit_visible(&mut self, full: egui::Rect, visible: egui::Rect) {
+    /// Fit distance for a bounding radius and viewport aspect ratio.
+    fn fit_distance(&self, radius: f64, aspect: f64) -> f64 {
+        let tan_half = if self.camera.fov > 0.0 {
+            (self.camera.fov * 0.5).tan()
+        } else {
+            0.4
+        };
+        let vertical = radius / (tan_half * 0.9);
+        let horizontal = radius / (tan_half * aspect.max(1.0e-3) * 0.9);
+        vertical.max(horizontal).max(1.0)
+    }
+
+    /// Home/ISO framing: put the shared world origin at the centre of the
+    /// unobstructed 3D viewport and frame the whole model around it. The orbit
+    /// pivot stays at the origin; composition uses the projection lens shift.
+    fn frame_origin(&mut self, radius: f64, aspect: f64, lens_shift: [f32; 2]) {
+        let (yaw, pitch) = StandardView::Iso.angles();
+        self.camera.yaw = -yaw;
+        self.camera.pitch = pitch;
+        self.camera.roll = 0.0;
+        self.camera.target = VIEW_ORIGIN;
+        self.camera.distance = self.fit_distance(radius, aspect);
+        self.lens_shift = lens_shift;
+        self.dirty = true;
+    }
+
+    pub fn fit_origin(&mut self, full: egui::Rect, visible: egui::Rect) {
         let Some(display) = &self.display else {
             self.camera = Camera::default();
             self.dirty = true;
@@ -640,29 +680,14 @@ impl Viewport {
         };
         let visible = visible.intersect(full);
         if visible.width() <= 1.0 || visible.height() <= 1.0 {
-            self.fit();
+            let radius = (display.center.dist(VIEW_ORIGIN) + display.radius).max(1.0);
+            self.frame_origin(radius, f64::from(full.width() / full.height().max(1.0)), [0.0, 0.0]);
             return;
         }
-        let (yaw, pitch) = StandardView::Iso.angles();
-        self.camera.yaw = -yaw;
-        self.camera.pitch = pitch;
-        let aspect = f64::from(visible.width() / visible.height());
-        let tan_half = if self.camera.fov > 0.0 {
-            (self.camera.fov * 0.5).tan()
-        } else {
-            0.4
-        };
-        let vertical = display.radius / (tan_half * 0.9);
-        let horizontal = display.radius / (tan_half * aspect * 0.9);
-        self.camera.distance = vertical.max(horizontal).max(1.0);
-        // Keep the pivot at the model bounds centre. Composition is performed by
-        // the projection lens shift, not by moving the orbit pivot.
-        self.camera.target = display.center;
-        self.lens_shift = [
-            2.0 * (visible.center().x - full.center().x) / full.width().max(1.0),
-            -2.0 * (visible.center().y - full.center().y) / full.height().max(1.0),
-        ];
-        self.dirty = true;
+        let radius = (display.center.dist(VIEW_ORIGIN) + display.radius).max(1.0);
+        let aspect = f64::from(visible.width() / visible.height().max(1.0));
+        let lens = lens_shift_for_visible(full, visible);
+        self.frame_origin(radius, aspect, lens);
     }
 
     pub fn show_view_matrix(&self) -> bool {
@@ -702,7 +727,7 @@ impl Viewport {
 
     pub fn home(&mut self) {
         if let (Some(full), Some(visible)) = (self.last_full, self.last_visible) {
-            self.fit_visible(full, visible);
+            self.fit_origin(full, visible);
         }
     }
 
@@ -983,8 +1008,12 @@ impl Viewport {
                 self.camera
                     .zoom_at(f64::from((-gesture.wheel.y * 0.0015).exp()), None);
             } else if gesture.pan != egui::Vec2::ZERO {
-                if gesture.shift {
-                    // Shift + two fingers rotates the model.
+                // Latch the mode for the whole gesture. macOS scroll momentum can
+                // keep delivering pan deltas after the Shift key-up; using the
+                // current modifier per frame would turn the last part of an orbit
+                // into a pivot-moving pan.
+                let orbit = *self.trackpad_orbit.get_or_insert(gesture.shift);
+                if orbit {
                     self.camera.orbit(
                         f64::from(gesture.pan.x) * f64::from(self.view.orbit_speed),
                         f64::from(gesture.pan.y) * f64::from(self.view.orbit_speed),
@@ -997,7 +1026,13 @@ impl Viewport {
                     );
                 }
             }
+            if gesture.pan == egui::Vec2::ZERO {
+                self.trackpad_orbit = None;
+            }
             self.dirty = true;
+        }
+        if !gesture.has_navigation() {
+            self.trackpad_orbit = None;
         }
 
         self.sync_edit_ghost_theme();
@@ -1045,7 +1080,7 @@ impl Viewport {
             );
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, frame));
             if self.chrome_visible {
-                self.axis_gizmo(ui, rect, visible);
+                self.axis_gizmo(ui, rect);
                 // Top selection dock intentionally disabled for the inspector-driven
                 // selection experiment. Keep `selection_dock` for a future opt-in.
                 self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
@@ -1079,7 +1114,7 @@ impl Viewport {
         }
         self.draw_debug_overlays(ui, rect);
         if self.chrome_visible {
-            self.axis_gizmo(ui, rect, visible);
+            self.axis_gizmo(ui, rect);
             // Top selection dock intentionally disabled; see inspector edit action.
             self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
             self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
@@ -1479,7 +1514,7 @@ impl Viewport {
 
     /// SolidCraft-style signed XYZ compass in the viewport's top-right corner.
     /// Clicking a positive tip chooses that standard view; dragging the compass orbits.
-    fn axis_gizmo(&mut self, ui: &mut egui::Ui, viewport: egui::Rect, visible: egui::Rect) {
+    fn axis_gizmo(&mut self, ui: &mut egui::Ui, viewport: egui::Rect) {
         let theme = crate::theme::get();
         const SIZE: f32 = 94.0;
         const MARGIN: f32 = 14.0;
@@ -1606,7 +1641,7 @@ impl Viewport {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         if home.clicked() {
-            self.fit_visible(viewport, visible);
+            self.home();
             ui.ctx().request_repaint();
         }
         let icon_colour = if home.hovered() {
@@ -1933,7 +1968,7 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
     add_grid(
         &mut scene,
         display.radius,
-        solidcore_record_new::Vec3::ZERO,
+        VIEW_ORIGIN,
         camera.fov > 0.0,
         ortho_fade,
     );
@@ -1964,6 +1999,25 @@ mod tests {
         assert!(!viewport.debug_overlays_enabled());
         viewport.set_show_gpu_info(true);
         assert!(viewport.debug_overlays_enabled());
+    }
+
+    #[test]
+    fn home_frames_the_shared_world_origin() {
+        let mut viewport = Viewport::default();
+        viewport.camera.target = solidcore_record_new::Vec3::new(40.0, -25.0, 12.0);
+        viewport.camera.distance = 500.0;
+        viewport.lens_shift = [0.25, -0.15];
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        let visible = egui::Rect::from_min_max(egui::pos2(400.0, 0.0), full.max);
+        let expected = lens_shift_for_visible(full, visible);
+        viewport.frame_origin(30.0, f64::from(visible.width() / visible.height()), expected);
+        assert_eq!(viewport.camera.target, VIEW_ORIGIN);
+        assert_eq!(viewport.lens_shift, expected);
+        assert!(expected[0] > 0.0, "visible origin should shift right of full centre");
+        let (yaw, pitch) = StandardView::Iso.angles();
+        assert_eq!(viewport.camera.yaw, -yaw);
+        assert_eq!(viewport.camera.pitch, pitch);
+        assert!(viewport.camera.distance > 0.0);
     }
 
     #[test]

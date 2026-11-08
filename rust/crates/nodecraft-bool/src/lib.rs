@@ -10,7 +10,7 @@
 //!   [`solidcore::offset::offset_executive::p2`]'s `OffsetExecutive::shell_brep`
 //!   (hollowing with removed "opening" faces).
 //! * [`display_mesh`] bridges any B-rep to a protocol [`Mesh`] through
-//!   [`nodecraft_solidcore::curved::brep_display_mesh`], and [`boolean_mesh`] /
+//!   `nodecraft-layers`, and [`boolean_mesh`] /
 //!   [`shell_mesh`] combine an operation with that bridge.
 //! * [`box_brep`] / [`box_brep_at`] construct solidcore box operands in B-rep
 //!   coordinates; [`brep_faces`] lists the face ids a shell operation can open.
@@ -61,7 +61,6 @@ use solidcore::sweep::topology_sweep::store::SweepIdentities;
 use solidcore::topology::topology::{NotifyRecords, Topology};
 use solidcore::topology::{Brep, FaceId};
 use nodecraft_protocol::Mesh;
-use nodecraft_mesh::{CurvedTessOptions, brep_display_mesh};
 
 /// Prefix of every error caused by a solidcore dependency that is not ported yet.
 ///
@@ -258,27 +257,29 @@ fn boolean_with_kernel(
 
 /// Tessellates a solidcore B-rep into a protocol [`Mesh`] in B-rep coordinates.
 ///
-/// Uses the nodecraft-solidcore display bridge
-/// ([`nodecraft_solidcore::curved::brep_display_mesh`]) with its default grid density.
-/// The mesh is a display approximation: seam vertices may be duplicated and the index
-/// buffer is not welded. The result is not re-centered.
+/// Uses the upstream `solidcore-tess` path through `nodecraft-layers`. The mesh is a
+/// display approximation: seam vertices may be duplicated and the index buffer is not
+/// welded. The result is not re-centered.
 ///
 /// # Errors
 ///
-/// A message when the bridge cannot tessellate a face or the B-rep has no faces.
+/// A message when tessellation fails or the B-rep has no faces.
 pub fn display_mesh(brep: &Brep) -> Result<Mesh, String> {
-    display_mesh_with_options(brep, &CurvedTessOptions::default())
-}
-
-/// [`display_mesh`] with an explicit display-grid density.
-///
-/// # Errors
-///
-/// A message when the bridge cannot tessellate a face or the B-rep has no faces.
-pub fn display_mesh_with_options(brep: &Brep, options: &CurvedTessOptions) -> Result<Mesh, String> {
-    let kernel = nodecraft_kernel_profile::kernel();
-    brep_display_mesh(&kernel, brep, options)
-        .map_err(|error| format!("nodecraft_solidcore curved display mesh: {error}"))
+    if brep.faces().len() == 0 {
+        return Err("display tessellation produced no triangles".into());
+    }
+    let mut kernel = nodecraft_kernel_profile::kernel();
+    let mut copy = brep
+        .clone_standing_for_self()
+        .map_err(|error| format!("display copy: {error}"))?;
+    let mut mesh = nodecraft_layers::tessellate_kernel(&mut kernel, &mut copy, 0.05)
+        .map_err(|error| format!("solidcore-tess display mesh: {error}"))?
+        .mesh;
+    if mesh.faces.is_empty() {
+        return Err("display tessellation produced no triangles".into());
+    }
+    mesh.lightweight = true;
+    Ok(mesh)
 }
 
 /// [`boolean_breps`] followed by [`display_mesh`].
@@ -292,8 +293,7 @@ pub fn display_mesh_with_options(brep: &Brep, options: &CurvedTessOptions) -> Re
 pub fn boolean_mesh(op: BooleanOp, a: Brep, b: Brep) -> Result<Mesh, String> {
     let mut kernel = nodecraft_kernel_profile::kernel();
     let brep = boolean_with_kernel(&mut kernel, op, a, b)?;
-    brep_display_mesh(&kernel, &brep, &CurvedTessOptions::default())
-        .map_err(|error| format!("nodecraft_solidcore curved display mesh: {error}"))
+    display_mesh(&brep)
 }
 
 // ---------------------------------------------------------------------------------

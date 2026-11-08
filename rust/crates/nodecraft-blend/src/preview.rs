@@ -11,7 +11,7 @@
 //! NodeCraft, however, previews shapes as display meshes. This module produces the
 //! *shortest working path* to a usable Edge node today: the selected edge is located on
 //! the exact B-rep (see [`crate::edge`]), its adjacent faces are read from
-//! `brep_display_mesh`, and the display mesh is cut with the treatment's planes —
+//! the display tessellation, and the display mesh is cut with the treatment's planes —
 //!
 //! * chamfer (equal / two-distance / distance-angle) is **one** plane through the edge,
 //! * circular (G1) fillet is a sequence of tangent planes along the fillet arc,
@@ -233,7 +233,7 @@ fn mesh_diagonal(mesh: &Mesh) -> Result<f64, BlendError> {
 
 /// Build a corner-only display mesh of a planar-faced solid.
 ///
-/// `brep_display_mesh` samples each face boundary independently, which leaves
+/// the display tessellation samples each face boundary independently, which leaves
 /// T-junctions between adjacent faces and makes a watertight clip result impossible to
 /// verify (and awkward to cap). The preview only supports planar-faced, convex bodies,
 /// so this builder uses one point per B-rep edge (the corner), exactly like
@@ -344,7 +344,7 @@ fn push_mesh_triangle(
 /// Find the two planar faces around a straight edge and build its cross-section frame.
 ///
 /// The faces and their normals come from the exact B-rep (not from triangles), so the
-/// preview is independent of how finely `brep_display_mesh` samples a face boundary.
+/// preview is independent of how finely the display tessellation samples a face boundary.
 fn face_normal_order(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let key = |normal: [f64; 3]| {

@@ -36,7 +36,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let cache_is_fresh = node_cache_is_fresh(&node);
         let mesh_quality = nodecraft_mesh::display_tolerance();
         let cache_key = (format!("{node_id}@q{mesh_quality:.6}"), node_key);
-        if cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
             self.cache_hits += 1;
             self.cache.note_failure_hit();
             self.errors.insert(node_id.into(), error);
@@ -49,7 +49,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
             return None;
         }
-        if cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
             self.cache_hits += 1;
             self.objects.insert(node_id.into(), mesh.clone());
             self.order.push(node_id.into());
@@ -99,7 +99,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node = self.request.nodes.iter().find(|node| node.id == node_id);
         let key = node.and_then(|node| node.cache.as_ref()?.key.clone()).unwrap_or_default();
         let cache_is_fresh = node.is_some_and(node_cache_is_fresh);
-        if cache_is_fresh && self.cache.part(&(node_id.to_owned(), key)).is_some() {
+        if !self.bypass_cache && cache_is_fresh && self.cache.part(&(node_id.to_owned(), key)).is_some() {
             self.cache.note_part_hit();
             self.cache_hits += 1;
             return;
@@ -150,7 +150,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             // the transform is reapplied; the B-rep is not tessellated again.
             for (index, body) in part.bodies.iter().enumerate() {
                 let transforms = body_transforms(body.body.as_ref(), part, index);
-                if let Some(local) = self.cache.body_mesh(&body.body, tolerance) {
+                if !self.bypass_cache && let Some(local) = self.cache.body_mesh(&body.body, tolerance) {
                     let mut mesh = (*local).clone();
                     apply_brep_face_colors(body.body.as_ref(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
@@ -266,7 +266,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         // A dirty node must be recomputed even if its old cache key is still present
         // (for example after "re-evaluate graph" / render all).
         let cache_is_fresh = node_cache_is_fresh(&node);
-        if cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
             self.cache_hits += 1;
             self.cache.note_failure_hit();
             self.errors.insert(node_id.into(), error);
@@ -283,14 +283,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.visiting.pop();
             return None;
         }
-        if cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
             self.cache_hits += 1;
             self.visiting.pop();
             self.objects.insert(node_id.into(), mesh.clone());
             // A mesh-cache hit still has to restore the exact result used by
             // exporters and exact consumers.
             let brep_key = (node_id.to_string(), node_key.clone());
-            if let Some(brep) = self.cache.brep(&brep_key) {
+            if !self.bypass_cache && let Some(brep) = self.cache.brep(&brep_key) {
                 self.cache.note_brep_hit();
                 self.breps.insert(node_id.into(), brep);
             }
@@ -341,7 +341,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let key = import_cache_key(path);
                     let default_quality = (nodecraft_mesh::display_tolerance()
                         - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs() < 1.0e-9;
-                    if default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
+                    if !self.bypass_cache && default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
                         self.cache.note_import_hit();
                         self.step_diagnostics.insert(node_id.into(), import.diagnostics.clone());
                         Ok(import.mesh.clone())

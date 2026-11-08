@@ -736,7 +736,7 @@ fn section_title(node: &GraphNode) -> &'static str {
 
 fn node_description(node: &GraphNode) -> Option<String> {
     let text = match node.node_type.as_str() {
-        "stepimporter" => "Imports STEP solids and surfaces. Requires a local .step/.stp file.".to_owned(),
+        "stepimporter" => "Imports STEP solids and surfaces from AP203, AP214 or AP242 Part 21 files. Requires a local .step/.stp file.".to_owned(),
         "exporter" => "Writes the connected shape to a STEP file on disk.".to_owned(),
         "translate" => "Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo.".to_owned(),
         "solid" | "primitive" => "Creates a parametric primitive solid. Dimensions are in model units.".to_owned(),
@@ -815,6 +815,16 @@ fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     description(ui, "Opens this .nodecraft document as an editable tab. Linked parts may themselves link further documents.");
 }
 
+fn step_schema(ui: &Ui, path: &str) -> Option<String> {
+    let id = egui::Id::new(("step-schema", path));
+    if let Some(cached) = ui.ctx().data(|data| data.get_temp::<Option<String>>(id)) {
+        return cached;
+    }
+    let schema = nodecraft_step::read_schema(path).ok().flatten();
+    ui.ctx().data_mut(|data| data.insert_temp(id, schema.clone()));
+    schema
+}
+
 fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let theme = crate::theme::get();
     let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -845,6 +855,20 @@ fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             output.choose_file = true;
         }
     });
+    if !path.is_empty() {
+        if let Some(schema) = step_schema(ui, &path) {
+            let protocol = nodecraft_step::application_protocol(&schema).unwrap_or("Other");
+            ui.label(
+                egui::RichText::new(format!("{protocol} · {schema}"))
+                    .size(11.0)
+                    .color(theme.color(theme.muted)),
+            )
+            .on_hover_text(
+                "Supported: AP203/AP214/AP242 Part 21 B-rep import. \n\
+                 AP242 PMI/GD&T, tessellated geometry and STEP XML (Part 28) are not yet supported.",
+            );
+        }
+    }
     let mut heal = node.values.get("heal").and_then(Value::as_bool).unwrap_or(true);
     if ui.checkbox(&mut heal, "Heal imported B-rep").changed() {
         output.changes.push(Change { field: "heal".to_owned(), value: Value::Bool(heal) });

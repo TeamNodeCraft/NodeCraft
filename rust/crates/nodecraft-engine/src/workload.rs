@@ -158,6 +158,7 @@ pub fn profile_flat(nodes: &[Node], connections: &[Connection], targets: &[Strin
         run_exporters: true,
         mesh_tolerance: None,
         comparison_targets: None,
+        bypass_cache: false,
     })
 }
 

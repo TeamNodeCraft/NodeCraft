@@ -7,7 +7,7 @@ use nodecraft_solidcore::solidcore::kernel::{CancelToken, Kernel};
 use std::any::Any;
 use std::collections::VecDeque;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -54,6 +54,8 @@ struct Shared {
     queue: Mutex<VecDeque<Work>>,
     ready: Condvar,
     shutdown: AtomicBool,
+    /// Bumped to make every worker replace its kernel before its next job.
+    generation: AtomicU64,
 }
 
 impl Shared {
@@ -100,6 +102,7 @@ impl KernelPool {
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
             shutdown: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         });
         let mut workers = Vec::with_capacity(threads);
         for index in 0..threads {
@@ -108,7 +111,13 @@ impl KernelPool {
                 .name(format!("solidcore-kernel-{index}"))
                 .spawn(move || {
                     let mut kernel = nodecraft_solidcore::kernel::kernel();
+                    let mut generation = 0;
                     while let Some(work) = shared.next() {
+                        let current = shared.generation.load(Ordering::Acquire);
+                        if current != generation {
+                            kernel = nodecraft_solidcore::kernel::kernel();
+                            generation = current;
+                        }
                         kernel.rng = nodecraft_solidcore::solidcore::kernel::Rng::new(work.seed);
                         kernel.set_cancel_token(work.token);
                         let outcome = catch_unwind(AssertUnwindSafe(|| (work.job)(&mut kernel)));
@@ -131,6 +140,13 @@ impl KernelPool {
     #[must_use]
     pub fn workers(&self) -> usize {
         self.workers.len()
+    }
+
+    /// Make every worker discard its kernel and memoisation caches before its
+    /// next job. The reset is lazy so it never blocks the caller behind a busy
+    /// kernel.
+    pub fn reset_caches(&self) {
+        self.shared.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Run one job synchronously on a pool worker. This is the convenience
@@ -341,5 +357,16 @@ mod tests {
             .expect("result")
             .expect("job");
         assert!(cancelled);
+    }
+}
+
+
+/// Reset both shared kernel pools after an explicit rebuild.
+pub fn reset_kernel_caches() {
+    if let Some(pool) = EXACT_POOL.get() {
+        pool.reset_caches();
+    }
+    if let Some(pool) = MESH_POOL.get() {
+        pool.reset_caches();
     }
 }

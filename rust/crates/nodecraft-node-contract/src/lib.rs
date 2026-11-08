@@ -293,6 +293,7 @@ const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
 const FILLET_FIELDS: &[NodeFieldSpec] = &[
     field_number("length", "Radius", 2.0, Some(0.0), None, 0.1),
     field_choice("continuity", "Continuity", "", &[("", "Circular (G1)"), ("G2", "Curvature (G2)"), ("G3", "Curvature (G3)")]),
+    field_choice("cornerTurn", "Corner turn", "mitre", &[("mitre", "Mitre"), ("swept", "Swept")]),
 ];
 
 const OFFSET_FIELDS: &[NodeFieldSpec] = &[field_number("distance", "Distance", 1.0, Some(0.0), None, 0.1)];

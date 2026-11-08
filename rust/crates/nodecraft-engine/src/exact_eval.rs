@@ -10,7 +10,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (node.id.clone(), node_key);
         let cache_is_fresh = node_cache_is_fresh(node);
-        if cache_is_fresh && let Some(brep) = self.cache.brep(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.note_brep_hit();
             self.cache_hits += 1;
             self.breps.insert(node.id.clone(), brep.clone());
@@ -112,7 +112,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node = self.request.nodes.iter().find(|item| item.id == start).cloned().ok_or("Boolean operand node missing")?;
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (start.to_string(), node_key);
-        if node_cache_is_fresh(&node) && let Some(brep) = self.cache.brep(&cache_key) {
+        if !self.bypass_cache && node_cache_is_fresh(&node) && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.note_brep_hit();
             self.cache_hits += 1;
             self.breps.insert(start.to_string(), brep.clone());
@@ -283,7 +283,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             if !warmable.contains(&node.id) || !node_cache_is_fresh(node) { continue; }
             let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
             let cache_key = (node.id.clone(), node_key);
-            if self.breps.contains_key(&node.id) || self.cache.brep(&cache_key).is_some() {
+            if self.breps.contains_key(&node.id)
+                || (!self.bypass_cache && self.cache.brep(&cache_key).is_some())
+            {
                 continue;
             }
             let id = node.id.clone();
@@ -526,7 +528,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (start.to_owned(), node_key);
         let cache_is_fresh = node_cache_is_fresh(&node);
-        if cache_is_fresh && let Some(part) = self.cache.part(&cache_key) {
+        if !self.bypass_cache && cache_is_fresh && let Some(part) = self.cache.part(&cache_key) {
             self.cache.note_part_hit();
             self.cache_hits += 1;
             self.parts.insert(start.to_owned(), part.clone());
@@ -916,7 +918,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let key = import_cache_key(path);
                     let default_quality = (nodecraft_mesh::display_tolerance()
                         - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs() < 1.0e-9;
-                    if default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
+                    if !self.bypass_cache && default_quality && node_cache_is_fresh(&node) && let Some(import) = self.cache.import(&key) {
                         self.cache.note_import_hit();
                         self.step_diagnostics.insert(node.id.clone(), import.diagnostics.clone());
                     } else {

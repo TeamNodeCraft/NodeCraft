@@ -213,15 +213,24 @@ impl EvalWorker {
                     },
                 };
                 // Only the newest request matters; discard queued stale work.
+                // A clear request must not be lost because a newer edit coalesced
+                // into it: keep the flag and clear before the newest evaluation.
+                let mut clear_cache = job.clear_cache;
                 while let Ok(next) = job_rx.try_recv() {
+                    clear_cache |= next.clear_cache;
                     job = next;
                 }
+                job.clear_cache = clear_cache;
                 let mut state = states.remove(&job.tab_id).unwrap_or_default();
                 nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
                 if job.clear_cache {
                     // Re-evaluate is an explicit request for a fresh result: do
-                    // not let mesh/BRep/failure/import entries answer it.
+                    // not let mesh/BRep/failure/import or flattened-graph entries
+                    // answer it.
                     state.cache = EngineCache::new();
+                    state.flat.clear();
+                    nodecraft_engine::kernel_pool::reset_kernel_caches();
+                    nodecraft_engine::mesher::reset_mesher_caches();
                 }
                 let target = engine_bridge::target_for(&job.document, job.selected.as_deref());
                 let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
@@ -271,6 +280,7 @@ impl EvalWorker {
                             None,
                             &job.validation_targets,
                             None,
+                            job.clear_cache,
                         )
                     }));
                     let exact = match exact_outcome {
@@ -313,9 +323,12 @@ impl EvalWorker {
                     // this exact result, abandon the now-stale display pass, and let
                     // the newest job use the warmed cache.
                     if let Ok(mut next) = job_rx.try_recv() {
+                        let mut clear_cache = next.clear_cache;
                         while let Ok(newer) = job_rx.try_recv() {
+                            clear_cache |= newer.clear_cache;
                             next = newer;
                         }
+                        next.clear_cache = clear_cache;
                         state.cache = cache;
                         states.insert(job.tab_id, state);
                         pending_job = Some(next);
@@ -334,6 +347,7 @@ impl EvalWorker {
                         job.ghost_input.as_deref(),
                         &job.validation_targets,
                         job.edit_preview.as_deref(),
+                        job.clear_cache,
                     )
                 }));
                 let evaluation = match display_outcome {
