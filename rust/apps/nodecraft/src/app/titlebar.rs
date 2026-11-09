@@ -4,11 +4,7 @@
 //! These helpers only cover the shared mechanics: a clickable window button,
 //! title text, and starting a native window drag.
 
-use super::*;
-
 pub(super) const CLOSE_LIGHT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 95, 86);
-pub(super) const MINIMIZE_LIGHT_COLOR: egui::Color32 = egui::Color32::from_rgb(255, 189, 46);
-pub(super) const ZOOM_LIGHT_COLOR: egui::Color32 = egui::Color32::from_rgb(39, 201, 63);
 
 /// A circular window control that sends `command` when clicked.
 ///

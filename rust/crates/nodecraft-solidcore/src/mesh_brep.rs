@@ -12,7 +12,6 @@ use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::error::EntityRef;
 use solidcore::geom::object::ObjectRef;
-use solidcore::kernel::Kernel;
 use solidcore::math::{Point3, Vec3};
 use solidcore::nurbs::b_spline_curve::BSplineCurve;
 use solidcore::nurbs::b_spline_surface::BSplineSurface;
@@ -89,7 +88,6 @@ pub fn brep_from_triangles(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> Resul
 mod tests {
     use super::*;
     use solidcore::mass::integrator::properties::{brep_area, brep_volume, PropertyAttributes};
-    use solidcore::topology::Brep;
 
     fn box_mesh() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         let points = vec![
@@ -107,7 +105,7 @@ mod tests {
     fn faceted_box_has_volume_and_area() {
         let (points, triangles) = box_mesh();
         let mut brep = brep_from_triangles(&points, &triangles).unwrap();
-        let mut kernel = crate::kernel::kernel();
+        let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();
         let attrs = PropertyAttributes { store: &store, key_of: &|entity| key_of(entity).key };
         let volume = brep_volume(&kernel, &mut brep, 1e-6, &attrs).unwrap();
@@ -139,7 +137,6 @@ pub fn brep_from_planar_body(body: &nodecraft_step::PlanarBody) -> Result<Brep, 
 mod planar_tests {
     use super::*;
     use solidcore::mass::integrator::properties::{brep_area, brep_volume, PropertyAttributes};
-    use solidcore::topology::Brep;
 
     #[test]
     fn block_step_becomes_solidcore_brep() {
@@ -280,7 +277,7 @@ mod exact_planar_tests {
             holes: vec![vec![vec![4,5,6,7]]],
         };
         let mut brep = brep_from_planar_body_exact(&body).unwrap();
-        let mut kernel = crate::kernel::kernel();
+        let kernel = crate::kernel::kernel();
         let area = brep_area(&kernel, &mut brep, 1e-6).unwrap();
         assert!((area - 12.0).abs() < 1e-4, "area {area}");
     }

@@ -377,7 +377,7 @@ fn body_display_mesh(
     } else {
         FAR_FACTOR
     };
-    let mut effective = if extent > 0.0 { requested.min(extent * factor).max(1.0e-9) } else { requested };
+    let effective = if extent > 0.0 { requested.min(extent * factor).max(1.0e-9) } else { requested };
     crate::set_display_tolerance(Some(effective));
     let render = |brep: &solidcore::topology::Brep| -> Result<Mesh, String> {
         // Display tessellation belongs to the upstream layer just like every

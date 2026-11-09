@@ -194,10 +194,6 @@ pub struct NodeFieldSpec {
     pub kind: FieldKind,
 }
 
-const fn field_text(key: &'static str, label: &'static str, default: &'static str) -> NodeFieldSpec {
-    NodeFieldSpec { key, label, default: FieldDefault::Text(default), kind: FieldKind::Text }
-}
-
 const fn field_switch(key: &'static str, label: &'static str, default: bool) -> NodeFieldSpec {
     NodeFieldSpec { key, label, default: FieldDefault::Bool(default), kind: FieldKind::Switch }
 }
@@ -288,12 +284,14 @@ const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
     field_choice("chamferType", "Type", "equal", &[("equal", "Equal distance"), ("two-distance", "Two distances"), ("distance-angle", "Distance + angle")]),
     field_number("distance2", "Distance 2", 2.0, Some(0.0), None, 0.1),
     field_angle("angle", "Angle°", 45.0, Some(0.1), Some(179.9), 0.1),
+    field_switch("tangentChain", "Tangent chain", true),
 ];
 
 const FILLET_FIELDS: &[NodeFieldSpec] = &[
     field_number("length", "Radius", 2.0, Some(0.0), None, 0.1),
     field_choice("continuity", "Continuity", "", &[("", "Circular (G1)"), ("G2", "Curvature (G2)"), ("G3", "Curvature (G3)")]),
     field_choice("cornerTurn", "Corner turn", "mitre", &[("mitre", "Mitre"), ("swept", "Swept")]),
+    field_switch("tangentChain", "Tangent chain", true),
 ];
 
 const OFFSET_FIELDS: &[NodeFieldSpec] = &[field_number("distance", "Distance", 1.0, Some(0.0), None, 0.1)];
@@ -537,7 +535,7 @@ impl fmt::Display for ContractError {
             Self::MissingSource { node, source } => {
                 write!(f, "connection to {node:?} references missing source {source:?}")
             }
-            Self::MissingOutput { node, source } => {
+            Self::MissingOutput { node: _, source } => {
                 write!(f, "connection source {source:?} has no geometry output")
             }
             Self::WrongKind { node, input, expected, actual } => {

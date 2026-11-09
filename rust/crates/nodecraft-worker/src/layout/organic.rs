@@ -11,8 +11,6 @@
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-const H_GAP: f64 = 6.0;
-const V_GAP: f64 = 86.0;
 
 #[derive(Clone)]
 struct Node { id: String, width: f64, height: f64, layer: usize, x: f64, y: f64 }
@@ -142,7 +140,6 @@ pub fn layout_organic(nodes: &[Value], connections: &[Value]) -> Result<Value, S
     }
     for layer in &layers { for (r, &i) in layer.iter().enumerate() { order[i] = r; } }
 
-    let gap = H_GAP;
     // Fan the children of a single parent around its centre so their edges do not
     // collapse into one vertical line. Multi-parent joins still use the average.
     // Bottom-up tidy tree: the result is the root at the bottom. Each node owns one
@@ -171,13 +168,6 @@ pub fn layout_organic(nodes: &[Value], connections: &[Value]) -> Result<Value, S
     let mut density_memo = vec![None; items.len()];
     let density: Vec<usize> = (0..items.len()).map(|node| canopy_density(node, &tree_inputs, &mut density_memo)).collect();
 
-    fn subtree_width(node: usize, items: &Vec<Node>, tree_inputs: &Vec<Vec<usize>>, gap: f64, memo: &mut Vec<Option<f64>>) -> f64 {
-        if let Some(value) = memo[node] { return value; }
-        let children_width: f64 = tree_inputs[node].iter().map(|&child| subtree_width(child, items, tree_inputs, gap, memo) + gap).sum::<f64>();
-        let value = items[node].width.max(children_width - gap);
-        memo[node] = Some(value);
-        value
-    }
     fn grow(node: usize, root_x: f64, root_y: f64, angle_start: f64, angle_end: f64, depth: usize,
             items: &mut Vec<Node>, tree_inputs: &Vec<Vec<usize>>, density: &Vec<usize>) {
         let middle = (angle_start + angle_end) / 2.0;

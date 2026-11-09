@@ -74,7 +74,7 @@ pub fn source_fingerprint(
     linked_documents: &BTreeMap<PathBuf, GraphDocument>,
 ) -> ContentHash {
     let mut combined: u128 = 0x9e37_79b9_7f4a_7c15;
-    let mut mix = |combined: &mut u128, hash: ContentHash| {
+    let mix = |combined: &mut u128, hash: ContentHash| {
         *combined = combined
             .rotate_left(17)
             .wrapping_add(hash.0)

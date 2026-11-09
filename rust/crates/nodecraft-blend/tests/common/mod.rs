@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 
+use nodecraft_protocol::Mesh;
 use solidcore::kernel::Kernel;
 use solidcore::topology::Brep;
-use nodecraft_protocol::Mesh;
 
 /// The test body: a 40 x 30 x 20 box at the origin (B-rep coordinates).
 pub fn box_40_30_20() -> (Kernel, Brep) {
@@ -63,16 +63,17 @@ pub fn volume(mesh: &Mesh) -> f64 {
             f64::from(b[2]) * f64::from(c[0]) - f64::from(b[0]) * f64::from(c[2]),
             f64::from(b[0]) * f64::from(c[1]) - f64::from(b[1]) * f64::from(c[0]),
         ];
-        total += f64::from(a[0]) * cross[0] + f64::from(a[1]) * cross[1] + f64::from(a[2]) * cross[2];
+        total +=
+            f64::from(a[0]) * cross[0] + f64::from(a[1]) * cross[1] + f64::from(a[2]) * cross[2];
     }
     total / 6.0
 }
 
 /// Smallest distance from any mesh vertex to the infinite line `point + t * direction`.
 pub fn min_distance_to_line(mesh: &Mesh, point: [f64; 3], direction: [f64; 3]) -> f64 {
-    let norm = (direction[0] * direction[0] + direction[1] * direction[1]
-        + direction[2] * direction[2])
-        .sqrt();
+    let norm =
+        (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
+            .sqrt();
     let unit = [
         direction[0] / norm,
         direction[1] / norm,

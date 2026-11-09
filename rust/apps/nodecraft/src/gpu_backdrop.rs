@@ -543,6 +543,8 @@ impl BackdropRenderer {
         );
         let backdrop = Frame {
             product: false,
+            preview_bounds: None,
+            moving: None,
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),

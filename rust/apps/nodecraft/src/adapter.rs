@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use solidcraft_geom::Mesh as CraftMesh;
-use solidcore_record_new::Vec3;
+use solidcore_record::Vec3;
 use nodecraft_protocol::Mesh as NodeMesh;
 use solidcraft_geom::prelude::*;
 
@@ -429,8 +429,8 @@ mod tests {
         assert_eq!(display.edges.len(), 1, "generated mesh edges must not be pickable");
         assert_eq!(display.edges[0].id, "edge:0");
         assert_eq!(display.mesh.edges, vec![vec![
-            solidcore_record_new::Vec3::new(0.0, 0.0, 0.0),
-            solidcore_record_new::Vec3::new(10.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(0.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(10.0, 0.0, 0.0),
         ]]);
         assert!(display.radius > 0.0);
     }

@@ -371,7 +371,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     .get("primitiveType")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(&node.node_type);
-                let number = |key: &str, default: f64| {
+                let _number = |key: &str, default: f64| {
                     node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default)
                 };
                 match kind {
@@ -719,12 +719,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if !has_edges {
                     return self.evaluate(&link.from).ok_or_else(|| "Edge source did not evaluate".to_owned());
                 }
-                let brep = self.operand_brep(&link.from)?;
-                let kernel = nodecraft_solidcore::kernel::kernel();
-                let mut values = node.values.clone();
-                values["mode"] = serde_json::json!(if node.node_type == "fillet" { "fillet" } else { "chamfer" });
-                nodecraft_blend::edge_treatment_preview(&kernel, &brep, &values)
-                    .map_err(|error| format!("Edge preview: {error}"))
+                // Display the exact BRep result. The mesh preview path is
+                // planar-only and cannot represent a curved chamfer or G2/G3
+                // fillet, even when the exact result built successfully.
+                let part = self.evaluate_part(node_id)?;
+                self.part_display_mesh(node_id, &part)
+                    .map_err(|error| format!("Edge display mesh: {error}"))
             })(),
             "look" => match source(self.request, node_id) {
                 Some(link) => self

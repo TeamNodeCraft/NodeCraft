@@ -8,90 +8,11 @@ pub mod organic;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-const H_GAP: f64 = 18.0;
-const LAYER_GAP: f64 = 74.0;
-
 #[derive(Clone)]
 struct Node { id: String, width: f64, height: f64, rank: usize, x: f64, y: f64 }
 
 fn number(value: Option<&Value>, default: f64) -> f64 {
     value.and_then(Value::as_f64).filter(|value| value.is_finite() && *value > 0.0).unwrap_or(default)
-}
-
-fn segments_cross(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    fn orient(p: [f64; 2], q: [f64; 2], r: [f64; 2]) -> f64 {
-        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
-    }
-    let o1 = orient(a, b, c); let o2 = orient(a, b, d); let o3 = orient(c, d, a); let o4 = orient(c, d, b);
-    (o1 * o2 < 0.0) && (o3 * o4 < 0.0)
-}
-
-fn tangle_score(items: &[Node], edges: &[(usize, usize)]) -> f64 {
-    let mut score = 0.0;
-    for (index, &(from, to)) in edges.iter().enumerate() {
-        let a = [items[from].x + items[from].width / 2.0, items[from].y + items[from].height];
-        let b = [items[to].x + items[to].width / 2.0, items[to].y];
-        for &(other_from, other_to) in edges.iter().skip(index + 1) {
-            if from == other_from || from == other_to || to == other_from || to == other_to { continue; }
-            let c = [items[other_from].x + items[other_from].width / 2.0, items[other_from].y + items[other_from].height];
-            let d = [items[other_to].x + items[other_to].width / 2.0, items[other_to].y];
-            if segments_cross(a, b, c, d) { score += 2.0; }
-        }
-        for node in 0..items.len() {
-            if node == from || node == to { continue; }
-            for step in 1..18 {
-                let t = step as f64 / 18.0;
-                let x = a[0] + (b[0] - a[0]) * t; let y = a[1] + (b[1] - a[1]) * t;
-                if x > items[node].x && x < items[node].x + items[node].width && y > items[node].y && y < items[node].y + items[node].height {
-                    score += 10.0; break;
-                }
-            }
-        }
-    }
-    score
-}
-
-fn overlaps(items: &[Node], node: usize) -> bool {
-    for other in 0..items.len() {
-        if other == node { continue; }
-        if (items[other].x - items[node].x).abs() < (items[other].width + items[node].width) / 2.0 + 8.0
-            && (items[other].y - items[node].y).abs() < (items[other].height + items[node].height) / 2.0 + 8.0 {
-            return true;
-        }
-    }
-    false
-}
-
-fn translate_tree(node: usize, dx: f64, items: &mut Vec<Node>, tree_inputs: &Vec<Vec<usize>>) {
-    items[node].x += dx;
-    for &child in &tree_inputs[node] { translate_tree(child, dx, items, tree_inputs); }
-}
-
-fn subtree_width_tree(node: usize, items: &Vec<Node>, tree_inputs: &Vec<Vec<usize>>, gap: f64, memo: &mut Vec<Option<f64>>) -> f64 {
-    if let Some(value) = memo[node] { return value; }
-    let children_width: f64 = tree_inputs[node].iter().map(|&child| subtree_width_tree(child, items, tree_inputs, gap, memo) + gap).sum::<f64>();
-    let value = items[node].width.max(children_width - gap);
-    memo[node] = Some(value);
-    value
-}
-
-fn place_tree(node: usize, left: f64, items: &mut Vec<Node>, tree_inputs: &Vec<Vec<usize>>, widths: &Vec<f64>, gap: f64) {
-    if tree_inputs[node].is_empty() {
-        items[node].x = left;
-        return;
-    }
-    let children_width: f64 = tree_inputs[node].iter().map(|&child| widths[child] + gap).sum::<f64>() - gap;
-    let mut cursor = left + (widths[node] - children_width).max(0.0) / 2.0;
-    let mut first = 0.0;
-    let mut last = 0.0;
-    for (index, &child) in tree_inputs[node].iter().enumerate() {
-        place_tree(child, cursor, items, tree_inputs, widths, gap);
-        let centre = items[child].x + items[child].width / 2.0;
-        if index == 0 { first = centre; }
-        last = centre;
-        cursor += widths[child] + gap;
-    }
-    items[node].x = (first + last) / 2.0 - items[node].width / 2.0;
 }
 
 fn packed_box(node: usize, items: &Vec<Node>, input_tree: &Vec<Vec<usize>>, gap: f64, memo: &mut Vec<Option<(f64, f64)>>) -> (f64, f64) {
@@ -390,6 +311,7 @@ fn layout(nodes: &[Value], connections: &[Value], spaced: bool, centered: bool) 
 ///
 /// `mode` is `"timeline"`, `"centered"` or `"organic"`; unknown modes fall back to
 /// the timeline layout.
+#[allow(dead_code)] // public worker API; the app calls it through the worker
 pub fn compute(mode: &str, nodes: &[Value], connections: &[Value]) -> Result<Value, String> {
     match mode {
         "organic" => organic::layout_organic(nodes, connections),

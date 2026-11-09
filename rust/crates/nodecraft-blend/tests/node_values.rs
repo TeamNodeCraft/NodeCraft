@@ -2,10 +2,10 @@
 
 mod common;
 
-use serde_json::json;
 use nodecraft_blend::{
     BlendError, ChamferType, Continuity, EdgeMode, EdgeTreatment, edge_treatment_preview,
 };
+use serde_json::json;
 
 #[test]
 fn parses_the_node_values_the_app_writes() {
@@ -36,13 +36,13 @@ fn parses_the_node_values_the_app_writes() {
 
 #[test]
 fn node_value_errors_are_explicit() {
-    let unknown_mode = EdgeTreatment::from_node_values(&json!({"mode": "bevel"}))
-        .expect_err("unknown mode");
+    let unknown_mode =
+        EdgeTreatment::from_node_values(&json!({"mode": "bevel"})).expect_err("unknown mode");
     assert!(matches!(unknown_mode, BlendError::InvalidInput(_)));
     assert!(unknown_mode.to_string().contains("chamfer"));
 
-    let bad_length = EdgeTreatment::from_node_values(&json!({"length": "2"}))
-        .expect_err("string length");
+    let bad_length =
+        EdgeTreatment::from_node_values(&json!({"length": "2"})).expect_err("string length");
     assert!(matches!(bad_length, BlendError::InvalidInput(_)));
 
     let not_an_object = EdgeTreatment::from_node_values(&json!([])).expect_err("array values");
@@ -102,12 +102,8 @@ fn node_edges_can_be_referenced_by_centered_centre() {
 fn node_edge_errors_are_explicit() {
     let (kernel, brep) = common::box_40_30_20();
 
-    let no_edges = edge_treatment_preview(
-        &kernel,
-        &brep,
-        &json!({"mode": "chamfer", "edges": []}),
-    )
-    .expect_err("no edges");
+    let no_edges = edge_treatment_preview(&kernel, &brep, &json!({"mode": "chamfer", "edges": []}))
+        .expect_err("no edges");
     assert!(matches!(no_edges, BlendError::InvalidInput(_)));
     assert!(no_edges.to_string().contains("no edges selected"));
 
@@ -115,20 +111,13 @@ fn node_edge_errors_are_explicit() {
         .expect_err("missing edges");
     assert!(matches!(missing_edges, BlendError::InvalidInput(_)));
 
-    let bad_ordinal = edge_treatment_preview(
-        &kernel,
-        &brep,
-        &json!({"edges": [{"ordinal": 99}]}),
-    )
-    .expect_err("bad ordinal");
+    let bad_ordinal = edge_treatment_preview(&kernel, &brep, &json!({"edges": [{"ordinal": 99}]}))
+        .expect_err("bad ordinal");
     assert!(matches!(bad_ordinal, BlendError::InvalidInput(_)));
 
-    let bad_reference = edge_treatment_preview(
-        &kernel,
-        &brep,
-        &json!({"edges": [{"name": "edge-3"}]}),
-    )
-    .expect_err("bad reference");
+    let bad_reference =
+        edge_treatment_preview(&kernel, &brep, &json!({"edges": [{"name": "edge-3"}]}))
+            .expect_err("bad reference");
     assert!(matches!(bad_reference, BlendError::InvalidInput(_)));
 }
 
@@ -144,7 +133,9 @@ fn g2_and_g3_node_fillets_report_the_missing_law_api() {
         });
         let error = edge_treatment_preview(&kernel, &brep, &values).expect_err("continuity");
         match error {
-            BlendError::Unsupported { feature, missing, .. } => {
+            BlendError::Unsupported {
+                feature, missing, ..
+            } => {
                 assert_eq!(feature, "fillet G2/G3");
                 assert!(
                     missing.iter().any(|call| call.contains("SmFilletLaw")),

@@ -39,25 +39,32 @@ fn equal_chamfer_removes_the_edge_and_stays_closed() {
         .expect("chamfer preview");
 
     assert!(mesh.faces.len() > 12, "chamfer adds facets");
-    assert!(common::count_group(&mesh, "blend:chamfer") > 0, "chamfer cap facets");
+    assert!(
+        common::count_group(&mesh, "blend:chamfer") > 0,
+        "chamfer cap facets"
+    );
     let (edges, bad) = common::closure_report(&mesh);
     assert!(edges > 0);
     assert_eq!(bad, 0, "chamfered preview must stay watertight");
 
     // The ideal 45-degree chamfer plane is length/sqrt(2) from the edge line.
-    let distance = common::min_distance_to_line(
-        &mesh,
-        centred([40.0, 0.0, 20.0]),
-        [0.0, 1.0, 0.0],
-    );
+    let distance = common::min_distance_to_line(&mesh, centred([40.0, 0.0, 20.0]), [0.0, 1.0, 0.0]);
     assert!(
         (distance - 2.0 / 2.0_f64.sqrt()).abs() < 0.01,
         "chamfer plane distance {distance} != 1.414"
     );
 
     // Cut corners on both adjacent faces.
-    assert!(common::has_vertex_near(&mesh, centred([40.0, 0.0, 18.0]), 0.05));
-    assert!(common::has_vertex_near(&mesh, centred([38.0, 0.0, 20.0]), 0.05));
+    assert!(common::has_vertex_near(
+        &mesh,
+        centred([40.0, 0.0, 18.0]),
+        0.05
+    ));
+    assert!(common::has_vertex_near(
+        &mesh,
+        centred([38.0, 0.0, 20.0]),
+        0.05
+    ));
 
     // Box volume minus the 0.5 * d^2 * edge_length prism.
     let expected = 40.0 * 30.0 * 20.0 - 0.5 * 2.0 * 2.0 * 30.0;
@@ -115,8 +122,20 @@ fn two_distance_chamfer_is_asymmetric() {
             )
         })
         .collect();
-    assert!(corner_distances.iter().cloned().fold(f64::INFINITY, f64::min) < 1.05);
-    assert!(corner_distances.iter().cloned().fold(f64::NEG_INFINITY, f64::max) > 3.95);
+    assert!(
+        corner_distances
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min)
+            < 1.05
+    );
+    assert!(
+        corner_distances
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max)
+            > 3.95
+    );
     // The two cut-back lines: 4 on one face, 1 on the other (order depends on face order).
     let cut_a = common::has_vertex_near(&mesh, centred([40.0, 0.0, 16.0]), 0.05)
         && common::has_vertex_near(&mesh, centred([39.0, 0.0, 20.0]), 0.05);
@@ -203,8 +222,7 @@ fn circular_fillet_is_faceted_tangent_and_closed() {
 
     // A faceted circular fillet keeps the arc within about r * (1 - cos(pi/2N)) of the
     // edge; it must never come closer than ~r * (sqrt(2) - 1) / 2.
-    let distance =
-        common::min_distance_to_line(&mesh, centred([40.0, 0.0, 20.0]), [0.0, 1.0, 0.0]);
+    let distance = common::min_distance_to_line(&mesh, centred([40.0, 0.0, 20.0]), [0.0, 1.0, 0.0]);
     let ideal = 2.0 * (2.0f64.sqrt() - 1.0);
     assert!(
         distance > ideal * 0.6 && distance < ideal * 1.2,
@@ -213,8 +231,8 @@ fn circular_fillet_is_faceted_tangent_and_closed() {
 
     // Volume: box minus (r^2 - quarter circle) * edge length, with the circumscribed
     // polygon removing slightly less than the ideal arc.
-    let ideal_volume = 40.0 * 30.0 * 20.0
-        - 30.0 * (2.0 * 2.0 - std::f64::consts::PI * 2.0 * 2.0 / 4.0);
+    let ideal_volume =
+        40.0 * 30.0 * 20.0 - 30.0 * (2.0 * 2.0 - std::f64::consts::PI * 2.0 * 2.0 / 4.0);
     let volume = common::volume(&mesh);
     assert!(
         volume > ideal_volume - 1.0 && volume < 40.0 * 30.0 * 20.0,
@@ -250,9 +268,15 @@ fn unsupported_treatments_return_explicit_errors() {
     };
     let error = apply_edge_treatment(&kernel, &brep, &selections[..1], &g2).expect_err("G2");
     match &error {
-        BlendError::Unsupported { feature, missing, .. } => {
+        BlendError::Unsupported {
+            feature, missing, ..
+        } => {
             assert_eq!(*feature, "fillet G2/G3");
-            assert!(missing.iter().any(|call| call.contains("SmBSplineFilletLaw")));
+            assert!(
+                missing
+                    .iter()
+                    .any(|call| call.contains("SmBSplineFilletLaw"))
+            );
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -279,8 +303,8 @@ fn unsupported_treatments_return_explicit_errors() {
     let error = apply_edge_treatment(&kernel, &brep, &selections[..1], &zero).expect_err("zero");
     assert!(matches!(error, BlendError::InvalidInput(_)));
 
-    let empty = apply_edge_treatment(&kernel, &brep, &[], &EdgeTreatment::default())
-        .expect_err("no edges");
+    let empty =
+        apply_edge_treatment(&kernel, &brep, &[], &EdgeTreatment::default()).expect_err("no edges");
     assert!(matches!(empty, BlendError::InvalidInput(_)));
 }
 
@@ -294,7 +318,12 @@ fn curved_edges_are_rejected_without_panicking() {
         .expect("cylinder");
     let selections = edge_selections(&kernel, &cylinder).expect("cylinder edges");
     assert!(!selections.is_empty());
-    let result = apply_edge_treatment(&kernel, &cylinder, &selections[..1], &EdgeTreatment::default());
+    let result = apply_edge_treatment(
+        &kernel,
+        &cylinder,
+        &selections[..1],
+        &EdgeTreatment::default(),
+    );
     match result {
         Err(BlendError::Unsupported { .. }) | Err(BlendError::InvalidInput(_)) => {}
         other => panic!("curved edge treatment must fail explicitly, got {other:?}"),

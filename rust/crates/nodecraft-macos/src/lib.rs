@@ -20,11 +20,11 @@ use std::sync::{Mutex, OnceLock};
 
 use objc2::ffi::class_addMethod;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadOnly};
+use objc2::{define_class, msg_send, MainThreadOnly};
 use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
-    NSPoint, NSRect, NSSize, NSString, NSURL,
+    NSPoint, NSRect, NSString, NSURL,
 };
 
 static PENDING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());

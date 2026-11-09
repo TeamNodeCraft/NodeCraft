@@ -4,7 +4,7 @@
 //! defaults are applied once when the session accepts a document or command node.
 
 use crate::{GraphDocument, GraphNode};
-use serde_json::{json, Value};
+use serde_json::json;
 
 /// Applies structural defaults to every node in `document`.
 pub fn canonicalize_document(document: &mut GraphDocument) {

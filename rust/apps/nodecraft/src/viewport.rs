@@ -18,7 +18,7 @@ use solidcraft_geom::prelude::*;
 /// The shared world origin used by both the XY construction grid and the
 /// Home/ISO framing. Keeping one constant makes the view centre and the grid
 /// origin the same point by construction.
-const VIEW_ORIGIN: solidcore_record_new::Vec3 = solidcore_record_new::Vec3::ZERO;
+const VIEW_ORIGIN: solidcore_record::Vec3 = solidcore_record::Vec3::ZERO;
 
 fn lens_shift_for_visible(full: egui::Rect, visible: egui::Rect) -> [f32; 2] {
     [
@@ -105,6 +105,7 @@ pub enum PreviewScope {
     /// Every body in the display mesh is downstream of the edited node.
     All,
     /// Only bodies whose namespaced ids start with one of these prefixes.
+    #[allow(dead_code)] // constructed by the body-scoped preview regression tests
     Bodies(Vec<String>),
 }
 
@@ -145,10 +146,10 @@ fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 fn raycast_face(
     mesh: &solidcraft_geom::Mesh,
     face_ids: &[String],
-    origin: solidcore_record_new::Vec3,
-    direction: solidcore_record_new::Vec3,
+    origin: solidcore_record::Vec3,
+    direction: solidcore_record::Vec3,
 ) -> Option<String> {
-    use solidcore_record_new::Vec3;
+    use solidcore_record::Vec3;
     let mut best = f64::INFINITY;
     let mut best_face = None;
     for (index, triangle) in mesh.triangles.iter().enumerate() {
@@ -590,12 +591,33 @@ impl Viewport {
         }
     }
 
+    /// Highlight the exact display-edge ids stored on the node. These are the
+    /// same ids the blend resolver validates, so the highlight and the
+    /// treatment cannot disagree about which edge was picked.
+    pub fn select_edges_by_ids(&mut self, ids: &[String]) {
+        let Some(display) = self.display.as_ref() else {
+            self.selected_edges.clear();
+            return;
+        };
+        let available: std::collections::HashSet<&str> = self
+            .topology_edges(display)
+            .iter()
+            .chain(self.edit_ghost_edges.iter())
+            .map(|edge| edge.id.as_str())
+            .collect();
+        self.selected_edges = ids
+            .iter()
+            .filter(|id| available.contains(id.as_str()))
+            .cloned()
+            .collect();
+    }
+
     pub fn select_edges_by_centers(&mut self, centers: &[[f64; 3]]) {
         let Some(display) = self.display.as_ref() else {
             self.selected_edges.clear();
             return;
         };
-        self.selected_edges = centers
+        let selected: Vec<String> = centers
             .iter()
             .filter_map(|center| {
                 self.topology_edges(display)
@@ -608,6 +630,7 @@ impl Viewport {
                     .map(|edge| edge.id.clone())
             })
             .collect();
+        self.selected_edges = selected.into_iter().collect();
     }
 
     fn topology_edges<'a>(&'a self, display: &'a DisplayMesh) -> &'a [crate::adapter::DisplayEdge] {
@@ -1192,10 +1215,29 @@ impl Viewport {
                 }
             }
         }
+        // While editing a feature, the pickable layer is the transparent input
+        // ghost, not the downstream breakpoint base. Its ids/centres are in the
+        // feature's own frame, so they can be stored without inverse mapping.
+        if self.edit_ghost_transform.is_some() {
+            for edge in &self.edit_ghost_edges {
+                let points: Vec<egui::Pos2> = edge
+                    .points
+                    .iter()
+                    .filter_map(|point| self.project_to_viewport_ghost(*point, viewport))
+                    .collect();
+                for pair in points.windows(2) {
+                    let distance = distance_to_segment(pointer, pair[0], pair[1]);
+                    if distance <= best {
+                        best = distance;
+                        nearest = Some((edge.id.clone(), edge.midpoint));
+                    }
+                }
+            }
+        }
         nearest
     }
 
-    fn project_to_viewport(&self, point: solidcore_record_new::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+    fn project_to_viewport(&self, point: solidcore_record::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
         // Unclassified overlay geometry follows the preview only when the whole
         // display is downstream of the edit.
         self.project_to_viewport_body(point, viewport, "")
@@ -1207,7 +1249,7 @@ impl Viewport {
     /// solid during a partial-body drag.
     fn project_to_viewport_body(
         &self,
-        point: solidcore_record_new::Vec3,
+        point: solidcore_record::Vec3,
         viewport: egui::Rect,
         body_id: &str,
     ) -> Option<egui::Pos2> {
@@ -1219,7 +1261,7 @@ impl Viewport {
             .filter(|_| self.preview_scope.is_affected(body_id));
         let point = transform.map_or(point, |matrix| {
             let m = matrix.map(|column| column.map(f64::from));
-            solidcore_record_new::Vec3::new(
+            solidcore_record::Vec3::new(
                 m[0][0] * point.x + m[1][0] * point.y + m[2][0] * point.z + m[3][0],
                 m[0][1] * point.x + m[1][1] * point.y + m[2][1] * point.z + m[3][1],
                 m[0][2] * point.x + m[1][2] * point.y + m[2][2] * point.z + m[3][2],
@@ -1346,7 +1388,7 @@ impl Viewport {
         let Some(comparison) = &display.comparison else { return };
         let theme = crate::theme::get();
         let painter = ui.painter().with_clip_rect(viewport);
-        let draw_layer = |triangles: &[([solidcore_record_new::Vec3; 3], [solidcore_record_new::Vec3; 3])], color: egui::Color32| {
+        let draw_layer = |triangles: &[([solidcore_record::Vec3; 3], [solidcore_record::Vec3; 3])], color: egui::Color32| {
             for (points, _) in triangles {
                 let projected: Vec<egui::Pos2> = points
                     .iter()
@@ -1399,6 +1441,31 @@ impl Viewport {
         }
     }
 
+    /// Project a point in the edit ghost's branch frame into the viewport.
+    fn project_to_viewport_ghost(
+        &self,
+        point: solidcore_record::Vec3,
+        viewport: egui::Rect,
+    ) -> Option<egui::Pos2> {
+        let matrix = self.edit_ghost_transform?;
+        let x = f64::from(matrix[0][0]) * point.x
+            + f64::from(matrix[1][0]) * point.y
+            + f64::from(matrix[2][0]) * point.z
+            + f64::from(matrix[3][0]);
+        let y = f64::from(matrix[0][1]) * point.x
+            + f64::from(matrix[1][1]) * point.y
+            + f64::from(matrix[2][1]) * point.z
+            + f64::from(matrix[3][1]);
+        let z = f64::from(matrix[0][2]) * point.x
+            + f64::from(matrix[1][2]) * point.y
+            + f64::from(matrix[2][2]) * point.z
+            + f64::from(matrix[3][2]);
+        self.project_to_viewport(
+            solidcore_record::Vec3::new(x, y, z),
+            viewport,
+        )
+    }
+
     fn draw_edit_ghost_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
         let Some(matrix) = self.edit_ghost_transform else { return };
         if self.edit_ghost_edges.is_empty() { return; }
@@ -1423,7 +1490,7 @@ impl Viewport {
                         + f64::from(matrix[2][2]) * point.z
                         + f64::from(matrix[3][2]);
                     self.project_to_viewport(
-                        solidcore_record_new::Vec3::new(x, y, z),
+                        solidcore_record::Vec3::new(x, y, z),
                         viewport,
                     )
                 })
@@ -1440,12 +1507,26 @@ impl Viewport {
         let theme = crate::theme::get();
         let painter = ui.painter().with_clip_rect(viewport);
         let draw = |id: &str, colour: egui::Color32, width: f32| {
-            let Some(edge) = display.edges.iter().find(|edge| edge.id == id) else { return };
-            let points: Vec<egui::Pos2> = edge
-                .points
-                .iter()
-                .filter_map(|point| self.project_to_viewport_body(*point, viewport, id))
-                .collect();
+            let (edge, ghost) = match display.edges.iter().find(|edge| edge.id == id) {
+                Some(edge) => (edge, false),
+                None => {
+                    let Some(edge) = self.edit_ghost_edges.iter().find(|edge| edge.id == id) else {
+                        return;
+                    };
+                    (edge, true)
+                }
+            };
+            let points: Vec<egui::Pos2> = if ghost {
+                edge.points
+                    .iter()
+                    .filter_map(|point| self.project_to_viewport_ghost(*point, viewport))
+                    .collect()
+            } else {
+                edge.points
+                    .iter()
+                    .filter_map(|point| self.project_to_viewport_body(*point, viewport, id))
+                    .collect()
+            };
             for pair in points.windows(2) {
                 if pair[0].distance_sq(pair[1]) <= 1.0e-6 {
                     continue;
@@ -1537,12 +1618,12 @@ impl Viewport {
         let center = rect.center();
         let (right, up, back) = self.camera.basis();
         let axes = [
-            ("x", solidcore_record_new::Vec3::X),
-            ("-x", -solidcore_record_new::Vec3::X),
-            ("y", solidcore_record_new::Vec3::Y),
-            ("-y", -solidcore_record_new::Vec3::Y),
-            ("z", solidcore_record_new::Vec3::Z),
-            ("-z", -solidcore_record_new::Vec3::Z),
+            ("x", solidcore_record::Vec3::X),
+            ("-x", -solidcore_record::Vec3::X),
+            ("y", solidcore_record::Vec3::Y),
+            ("-y", -solidcore_record::Vec3::Y),
+            ("z", solidcore_record::Vec3::Z),
+            ("-z", -solidcore_record::Vec3::Z),
         ];
         let mut tips: Vec<(&'static str, egui::Pos2, f32)> = axes
             .iter()
@@ -1910,7 +1991,7 @@ impl Viewport {
 fn add_grid(
     scene: &mut Scene,
     radius: f64,
-    center: solidcore_record_new::Vec3,
+    center: solidcore_record::Vec3,
     perspective: bool,
     ortho_fade: f32,
 ) {
@@ -1926,12 +2007,12 @@ fn add_grid(
         };
         scene.grid.push(SceneLine {
             points: vec![
-                solidcore_record_new::Vec3::new(
+                solidcore_record::Vec3::new(
                     center.x + line.start[0] as f64,
                     center.y + line.start[1] as f64,
                     center.z + line.start[2] as f64,
                 ),
-                solidcore_record_new::Vec3::new(
+                solidcore_record::Vec3::new(
                     center.x + line.end[0] as f64,
                     center.y + line.end[1] as f64,
                     center.z + line.end[2] as f64,
@@ -2004,7 +2085,7 @@ mod tests {
     #[test]
     fn home_frames_the_shared_world_origin() {
         let mut viewport = Viewport::default();
-        viewport.camera.target = solidcore_record_new::Vec3::new(40.0, -25.0, 12.0);
+        viewport.camera.target = solidcore_record::Vec3::new(40.0, -25.0, 12.0);
         viewport.camera.distance = 500.0;
         viewport.lens_shift = [0.25, -0.15];
         let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
@@ -2033,7 +2114,7 @@ mod tests {
     #[test]
     fn projection_toggle_preserves_target_rotation_and_half_height() {
         let mut viewport = Viewport::default();
-        viewport.camera.target = solidcore_record_new::Vec3::new(12.0, -4.0, 7.0);
+        viewport.camera.target = solidcore_record::Vec3::new(12.0, -4.0, 7.0);
         viewport.camera.yaw = 0.4;
         viewport.camera.pitch = 0.3;
         viewport.camera.roll = 0.2;
@@ -2055,7 +2136,6 @@ mod tests {
         assert_eq!(viewport.camera.target, target);
         assert!((viewport.camera.half_height() - perspective_half).abs() < 1e-9);
     }
-    use super::*;
 
     #[test]
     fn zebra_is_an_active_display_override() {
@@ -2080,8 +2160,8 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.set_mesh(Some(&NodeMesh::default()));
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let point = solidcore_record_new::Vec3::new(1.0, 0.5, 0.0);
-        let shift = solidcore_record_new::Vec3::new(4.0, 0.0, 0.0);
+        let point = solidcore_record::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcore_record::Vec3::new(4.0, 0.0, 0.0);
         let shifted = viewport
             .project_to_viewport(point + shift, rect)
             .expect("shifted point projects");
@@ -2115,11 +2195,11 @@ mod tests {
     fn face_pick_returns_the_solidcore_face_group() {
         let mesh = solidcraft_geom::Mesh {
             positions: vec![
-                solidcore_record_new::Vec3::new(-1.0, -1.0, 0.0),
-                solidcore_record_new::Vec3::new(1.0, -1.0, 0.0),
-                solidcore_record_new::Vec3::new(1.0, 1.0, 0.0),
+                solidcore_record::Vec3::new(-1.0, -1.0, 0.0),
+                solidcore_record::Vec3::new(1.0, -1.0, 0.0),
+                solidcore_record::Vec3::new(1.0, 1.0, 0.0),
             ],
-            normals: vec![solidcore_record_new::Vec3::Z; 3],
+            normals: vec![solidcore_record::Vec3::Z; 3],
             triangles: vec![[0, 1, 2]],
             tri_face: vec![0],
             edges: Vec::new(),
@@ -2132,8 +2212,8 @@ mod tests {
         let picked = raycast_face(
             &mesh,
             &["body:0:face:9".to_owned()],
-            solidcore_record_new::Vec3::new(0.0, 0.0, 5.0),
-            solidcore_record_new::Vec3::new(0.0, 0.0, -1.0),
+            solidcore_record::Vec3::new(0.0, 0.0, 5.0),
+            solidcore_record::Vec3::new(0.0, 0.0, -1.0),
         );
         assert_eq!(picked.as_deref(), Some("body:0:face:9"));
     }
@@ -2141,7 +2221,7 @@ mod tests {
     #[test]
     fn mesh_update_can_preserve_the_camera() {
         let mut viewport = Viewport::default();
-        viewport.camera.target = solidcore_record_new::Vec3::new(12.0, -4.0, 3.0);
+        viewport.camera.target = solidcore_record::Vec3::new(12.0, -4.0, 3.0);
         viewport.camera.distance = 73.0;
         viewport.camera.yaw = 0.6;
         viewport.camera.pitch = 0.3;
@@ -2184,8 +2264,8 @@ mod tests {
         let mut viewport = Viewport::default();
         viewport.set_mesh(Some(&NodeMesh::default()));
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let point = solidcore_record_new::Vec3::new(1.0, 0.5, 0.0);
-        let shift = solidcore_record_new::Vec3::new(4.0, 0.0, 0.0);
+        let point = solidcore_record::Vec3::new(1.0, 0.5, 0.0);
+        let shift = solidcore_record::Vec3::new(4.0, 0.0, 0.0);
         let plain = viewport
             .project_to_viewport_body(point, rect, "body:1:face:0")
             .expect("point projects");

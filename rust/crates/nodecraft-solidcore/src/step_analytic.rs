@@ -1,6 +1,5 @@
 //! Exact analytic STEP primitives → solidcore Breps.
 
-use solidcore::kernel::Kernel;
 use solidcore::math::Point3;
 use solidcore::primitive::api_primitives as api;
 use solidcore::topology::Brep;

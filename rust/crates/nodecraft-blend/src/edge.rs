@@ -13,15 +13,13 @@
 
 use serde_json::Value;
 use solidcore::kernel::Kernel;
+use solidcore::math::Point3;
 use solidcore::query::api_queries as queries;
 use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
 use solidcore::query::face::p1::evaluate_curve;
 use solidcore::topology::{Brep, EdgeId};
 
 use crate::error::BlendError;
-
-/// Parameter samples used to measure an edge and to find the nearest one.
-const SAMPLES: usize = 16;
 
 /// A point farther than this fraction of the B-rep diagonal from every edge
 /// midpoint is not treated as an edge selection.
@@ -108,7 +106,6 @@ pub fn select_edge_by_midpoint(
             "the B-rep has no edges to select".into(),
         ));
     }
-    let center = brep_center(kernel, brep)?;
     let extent = calculate_bounding_box(
         kernel,
         brep,
@@ -125,23 +122,23 @@ pub fn select_edge_by_midpoint(
         extent.max_at(2) - extent.min_at(2),
     ]);
     let limit = diagonal * SELECTION_RADIUS_FRACTION;
-    let _ = center;
 
-    let mut best: Option<(f64, &EdgeSelection)> = None;
+    let mut best: Option<(f64, f64, &EdgeSelection)> = None;
     for selection in &selections {
-        let distance = point_to_polyline_distance(
-            kernel,
-            brep,
-            selection.edge,
-            point,
-        )?;
-        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
-            best = Some((distance, selection));
+        let distance = point_to_edge_distance(kernel, brep, selection.edge, point)?;
+        // A closed circle's centre is equidistant to the circle and its mate;
+        // break the tie by the exact edge midpoint so old centroid references
+        // still resolve to the intended ring.
+        let midpoint_distance = length3(sub(selection.midpoint, point));
+        if best.is_none_or(|(best_distance, best_mid, _)| {
+            distance.total_cmp(&best_distance) == std::cmp::Ordering::Less
+                || (distance == best_distance && midpoint_distance < best_mid)
+        }) {
+            best = Some((distance, midpoint_distance, selection));
         }
     }
-    let (distance, selection) = best.ok_or_else(|| {
-        BlendError::InvalidInput("no edge could be sampled for selection".into())
-    })?;
+    let (distance, _, selection) = best
+        .ok_or_else(|| BlendError::InvalidInput("no edge could be sampled for selection".into()))?;
     if distance > limit {
         return Err(BlendError::InvalidInput(format!(
             "point {} is not within {limit:.6} of any edge (nearest is edge {} at \
@@ -194,123 +191,153 @@ pub fn select_edges_by_ordinals(
         }
     }
     if out.is_empty() {
-        return Err(BlendError::InvalidInput("no edge ordinals were given".into()));
+        return Err(BlendError::InvalidInput(
+            "no edge ordinals were given".into(),
+        ));
     }
     Ok(out)
 }
 
-/// Which reference field wins when a viewer pick carries both an exact edge id
-/// and a display-space centre.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EdgeReferencePriority {
-    IdFirst,
-    CenterFirst,
+/// Expand a selection along SolidCore's tangent edge chain.
+///
+/// A Boolean join is often split into several edges at seams even though the
+/// join is one continuous curve. Selecting one of those edges must round the
+/// whole run, not stop at the hidden seam vertex. SolidCore's `tangent_chain`
+/// is the shared definition of that run.
+pub fn tangent_chain(
+    kernel: &mut Kernel,
+    brep: &Brep,
+    selections: &[EdgeSelection],
+    tangency_radians: f64,
+) -> Result<Vec<EdgeSelection>, BlendError> {
+    let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
+        .map_err(|error| BlendError::Kernel(error.to_string()))?;
+    let seeds: Vec<EdgeId> = selections.iter().map(|selection| selection.edge).collect();
+    let chain = solidcore::blend::blend_refusal::tangent_chain(
+        kernel,
+        &mut working,
+        &seeds,
+        tangency_radians,
+    )
+    .map_err(|error| BlendError::Kernel(format!("tangent chain: {error}")))?;
+
+    let all = edge_selections(kernel, brep)?;
+    let mut out = Vec::with_capacity(chain.len());
+    for edge in chain {
+        if let Some(selection) = all.iter().find(|selection| selection.edge == edge) {
+            out.push(selection.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// Select the edges referenced by a NodeCraft Edge-node `values` object.
+///
+/// The saved `id` is the canonical B-rep edge identity. Its `center` is the
+/// exact geometric witness: when the body has changed and the id no longer
+/// names the edge under that point, the centre resolves the edge with
+/// SolidCore's closest-point measure instead. This is the one resolver shared
+/// by the viewer, fillet and chamfer; do not add a separate display-id or
+/// midpoint-only path.
 pub fn select_edges_from_values(
     kernel: &Kernel,
     brep: &Brep,
     values: &Value,
 ) -> Result<Vec<EdgeSelection>, BlendError> {
-    select_edges_from_values_with_priority(kernel, brep, values, EdgeReferencePriority::IdFirst)
-}
-
-/// Centre-first resolution. A Boolean or fillet can change the edge ordinals
-/// behind body-scoped viewer ids; the centre sampled from the visible result is
-/// then the more reliable pick.
-pub fn select_edges_from_values_center_first(
-    kernel: &Kernel,
-    brep: &Brep,
-    values: &Value,
-) -> Result<Vec<EdgeSelection>, BlendError> {
-    select_edges_from_values_with_priority(kernel, brep, values, EdgeReferencePriority::CenterFirst)
-}
-
-fn select_edges_from_values_with_priority(
-    kernel: &Kernel,
-    brep: &Brep,
-    values: &Value,
-    priority: EdgeReferencePriority,
-) -> Result<Vec<EdgeSelection>, BlendError> {
     let refs = values
         .get("edges")
-        .ok_or_else(|| BlendError::InvalidInput("edge node has no \"edges\" field".into()))?;
-    let refs = refs
-        .as_array()
-        .ok_or_else(|| BlendError::InvalidInput("edge node \"edges\" must be an array".into()))?;
+        .and_then(Value::as_array)
+        .ok_or_else(|| BlendError::InvalidInput("edge node has no \"edges\" array".into()))?;
     if refs.is_empty() {
         return Err(BlendError::InvalidInput(
             "edge node has no edges selected; select at least one edge in the viewer".into(),
         ));
     }
+    let selections = edge_selections(kernel, brep)?;
+    // A display pick is f32-rounded, so allow a small absolute error between
+    // the saved centre and the exact edge. It only decides whether a saved id
+    // is still trustworthy; it never overrides a matching id.
+    const CENTER_TOLERANCE: f64 = 1.0e-4;
     let mut out: Vec<EdgeSelection> = Vec::with_capacity(refs.len());
     for (index, reference) in refs.iter().enumerate() {
-        let selection = select_reference(kernel, brep, reference, priority).map_err(|error| {
-            BlendError::InvalidInput(format!("edges[{index}]: {error}"))
-        })?;
-        if !out.contains(&selection) {
-            out.push(selection);
+        let selection =
+            resolve_edge_reference(kernel, brep, &selections, reference, CENTER_TOLERANCE)
+                .map_err(|error| BlendError::InvalidInput(format!("edges[{index}]: {error}")))?;
+        if out.contains(&selection) {
+            return Err(BlendError::InvalidInput(format!(
+                "edges[{index}]: more than one reference resolves to B-rep edge {}; reselect the join",
+                selection.ordinal
+            )));
         }
+        out.push(selection);
     }
     Ok(out)
 }
 
-/// Resolve one node edge reference.
-fn select_reference(
+/// Resolve one saved reference against the exact body.
+///
+/// The id wins when its edge actually lies under the saved centre; otherwise
+/// the centre is the fallback for a stale id. A reference without either is
+/// invalid rather than silently ignored.
+fn resolve_edge_reference(
     kernel: &Kernel,
     brep: &Brep,
+    selections: &[EdgeSelection],
     reference: &Value,
-    priority: EdgeReferencePriority,
+    center_tolerance: f64,
 ) -> Result<EdgeSelection, BlendError> {
-    let mut id_error = None;
-    let mut center_error = None;
-    if priority == EdgeReferencePriority::CenterFirst {
-        if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
-            let point = json_point(point)?;
-            match select_edge_by_midpoint(kernel, brep, point) {
-                Ok(selection) => return Ok(selection),
-                Err(error) => center_error = Some(error),
+    let center = reference
+        .get("center")
+        .or_else(|| reference.get("point"))
+        .map(json_point)
+        .transpose()?;
+    if reference
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(|id| id.starts_with("preview-edge:"))
+    {
+        return Err(BlendError::InvalidInput(
+            "a preview-only edge cannot be used for an exact treatment; select a B-rep edge"
+                .into(),
+        ));
+    }
+    let ordinal = reference
+        .get("ordinal")
+        .map(json_ordinal)
+        .transpose()?
+        .or_else(|| {
+            reference
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| id.rsplit("edge:").next())
+                .and_then(|tail| tail.parse::<usize>().ok())
+        });
+    if let Some(ordinal) = ordinal {
+        let selection = selections.get(ordinal).ok_or_else(|| {
+            BlendError::InvalidInput(format!(
+                "edge ordinal {ordinal} is out of range; the B-rep has {} edges",
+                selections.len()
+            ))
+        })?;
+        match center {
+            Some(point) => {
+                let distance = point_to_edge_distance(kernel, brep, selection.edge, point)?;
+                if distance <= center_tolerance {
+                    return Ok(selection.clone());
+                }
+                // The id still addresses an edge, but not the one the centre
+                // points at: the body changed under the saved reference.
+                select_edge_by_midpoint(kernel, brep, point)
             }
+            None => Ok(selection.clone()),
         }
+    } else if let Some(point) = center {
+        select_edge_by_midpoint(kernel, brep, point)
+    } else {
+        Err(BlendError::InvalidInput(
+            "edge reference needs a \"center\"/\"point\", an \"ordinal\" or an \"id\"".into(),
+        ))
     }
-    if let Some(id) = reference.get("id").and_then(Value::as_str) {
-        if id.starts_with("preview-edge:") {
-            return Err(BlendError::InvalidInput(
-                "a preview-only edge cannot be used for an exact treatment; select a B-rep edge".into(),
-            ));
-        }
-        if let Some(ordinal) = id.rsplit("edge:").next().and_then(|tail| tail.parse::<usize>().ok()) {
-            match select_edges_by_ordinals(kernel, brep, &[ordinal]) {
-                Ok(mut selections) => return Ok(selections.remove(0)),
-                Err(error) => id_error = Some(error),
-            }
-        }
-    }
-    if let Some(ordinal) = reference.get("ordinal") {
-        let ordinal = json_ordinal(ordinal)?;
-        return select_edges_by_ordinals(kernel, brep, &[ordinal])
-            .map(|mut selections| selections.remove(0))
-            .map_err(|error| BlendError::InvalidInput(error.to_string()));
-    }
-    if priority == EdgeReferencePriority::IdFirst {
-        if let Some(point) = reference.get("center").or_else(|| reference.get("point")) {
-            let point = json_point(point)?;
-            match select_edge_by_midpoint(kernel, brep, point) {
-                Ok(selection) => return Ok(selection),
-                Err(error) => center_error = Some(error),
-            }
-        }
-    }
-    if let Some(error) = id_error {
-        return Err(error);
-    }
-    if let Some(error) = center_error {
-        return Err(error);
-    }
-    Err(BlendError::InvalidInput(
-        "edge reference needs a \"center\"/\"point\", an \"ordinal\" or an \"id\"".into(),
-    ))
 }
 
 /// Sample one edge into an [`EdgeSelection`].
@@ -324,17 +351,26 @@ fn edge_selection(
         .edge(edge)
         .map_err(|error| BlendError::Kernel(format!("edge {ordinal}: {error}")))?;
     let interval = record.interval;
-    let start = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(0.0), ordinal)?;
-    let end = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(1.0), ordinal)?;
-    let midpoint = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(0.5), ordinal)?;
-    let mut length = 0.0;
-    let mut previous = start;
-    for sample in 1..=SAMPLES {
-        let parameter = interval.evaluate(sample as f64 / SAMPLES as f64);
-        let point = evaluate_point(kernel, record.curve.as_ref(), parameter, ordinal)?;
-        length += length3(sub(point, previous));
-        previous = point;
-    }
+    let start = evaluate_point(
+        kernel,
+        record.curve.as_ref(),
+        interval.evaluate(0.0),
+        ordinal,
+    )?;
+    let end = evaluate_point(
+        kernel,
+        record.curve.as_ref(),
+        interval.evaluate(1.0),
+        ordinal,
+    )?;
+    let midpoint = evaluate_point(
+        kernel,
+        record.curve.as_ref(),
+        interval.evaluate(0.5),
+        ordinal,
+    )?;
+    let length = solidcore::mass::integrator::properties::edge_length(kernel, brep, edge, 1.0e-9)
+        .map_err(|error| BlendError::Kernel(format!("edge {ordinal} length: {error}")))?;
     Ok(EdgeSelection {
         ordinal,
         edge,
@@ -361,47 +397,21 @@ fn evaluate_point(
     Ok([evaluated[0].x, evaluated[0].y, evaluated[0].z])
 }
 
-/// Distance from `point` to the edge's sampled polyline.
-fn point_to_polyline_distance(
+/// Distance from `point` to the edge, measured by the kernel.
+fn point_to_edge_distance(
     kernel: &Kernel,
     brep: &Brep,
     edge: EdgeId,
     point: [f64; 3],
 ) -> Result<f64, BlendError> {
-    let record = brep
-        .edge(edge)
-        .map_err(|error| BlendError::Kernel(format!("edge drop: {error}")))?;
-    let interval = record.interval;
-    let mut samples = Vec::with_capacity(SAMPLES + 1);
-    for sample in 0..=SAMPLES {
-        let parameter = interval.evaluate(sample as f64 / SAMPLES as f64);
-        samples.push(evaluate_point(kernel, record.curve.as_ref(), parameter, 0)?);
-    }
-    // Saved references carry the display edge's representative point. Older
-    // documents stored the centroid, which for a closed circle is the circle
-    // centre rather than a point on the curve; accept either.
-    let centroid = samples.iter().fold([0.0; 3], |mut sum, sample| {
-        sum[0] += sample[0] / samples.len() as f64;
-        sum[1] += sample[1] / samples.len() as f64;
-        sum[2] += sample[2] / samples.len() as f64;
-        sum
-    });
-    let mut best = length3(sub(point, centroid));
-    for pair in samples.windows(2) {
-        best = best.min(point_segment_distance(point, pair[0], pair[1]));
-    }
-    Ok(best)
-}
-
-/// Distance from a point to a segment.
-fn point_segment_distance(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
-    let ab = sub(b, a);
-    let length_squared = dot(ab, ab);
-    if !(length_squared > 0.0) {
-        return length3(sub(point, a));
-    }
-    let t = (dot(sub(point, a), ab) / length_squared).clamp(0.0, 1.0);
-    length3(sub(point, add(a, scale(ab, t))))
+    queries::edge_closest_point(
+        kernel,
+        brep,
+        edge,
+        Point3::new(point[0], point[1], point[2]),
+    )
+    .map(|closest| closest.closest.distance)
+    .map_err(|error| BlendError::Kernel(format!("edge closest point: {error}")))
 }
 
 /// Parse `[x, y, z]` or `{ "x": .., "y": .., "z": .. }`.
@@ -416,7 +426,9 @@ fn json_point(value: &Value) -> Result<[f64; 3], BlendError> {
         let mut out = [0.0; 3];
         for (axis, entry) in array.iter().enumerate() {
             out[axis] = entry.as_f64().ok_or_else(|| {
-                BlendError::InvalidInput(format!("point coordinate {axis} is not a number: {entry}"))
+                BlendError::InvalidInput(format!(
+                    "point coordinate {axis} is not a number: {entry}"
+                ))
             })?;
         }
         return Ok(out);
@@ -453,16 +465,8 @@ fn format_point(point: [f64; 3]) -> String {
     format!("[{:.6}, {:.6}, {:.6}]", point[0], point[1], point[2])
 }
 
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn scale(a: [f64; 3], factor: f64) -> [f64; 3] {
-    [a[0] * factor, a[1] * factor, a[2] * factor]
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -480,15 +484,19 @@ mod tests {
     use solidcore::primitive::api_primitives as api;
 
     #[test]
-    fn closed_circle_edge_resolves_from_its_centroid() {
+    fn closed_circle_edge_resolves_from_a_point_on_it() {
         let mut kernel = Kernel::default();
         let cylinder = api::create_cylinder(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 20.0)
             .expect("cylinder");
-        let bottom = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 0.0, 0.0])
-            .expect("bottom circle by centroid");
+        let bottom = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 10.0, 0.0])
+            .expect("bottom circle by point");
         assert!((bottom.midpoint[2]).abs() < 1.0e-6, "{:?}", bottom.midpoint);
-        let top = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 0.0, 20.0])
-            .expect("top circle by centroid");
-        assert!((top.midpoint[2] - 20.0).abs() < 1.0e-6, "{:?}", top.midpoint);
+        let top = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 10.0, 20.0])
+            .expect("top circle by point");
+        assert!(
+            (top.midpoint[2] - 20.0).abs() < 1.0e-6,
+            "{:?}",
+            top.midpoint
+        );
     }
 }

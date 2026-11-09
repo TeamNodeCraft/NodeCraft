@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use egui::{Pos2, Rect, Stroke, Vec2 as EVec2};
-use solidcore_record_new::{Vec2, Vec3};
+use solidcore_record::{Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
 use nodecraft_engine::sketch::{solve, ConstraintKind, CurveKind, Sketch, SolveReport};
@@ -858,13 +858,13 @@ impl SketchGui {
             ("Snap", &mut view.no_snap),
         ] {
             let mut shown = !*hidden;
-            if ui.checkbox(&mut shown, label).changed() {
+            if crate::widgets::switch_row(ui, label, &mut shown).changed() {
                 *hidden = !shown;
                 changed = true;
             }
         }
         let mut construction_mode = self.draw_type == 1;
-        if ui.checkbox(&mut construction_mode, "Construction mode").changed() {
+        if crate::widgets::switch_row(ui, "Construction mode", &mut construction_mode).changed() {
             self.set_line_type(if construction_mode { 1 } else { 0 });
         }
         egui::CollapsingHeader::new("MORE")
@@ -875,7 +875,7 @@ impl SketchGui {
                     ("Construction Geometries", &mut view.hide_construction),
                 ] {
                     let mut shown = !*hidden;
-                    if ui.checkbox(&mut shown, label).changed() {
+                    if crate::widgets::switch_row(ui, label, &mut shown).changed() {
                         *hidden = !shown;
                         changed = true;
                     }
@@ -884,7 +884,7 @@ impl SketchGui {
                     ("Slice", &mut view.slice),
                     ("3D Sketch", &mut view.three_d),
                 ] {
-                    if ui.checkbox(on, label).changed() {
+                    if crate::widgets::switch_row(ui, label, on).changed() {
                         changed = true;
                     }
                 }

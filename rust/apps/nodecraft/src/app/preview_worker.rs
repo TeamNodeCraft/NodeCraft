@@ -59,7 +59,7 @@ impl PreviewWorker {
                     while let Ok(next) = job_rx.try_recv() {
                         message = next;
                     }
-                    let PreviewMessage::Request(mut job) = message else {
+                    let PreviewMessage::Request(job) = message else {
                         states.clear();
                         continue;
                     };

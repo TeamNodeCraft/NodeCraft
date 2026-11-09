@@ -15,11 +15,11 @@
 
 use nodecraft_protocol::Mesh;
 use solidcore::kernel::Kernel;
-use solidcore::topology::FaceId;
 use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
 use solidcore::topology::Brep as KernelBrep;
-use solidcore_record::brep::Brep as RecordBrep;
+use solidcore::topology::FaceId;
 use solidcore_record::Vec3;
+use solidcore_record::brep::Brep as RecordBrep;
 use solidcore_tess::MeshTolerance;
 
 pub use solidcore_ops::BooleanOp;
@@ -144,7 +144,12 @@ pub fn tessellate_record(
     let edge_polylines: Vec<Vec<[f32; 3]>> = tess
         .edges
         .iter()
-        .map(|polyline| polyline.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect())
+        .map(|polyline| {
+            polyline
+                .iter()
+                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                .collect()
+        })
         .collect();
     let mesh = protocol_mesh(&tess, &edge_polylines);
     Ok(TessDisplay {
@@ -189,7 +194,12 @@ fn protocol_mesh(tess: &solidcore_tess::Mesh, edge_polylines: &[Vec<[f32; 3]>]) 
     for (edge_index, polyline) in edge_polylines.iter().enumerate() {
         let mut segments = Vec::with_capacity(polyline.len().saturating_sub(1));
         for pair in polyline.windows(2) {
-            let (Some(a), Some(b)) = (vertex_at.get(&vertex_key(pair[0])), vertex_at.get(&vertex_key(pair[1]))) else { continue };
+            let (Some(a), Some(b)) = (
+                vertex_at.get(&vertex_key(pair[0])),
+                vertex_at.get(&vertex_key(pair[1])),
+            ) else {
+                continue;
+            };
             segments.push([*a, *b]);
         }
         if !segments.is_empty() {
@@ -214,7 +224,10 @@ pub fn record_bridge() -> RecordBridge {
     RecordBridge::Available
 }
 
-fn record_face_indices(order: &solidcore_convert::brep::Order, faces: &[FaceId]) -> Result<Vec<usize>, String> {
+fn record_face_indices(
+    order: &solidcore_convert::brep::Order,
+    faces: &[FaceId],
+) -> Result<Vec<usize>, String> {
     faces
         .iter()
         .map(|face| {
@@ -281,7 +294,12 @@ pub fn shell_kernel(
     open: &[FaceId],
     thickness: f64,
 ) -> Result<KernelBrep, String> {
-    let open = record_face_indices(&solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1, open)?;
+    let open = record_face_indices(
+        &solidcore_convert::brep::to_record(kernel, brep)
+            .map_err(|error| error.to_string())?
+            .1,
+        open,
+    )?;
     kernel_body_edit(kernel, brep, |body, order| {
         solidcore_ops::shell(body, order, &open, thickness)
             .map_err(|error| format!("solidcore-ops shell: {error}"))
@@ -295,7 +313,12 @@ pub fn offset_faces_kernel(
     faces: &[FaceId],
     distance: f64,
 ) -> Result<KernelBrep, String> {
-    let faces = record_face_indices(&solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1, faces)?;
+    let faces = record_face_indices(
+        &solidcore_convert::brep::to_record(kernel, brep)
+            .map_err(|error| error.to_string())?
+            .1,
+        faces,
+    )?;
     kernel_body_edit(kernel, brep, |body, order| {
         solidcore_ops::offset_faces(body, order, &faces, distance)
             .map_err(|error| format!("solidcore-ops offset_faces: {error}"))
@@ -406,7 +429,10 @@ pub fn kernel_volume(kernel: &mut Kernel, brep: &KernelBrep) -> Result<f64, Stri
 }
 
 /// Convert an ops body to a kernel Brep through its record.
-pub fn body_to_kernel(kernel: &mut Kernel, body: &solidcore_ops::Body) -> Result<KernelBrep, String> {
+pub fn body_to_kernel(
+    kernel: &mut Kernel,
+    body: &solidcore_ops::Body,
+) -> Result<KernelBrep, String> {
     let (record, _order) = body
         .to_record()
         .map_err(|error| format!("ops body to record: {error}"))?;
@@ -437,7 +463,80 @@ pub fn tessellate_kernel(
         diagonal += (extent.max_at(axis) - extent.min_at(axis)).powi(2);
     }
     let size = diagonal.sqrt().max(1.0);
-    let (record, _order) = solidcore_convert::brep::to_record(kernel, brep)
+    let (record, order) = solidcore_convert::brep::to_record(kernel, brep)
         .map_err(|error| format!("kernel to record: {error}"))?;
-    tessellate_record(&record, &MeshTolerance::display(tolerance.max(1.0e-5)), size)
+    let mut display = tessellate_record(
+        &record,
+        &MeshTolerance::display(tolerance.max(1.0e-5)),
+        size,
+    )?;
+    // `protocol_mesh` keeps the record edge index in each display edge's id,
+    // and skips empty polylines. Index into `order.edges` instead of zipping the
+    // shorter display list against it; zipping shifted every id after the first
+    // skipped edge, so saved ids named the wrong BRep edge.
+    let edge_list = brep.edge_list();
+    for display_edge in &mut display.mesh.brep_edges {
+        let Some(record_index) = display_edge
+            .id
+            .strip_prefix("edge:")
+            .and_then(|index| index.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let Some(kernel_edge) = order.edges.get(record_index) else {
+            continue;
+        };
+        if let Some(ordinal) = edge_list.iter().position(|edge| edge == kernel_edge) {
+            display_edge.id = format!("edge:{ordinal}");
+        }
+    }
+    Ok(display)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solidcore::math::Point3;
+    use solidcore::primitive::api_primitives as api;
+    use solidcore::query::api_queries;
+
+    #[test]
+    fn display_edge_ids_name_the_kernel_edge_they_lie_on() {
+        let mut kernel = Kernel::default();
+        let mut brep =
+            api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+                .expect("box");
+        let display = tessellate_kernel(&mut kernel, &mut brep, 0.1).expect("tessellate");
+        let edges = brep.edge_list();
+        assert!(!display.mesh.brep_edges.is_empty());
+        for display_edge in &display.mesh.brep_edges {
+            let segment = display_edge.segments.first().expect("segment");
+            let a = display.mesh.vertices[segment[0] as usize];
+            let b = display.mesh.vertices[segment[1] as usize];
+            let point = Point3::new(
+                (f64::from(a[0]) + f64::from(b[0])) * 0.5,
+                (f64::from(a[1]) + f64::from(b[1])) * 0.5,
+                (f64::from(a[2]) + f64::from(b[2])) * 0.5,
+            );
+            let nearest = edges
+                .iter()
+                .min_by(|a, b| {
+                    let da = api_queries::edge_closest_point(&kernel, &brep, **a, point)
+                        .expect("closest")
+                        .closest
+                        .distance;
+                    let db = api_queries::edge_closest_point(&kernel, &brep, **b, point)
+                        .expect("closest")
+                        .closest
+                        .distance;
+                    da.total_cmp(&db)
+                })
+                .expect("nearest");
+            let ordinal = edges
+                .iter()
+                .position(|edge| *edge == *nearest)
+                .expect("ordinal");
+            assert_eq!(display_edge.id, format!("edge:{ordinal}"));
+        }
+    }
 }

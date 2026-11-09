@@ -11,7 +11,7 @@ use wgpu::util::DeviceExt as _;
 
 use egui_wgpu::{wgpu, CallbackTrait, RenderState};
 use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
-use solidcore_record_new::Vec3;
+use solidcore_record::Vec3;
 
 use crate::viewport::{PreviewScope, ViewSettings};
 use solidcraft_gpu::depth_format;
@@ -587,9 +587,6 @@ struct GpuDrawItem {
     /// moved and stationary body ranges.
     index_start: u32,
     index_count: u32,
-    /// 1.0 for the stationary/context bodies; lower values carry the ghost
-    /// opacity for this layer.
-    alpha: f32,
     /// Explicit ghost-layer membership. This is intentionally independent of
     /// alpha: the ghost draw must use the ghost pipeline even if the opacity is
     /// temporarily 1.0 (for example while a setting is being initialised).
@@ -674,7 +671,7 @@ fn flat_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVer
         let [a, b, c] = triangle.map(|index| index as usize);
         let (Some(pa), Some(pb), Some(pc)) = (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c)) else { continue };
         let fallback = (*pb - *pa).cross(*pc - *pa);
-        let normal = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z).to_f32();
+        let normal = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z).to_f32();
         for point in [pa, pb, pc] {
             indices.push(vertices.len() as u32);
             vertices.push(ObjectVertex { position: point.to_f32(), normal, colour });
@@ -701,10 +698,14 @@ fn smoothed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<Objec
             (p.z * 1.0e3).round() as i64,
         )
     };
-    let mut incident: std::collections::HashMap<(i64, i64, i64), Vec<Vec3>> =
+    // Creases follow B-rep faces, not just the angle between triangles. A chamfer
+    // face is only 45° from the faces beside it: an angular threshold alone
+    // averages them and makes the flat bevel look rounded and dark.
+    let group_of = |triangle: usize| mesh.tri_face.get(triangle).copied().unwrap_or(0);
+    let mut incident: std::collections::HashMap<((i64, i64, i64), u32), Vec<Vec3>> =
         std::collections::HashMap::new();
     let mut face_normals = Vec::with_capacity(mesh.triangles.len());
-    for triangle in &mesh.triangles {
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
         let [a, b, c] = triangle.map(|index| index as usize);
         let (Some(pa), Some(pb), Some(pc)) = (
             mesh.positions.get(a),
@@ -718,20 +719,21 @@ fn smoothed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<Objec
         let normal = cross.normalized();
         face_normals.push(normal);
         if let Some(normal) = normal {
+            let group = group_of(triangle_index);
             for point in [pa, pb, pc] {
-                incident.entry(key(point)).or_default().push(normal);
+                incident.entry((key(point), group)).or_default().push(normal);
             }
         }
     }
     let mut vertices: Vec<ObjectVertex> = Vec::new();
     let mut indices = Vec::with_capacity(mesh.triangles.len() * 3);
-    let mut corners: std::collections::HashMap<((i64, i64, i64), [i64; 3]), u32> =
+    let mut corners: std::collections::HashMap<((i64, i64, i64), u32, [i64; 3]), u32> =
         std::collections::HashMap::new();
     for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
         let Some(face) = face_normals.get(triangle_index).copied().flatten() else { continue };
         for index in triangle {
             let point = mesh.positions.get(*index as usize)?;
-            let k = key(point);
+            let k = (key(point), group_of(triangle_index));
             let mut sum = Vec3::new(0.0, 0.0, 0.0);
             for normal in incident.get(&k).into_iter().flatten() {
                 if normal.dot(face) >= CREASE_COS {
@@ -744,7 +746,7 @@ fn smoothed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<Objec
                 (normal.y * 1.0e3).round() as i64,
                 (normal.z * 1.0e3).round() as i64,
             ];
-            let vertex_index = *corners.entry((k, normal_key)).or_insert_with(|| {
+            let vertex_index = *corners.entry((k.0, k.1, normal_key)).or_insert_with(|| {
                 let index = vertices.len() as u32;
                 vertices.push(ObjectVertex {
                     position: point.to_f32(),
@@ -759,6 +761,7 @@ fn smoothed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<Objec
     Some((vertices, indices))
 }
 
+#[cfg(test)]
 fn indexed_object_mesh(mesh: &CraftMesh, colour: [f32; 3]) -> Option<(Vec<ObjectVertex>, Vec<u32>)> {
     if mesh.normals.len() < mesh.positions.len() {
         return None;
@@ -1009,7 +1012,6 @@ impl ObjectRenderer {
                 transform: identity_matrix(),
                 index_start: 0,
                 index_count,
-                alpha: 1.0,
                 ghost: false,
             });
             self.chunk_spans.push((key, index_count / 3));
@@ -1042,7 +1044,7 @@ impl ObjectRenderer {
                 let mut first_triangle = 0;
                 for (asset_key, triangles) in chunks {
                     let last_triangle = first_triangle + triangles;
-                    for (ranges, matrix, alpha, ghost) in [
+                    for (ranges, matrix, _alpha, ghost) in [
                         (&moved, matrix, ghost_alpha, true),
                         (&stationary, identity_matrix(), 1.0, false),
                     ] {
@@ -1057,9 +1059,6 @@ impl ObjectRenderer {
                                 transform: matrix,
                                 index_start: (start - first_triangle) * 3,
                                 index_count: (end - start) * 3,
-                                // Moved ranges are the edit branch; stationary
-                                // ranges are the dim breakpoint context.
-                                alpha,
                                 ghost,
                             });
                         }
@@ -1075,7 +1074,6 @@ impl ObjectRenderer {
                     transform: transform.unwrap_or_else(identity_matrix),
                     index_start: 0,
                     index_count: triangles * 3,
-                    alpha: 1.0,
                     ghost: false,
                 })
                 .collect(),
@@ -2107,7 +2105,7 @@ impl GpuViewport {
                         continue;
                     };
                     let fallback = (*pb - *pa).cross(*pc - *pa);
-                    let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
+                    let fallback = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z);
                     let colour = if self.view.face_colours {
                         face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
                     } else if ignore_look {
@@ -2371,7 +2369,7 @@ impl GpuViewport {
                         })
                         .unwrap_or(surface);
                     let fallback = (*pb - *pa).cross(*pc - *pa);
-                    let fallback = fallback.normalized().unwrap_or(solidcore_record_new::Vec3::Z);
+                    let fallback = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z);
                     scene.pbr_tri(pa.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pb.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pc.to_f32(), fallback.to_f32(), surface);
@@ -2601,6 +2599,8 @@ impl GpuViewport {
             chrome_visible: self.chrome_visible,
             frame: Frame {
             product: false,
+            preview_bounds: None,
+            moving: None,
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),
@@ -2900,13 +2900,36 @@ mod tests {
     }
 
     #[test]
+    fn shading_creases_follow_brep_faces_not_just_triangle_angle() {
+        use nodecraft_protocol::Mesh as NodeMesh;
+        // A horizontal and a 45-degree face share an edge. Their normals are
+        // 45 degrees apart, so an angular-only smoother merges them and makes
+        // a flat chamfer look rounded.
+        let source = NodeMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            faces: vec![[0, 1, 2], [0, 1, 3]],
+            face_groups: vec!["face:0".to_owned(), "face:1".to_owned()],
+            ..NodeMesh::default()
+        };
+        let display = crate::adapter::display_mesh(&source);
+        let (vertices, _) =
+            smoothed_object_mesh(&display.mesh, [0.2, 0.3, 0.4]).expect("mesh");
+        assert_eq!(vertices.len(), 6, "the two B-rep faces must not share normals");
+    }
+
+    #[test]
     fn identity_draw_uploads_identity_model_and_normal_matrix() {
         let draw = GpuDrawItem {
             asset_key: 1,
             transform: identity_matrix(),
             index_start: 0,
             index_count: 3,
-            alpha: 1.0,
             ghost: false,
         };
         let instance = draw.instance();
@@ -2944,7 +2967,6 @@ mod tests {
             transform: identity_matrix(),
             index_start: 0,
             index_count: 3,
-            alpha: 0.45,
             ghost: true,
         };
         assert_eq!(draw.instance().alpha, 1.0);

@@ -325,7 +325,7 @@ fn simplify_polyline(points: &[[f64; 3]], tolerance: f64) -> Vec<[f64; 3]> {
 fn sketch_profile_curves(
     output: &SketchOutput,
 ) -> Result<Vec<nodecraft_solidcore::solidcore::curve::curve::Curve>, String> {
-    use solidcore_record_new::Seg2;
+    use solidcore_record::Seg2;
     use solidcraft_geom::prelude::*;
     use nodecraft_solidcore::solidcore::curve::curve::Curve;
     use nodecraft_solidcore::solidcore::curve::line::Line;
@@ -475,7 +475,7 @@ fn sketch_record_plane(output: &SketchOutput) -> solidcore_record::Plane {
 }
 
 fn sketch_record_section(output: &SketchOutput) -> Option<Vec<solidcore_record::profile::Seg2>> {
-    use solidcore_record_new::Seg2;
+    use solidcore_record::Seg2;
     let mut profiles = output.profiles.clone();
     profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
     let profile = profiles.into_iter().next()?;
@@ -1460,9 +1460,9 @@ fn spline_display_mesh(sketch: &crate::sketch::Sketch) -> Mesh {
         let next = points[(index + 1).min(points.len() - 1)];
         let mut tangent = next - previous;
         if tangent.len2() <= 1.0e-18 {
-            tangent = solidcore_record_new::Vec2::new(1.0, 0.0);
+            tangent = solidcore_record::Vec2::new(1.0, 0.0);
         }
-        let normal = solidcore_record_new::Vec2::new(-tangent.y, tangent.x) * (half_width / tangent.len());
+        let normal = solidcore_record::Vec2::new(-tangent.y, tangent.x) * (half_width / tangent.len());
         let left = *point + normal;
         let right = *point - normal;
         mesh.vertices.push([left.x as f32, left.y as f32, 0.0]);
@@ -1502,7 +1502,7 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
             return Err("Spline points need finite x and y values".into());
         }
         let id = sketch
-            .add_point(solidcore_record_new::Vec2::new(x, y), None)
+            .add_point(solidcore_record::Vec2::new(x, y), None)
             .map_err(|error| error.to_string())?;
         point_ids.push(id);
     }
@@ -1512,7 +1512,7 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
         .get("degree")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(3)
-        .clamp(1, solidcore_record_new::MAX_BEZIER_DEGREE as u64) as u8;
+        .clamp(1, solidcore_record::MAX_BEZIER_DEGREE as u64) as u8;
     sketch
         .add_curve(CurveKind::Spline { pts: point_ids, control, degree, periodic, nurbs: None }, None)
         .map_err(|error| error.to_string())?;
@@ -2717,7 +2717,7 @@ mod tests {
             {"center": [14.100593090057371, -11.389926261372036, 4.566759937339359], "id": "edge:1"},
             {"center": [14.100598600175644, 11.389923453330994, 4.5666884283224745], "id": "edge:2"}
         ]});
-        let selections = nodecraft_blend::select_edges_from_values_center_first(&kernel, brep, &values)
+        let selections = nodecraft_blend::select_edges_from_values(&kernel, brep, &values)
             .expect("centre-first selections");
         assert_eq!(selections.len(), 2);
         let ids: std::collections::BTreeSet<u32> = selections.iter().map(|selection| selection.edge.index()).collect();
@@ -3015,10 +3015,11 @@ mod tests {
         let response = &output.response;
         assert!(response.evaluation_ms > 0.0);
         assert_eq!(response.timings.len(), 76, "every train node should be accounted for");
-        let expected_errors = ["n76"];
+        // The current SolidCore blend fixes n76, which used to be the only
+        // expected failure on this graph.
         let mut actual_errors: Vec<&str> = response.node_errors.keys().map(String::as_str).collect();
         actual_errors.sort_unstable();
-        assert_eq!(actual_errors, expected_errors);
+        assert!(actual_errors.is_empty(), "unexpected train errors: {actual_errors:?}");
         assert!(!response.node_errors.contains_key("n68"));
         assert!(!response.node_errors.contains_key("n72"));
         assert!(!response.node_errors.contains_key("n74"));
@@ -4205,6 +4206,8 @@ mod tests {
         assert!(!response.meshes["n28"].mesh.faces.is_empty());
     }
 
+    #[test]
+    #[ignore = "known upstream limit: a rotated curved compound's conic record is refused"]
     fn rotated_curved_compound_boolean_reports_upstream_limit() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1, "targets": ["n28"], "meshTargets": ["n28"],
@@ -4583,10 +4586,10 @@ mod tests {
     #[test]
     fn part_sketch_target_uses_geometry_container() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -4856,10 +4859,10 @@ mod tests {
     #[test]
     fn loft_between_sketch_profiles_uses_solidcore() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -4926,10 +4929,10 @@ mod tests {
     #[test]
     fn surface_loft_has_no_end_caps() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -4984,7 +4987,7 @@ mod tests {
     fn surface_loft_accepts_open_spline_sections() {
         let mut sketch = crate::sketch::Sketch::new();
         for (x, y) in [(-10.0, 0.0), (-2.0, 6.0), (4.0, -3.0), (12.0, 2.0)] {
-            sketch.add_point(solidcore_record_new::Vec2::new(x, y), None).unwrap();
+            sketch.add_point(solidcore_record::Vec2::new(x, y), None).unwrap();
         }
         sketch
             .add_curve(
@@ -5026,10 +5029,10 @@ mod tests {
     #[test]
     fn sketch_output_carries_translate_rotation() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -5058,10 +5061,10 @@ mod tests {
     #[test]
     fn loft_after_translate_edit_keeps_typed_sketch_output() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -5098,7 +5101,7 @@ mod tests {
     fn zero_extrude_amount_is_rejected() {
         let mut sketch = crate::sketch::Sketch::new();
         sketch
-            .add_circle(solidcore_record_new::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
+            .add_circle(solidcore_record::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
             .unwrap();
         let error = sketch_extrude_brep(&SketchOutput::new(sketch), 0.0).expect_err("zero amount");
         assert!(error.contains("greater than zero"), "{error}");
@@ -5108,7 +5111,7 @@ mod tests {
     fn extrude_consumes_a_circle_sketch_profile() {
         let mut sketch = crate::sketch::Sketch::new();
         sketch
-            .add_circle(solidcore_record_new::Vec2::new(1.0, 1.0), 33.18108250839226, None, None)
+            .add_circle(solidcore_record::Vec2::new(1.0, 1.0), 33.18108250839226, None, None)
             .unwrap();
         let brep = sketch_extrude_brep(&SketchOutput::new(sketch), 20.0)
             .expect("circle extrude brep");
@@ -5119,7 +5122,7 @@ mod tests {
     fn circle_extrude_geometry_is_a_cylinder() {
         let mut sketch = crate::sketch::Sketch::new();
         sketch
-            .add_circle(solidcore_record_new::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
+            .add_circle(solidcore_record::Vec2::new(-1.0, 0.0), 51.960239979110156, None, None)
             .unwrap();
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
@@ -5157,10 +5160,10 @@ mod tests {
     #[test]
     fn extrude_consumes_a_closed_sketch_profile() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -5195,10 +5198,10 @@ mod tests {
     #[test]
     fn sketch_target_does_not_emit_a_3d_display_mesh() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -5223,10 +5226,10 @@ mod tests {
     #[test]
     fn sketch_output_is_typed_cached_and_transformed() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();
@@ -5254,7 +5257,7 @@ mod tests {
     #[test]
     fn loft_profile_sampling_keeps_arc_curvature() {
         let mut sketch = crate::sketch::Sketch::new();
-        sketch.add_circle(solidcore_record_new::Vec2::new(0.0, 0.0), 10.0, None, None).unwrap();
+        sketch.add_circle(solidcore_record::Vec2::new(0.0, 0.0), 10.0, None, None).unwrap();
         let points = sketch_profile_points(&SketchOutput::new(sketch)).expect("profile");
         assert!(points.len() > 64);
         for (x, y, _) in points {
@@ -5266,10 +5269,10 @@ mod tests {
     #[test]
     fn exports_boolean_of_sketch_loft_exact() {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, -10.0), None).unwrap();
-        let b = sketch.add_point(solidcore_record_new::Vec2::new(10.0, -10.0), None).unwrap();
-        let c = sketch.add_point(solidcore_record_new::Vec2::new(10.0, 10.0), None).unwrap();
-        let d = sketch.add_point(solidcore_record_new::Vec2::new(-10.0, 10.0), None).unwrap();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).unwrap();
         sketch.add_line_pts(a, b, None).unwrap();
         sketch.add_line_pts(b, c, None).unwrap();
         sketch.add_line_pts(c, d, None).unwrap();

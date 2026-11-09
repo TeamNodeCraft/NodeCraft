@@ -4,7 +4,7 @@
 
 use egui::{Color32, Pos2, Rect, Shape, Stroke, vec2};
 use solidcraft_geom::Ring;
-use solidcore_record_new::Vec3;
+use solidcore_record::Vec3;
 use solidcraft_geom::prelude::*;
 use solidcraft_render::Camera;
 

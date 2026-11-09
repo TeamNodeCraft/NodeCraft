@@ -252,7 +252,7 @@ mod part_export_tests {
     #[test]
     fn writes_multiple_solids_as_one_part() {
         use solidcore::kernel::Kernel;
-        use solidcore::math::{Point3, Vec3};
+        use solidcore::math::Point3;
         use solidcore::primitive::api_primitives as api;
 
         let mut kernel = Kernel::default();

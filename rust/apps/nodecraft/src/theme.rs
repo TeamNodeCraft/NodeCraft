@@ -342,12 +342,6 @@ impl Theme {
         ((self.backdrop_blur / 18.0 * 5.0).ceil() as usize).clamp(1, 5)
     }
 
-    /// Test-covered blend from the direct low-pass into the full pyramid.
-    #[cfg(test)]
-    pub fn backdrop_blur_mix(&self) -> f32 {
-        let t = (self.backdrop_blur / 18.0).clamp(0.0, 1.0);
-        t * t
-    }
 
     /// Map the user-facing radius to the backdrop's dual-Kawase sample scale.
     /// 24 px is one full sample-scale unit; the default 18 px preserves the
@@ -943,25 +937,6 @@ pub fn menu_style(style: &mut egui::Style) {
 }
 
 
-/// Width for a menu content column, derived from its longest label.
-///
-/// The indicator column is always reserved, and the label gets a fixed amount
-/// of trailing padding. This avoids a wide fixed menu when every item is short.
-pub fn menu_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
-    let font = egui::FontId::proportional(13.0);
-    let longest = labels
-        .iter()
-        .map(|label| {
-            ui.ctx().fonts_mut(|fonts| {
-                fonts
-                    .layout_no_wrap((*label).to_owned(), font.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-            })
-        })
-        .fold(0.0_f32, f32::max);
-    28.0 + longest + 12.0
-}
 
 /// Full-row menu item with a fixed indicator column.
 ///

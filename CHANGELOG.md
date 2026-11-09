@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased — 2026-11-09
+
+### Dependencies and build
+
+- SolidCore, its STEP/tessellation modules and the SolidCraft render/sketch
+  crates now come from the vendored SolidCraft tree at
+  `9b559c4c0727b2c626622d86e00e7d4c63f52400`. The separate SolidCore pin and the
+  `solidcore-record-new` alias are gone; one lockfile revision covers all of
+  them.
+- Removed the dead-code set left by earlier refactors and applied workspace-wide
+  unused-import/mut cleanups. `cargo check --workspace --all-targets` and the
+  release app build are warning-free.
+
+### Inspector
+
+- All inspector control rows now share one label/control layout: equal left and
+  right insets, one row height and gap, number rows sized from the full control
+  column, and a scroll bar placed by ScrollArea layout rather than a negative
+  margin. The bar keeps its normal hover/drag hit area.
+- Long labels truncate with the full label on hover. Exporter and STEP-import
+  fields use the same rows.
+
+### Feature edge editing
+
+- Chamfer/fillet edge selection keeps the downstream breakpoint visible and
+  previews the feature's input body as the transform-edit ghost; the ghost edges
+  are pickable. This removes the old target swap that replaced a viewed Part
+  with one upstream body.
+
+### Known issues
+
+- Fillet/chamfer ghost edit mode is **not 100% of the desired interaction yet**.
+  The breakpoint + input ghost path works, but selection/overlay behaviour still
+  needs another pass; it is not considered finished.
+- A constructive chamfer around a feature can still remove more material than
+  intended on some combined/looped shapes. This is a kernel result issue; the
+  app has no local workaround.
+- True G2 multi-edge fillet corners refuse until the matched G2 corner patch is
+  ported into SolidCore.
+
 ## Unreleased — 2026-11-07
 
 ### SolidCore integration
@@ -28,10 +68,19 @@
 - Extracted the SolidCore kernel fix profile into a dependency-light crate so
   primitive, STEP and Boolean construction use the same `UpstreamFixes` profile
   without a dependency cycle through `nodecraft-solidcore`.
-- Updated SolidCore to `45d6111` (latest `main`), including the setback and
-  projected-culling fixes. The SolidCraft sketch stack
-  remains at `871014f9`; the older `solidcore-record` revision it needs stays
-  isolated as `solidcore-record-new`.
+- Multi-edge G2 fillet corners use SolidCore's set-back corner session and are
+  welded into the body, avoiding the folded Mitre corner. The patch currently
+  uses circular sections; a true G2 edge-section patch still needs the
+  SolidCraft `fill_matched`/`corner_g2` port.
+- Equal-distance chamfer now falls back to the kernel blend session for curved
+  faces, so a chamfer on a Boolean/torus join no longer stops at the planar
+  preview limit. Fillet now has a **Tangent chain** inspector toggle and expands the selected
+  edge through SolidCore's tangent-chain definition before rounding. This closes
+  the seam-split torus/cylinder join for a normal join pick.
+- Viewport edge references now carry the underlying BRep edge ordinal, and a
+  multi-edge pick is resolved as a unique set with smooth/tangent edges excluded.
+  A pick that only hits tangent edges now reports "reselect the join" instead of
+  silently rounding an unrelated segment.
 - The upstream fix profile now also configures the `solidcore-ops` session, so
   Boolean, shell, offset and blend calls run with the same fixes as direct
   kernel work.

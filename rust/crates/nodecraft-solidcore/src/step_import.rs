@@ -31,7 +31,6 @@
 //! * Coordinates are millimetres where the reader handles units (`step_mixed`,
 //!   `step_analytic`); see each reader for its own unit rules.
 
-use solidcore::kernel::Kernel;
 use solidcore::topology::Brep;
 /// Which solidcore STEP reader produced a [`StepBrepImport`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +141,6 @@ mod tests {
         assert_eq!(import.brep.edges().len(), 87);
         assert_eq!(import.brep.vertices().len(), 58);
         use solidcore::geom::attribute::{AttributeStore, ObjectKey};
-        use solidcore::kernel::Kernel;
         use solidcore::mass::integrator::properties::{PropertyAttributes, brep_mass_properties};
         let kernel = crate::kernel::kernel();
         let store = AttributeStore::new();

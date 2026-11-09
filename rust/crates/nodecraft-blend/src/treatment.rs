@@ -281,8 +281,7 @@ impl EdgeTreatment {
                 }
             }
             EdgeMode::Fillet => {
-                if self.corner_turn == CornerTurn::Swept
-                    && self.continuity != Continuity::Circular
+                if self.corner_turn == CornerTurn::Swept && self.continuity != Continuity::Circular
                 {
                     return Err(BlendError::missing_api(
                         "swept fillet corner",
@@ -333,14 +332,15 @@ fn number_field(values: &Value, key: &str) -> Result<Option<f64>, BlendError> {
     match values.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(number)) => number.as_f64().map(Some).ok_or_else(|| {
-            BlendError::InvalidInput(format!("edge node field {key:?} is not representable: {number}"))
+            BlendError::InvalidInput(format!(
+                "edge node field {key:?} is not representable: {number}"
+            ))
         }),
         Some(other) => Err(BlendError::InvalidInput(format!(
             "edge node field {key:?} must be a number, got {other}"
         ))),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

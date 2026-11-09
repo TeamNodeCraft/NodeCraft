@@ -827,7 +827,7 @@ fn planar_body_from_file(file: &StepFile) -> Result<PlanarBody, String> {
             // present the first bound is the outer loop and the rest are holes.
             outer = Some(holes.remove(0));
         }
-        if let Some(mut outer) = outer {
+        if let Some(outer) = outer {
             if outer.len() < 3 {
                 // Non-polygonal outer bound (for example a single closed curve).
                 continue;

@@ -2391,10 +2391,6 @@ fn lasso_selection(
     selection
 }
 
-fn wire_points(x0: f32, y0: f32, x1: f32, y1: f32, zoom: f32) -> Vec<Pos2> {
-    crate::routing::route(x0, y0, x1, y1, zoom).polyline(64)
-}
-
 fn wire_points_for(
     style: CableRouting,
     x0: f32,
@@ -2805,6 +2801,7 @@ fn node_screen_center(
     node_rect(node, panel_canvas(panel), pan, zoom).center()
 }
 
+#[cfg(test)]
 fn cable_hit(
     document: &GraphDocument,
     panel: Rect,
@@ -2826,6 +2823,7 @@ fn cable_hit_for(
     cable_hit_with_hold_for(style, document, panel, pan, zoom, pointer, None)
 }
 
+#[cfg(test)]
 fn cable_hit_with_hold(
     document: &GraphDocument,
     panel: Rect,
@@ -2911,15 +2909,6 @@ fn cable_hit_with_hold_for(
     best.1
 }
 
-fn distance_to_segment(point: Pos2, a: Pos2, b: Pos2) -> f32 {
-    let ab = b - a;
-    let length_sq = ab.length_sq();
-    if length_sq <= f32::EPSILON {
-        return (point - a).length();
-    }
-    let t = ((point - a).dot(ab) / length_sq).clamp(0.0, 1.0);
-    (point - (a + ab * t)).length()
-}
 
 fn document_roi(document: &GraphDocument) -> Option<Rect> {
     let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
@@ -3005,6 +2994,7 @@ fn panel_canvas(panel: Rect) -> Rect {
     )
 }
 
+#[cfg(test)]
 fn geometry_key(
     document: &GraphDocument,
     selected: &HashSet<String>,
@@ -3352,6 +3342,7 @@ fn ordered_cable_connections(
     ordinary
 }
 
+#[cfg(test)]
 fn build_cables(
     document: &GraphDocument,
     selected: &HashSet<String>,
@@ -4002,7 +3993,7 @@ mod tests {
             let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
             // Warm up layout and the cached geometry.
             for _ in 0..2 {
-                context.run_ui(input.clone(), |ui| {
+                let _ = context.run_ui(input.clone(), |ui| {
                     editor.show(
                         ui.ctx(),
                         viewport,
@@ -4018,7 +4009,7 @@ mod tests {
             let frames = 4;
             for _ in 0..frames {
                 let start = Instant::now();
-                context.run_ui(input.clone(), |ui| {
+                let _ = context.run_ui(input.clone(), |ui| {
                     editor.show(
                         ui.ctx(),
                         viewport,
@@ -4841,7 +4832,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn fit_does_not_zoom_past_one_hundred_percent() {
         let canvas = Rect::from_min_max(Pos2::ZERO, Pos2::new(1000.0, 800.0));
         let small = Rect::from_min_max(Pos2::ZERO, Pos2::new(100.0, 80.0));
@@ -4886,6 +4876,7 @@ mod tests {
         assert_eq!(delta.x, 0.0);
     }
 
+    #[test]
     fn zoom_percentage_uses_one_graph_unit_per_point_as_100() {
         assert_eq!(zoom_percent(1.0), 100);
         assert_eq!(zoom_percent(0.5), 50);

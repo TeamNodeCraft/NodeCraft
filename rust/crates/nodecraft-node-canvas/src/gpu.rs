@@ -582,10 +582,6 @@ struct NodeRenderer {
     geometry_key: Option<u64>,
 }
 
-const CABLE_MAX_SEGMENTS: u32 = 48;
-/// Longest total path budget (see `MAX_PATH_SEGMENTS` in the shader).
-const CABLE_MAX_PATH_SEGMENTS: u32 = 192;
-
 struct GlyphonState {
     font_system: FontSystem,
     swash_cache: SwashCache,

@@ -13,6 +13,7 @@ use nodecraft_session::GraphDocument;
 /// pre-merge bodies lets a transform drag show the edited branch while the
 /// other operand stays put; the Boolean itself is re-evaluated on release.
 #[derive(Clone)]
+#[allow(dead_code)] // test-visible pre-merge provenance; production drags use PreviewWorker
 pub struct PreMerge {
     pub a: (String, Mesh),
     pub b: (String, Mesh),
@@ -25,10 +26,13 @@ pub struct Evaluation {
     pub mesh: Option<Mesh>,
     /// Display mesh for the node being edited, used by branch-scoped transform
     /// previews when the breakpoint result is geometrically merged.
+    #[allow(dead_code)] // engine-bridge regression coverage; the app uses PreviewWorker
     pub edit_preview: Option<Mesh>,
     /// Node whose transform input produced `edit_preview`.
+    #[allow(dead_code)]
     pub edit_preview_target: Option<String>,
     /// Boolean operands for a pre-merge drag display.
+    #[allow(dead_code)]
     pub pre_merge: Option<PreMerge>,
     /// Before/after pair when the selected feature can be compared.
     pub comparison: Option<(Mesh, Mesh)>,

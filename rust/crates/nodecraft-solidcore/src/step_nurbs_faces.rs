@@ -43,7 +43,6 @@ use solidcore::error::EntityRef;
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::geom::object::ObjectRef;
-use solidcore::kernel::Kernel;
 use solidcore::math::Point3;
 use solidcore::nurbs::b_spline_curve::BSplineCurve;
 use solidcore::nurbs::b_spline_surface::{IsoCurveOptions, SurfParamType};

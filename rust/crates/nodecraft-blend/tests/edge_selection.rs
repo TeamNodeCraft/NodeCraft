@@ -4,7 +4,7 @@ mod common;
 
 use nodecraft_blend::{
     BlendError, brep_center, edge_selections, select_edge_by_midpoint, select_edges_by_midpoints,
-    select_edges_by_ordinals,
+    select_edges_by_ordinals, select_edges_from_values,
 };
 
 #[test]
@@ -34,11 +34,14 @@ fn box_has_twelve_edges_with_distinct_midpoints() {
     assert_eq!(buckets, [4, 4, 4]);
     for selection in &selections {
         let direction = selection.direction().expect("edge direction");
-        assert!((direction[0] * direction[0] + direction[1] * direction[1]
-            + direction[2] * direction[2]
-            - 1.0)
-            .abs()
-            < 1.0e-9);
+        assert!(
+            (direction[0] * direction[0]
+                + direction[1] * direction[1]
+                + direction[2] * direction[2]
+                - 1.0)
+                .abs()
+                < 1.0e-9
+        );
     }
 }
 
@@ -67,15 +70,17 @@ fn selects_each_edge_by_its_approximate_midpoint() {
 fn selects_edges_by_ordinal_and_deduplicates() {
     let (kernel, brep) = common::box_40_30_20();
     let selections = edge_selections(&kernel, &brep).expect("selections");
-    let selected =
-        select_edges_by_ordinals(&kernel, &brep, &[3, 3, 7]).expect("ordinal selection");
+    let selected = select_edges_by_ordinals(&kernel, &brep, &[3, 3, 7]).expect("ordinal selection");
     assert_eq!(selected.len(), 2);
     assert_eq!(selected[0], selections[3]);
     assert_eq!(selected[1], selections[7]);
 
-    let by_midpoint =
-        select_edges_by_midpoints(&kernel, &brep, &[selections[3].midpoint, selections[3].midpoint])
-            .expect("midpoint selection");
+    let by_midpoint = select_edges_by_midpoints(
+        &kernel,
+        &brep,
+        &[selections[3].midpoint, selections[3].midpoint],
+    )
+    .expect("midpoint selection");
     assert_eq!(by_midpoint.len(), 1);
     assert_eq!(by_midpoint[0], selections[3]);
 }
@@ -83,7 +88,10 @@ fn selects_edges_by_ordinal_and_deduplicates() {
 #[test]
 fn edge_selection_errors_are_explicit() {
     let (kernel, brep) = common::box_40_30_20();
-    assert_eq!(brep_center(&kernel, &brep).expect("centre"), [20.0, 15.0, 10.0]);
+    assert_eq!(
+        brep_center(&kernel, &brep).expect("centre"),
+        [20.0, 15.0, 10.0]
+    );
 
     let out_of_range = select_edges_by_ordinals(&kernel, &brep, &[99]).expect_err("range");
     assert!(matches!(out_of_range, BlendError::InvalidInput(_)));
@@ -105,4 +113,41 @@ fn selection_never_panics_on_bad_input() {
     assert!(nan.is_err(), "NaN pick must be an explicit error");
     let infinite = select_edge_by_midpoint(&kernel, &brep, [f64::INFINITY, 0.0, 0.0]);
     assert!(infinite.is_err());
+}
+
+#[test]
+fn a_stale_edge_id_falls_back_to_its_exact_centre() {
+    let (kernel, brep) = common::box_40_30_20();
+    let selections = edge_selections(&kernel, &brep).expect("selections");
+    let expected = selections
+        .iter()
+        .find(|selection| selection.midpoint != selections[0].midpoint)
+        .expect("second edge")
+        .clone();
+    let wrong = selections
+        .iter()
+        .find(|selection| selection.edge != expected.edge)
+        .expect("wrong edge");
+    let values = serde_json::json!({
+        "edges": [{
+            "id": format!("edge:{}", wrong.ordinal),
+            "center": expected.midpoint,
+        }]
+    });
+    let resolved = select_edges_from_values(&kernel, &brep, &values).expect("resolve");
+    assert_eq!(resolved, vec![expected]);
+}
+
+#[test]
+fn a_matching_edge_id_is_authoritative() {
+    let (kernel, brep) = common::box_40_30_20();
+    let expected = edge_selections(&kernel, &brep).expect("selections")[5].clone();
+    let values = serde_json::json!({
+        "edges": [{
+            "id": format!("edge:{}", expected.ordinal),
+            "center": expected.midpoint,
+        }]
+    });
+    let resolved = select_edges_from_values(&kernel, &brep, &values).expect("resolve");
+    assert_eq!(resolved, vec![expected]);
 }

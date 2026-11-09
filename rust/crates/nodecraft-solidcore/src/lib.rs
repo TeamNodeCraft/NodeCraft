@@ -22,4 +22,3 @@ pub mod kernel;
 pub mod planar;
 pub use solidcore;
 
-use solidcore::kernel::Kernel;

@@ -12,14 +12,30 @@ sphere_no_pole has open or non-manifold seam edges
 
 Do not suppress the seam check to make the test green; fix the seam topology.
 
-## Partial multi-edge join fillet
+## Torus/cylinder join fillet (resolved in the app)
 
-A constant-radius fillet on the torus/cylinder join can stop part-way around the
-join. SolidCore reports `EdgeNotBlendable { reason: Smooth }` for some join
-edges; the application now reports that refusal instead of dropping the refused
-edges and returning a partial round. Upstream issue:
+A constant-radius fillet on the torus/cylinder join used to stop part-way around
+the join when only one seam-split edge was picked. Fillet now expands the pick
+through SolidCore's tangent chain, so one picked join edge rounds the continuous
+run without a gap. Upstream issue:
 [tangency-labs/solidcore#2826](https://github.com/tangency-labs/solidcore/issues/2826).
-`#2863` is merged and present but does not cover this remaining case.
+Keep this regression covered when changing edge selection or the blend path.
+
+## Feature edge ghost editing is not finished
+
+Fillet/chamfer edge selection now keeps the downstream breakpoint and previews
+the feature input as the transform-edit ghost. The basic path works (ghost
+edges are pickable, the breakpoint is not replaced), but the selection and
+overlay interaction is **not 100% of the desired behaviour yet**. Treat this as
+work in progress when changing selection, comparison overlays or the edit-ghost
+path.
+
+## Constructive chamfer can cut away a feature
+
+A constructive chamfer around a boss/feature can remove most of the body on some
+combined shapes. SolidCore currently returns a technically valid result, so the
+app has no error to show. This is a kernel result issue; add validation only
+together with an upstream regression, not as a local visual workaround.
 
 ## STEP analytic edge fallback
 

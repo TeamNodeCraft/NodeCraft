@@ -4,9 +4,9 @@ Priority order is approximate.
 
 ## Current state (2026-11-08)
 
-- SolidCore is pinned at `45d6111b909487e94edaec309a7673a3b73d4ae5` (latest `main`).
-- SolidCraft sketch stack is pinned at
-  `871014f955a76fd308ce156e68c93e6372906005`.
+- SolidCore is vendored in SolidCraft at `9b559c4c0727b2c626622d86e00e7d4c63f52400`.
+- Every SolidCraft module, including the sketch stack, is pinned to
+  `9b559c4c0727b2c626622d86e00e7d4c63f52400`.
 - Evaluated Part, comparison and STEP import display meshes use
   `nodecraft-layers` / `solidcore-tess`. STEP keeps a legacy fallback only for
   analytic edge curves that `solidcore-convert` cannot yet record.
@@ -18,9 +18,9 @@ Priority order is approximate.
 - Fillet refusals are no longer converted into partial successes. Exact fillet
   results are checked through `solidcore-ops::check`; invalid results report the
   upstream `CheckReport` text.
-- A partial round around a multi-edge torus/cylinder join remains an upstream
-  issue (SolidCore #2826, open; #2863 merged). The application now surfaces the
-  refusal instead of hiding it.
+- A torus/cylinder join now rounds continuously from one picked edge through the
+  fillet tangent chain. SolidCore #2826 remains open for callers that pass a
+  bare edge without the chain.
 - All primitives, including wedge, partial sphere and partial torus, now have
   exact B-reps and use `solidcore-tess`; the local B-rep mesher and the
   `solidcore-stepio` façade have been removed.
@@ -31,12 +31,23 @@ Priority order is approximate.
   bump was 879 passed / 1 known `nodecraft-mesh` sphere seam failure / 11
   ignored.
 
+## Feature edge ghost editing (in progress)
+
+- [ ] **Fillet/chamfer ghost edit mode is not 100% how we want it yet.** The
+      breakpoint + transform-edit input ghost path works and the ghost edges are
+      pickable, but the selection/overlay behaviour still needs another pass.
+      Do not treat this as finished.
+- [ ] A constructive chamfer around a feature can remove most of the body on
+      some combined/looped shapes. The session returns a technically valid
+      result; this needs an upstream result guard or fix, not an app workaround.
+- [ ] True G2 multi-edge fillet corners are refused until the matched G2 corner
+      patch port in `agents/port-g2-corner-fill.md` lands.
+
 ## SolidCore a445bda pin bump (completed)
 
 Updated the workspace pin from `0249e8e` to `a445bda`; targeted app, engine,
-layers and session tests pass. The SolidCraft sketch stack keeps its older
-`solidcore-record-new` alias, so the workspace now intentionally carries two
-record revisions.
+layers and session tests pass. This predates the vendored SolidCraft layout; the
+workspace now has one record revision from the SolidCraft tree.
 
 Upstream history from `3ed61947` to `f8685cdc`: +491 commits to `5458b142`,
 then +7 blend end-section/smooth-vertex fixes, then +6 blend/offset/surface
@@ -175,6 +186,19 @@ Preferred near-term order:
 4. view/visibility decision;
 5. expression-storage and versioning decision.
 
+## G2 corner fill
+
+- [ ] Port the matched G2 corner fill from SolidCraft into SolidCore and expose
+      it as a corner mode in `solidcore_ops`. Full plan:
+      [port-g2-corner-fill.md](port-g2-corner-fill.md).
+
+## Exact measure UI
+
+- [ ] Show exact kernel measures in the inspector/properties: edge length,
+      face area, face centroid and planar face normal via the
+      `solidcore_ops::measure` APIs. Edge selection already uses the exact
+      kernel edge length.
+
 ## Remaining after this pass
 
 - [ ] Republish the public snapshot with the docs and integration work.
@@ -182,8 +206,9 @@ Preferred near-term order:
       after the exact phase; a newer edit now cancels display cooperatively
       between nodes/mesher bodies, but display still runs on the exact worker.
 - [x] Remove the STEP legacy mesher fallback; STEP display uses solidcore-tess.
-- [ ] Track SolidCore #2826 until multi-edge join fillets run continuously; add
-      the torus/cylinder case as an upstream regression.
+- [x] Multi-edge torus/cylinder join fillets run continuously from one picked
+      edge via the fillet tangent-chain expansion. Keep the upstream #2826
+      regression for callers that pass a bare edge.
 - [ ] Manually smoke-test heavy-target edits, rapid edits, tab switches during
       display, failed-node glow, export/clear-cache and cache growth.
 - [ ] Finish the Part-target Boolean and shell ops migration once upstream
@@ -792,7 +817,7 @@ CacheKey = hash(
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `45d6111b909487e94edaec309a7673a3b73d4ae5`:
+      Reproduction at current pin `9b559c4c0727b2c626622d86e00e7d4c63f52400`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`

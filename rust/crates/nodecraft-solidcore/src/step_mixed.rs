@@ -547,32 +547,6 @@ impl Frame {
     }
 }
 
-fn uv_polyline(frame: Frame, curve: &Curve, interval: Extent1d, orientation: bool, kernel: &Kernel) -> Result<Curve, String> {
-    let low = interval.min();
-    let high = interval.max();
-    let samples = 24usize;
-    let mut points = Vec::with_capacity(samples + 1);
-    let mut previous: Option<f64> = None;
-    for index in 0..=samples {
-        let mut fraction = index as f64 / samples as f64;
-        if !orientation { fraction = 1.0 - fraction; }
-        let t = low + (high - low) * fraction;
-        let point = curve.evaluate_point(kernel, t).map_err(|error| error.to_string())?;
-        let mut uv = frame.project(point);
-        if matches!(frame, Frame::Cylinder { .. }) { uv[0] = uv[0].rem_euclid(360.0); }
-        if let (Some(previous), Frame::Cylinder { .. }) = (previous, frame) {
-            let period = 360.0;
-            while uv[0] - previous > period / 2.0 { uv[0] -= period; }
-            while uv[0] - previous < -period / 2.0 { uv[0] += period; }
-        }
-        previous = Some(uv[0]);
-        points.push(Point3::new(uv[0], uv[1], 0.0));
-    }
-    let degree = 3.min(points.len().saturating_sub(1)).max(1);
-    let curve = BSplineCurve::interpolate_points(&points, None, degree, None, None, false, ParamMethod::ChordLength)
-        .map_err(|error| error.to_string())?;
-    Ok(Curve::from(curve))
-}
 
 /// Base frame (origin, axis, x, y, radius) of a CYLINDRICAL_SURFACE.
 fn cylinder_frame_parts(
@@ -814,7 +788,7 @@ pub fn build_mixed(file: &StepFile, body: &nodecraft_step::StepBrep, solid_id: u
         } else {
             0.0
         };
-        let (surface, uv_domain, frame) = face_surface(file, face, &kernel, scale, rotation_deg)
+        let (surface, _uv_domain, frame) = face_surface(file, face, &kernel, scale, rotation_deg)
             .map_err(|error| format!("face #{face_id}: {error}"))?;
         let surface_index = data.surfaces.len() as u64;
         data.surfaces.push(Keyed { key: ObjectKey(3_000_000 + surface_index), object: surface.clone() });
@@ -1155,6 +1129,7 @@ fn validate_mixed_brep(brep: &mut Brep, label: &str) -> Result<(f64, f64), Strin
 /// magnitude because STL/STEP orientation can be opposite to SMLib for some fixtures.
 /// Fixtures whose import path is affected by full-period CIRCLE normalization; the
 /// focused regression test checks these against the full SMLib gate table.
+#[cfg(test)]
 const CIRCLE_ANGLE_FIXTURES: &[&str] = &[
     "doghouse.stp",
     "socket.stp",

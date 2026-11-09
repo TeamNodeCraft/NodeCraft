@@ -55,6 +55,7 @@ impl NodeCraftApp {
             self.edit_preview_target = Some(result.target);
             self.attach_pending_edit_ghost();
             self.refresh_edit_overlay();
+            self.refresh_topology_picking();
             self.egui_ctx.request_repaint();
         }
     }
@@ -70,10 +71,22 @@ impl NodeCraftApp {
             self.eval_pending = None;
             return;
         }
-        let evaluation_selection = self
-            .face_pick_target
-            .clone()
-            .or_else(|| self.viewer_breakpoint.clone());
+        // Edge editing keeps the displayed breakpoint as the base and picks
+        // from the transform-edit ghost. Other selection modes use the
+        // downstream view target when one is set.
+        let selection_mode = self.viewport.selection_mode();
+        let evaluation_selection = if selection_mode == crate::viewport::SelectionMode::Edge {
+            self.selection_view_target
+                .clone()
+                .or_else(|| self.viewer_breakpoint.clone())
+                .or_else(|| self.eval_target.clone())
+                .or_else(|| self.face_pick_target.clone())
+        } else {
+            self.selection_view_target
+                .clone()
+                .or_else(|| self.face_pick_target.clone())
+                .or_else(|| self.viewer_breakpoint.clone())
+        };
         let comparison = if self.selected_nodes.len() == 1 {
             let selected = self.selected_nodes.iter().next().map(String::as_str);
             comparison_for_selection(session.document(), selected, self.feature_overlay)
@@ -529,15 +542,21 @@ impl NodeCraftApp {
                 } else if let Some((added, removed)) = exact {
                     let added = self.reframe_comparison(&selected, added);
                     let removed = self.reframe_comparison(&selected, removed);
+                    // While picking, keep the displayed breakpoint as the
+                    // solid base. The comparison pair is evaluated in the
+                    // feature's frame, so using it as the base would replace a
+                    // downstream Part with one upstream body as soon as the
+                    // first edge makes the pair active.
+                    let base = self.mesh.as_ref().unwrap_or(&before);
                     self.viewport.set_selection_comparison_mesh(
-                        &after,
-                        &before,
-                        &added,
-                        &removed,
+                        base, base, &added, &removed,
                     );
                 } else {
+                    // No exact difference: overlay the result over the
+                    // displayed breakpoint rather than replacing it.
                     let empty = Mesh::default();
-                    self.viewport.set_selection_comparison_mesh(&after, &before, &empty, &before);
+                    let base = self.mesh.as_ref().unwrap_or(&before);
+                    self.viewport.set_selection_comparison_mesh(base, base, &after, &empty);
                 }
                 if !preserve {
                     self.viewport.fit();
@@ -570,7 +589,7 @@ impl NodeCraftApp {
             }
             self.refresh_topology_picking();
             if self.viewport.selection_mode() == crate::viewport::SelectionMode::Edge
-                && self.eval_target == self.face_pick_target
+                && (self.eval_target == self.topology_target() || self.edge_selection_on_preview())
                 && self.selected_nodes.len() == 1
                 && let Some(session) = &self.session
                 && let Some(node) = session
@@ -581,7 +600,9 @@ impl NodeCraftApp {
                 && Self::selection_spec(&node.node_type)
                     .is_some_and(|(_, mode)| mode == crate::viewport::SelectionMode::Edge)
             {
-                let centers: Vec<[f64; 3]> = node
+                let frame = node.id.clone();
+                let frame = self.selection_view_affine(&frame);
+                let mut centers: Vec<[f64; 3]> = node
                     .values
                     .get("edges")
                     .and_then(serde_json::Value::as_array)
@@ -596,7 +617,26 @@ impl NodeCraftApp {
                         ])
                     })
                     .collect();
-                self.viewport.select_edges_by_centers(&centers);
+                if let Some(frame) = frame {
+                    for center in &mut centers {
+                        *center = frame.apply_point(*center);
+                    }
+                    self.viewport.select_edges_by_centers(&centers);
+                } else {
+                    let ids: Vec<String> = node
+                        .values
+                        .get("edges")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|item| item.get("id")?.as_str().map(str::to_owned))
+                        .collect();
+                    if !ids.is_empty() {
+                        self.viewport.select_edges_by_ids(&ids);
+                    } else {
+                        self.viewport.select_edges_by_centers(&centers);
+                    }
+                }
             }
             self.node_editor.pulse_glow();
             self.warmup_until = self

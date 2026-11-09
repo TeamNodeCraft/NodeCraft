@@ -243,8 +243,7 @@ fn control_point(pole: [f64; 3], weight: Option<f64>) -> Result<CPoint, String> 
 mod tests {
     use super::*;
     use solidcore::curve::curve::CurveKind;
-    use solidcore::kernel::Kernel;
-    use solidcore::math::{Point2, Point3};
+        use solidcore::math::{Point2, Point3};
     use solidcore::nurbs::b_spline_surface::SurfParamType;
     use solidcore::surface::surface::SurfaceKind;
 

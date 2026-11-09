@@ -26,6 +26,7 @@ mod inspector;
 mod viewport;
 mod viewport_grid;
 mod viewer_gizmo;
+mod widgets;
 mod window_chrome;
 
 use std::path::PathBuf;

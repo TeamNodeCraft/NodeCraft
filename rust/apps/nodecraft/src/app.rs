@@ -72,6 +72,13 @@ pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
 }
 
 const LAYOUT_ANIMATION: Duration = Duration::from_millis(650);
+/// Horizontal inset of the inspector's header and body content. Left and right
+/// use this one value; the scroll bar gets its own offset so moving it never
+/// changes the content margins.
+const INSPECTOR_INSET: f32 = 16.0;
+/// How far the scroll-area outer edge extends into the right inset. egui puts a
+/// floating vertical bar at that outer edge.
+const INSPECTOR_SCROLL_BAR_OFFSET: f32 = 9.0;
 
 struct InspectorAnimation {
     started: Instant,
@@ -234,54 +241,6 @@ impl SettingsTab {
     }
 }
 
-fn reframe_mesh_place(mesh: &Mesh, offset: [f64; 3], rotation: [f64; 3]) -> Mesh {
-    let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
-    let rotate = |point: [f64; 3]| {
-        let (mut x, mut y, mut z) = (point[0], point[1], point[2]);
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-        (y, z) = (y * cx - z * sx, y * sx + z * cx);
-        (x, z) = (x * cy + z * sy, -x * sy + z * cy);
-        (x, y) = (x * cz - y * sz, x * sz + y * cz);
-        [x, y, z]
-    };
-    let mut out = mesh.clone();
-    for vertex in &mut out.vertices {
-        let point = rotate([f64::from(vertex[0]), f64::from(vertex[1]), f64::from(vertex[2])]);
-        vertex[0] = (point[0] + offset[0]) as f32;
-        vertex[1] = (point[1] + offset[1]) as f32;
-        vertex[2] = (point[2] + offset[2]) as f32;
-    }
-    for normal in &mut out.normals {
-        let rotated = rotate([f64::from(normal[0]), f64::from(normal[1]), f64::from(normal[2])]);
-        *normal = [rotated[0] as f32, rotated[1] as f32, rotated[2] as f32];
-    }
-    out
-}
-
-fn reframe_mesh_mirror(mesh: &Mesh, plane: &str, offset: f64) -> Mesh {
-    let mut out = mesh.clone();
-    for vertex in &mut out.vertices {
-        match plane {
-            "xz" => vertex[1] = (2.0 * offset - f64::from(vertex[1])) as f32,
-            "yz" => vertex[0] = (2.0 * offset - f64::from(vertex[0])) as f32,
-            _ => vertex[2] = (2.0 * offset - f64::from(vertex[2])) as f32,
-        }
-    }
-    for normal in &mut out.normals {
-        match plane {
-            "xz" => normal[1] = -normal[1],
-            "yz" => normal[0] = -normal[0],
-            _ => normal[2] = -normal[2],
-        }
-    }
-    for face in &mut out.faces {
-        face.swap(1, 2);
-    }
-    out
-}
-
 #[derive(Clone)]
 struct GroupTab {
     parent_document_id: String,
@@ -399,6 +358,40 @@ fn transform_edit_input(document: &GraphDocument, edit_target: &str) -> Option<S
         .iter()
         .find(|link| link.to == node.id && link.input == "shape")
         .map(|link| link.from.clone())
+}
+
+/// The input mesh a feature edit should preview: a transform's shape input or
+/// an edge tool's source body. This is what the transform-edit ghost draws and
+/// what an edge selection picks against, without replacing the breakpoint.
+fn edit_preview_input(document: &GraphDocument, edit_target: &str) -> Option<String> {
+    let node = document.nodes.iter().find(|node| node.id == edit_target)?;
+    match node.node_type.as_str() {
+        "translate" | "mirror" => transform_edit_input(document, edit_target),
+        "chamfer" | "fillet" => NodeCraftApp::single_geometry_input(document, node),
+        _ => None,
+    }
+}
+
+/// The placement from the edited branch into the viewed breakpoint. A transform
+/// edit includes its own node's placement; a feature edit uses only the
+/// downstream placement.
+fn edit_placement(
+    document: &GraphDocument,
+    edit_target: &str,
+    target: &str,
+) -> Option<nodecraft_session::placement::Affine3> {
+    use nodecraft_session::placement::{transform_chain, Affine3};
+    let node = document.nodes.iter().find(|node| node.id == edit_target)?;
+    let chain = if edit_target == target {
+        Affine3::identity()
+    } else {
+        transform_chain(document, edit_target, target)?
+    };
+    Some(match Affine3::from_node(node) {
+        Some(local) => chain.compose(local),
+        None if matches!(node.node_type.as_str(), "translate" | "mirror") => return None,
+        None => chain,
+    })
 }
 
 fn feature_ghost_input(document: &GraphDocument, selected: &str) -> Option<String> {
@@ -528,7 +521,10 @@ fn transform_ghost_for(
         return None;
     }
     let node = document.nodes.iter().find(|node| node.id == edit_target)?;
-    if node.node_type != "translate" || node.suppressed {
+    if node.suppressed {
+        return None;
+    }
+    if !matches!(node.node_type.as_str(), "translate" | "mirror" | "chamfer" | "fillet") {
         return None;
     }
     if NodeCraftApp::transform_input_contains_sketch(document, edit_target) {
@@ -536,11 +532,11 @@ fn transform_ghost_for(
     }
     let preview = edit_preview?;
     let breakpoint = breakpoint?;
-    let frame = transform_frame(document, edit_target, target)?;
+    let placement = edit_placement(document, edit_target, target)?;
     Some(TransformGhost {
         base: dim_breakpoint_mesh(breakpoint),
         branch: preview.clone(),
-        base_transform: frame.placement,
+        base_transform: placement,
         alpha: alpha.clamp(0.0, 1.0),
     })
 }
@@ -565,6 +561,14 @@ pub struct NodeCraftApp {
     /// to the canvas underneath.
     tool_menu_rect: Option<egui::Rect>,
     face_pick_target: Option<String>,
+    /// Downstream target displayed while a topology selection session is active.
+    /// When set, picks are mapped back into the edited feature's frame instead
+    /// of replacing the downstream view with the feature's input body.
+    selection_view_target: Option<String>,
+    /// The node whose inspector started the active topology session. If the
+    /// selection changes or clears, the session ends rather than silently
+    /// reusing the old target.
+    selection_node: Option<String>,
     /// Target whose display mesh is currently shown. Picking is only valid when
     /// this is the explicit topology source for the active selection session.
     eval_target: Option<String>,
@@ -769,6 +773,8 @@ impl NodeCraftApp {
             tool_add_source: None,
             tool_menu_rect: None,
             face_pick_target: None,
+            selection_view_target: None,
+            selection_node: None,
             eval_target: None,
             comparison_pair: None,
             preview_ghost: None,
@@ -1396,7 +1402,7 @@ impl NodeCraftApp {
                 self.selected_nodes.insert(id.to_owned());
                 self.selected_connections.clear();
                 let expected = self.session.as_ref().and_then(|session| {
-                    transform_edit_input(session.document(), id)
+                    edit_preview_input(session.document(), id)
                 });
                 if self.edit_preview_target != expected {
                     self.edit_preview = None;
@@ -1847,6 +1853,8 @@ impl NodeCraftApp {
         if active {
             self.viewport.set_selection_mode(crate::viewport::SelectionMode::Object);
             self.face_pick_target = None;
+            self.selection_view_target = None;
+            self.selection_node = None;
             self.comparison_pair = None;
             self.viewport.set_edge_picking_enabled(false);
             self.sync_comparison_target();
@@ -1862,12 +1870,26 @@ impl NodeCraftApp {
             });
         self.viewport.set_selection_mode(mode);
         self.viewport.set_edge_picking_enabled(false);
+        self.selection_node = Some(node_id.to_owned());
         self.face_pick_target = source;
+        self.selection_view_target = None;
+        if mode == crate::viewport::SelectionMode::Edge {
+            // Keep the breakpoint solid displayed. The feature's input body is
+            // previewed as the transform-edit ghost and is the pickable layer.
+            self.edit_target = Some(node_id.to_owned());
+            if self.edit_preview_target != self.face_pick_target {
+                self.edit_preview = None;
+                self.edit_preview_target = None;
+                if let Some(input) = self.face_pick_target.clone() {
+                    self.request_transform_preview(&input);
+                }
+            }
+        }
         self.comparison_pair = None;
         self.viewport.clear_edge_selection();
         self.refresh_topology_picking();
-        // Entering a face/edge pick shows the feature's input body. Keep the
-        // camera where the user left it instead of refitting to that body.
+        // Keep the camera where the user left it instead of refitting to the
+        // feature input only.
         self.preserve_view_for_next_mesh = true;
         self.evaluate();
         true
@@ -1879,6 +1901,11 @@ impl NodeCraftApp {
         self.viewport.set_edge_picking_enabled(false);
         self.viewport.clear_edge_selection();
         self.face_pick_target = None;
+        self.selection_view_target = None;
+        self.selection_node = None;
+        if self.edit_target.is_some() && self.edge_selection_on_preview() {
+            self.clear_edit_target();
+        }
         self.comparison_pair = None;
         self.sync_comparison_target();
         self.preserve_view_for_next_mesh = true;
@@ -1888,73 +1915,65 @@ impl NodeCraftApp {
 
     /// Transform nodes between the edited feature and the viewed breakpoint. The
     /// engine graph stays canonical; this only re-frames comparison display data.
-    fn view_transform_chain(&self, selected: &str) -> Vec<GraphNode> {
-        let Some(session) = &self.session else { return Vec::new(); };
-        let document = session.document();
-        let Some(breakpoint) = engine_bridge::target_for(document, self.viewer_breakpoint.as_deref()) else {
-            return Vec::new();
-        };
-        if breakpoint == selected { return Vec::new(); }
-        fn find_path(
-            document: &GraphDocument,
-            current: &str,
-            selected: &str,
-            visited: &mut HashSet<String>,
-            path: &mut Vec<String>,
-        ) -> bool {
-            if !visited.insert(current.to_owned()) { return false; }
-            path.push(current.to_owned());
-            if current == selected { return true; }
-            for link in document.connections.iter().filter(|link| link.to == current) {
-                if find_path(document, &link.from, selected, visited, path) { return true; }
-            }
-            path.pop();
-            false
+    /// Selected-feature frame → displayed downstream frame, for picks and
+    /// highlights while a downstream selection target is active.
+    fn selection_view_affine(
+        &self,
+        selected: &str,
+    ) -> Option<nodecraft_session::placement::Affine3> {
+        let target = self.selection_view_target.as_deref()?;
+        let document = self.session.as_ref()?.document();
+        nodecraft_session::placement::transform_chain(document, selected, target)
+    }
+
+    /// Frame for comparison meshes: the selected feature's result placed in
+    /// the downstream view. Uses the one affine path helper, not a second
+    /// graph walk.
+    fn comparison_view_affine(
+        &self,
+        selected: &str,
+    ) -> Option<nodecraft_session::placement::Affine3> {
+        let document = self.session.as_ref()?.document();
+        if let Some(target) = self.selection_view_target.as_deref() {
+            return nodecraft_session::placement::transform_chain(document, selected, target);
         }
-        let mut path = Vec::new();
-        if !find_path(document, &breakpoint, selected, &mut HashSet::new(), &mut path) {
-            return Vec::new();
+        let target = engine_bridge::target_for(document, self.viewer_breakpoint.as_deref())?;
+        if target == selected {
+            return Some(nodecraft_session::placement::Affine3::identity());
         }
-        // path is breakpoint → selected; downstream order is selected → breakpoint.
-        path.pop();
-        let mut nodes: Vec<GraphNode> = path
-            .into_iter()
-            .rev()
-            .filter_map(|id| document.nodes.iter().find(|node| node.id == id).cloned())
-            .collect();
-        if nodes.iter().any(|node| !matches!(node.node_type.as_str(), "translate" | "mirror")) {
-            return Vec::new();
-        }
-        nodes.reverse();
-        nodes
+        nodecraft_session::placement::transform_chain(document, selected, &target)
     }
 
     fn reframe_comparison(&self, selected: &str, mesh: &Mesh) -> Mesh {
-        let chain = self.view_transform_chain(selected);
-        if chain.is_empty() { return mesh.clone(); }
+        let Some(frame) = self.comparison_view_affine(selected) else {
+            return mesh.clone();
+        };
         let mut transformed = mesh.clone();
-        for node in chain.iter().rev() {
-            transformed = match node.node_type.as_str() {
-                "translate" => {
-                    let offset = [
-                        node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                        node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                        node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                    ];
-                    let rotation = [
-                        node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                        node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                        node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-                    ];
-                    reframe_mesh_place(&transformed, offset, rotation)
-                }
-                "mirror" => {
-                    let plane = node.values.get("plane").and_then(serde_json::Value::as_str).unwrap_or("xy");
-                    let offset = node.values.get("offset").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                    reframe_mesh_mirror(&transformed, plane, offset)
-                }
-                _ => transformed,
-            };
+        for vertex in &mut transformed.vertices {
+            let point = frame.apply_point([
+                f64::from(vertex[0]),
+                f64::from(vertex[1]),
+                f64::from(vertex[2]),
+            ]);
+            *vertex = [point[0] as f32, point[1] as f32, point[2] as f32];
+        }
+        for normal in &mut transformed.normals {
+            let vector = frame.apply_vector([
+                f64::from(normal[0]),
+                f64::from(normal[1]),
+                f64::from(normal[2]),
+            ]);
+            let length = (vector[0] * vector[0]
+                + vector[1] * vector[1]
+                + vector[2] * vector[2])
+                .sqrt();
+            if length > 0.0 {
+                *normal = [
+                    (vector[0] / length) as f32,
+                    (vector[1] / length) as f32,
+                    (vector[2] / length) as f32,
+                ];
+            }
         }
         transformed
     }
@@ -1981,16 +2000,48 @@ impl NodeCraftApp {
         Some((spec.field, mode))
     }
 
+    /// The body the viewport is showing while a topology session is active.
+    fn topology_target(&self) -> Option<String> {
+        self.selection_view_target
+            .clone()
+            .or_else(|| self.face_pick_target.clone())
+    }
+
+    /// True once the edit preview has delivered the feature's input body. Edge
+    /// picks then come from the ghost branch while the breakpoint stays the
+    /// displayed solid.
+    fn edge_selection_on_preview(&self) -> bool {
+        self.viewport.selection_mode() == crate::viewport::SelectionMode::Edge
+            && self
+                .selected_nodes
+                .iter()
+                .next()
+                .is_some_and(|selected| self.edit_target.as_deref() == Some(selected.as_str()))
+            && self.face_pick_target.is_some()
+            && self.face_pick_target == self.edit_preview_target
+    }
+
     fn refresh_topology_picking(&mut self) {
         let mode = self.viewport.selection_mode();
         let matching_target = mode != crate::viewport::SelectionMode::Object
             && self.eval_target.is_some()
-            && self.eval_target == self.face_pick_target;
+            && (self.eval_target == self.topology_target() || self.edge_selection_on_preview());
         self.viewport.set_edge_picking_enabled(matching_target);
     }
 
     fn sync_face_pick_target(&mut self) {
         let mode = self.viewport.selection_mode();
+        if mode != crate::viewport::SelectionMode::Object {
+            let selected = self.selected_nodes.iter().next().cloned();
+            if selected.as_deref() != self.selection_node.as_deref() {
+                // A topology session belongs to one node. Clearing or changing
+                // the canvas selection ends it; otherwise the next selected
+                // node reuses a target from the previous session and the
+                // viewport can collapse a Part back to one upstream body.
+                self.end_selection_session();
+                return;
+            }
+        }
         let desired = if self.selected_nodes.len() == 1 {
             let selected = self.selected_nodes.iter().next().cloned();
             self.session.as_ref().and_then(|session| {
@@ -2013,6 +2064,9 @@ impl NodeCraftApp {
             None
         };
         if desired != self.face_pick_target {
+            if desired.is_none() {
+                self.selection_view_target = None;
+            }
             self.face_pick_target = desired;
             self.viewport.clear_edge_selection();
             self.viewport.set_edge_picking_enabled(false);
@@ -2606,11 +2660,6 @@ impl NodeCraftApp {
             self.screenshot = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-    }
-
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        let theme = crate::theme::get();
-        theme.color(theme.window).to_normalized_gamma_f32()
     }
 
     fn ui_inner(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -3271,7 +3320,7 @@ impl NodeCraftApp {
         let face_picks = self.viewport.take_face_picks();
         if !face_picks.is_empty()
             && self.eval_target.is_some()
-            && self.eval_target == self.face_pick_target
+            && self.eval_target == self.topology_target()
             && let Some(node) = selected_node.as_ref()
             && let Some((field, mode)) = Self::selection_spec(&node.node_type)
             && mode == crate::viewport::SelectionMode::Face
@@ -3286,7 +3335,7 @@ impl NodeCraftApp {
         let edge_picks = self.viewport.take_edge_picks();
         if !edge_picks.is_empty()
             && self.eval_target.is_some()
-            && self.eval_target == self.face_pick_target
+            && (self.eval_target == self.topology_target() || self.edge_selection_on_preview())
             && let Some(node) = selected_node.as_ref()
             && let Some((field, mode)) = Self::selection_spec(&node.node_type)
             && mode == crate::viewport::SelectionMode::Edge
@@ -3297,28 +3346,47 @@ impl NodeCraftApp {
                 .and_then(serde_json::Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            let pick_node = node.id.clone();
+            let inverse = if self.selection_view_target.is_some() {
+                self.selection_view_affine(&pick_node)
+                    .map(nodecraft_session::placement::Affine3::inverse)
+            } else {
+                None
+            };
             for pick in edge_picks {
+                let center = inverse
+                    .map(|frame| frame.apply_point(pick.center))
+                    .unwrap_or(pick.center);
                 let existing = references.iter().position(|reference| {
-                    if reference.get("id").and_then(serde_json::Value::as_str) == Some(&pick.id) {
+                    if inverse.is_none()
+                        && reference.get("id").and_then(serde_json::Value::as_str)
+                            == Some(&pick.id)
+                    {
                         return true;
                     }
-                    let Some(center) = reference.get("center").and_then(serde_json::Value::as_array) else {
+                    let Some(reference_center) =
+                        reference.get("center").and_then(serde_json::Value::as_array)
+                    else {
                         return false;
                     };
-                    if center.len() != 3 {
+                    if reference_center.len() != 3 {
                         return false;
                     }
-                    let dx = center[0].as_f64().unwrap_or_default() - pick.center[0];
-                    let dy = center[1].as_f64().unwrap_or_default() - pick.center[1];
-                    let dz = center[2].as_f64().unwrap_or_default() - pick.center[2];
+                    let dx = reference_center[0].as_f64().unwrap_or_default() - center[0];
+                    let dy = reference_center[1].as_f64().unwrap_or_default() - center[1];
+                    let dz = reference_center[2].as_f64().unwrap_or_default() - center[2];
                     (dx * dx + dy * dy + dz * dz).sqrt() <= 1.0e-4
                 });
                 if let Some(index) = existing {
                     references.remove(index);
+                } else if inverse.is_some() {
+                    // Downstream ids are not the feature's B-rep ids. Keep the
+                    // mapped centre so the exact resolver can find the edge.
+                    references.push(serde_json::json!({"center": center}));
                 } else {
                     references.push(serde_json::json!({
                         "id": pick.id,
-                        "center": [pick.center[0], pick.center[1], pick.center[2]],
+                        "center": center,
                     }));
                 }
             }
@@ -3408,13 +3476,15 @@ impl NodeCraftApp {
                 };
                 egui::Frame::new()
                     .inner_margin(egui::Margin {
-                        left: 16,
-                        right: 16,
+                        left: INSPECTOR_INSET as i8,
+                        right: INSPECTOR_INSET as i8,
                         top: top_margin,
                         bottom: bottom_margin,
                     })
                     .show(ui, |ui| {
-                        ui.set_width((panel_rect.width() - 32.0).max(100.0));
+                        ui.set_width(
+                            (panel_rect.width() - 2.0 * INSPECTOR_INSET).max(100.0),
+                        );
                         // The title and disclosure control stay fully opaque; only the
                         // body below fades with the collapse animation.
                         ui.set_opacity(1.0);
@@ -3500,7 +3570,6 @@ impl NodeCraftApp {
                             ui.style_mut().spacing.scroll.bar_width = 5.0;
                             ui.style_mut().spacing.scroll.floating_width = 3.0;
                             ui.style_mut().spacing.scroll.floating_allocated_width = 0.0;
-                            ui.style_mut().spacing.scroll.bar_outer_margin = 0.5;
                             ui.style_mut().spacing.scroll.dormant_handle_opacity = 1.0;
                             ui.style_mut().spacing.scroll.active_handle_opacity = 1.0;
                             ui.style_mut().spacing.scroll.interact_handle_opacity = 1.0;
@@ -3514,6 +3583,11 @@ impl NodeCraftApp {
                             ui.style_mut().visuals.widgets.inactive.corner_radius = bar_corner;
                             ui.style_mut().visuals.widgets.hovered.corner_radius = bar_corner;
                             ui.style_mut().visuals.widgets.active.corner_radius = bar_corner;
+                            // egui places a vertical bar from the ScrollArea's
+                            // outer rect. Widen only that rect so the bar moves
+                            // right; the content below keeps its normal width.
+                            let content_width = ui.available_width();
+                            ui.set_width(content_width + INSPECTOR_SCROLL_BAR_OFFSET);
                             let active_selection =
                                 self.active_selection_field().map(str::to_owned);
                             let reflow = self.inspector_reflow;
@@ -3528,6 +3602,7 @@ impl NodeCraftApp {
                                 scroll = scroll.vertical_scroll_offset(0.0);
                             }
                             scroll.show(ui, |ui| {
+                                    ui.set_width(content_width);
                                     let mut output = inspector::show(
                                         ui,
                                         node,
@@ -4527,6 +4602,51 @@ mod tests {
     }
 
     #[test]
+    fn feature_edit_ghost_previews_its_input_without_replacing_the_breakpoint() {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let link = |from: &str, to: &str, input: &str| GraphConnection {
+            from: from.into(),
+            to: to.into(),
+            input: input.into(),
+            out: "shape".into(),
+        };
+        let mut document = GraphDocument::new("feature-ghost");
+        document.nodes = vec![
+            node("box", "solid", serde_json::json!({"primitiveType": "box"})),
+            node("move", "translate", serde_json::json!({"x": 12.0})),
+            node("boolean", "boolean", serde_json::json!({"mode": "union"})),
+            node("chamfer", "chamfer", serde_json::json!({})),
+            node("out", "combine", serde_json::json!({})),
+        ];
+        document.connections = vec![
+            link("box", "move", "shape"),
+            link("move", "boolean", "a"),
+            link("boolean", "chamfer", "shape"),
+            link("chamfer", "out", "shape"),
+        ];
+        assert_eq!(edit_preview_input(&document, "chamfer").as_deref(), Some("boolean"));
+        let preview = Mesh { vertices: vec![[0.0; 3]], faces: vec![[0, 0, 0]], ..Mesh::default() };
+        let plan = transform_ghost_for(
+            &document,
+            "chamfer",
+            "out",
+            Some(&preview),
+            Some(&preview),
+            0.45,
+        )
+        .expect("feature ghost");
+        assert_eq!(plan.branch.vertices, preview.vertices);
+    }
+
+    #[test]
     fn double_click_activation_policy_is_one_place() {
         assert_eq!(node_activation("group"), NodeActivation::EnterGroup);
         assert_eq!(node_activation("translate"), NodeActivation::EditNode);
@@ -4864,6 +4984,7 @@ mod tests {
         assert!(!first_rect.intersects(second_rect));
     }
 
+    #[test]
     fn auto_connect_placement_avoids_an_existing_node() {
         let mut document = history_fixture();
         let mut blocker = document.nodes[0].clone();

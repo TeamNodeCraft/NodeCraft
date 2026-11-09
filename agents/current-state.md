@@ -39,9 +39,13 @@ SolidCore/SMLib for exact geometry.
 - face/edge/vertex selection filter dock in the viewport
 - shell opening-face selection from the viewport, with inspector chips
 - sharp-wall shell attempt using SolidCore's extended offset path
-- SolidCore pinned at `45d6111b909487e94edaec309a7673a3b73d4ae5` (latest `main` as of 2026-11-08);
-  `solidcore-record-new` remains at the older SolidCraft-compatible revision
-- SolidCraft sketch stack pinned at `871014f955a76fd308ce156e68c93e6372906005`
+- SolidCore vendored in SolidCraft at `9b559c4c0727b2c626622d86e00e7d4c63f52400`;
+  every SolidCore module, including the record crate, comes from that tree
+- SolidCraft sketch stack is pinned to the same revision
+- The workspace and release app build are warning-free; inspector controls share
+  one layout/inset and the scroll bar uses normal ScrollArea hit geometry.
+- Feature edge editing uses a breakpoint + input-body edit ghost. This is still
+  work in progress; see `agents/bugs.md`.
 - `configure_solidcore_fixes` applies the same upstream fix profile to our
   kernels and the `solidcore-ops` session (Boolean/shell/offset/blend)
 - exact fillet, Boolean, union, shell and offset results are validated through
@@ -115,10 +119,9 @@ curved primitives, and contextual face editing from the inspector.
 
 ## Known geometry limitations
 
-- A partial fillet around a multi-edge torus/cylinder join is still an upstream
-  seam/edge-use problem (SolidCore #2826 remains open; #2863 is merged). NodeCraft
-  now reports the upstream `Smooth` refusal instead of silently landing a
-  partial round.
+- The torus/cylinder join fillet is continuous in the app: one picked join edge
+  expands through the SolidCore tangent chain and rounds the full run. Upstream
+  #2826 remains open for callers that pass a single edge without the chain.
 - STEP bodies whose edge curves have no B-spline form cannot yet be
   recorded by `solidcore-convert`; STEP import falls back to the legacy display
   tessellator for those bodies only.

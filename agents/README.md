@@ -9,6 +9,7 @@ changing geometry, the node canvas, or the viewport.
 - [Philosophy](philosophy.md) — invariants and rules for changes.
 - [Vision](vision.md) — what NodeCraft is and why it exists.
 - [Current state](current-state.md) — what works today.
+- [SolidCore dependencies](../docs/solidcore-sync.md) — vendored kernel, pins and update procedure.
 - [Bugs](bugs.md) — known failures and risky areas.
 - [TODO](todo.md) — current priorities.
 - [Performance baseline](performance-baseline.md) — measured canvas bottlenecks.

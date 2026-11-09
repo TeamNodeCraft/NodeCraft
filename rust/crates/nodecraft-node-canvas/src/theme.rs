@@ -65,7 +65,6 @@ impl Default for CanvasTheme {
 
 impl std::hash::Hash for CanvasTheme {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        use std::hash::Hash as _;
         for field in [
             self.window,
             self.blur_tint,

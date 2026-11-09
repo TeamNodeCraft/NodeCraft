@@ -34,14 +34,14 @@
 
 use std::collections::HashMap;
 
+use nodecraft_protocol::{BrepEdge, Mesh};
+use nodecraft_step::PlanarBody;
 use solidcore::kernel::Kernel;
 use solidcore::math::Point2;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::nurbs::knots::Side;
 use solidcore::query::api_queries as queries;
 use solidcore::query::face::p1::evaluate_curve;
-use nodecraft_protocol::{BrepEdge, Mesh};
-use nodecraft_step::PlanarBody;
 
 use crate::edge::{EdgeSelection, brep_center};
 use crate::error::BlendError;
@@ -143,7 +143,12 @@ pub fn apply_edge_treatment(
                 &triangles,
                 plane,
                 weld_epsilon,
-                &format!("blend:{}:{}:{}", treatment.mode.as_str(), selection.ordinal, index),
+                &format!(
+                    "blend:{}:{}:{}",
+                    treatment.mode.as_str(),
+                    selection.ordinal,
+                    index
+                ),
             )?;
         }
     }
@@ -180,6 +185,9 @@ pub fn edge_treatment_preview(
             crate::missing::LAW_CONTINUITY.to_vec(),
         ));
     }
+    // Viewer references carry a centre sampled from the body; after a Boolean
+    // or an upstream edit their ordinals/ids can address a different edge.
+    // Resolve by centre first, exactly as the exact fillet path does.
     let selections = crate::edge::select_edges_from_values(kernel, brep, values)?;
     apply_edge_treatment(kernel, brep, &selections, &treatment)
 }
@@ -318,14 +326,7 @@ fn push_mesh_vertex(mesh: &mut Mesh, point: [f64; 3], normal: [f64; 3]) {
         .push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
 }
 
-fn push_mesh_triangle(
-    mesh: &mut Mesh,
-    a: u32,
-    b: u32,
-    c: u32,
-    normal: [f64; 3],
-    group: &str,
-) {
+fn push_mesh_triangle(mesh: &mut Mesh, a: u32, b: u32, c: u32, normal: [f64; 3], group: &str) {
     let pa = mesh.vertices[a as usize].map(f64::from);
     let pb = mesh.vertices[b as usize].map(f64::from);
     let pc = mesh.vertices[c as usize].map(f64::from);
@@ -395,7 +396,10 @@ fn edge_frame(
     let mut faces_with_normals = Vec::with_capacity(2);
     for face in &distinct {
         let context = format!("edge {} face", selection.ordinal);
-        faces_with_normals.push((*face, planar_face_normal(kernel, brep, *face, &context, interior)?));
+        faces_with_normals.push((
+            *face,
+            planar_face_normal(kernel, brep, *face, &context, interior)?,
+        ));
     }
     // A two-distance or distance-angle chamfer needs a consistent reference face.
     // B-rep face enumeration is arbitrary, so order the adjacent faces by their
@@ -464,9 +468,7 @@ fn planar_face_normal(
 ) -> Result<[f64; 3], BlendError> {
     let surface = solidcore::topology::face::p2::surface(brep, face_id)
         .map_err(|error| BlendError::Kernel(format!("{context} surface: {error}")))?
-        .ok_or_else(|| {
-            BlendError::Kernel(format!("{context} has no surface"))
-        })?;
+        .ok_or_else(|| BlendError::Kernel(format!("{context} has no surface")))?;
     let domain = solidcore::topology::face::p2::uv_domain(brep, face_id)
         .map_err(|error| BlendError::Kernel(format!("{context} domain: {error}")))?;
     let u0 = domain.u_interval().min();
@@ -486,11 +488,12 @@ fn planar_face_normal(
         .face(face_id)
         .map_err(|error| BlendError::Kernel(format!("{context}: {error}")))?;
     let flip = match face.faceuse {
-        Some(faceuse) => brep
-            .faceuse(faceuse)
-            .map_err(|error| BlendError::Kernel(format!("{context} faceuse: {error}")))?
-            .orientation
-            == OrientType::Opposite,
+        Some(faceuse) => {
+            brep.faceuse(faceuse)
+                .map_err(|error| BlendError::Kernel(format!("{context} faceuse: {error}")))?
+                .orientation
+                == OrientType::Opposite
+        }
         None => false,
     };
     let fractions = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (0.5, 0.5)];
@@ -550,7 +553,11 @@ fn in_face_direction(
             format!("edge {ordinal} cross-section is not a right angle (dot = {sign:.6})"),
         ));
     }
-    Ok(if sign < 0.0 { candidate } else { scale(candidate, -1.0) })
+    Ok(if sign < 0.0 {
+        candidate
+    } else {
+        scale(candidate, -1.0)
+    })
 }
 
 /// The cutting planes for one treatment.
@@ -565,16 +572,17 @@ fn treatment_planes(
             let origin = selection.start;
             let point_a = add(origin, scale(frame.away_a, distance_a));
             let point_b = add(origin, scale(frame.away_b, distance_b));
-            let normal = normalize(cross(frame.direction, sub(point_b, point_a))).ok_or_else(|| {
-                BlendError::unsupported(
-                    "chamfer",
-                    format!(
-                        "edge {} produces a degenerate chamfer plane (the two distances may be \
+            let normal =
+                normalize(cross(frame.direction, sub(point_b, point_a))).ok_or_else(|| {
+                    BlendError::unsupported(
+                        "chamfer",
+                        format!(
+                            "edge {} produces a degenerate chamfer plane (the two distances may be \
                          zero or equal to the edge length)",
-                        selection.ordinal
-                    ),
-                )
-            })?;
+                            selection.ordinal
+                        ),
+                    )
+                })?;
             Ok(vec![Plane {
                 point: point_a,
                 normal,
@@ -623,11 +631,7 @@ fn clip_triangles(
             plane.distance(triangle.points[1]),
             plane.distance(triangle.points[2]),
         ];
-        let outside = [
-            distances[0] > 0.0,
-            distances[1] > 0.0,
-            distances[2] > 0.0,
-        ];
+        let outside = [distances[0] > 0.0, distances[1] > 0.0, distances[2] > 0.0];
         if !outside[0] && !outside[1] && !outside[2] {
             kept.push(triangle.clone());
             continue;
@@ -712,7 +716,7 @@ fn cap_opening(
         adjacency[from].push(to);
         adjacency[to].push(from);
     }
-    let mut loop_points: Vec<[f64; 3]> = Vec::new();
+    let _loop_points: Vec<[f64; 3]> = Vec::new();
     if points.is_empty() {
         return Err(BlendError::unsupported(
             "edge treatment",
@@ -720,53 +724,92 @@ fn cap_opening(
         ));
     }
     if points.is_empty() {
-        return Err(BlendError::unsupported("edge treatment", "the cut cross-section has no boundary points"));
+        return Err(BlendError::unsupported(
+            "edge treatment",
+            "the cut cross-section has no boundary points",
+        ));
     }
     let mut visited = vec![false; points.len()];
     let mut loops: Vec<Vec<usize>> = Vec::new();
     for start in 0..points.len() {
-        if visited[start] { continue; }
+        if visited[start] {
+            continue;
+        }
         let mut walk = Vec::new();
         let mut previous = usize::MAX;
         let mut current = start;
         loop {
             if walk.len() > points.len() {
-                return Err(BlendError::unsupported("edge treatment", "the cut cross-section does not close"));
+                return Err(BlendError::unsupported(
+                    "edge treatment",
+                    "the cut cross-section does not close",
+                ));
             }
             walk.push(current);
             visited[current] = true;
             let neighbours = &adjacency[current];
             if neighbours.len() != 2 {
-                return Err(BlendError::unsupported("edge treatment", format!("the cut cross-section is not a manifold loop (vertex degree {})", neighbours.len())));
+                return Err(BlendError::unsupported(
+                    "edge treatment",
+                    format!(
+                        "the cut cross-section is not a manifold loop (vertex degree {})",
+                        neighbours.len()
+                    ),
+                ));
             }
-            let next = if neighbours[0] == previous { neighbours[1] } else { neighbours[0] };
+            let next = if neighbours[0] == previous {
+                neighbours[1]
+            } else {
+                neighbours[0]
+            };
             previous = current;
             current = next;
-            if current == start { break; }
+            if current == start {
+                break;
+            }
             if visited[current] {
-                return Err(BlendError::unsupported("edge treatment", "the cut cross-section has intersecting loops"));
+                return Err(BlendError::unsupported(
+                    "edge treatment",
+                    "the cut cross-section has intersecting loops",
+                ));
             }
         }
         if walk.len() < 3 {
-            return Err(BlendError::unsupported("edge treatment", "a cut cross-section loop has fewer than three points"));
+            return Err(BlendError::unsupported(
+                "edge treatment",
+                "a cut cross-section loop has fewer than three points",
+            ));
         }
         loops.push(walk);
     }
     if loops.len() == 1 {
         let mut loop_points: Vec<[f64; 3]> = loops[0].iter().map(|index| points[*index]).collect();
         let newell = newell_normal(&loop_points);
-        if dot(newell, plane.normal) < 0.0 { loop_points.reverse(); }
+        if dot(newell, plane.normal) < 0.0 {
+            loop_points.reverse();
+        }
         let centroid = average(&loop_points);
         let mut caps = Vec::with_capacity(loop_points.len());
         for corner in 0..loop_points.len() {
             let next = (corner + 1) % loop_points.len();
             let facet = [centroid, loop_points[corner], loop_points[next]];
             let normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
-            let normal = normalize(normal).ok_or_else(|| BlendError::unsupported("edge treatment", "the cut cross-section triangulation produced a degenerate facet"))?;
+            let normal = normalize(normal).ok_or_else(|| {
+                BlendError::unsupported(
+                    "edge treatment",
+                    "the cut cross-section triangulation produced a degenerate facet",
+                )
+            })?;
             if dot(normal, plane.normal) <= 0.0 {
-                return Err(BlendError::unsupported("edge treatment", "the cut cross-section is not convex; only convex bodies are supported"));
+                return Err(BlendError::unsupported(
+                    "edge treatment",
+                    "the cut cross-section is not convex; only convex bodies are supported",
+                ));
             }
-            caps.push(Tri { points: facet, group: group.to_string() });
+            caps.push(Tri {
+                points: facet,
+                group: group.to_string(),
+            });
         }
         return Ok(caps);
     }
@@ -781,11 +824,24 @@ fn cap_planar_loops(
     group: &str,
 ) -> Result<Vec<Tri>, BlendError> {
     let normal = plane.normal;
-    let helper = if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
-    let u = normalize(cross(normal, helper)).ok_or_else(|| BlendError::unsupported("edge treatment", "degenerate cut plane"))?;
+    let helper = if normal[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let u = normalize(cross(normal, helper))
+        .ok_or_else(|| BlendError::unsupported("edge treatment", "degenerate cut plane"))?;
     let v = cross(normal, u);
     let project = |point: [f64; 3]| [dot(point, u), dot(point, v)];
-    let loop_2d: Vec<Vec<[f64; 2]>> = loops.iter().map(|indices| indices.iter().map(|index| project(points[*index])).collect()).collect();
+    let loop_2d: Vec<Vec<[f64; 2]>> = loops
+        .iter()
+        .map(|indices| {
+            indices
+                .iter()
+                .map(|index| project(points[*index]))
+                .collect()
+        })
+        .collect();
     let area = |loop2d: &[[f64; 2]]| {
         let mut sum = 0.0;
         for corner in 0..loop2d.len() {
@@ -801,7 +857,9 @@ fn cap_planar_loops(
             let (a, b) = (loop2d[corner], loop2d[next]);
             if (a[1] > point[1]) != (b[1] > point[1])
                 && point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0]
-            { hit = !hit; }
+            {
+                hit = !hit;
+            }
         }
         hit
     };
@@ -810,14 +868,30 @@ fn cap_planar_loops(
     for index in 0..loops.len() {
         let point = loop_2d[index][0];
         parent[index] = (0..loops.len())
-            .filter(|candidate| *candidate != index && areas[*candidate] > areas[index] && inside(point, &loop_2d[*candidate]))
+            .filter(|candidate| {
+                *candidate != index
+                    && areas[*candidate] > areas[index]
+                    && inside(point, &loop_2d[*candidate])
+            })
             .min_by(|left, right| areas[*left].total_cmp(&areas[*right]));
     }
-    let mut planar = PlanarBody { points: points.to_vec(), faces: vec![], holes: vec![] };
+    let mut planar = PlanarBody {
+        points: points.to_vec(),
+        faces: vec![],
+        holes: vec![],
+    };
     for root in 0..loops.len() {
-        if parent[root].is_some() { continue; }
+        if parent[root].is_some() {
+            continue;
+        }
         let mut outer = loops[root].clone();
-        if dot(newell_normal(&outer.iter().map(|index| points[*index]).collect::<Vec<_>>()), normal) < 0.0 { outer.reverse(); }
+        if dot(
+            newell_normal(&outer.iter().map(|index| points[*index]).collect::<Vec<_>>()),
+            normal,
+        ) < 0.0
+        {
+            outer.reverse();
+        }
         let holes: Vec<Vec<usize>> = loops
             .iter()
             .enumerate()
@@ -833,8 +907,13 @@ fn cap_planar_loops(
     for [a, b, c] in indices {
         let mut facet = [planar.points[a], planar.points[b], planar.points[c]];
         let facet_normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
-        if dot(facet_normal, normal) < 0.0 { facet.swap(1, 2); }
-        caps.push(Tri { points: facet, group: group.to_string() });
+        if dot(facet_normal, normal) < 0.0 {
+            facet.swap(1, 2);
+        }
+        caps.push(Tri {
+            points: facet,
+            group: group.to_string(),
+        });
     }
     Ok(caps)
 }
@@ -903,8 +982,11 @@ pub fn chamfer_brep_exact_with_kernel(
     use solidcore::geom::axis2_placement::Axis2Placement;
     use solidcore::math::{Point3, Vec3};
     use solidcore::primitive::api_primitives as api;
-    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    let treatment = EdgeTreatment::from_node_values(values)
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment
+        .validate()
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if treatment.mode != EdgeMode::Chamfer {
         return Err("exact chamfer requires chamfer mode".into());
     }
@@ -913,7 +995,26 @@ pub fn chamfer_brep_exact_with_kernel(
     if selections.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let interior = brep_center(&*kernel, brep).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    let selections = if values
+        .get("tangentChain")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+    {
+        crate::edge::tangent_chain(kernel, brep, &selections, 0.5_f64.to_radians())
+            .unwrap_or(selections)
+    } else {
+        selections
+    };
+    // The legacy plane-cut implementation only supports planar faces. Try the
+    // kernel's curved-capable chamfer session first for equal-distance chamfers;
+    // the planar path remains as the exact fallback for bodies it handles.
+    if treatment.chamfer_type == crate::treatment::ChamferType::Equal
+        && let Ok(result) = chamfer_equal_ops(kernel, brep, &selections, treatment.length)
+    {
+        return Ok(result);
+    }
+    let interior = brep_center(&*kernel, brep)
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     let (min, max) = brep_vertex_bounds(brep)?;
     let diagonal = length(sub(max, min)).max(1.0);
     // Conservative body-scale bound. This catches nonsensical distances before the
@@ -932,29 +1033,42 @@ pub fn chamfer_brep_exact_with_kernel(
         .clone_standing_for_self()
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     for selection in &selections {
-        let frame = edge_frame(&*kernel, brep, selection, interior).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-        let planes = treatment_planes(&frame, selection, &treatment).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+        let frame = edge_frame(&*kernel, brep, selection, interior)
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+        let planes = treatment_planes(&frame, selection, &treatment)
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
         for plane in planes {
             let plane = plane.orient_towards(interior);
             let normal = normalize(plane.normal).ok_or("chamfer plane has no normal")?;
-            let helper = if normal[2].abs() < 0.9 { Vec3::new(0.0, 0.0, 1.0) } else { Vec3::new(1.0, 0.0, 0.0) };
+            let helper = if normal[2].abs() < 0.9 {
+                Vec3::new(0.0, 0.0, 1.0)
+            } else {
+                Vec3::new(1.0, 0.0, 0.0)
+            };
             let normal = Vec3::new(normal[0], normal[1], normal[2]);
-            let x_axis = normal.cross(helper).unitize().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            let y_axis = normal.cross(x_axis).unitize().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            let mut tool = api::create_box(kernel, Point3::new(-extent, -extent, 0.0), 2.0 * extent, 2.0 * extent, extent)
+            let x_axis = normal
+                .cross(helper)
+                .unitize()
                 .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+            let y_axis = normal
+                .cross(x_axis)
+                .unitize()
+                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+            let mut tool = api::create_box(
+                kernel,
+                Point3::new(-extent, -extent, 0.0),
+                2.0 * extent,
+                2.0 * extent,
+                extent,
+            )
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
             let placement = Axis2Placement::new(
                 Point3::new(plane.point[0], plane.point[1], plane.point[2]),
                 x_axis,
                 y_axis,
             );
-            solidcore::topology::brep::p5::transform(
-                kernel,
-                &mut tool,
-                &placement,
-                None,
-                true,
-            ).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+            solidcore::topology::brep::p5::transform(kernel, &mut tool, &placement, None, true)
+                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
             result = nodecraft_bool::boolean_breps_with_kernel(
                 kernel,
                 nodecraft_bool::BooleanOp::Difference,
@@ -973,9 +1087,20 @@ fn brep_vertex_bounds(brep: &solidcore::topology::Brep) -> Result<([f64; 3], [f6
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for id in brep.vertex_list() {
-        let point = brep.vertex(*id).map_err(|error| nodecraft_solidcore::error::user_message(error))?.point;
-        min = [min[0].min(point.x), min[1].min(point.y), min[2].min(point.z)];
-        max = [max[0].max(point.x), max[1].max(point.y), max[2].max(point.z)];
+        let point = brep
+            .vertex(*id)
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?
+            .point;
+        min = [
+            min[0].min(point.x),
+            min[1].min(point.y),
+            min[2].min(point.z),
+        ];
+        max = [
+            max[0].max(point.x),
+            max[1].max(point.y),
+            max[2].max(point.z),
+        ];
     }
     Ok((min, max))
 }
@@ -1154,10 +1279,60 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
     add(a, scale(sub(b, a), t))
 }
 
+/// Curved-capable equal-distance chamfer through the kernel blend session.
+///
+/// The session takes the exact `EdgeId`s from the shared resolver, so there is
+/// no record-order/index translation between the reference the viewer highlights
+/// and the edge the kernel cuts. The planar tool-cut path remains the fallback
+/// for chamfer types the session does not cover.
+fn chamfer_equal_ops(
+    kernel: &mut Kernel,
+    brep: &solidcore::topology::Brep,
+    selections: &[crate::EdgeSelection],
+    distance: f64,
+) -> Result<solidcore::topology::Brep, String> {
+    use solidcore::blend::fillet_executive::session::FilletSession;
+    use solidcore::surface::procedural_blend::chamfer::ChamferSize;
+
+    let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
+        .map_err(|error| error.to_string())?;
+    let mut session = FilletSession::new(kernel, &mut working)
+        .map_err(|error| format!("chamfer session: {error}"))?;
+    let edges: Vec<_> = selections.iter().map(|selection| selection.edge).collect();
+    let sizes = vec![ChamferSize::Distances([distance, distance]); edges.len()];
+    session
+        .prepare_chamfers(kernel, &edges, &sizes)
+        .map_err(|error| format!("chamfer prepare: {error}"))?;
+    session
+        .create_corners(kernel, None)
+        .map_err(|error| format!("chamfer corners: {error}"))?;
+    for corner in session
+        .fillet_corners()
+        .map_err(|error| format!("chamfer corners: {error}"))?
+    {
+        session
+            .set_corner_bevel(corner, true)
+            .map_err(|error| format!("chamfer bevel: {error}"))?;
+    }
+    session
+        .do_filleting(kernel, None)
+        .map_err(|error| format!("chamfer session: {error}"))?;
+    drop(session);
+    solidcore::topology::brep::p5::stitch_and_orient(
+        kernel,
+        &mut working,
+        &solidcore::topology::brep::p5::StitchAndOrientOptions::default(),
+    )
+    .map_err(|error| format!("chamfer stitch: {error}"))?;
+    nodecraft_layers::check_kernel_brep(kernel, &working)
+        .map_err(|error| format!("chamfer result failed solidcore check: {error}"))?;
+    Ok(working)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use solidcore::kernel::Kernel;
+    
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives as api;
 

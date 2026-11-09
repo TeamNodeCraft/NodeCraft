@@ -97,18 +97,45 @@ pub fn fillet_brep_exact_with_kernel(
     brep: &Brep,
     values: &serde_json::Value,
 ) -> Result<Brep, String> {
-    let treatment = EdgeTreatment::from_node_values(values).map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    let treatment = EdgeTreatment::from_node_values(values)
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment
+        .validate()
+        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if treatment.mode != EdgeMode::Fillet {
         return Err("exact fillet requires fillet mode".into());
     }
     // A saved viewer pick carries both a display-space centre and an edge id.
     // After a Boolean the id can address a different edge entirely, so prefer
     // the centre; if SolidCore refuses that edge as smooth, retry by id.
-    let primary = crate::edge::select_edges_from_values_center_first(kernel, brep, values)
+    let primary = crate::edge::select_edges_from_values(kernel, brep, values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if primary.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
+    }
+    // A Boolean join is split into several edges at seams even though the join
+    // is one continuous curve. Parasolid-style edge treatment follows that
+    // tangent run; without it a one-edge pick rounds only one segment and
+    // leaves a visible gap.
+    let tangent_chain = values
+        .get("tangentChain")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true);
+    let primary = if tangent_chain {
+        crate::edge::tangent_chain(kernel, brep, &primary, 0.5_f64.to_radians())
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?
+    } else {
+        primary
+    };
+    // Where three or more rounded edges meet, the direct path leaves a Mitre
+    // corner (with a cusp). Use the kernel's set-back corner session so the
+    // corner is closed by a patch instead.
+    if let Some(result) =
+        crate::fillet_corner::fillet_with_corner_patches(kernel, brep, &primary, &treatment)
+            .map_err(|error| nodecraft_solidcore::error::user_message(error))?
+    {
+        validate_result(kernel, &result)?;
+        return Ok(result);
     }
     // A refused edge is an upstream modelling refusal, not permission to round
     // a subset. Returning the error keeps the node from silently showing a
@@ -147,8 +174,8 @@ fn fillet_selection_ops(
         .map_err(|error| format!("{error:?}"))?;
     let (record, _) = solidcore_convert::brep::to_record(kernel, &mut working)
         .map_err(|error| format!("{error:?}"))?;
-    let (body, order) = solidcore_ops::Body::from_record(&record, true)
-        .map_err(|error| error.to_string())?;
+    let (body, order) =
+        solidcore_ops::Body::from_record(&record, true).map_err(|error| error.to_string())?;
     let mut edges = Vec::with_capacity(selections.len());
     for selection in selections {
         edges.push(
@@ -306,10 +333,16 @@ mod exact_fillet_tests {
             &[[40.0, 15.0, 20.0], [20.0, 30.0, 20.0]],
         )
         .expect("adjacent edges");
-        let edges: Vec<_> = selections.iter().map(|selection| serde_json::json!({"ordinal": selection.ordinal})).collect();
-        let values = serde_json::json!({"mode": "fillet", "continuity": "", "length": 2.0, "edges": edges});
+        let edges: Vec<_> = selections
+            .iter()
+            .map(|selection| serde_json::json!({"ordinal": selection.ordinal}))
+            .collect();
+        let values =
+            serde_json::json!({"mode": "fillet", "continuity": "", "length": 2.0, "edges": edges});
         let filleted = fillet_brep_exact(&brep, &values).expect("adjacent exact fillet");
-        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        assert!(
+            solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold")
+        );
     }
 
     #[test]
@@ -324,7 +357,9 @@ mod exact_fillet_tests {
             });
             let filleted = fillet_brep_exact(&brep, &values)
                 .unwrap_or_else(|error| panic!("{continuity} exact fillet: {error}"));
-            assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+            assert!(
+                solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold")
+            );
         }
     }
 
@@ -348,7 +383,9 @@ mod exact_fillet_tests {
             "edges": edges,
         });
         let filleted = fillet_brep_exact(&brep, &values).expect("two-edge exact fillet");
-        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        assert!(
+            solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold")
+        );
         assert!(!filleted.faces().is_empty());
     }
 
@@ -362,8 +399,8 @@ mod exact_fillet_tests {
             length: 2.0,
             ..EdgeTreatment::default()
         };
-        let result = fillet_selection_ops(&mut kernel, &brep, &[selection], &treatment)
-            .expect("ops blend");
+        let result =
+            fillet_selection_ops(&mut kernel, &brep, &[selection], &treatment).expect("ops blend");
         assert!(solidcore::query::api_queries::brep_is_manifold_solid(&result).expect("manifold"));
     }
 
@@ -377,7 +414,9 @@ mod exact_fillet_tests {
             "edges": [{"ordinal": 0}]
         });
         let filleted = fillet_brep_exact(&brep, &values).expect("exact fillet");
-        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold"));
+        assert!(
+            solidcore::query::api_queries::brep_is_manifold_solid(&filleted).expect("manifold")
+        );
         assert!(!filleted.faces().is_empty());
     }
 }

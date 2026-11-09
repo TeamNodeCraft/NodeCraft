@@ -496,7 +496,7 @@ pub fn reset_values(node: &GraphNode) -> Vec<Change> {
             values.insert(key.to_owned(), value.clone());
         }
     }
-    let mut changes: Vec<Change> = values
+    let changes: Vec<Change> = values
         .into_iter()
         .map(|(field, value)| Change { field, value })
         .collect();
@@ -507,29 +507,62 @@ fn current_value(node: &GraphNode, spec: &FieldSpec) -> Value {
     node.values.get(spec.key.as_str()).cloned().unwrap_or_else(|| spec.default.clone())
 }
 
-fn draw_switch(ui: &mut Ui, value: &mut bool) -> Response {
-    let theme = crate::theme::get();
-    let desired = Vec2::new(34.0, 18.0);
-    let (rect, mut response) = ui.allocate_exact_size(desired, Sense::click());
-    response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() {
-        *value = !*value;
-        response.mark_changed();
-    }
-    let t = if *value { 1.0 } else { 0.0 };
-    let track = theme.color(theme.control).lerp_to_gamma(theme.color(theme.accent), t);
-    let knob = theme.color(theme.text).lerp_to_gamma(theme.color(theme.control), t * 0.25);
-    ui.painter().rect_filled(rect, rect.height() * 0.5, track);
-    let radius = rect.height() * 0.5 - 2.0;
-    let center = egui::Pos2::new(
-        rect.left() + radius + 2.0 + (rect.width() - 2.0 * radius - 4.0) * t,
-        rect.center().y,
-    );
-    ui.painter().circle_filled(center, radius, knob);
-    response
+/// One inspector control row. The label column and the control column are the
+/// same width for every field, on every node: number boxes, dropdowns, text
+/// entries and switches all line up instead of sizing themselves from their
+/// longest label or current value.
+const FIELD_ROW_HEIGHT: f32 = 24.0;
+const FIELD_ROW_GAP: f32 = 7.0;
+const FIELD_COLUMN_GAP: f32 = 10.0;
+const LABEL_COLUMN_SHARE: f32 = 0.40;
+
+fn field_columns_for(total: f32) -> (f32, f32) {
+    let label = (total * LABEL_COLUMN_SHARE).clamp(72.0, 140.0);
+    let control = (total - label - FIELD_COLUMN_GAP).max(64.0);
+    (label, control)
 }
 
-fn draw_choice(ui: &mut Ui, key: &str, value: &mut String, choices: &[(&str, &str)]) -> bool {
+fn field_columns(ui: &Ui) -> (f32, f32) {
+    field_columns_for(ui.available_width())
+}
+
+fn field_row(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui, f32)) {
+    let (label_width, control_width) = field_columns(ui);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = FIELD_COLUMN_GAP;
+        ui.set_height(FIELD_ROW_HEIGHT);
+        ui.allocate_ui_with_layout(
+            egui::vec2(label_width, FIELD_ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(label_width);
+                ui.add(egui::Label::new(label).truncate())
+                    .on_hover_text(label);
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(control_width, FIELD_ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(control_width);
+                ui.spacing_mut().interact_size.y = FIELD_ROW_HEIGHT;
+                add_control(ui, control_width);
+            },
+        );
+    });
+    ui.add_space(FIELD_ROW_GAP);
+}
+
+/// Right-align a switch inside the shared control column.
+fn field_switch(ui: &mut Ui, value: &mut bool) -> egui::Response {
+    ui.with_layout(
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| crate::widgets::switch(ui, value),
+    )
+    .inner
+}
+
+fn draw_choice(ui: &mut Ui, key: &str, value: &mut String, choices: &[(&str, &str)], width: f32) -> bool {
     let selected = choices
         .iter()
         .find(|(candidate, _)| *candidate == value.as_str())
@@ -538,6 +571,7 @@ fn draw_choice(ui: &mut Ui, key: &str, value: &mut String, choices: &[(&str, &st
     let mut changed = false;
     egui::ComboBox::from_id_salt(format!("inspector-{key}"))
         .selected_text(selected)
+        .width(width)
         .show_ui(ui, |ui| {
             for (candidate, label) in choices {
                 if ui.selectable_value(value, (*candidate).to_owned(), *label).changed() {
@@ -576,9 +610,13 @@ fn draw_number(
     stored_expression: Option<&str>,
 ) -> (bool, Option<Option<String>>) {
     let mut changed = false;
+    let control_width = ui.available_width();
     ui.horizontal(|ui| {
+        // Use the field's full control width, not the nested horizontal's
+        // available width: the nested layout subtracts its own indent.
+        ui.set_width(control_width);
         ui.spacing_mut().item_spacing.x = 4.0;
-        let button_size = Vec2::new(22.0, 22.0);
+        let button_size = Vec2::new(24.0, FIELD_ROW_HEIGHT);
         let theme = crate::theme::get();
         let minus = ui_shape::button(
             ui,
@@ -597,7 +635,7 @@ fn draw_number(
         }
         // Keep the number entry centered in the remaining width. The DragValue
         // is a text entry first: clicking it types an exact number.
-        let entry_width = (ui.available_width() - button_size.x * 2.0 - 8.0).max(40.0);
+        let entry_width = (control_width - button_size.x * 2.0 - 8.0).max(40.0);
         let decimals = if step >= 1.0 {
             0
         } else if step >= 0.1 {
@@ -870,9 +908,11 @@ fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         }
     }
     let mut heal = node.values.get("heal").and_then(Value::as_bool).unwrap_or(true);
-    if ui.checkbox(&mut heal, "Heal imported B-rep").changed() {
-        output.changes.push(Change { field: "heal".to_owned(), value: Value::Bool(heal) });
-    }
+    field_row(ui, "Heal imported B-rep", |ui, _| {
+        if field_switch(ui, &mut heal).changed() {
+            output.changes.push(Change { field: "heal".to_owned(), value: Value::Bool(heal) });
+        }
+    });
     let _ = theme;
 }
 
@@ -895,64 +935,63 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    egui::Grid::new(("exporter-grid", &node.id))
-        .num_columns(2)
-        .spacing([10.0, 7.0])
-        .show(ui, |ui| {
-            ui.label("File name");
+    field_row(ui, "File name", |ui, control_width| {
+        if ui
+            .add_sized(
+                [control_width, FIELD_ROW_HEIGHT],
+                egui::TextEdit::singleline(&mut name).hint_text("model"),
+            )
+            .changed()
+        {
+            output.changes.push(Change {
+                field: "fileName".to_owned(),
+                value: Value::String(name.clone()),
+            });
+        }
+    });
+
+    field_row(ui, "Directory", |ui, control_width| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let button_width = 76.0;
+            let path_width = (control_width - button_width - 6.0).max(60.0);
             if ui
-                .add(egui::TextEdit::singleline(&mut name).hint_text("model"))
+                .add_sized(
+                    [path_width, FIELD_ROW_HEIGHT],
+                    egui::TextEdit::singleline(&mut directory)
+                        .hint_text("STEP output folder"),
+                )
                 .changed()
             {
                 output.changes.push(Change {
-                    field: "fileName".to_owned(),
-                    value: Value::String(name.clone()),
+                    field: "directory".to_owned(),
+                    value: Value::String(directory.clone()),
                 });
             }
-            ui.end_row();
-
-            ui.label("Directory");
-            ui.horizontal(|ui| {
-                let button_width = 76.0;
-                let path_width = (ui.available_width() - button_width - 8.0).max(80.0);
-                if ui
-                    .add_sized(
-                        [path_width, 26.0],
-                        egui::TextEdit::singleline(&mut directory)
-                            .hint_text("STEP output folder"),
-                    )
-                    .changed()
-                {
-                    output.changes.push(Change {
-                        field: "directory".to_owned(),
-                        value: Value::String(directory.clone()),
-                    });
-                }
-                if ui_shape::button(
-                    ui,
-                    "Choose…",
-                    button_width,
-                    26.0,
-                    theme.color(theme.control),
-                    egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
-                    theme.color(theme.text),
-                )
-                .clicked()
-                {
-                    output.choose_directory = true;
-                }
-            });
-            ui.end_row();
-
-            ui.label("Overwrite");
-            if draw_switch(ui, &mut overwrite).changed() {
-                output.changes.push(Change {
-                    field: "overwrite".to_owned(),
-                    value: Value::Bool(overwrite),
-                });
+            if ui_shape::button(
+                ui,
+                "Choose…",
+                button_width,
+                FIELD_ROW_HEIGHT,
+                theme.color(theme.control),
+                egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
+                theme.color(theme.text),
+            )
+            .clicked()
+            {
+                output.choose_directory = true;
             }
-            ui.end_row();
         });
+    });
+
+    field_row(ui, "Overwrite", |ui, _| {
+        if field_switch(ui, &mut overwrite).changed() {
+            output.changes.push(Change {
+                field: "overwrite".to_owned(),
+                value: Value::Bool(overwrite),
+            });
+        }
+    });
     let _ = theme;
 }
 
@@ -1113,67 +1152,64 @@ pub fn show(
             );
             ui.add_space(6.0);
         }
-        egui::Grid::new(("inspector-grid", &node.id))
-            .num_columns(2)
-            .spacing([10.0, 7.0])
-            .striped(false)
-            .show(ui, |ui| {
-                for spec in &specs {
-                    let mut value = current_value(node, spec);
-                    let mut changed = false;
-                    ui.label(&spec.label);
-                    match &spec.widget {
-                        Widget::Text => {
-                            let mut text = value.as_str().unwrap_or_default().to_owned();
-                            if ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY)).changed() {
-                                value = Value::String(text);
-                                changed = true;
-                            }
-                        }
-                        Widget::Switch => {
-                            let mut enabled = value.as_bool().unwrap_or(false);
-                            if draw_switch(ui, &mut enabled).changed() {
-                                value = Value::Bool(enabled);
-                                changed = true;
-                            }
-                        }
-                        Widget::Number { min, max, step, kind } => {
-                            let mut number = value.as_f64().unwrap_or(0.0);
-                            let field_id = egui::Id::new(("inspector-number", &node.id, &spec.key));
-                            let stored_expression =
-                                node.expressions.get(&spec.key).map(String::as_str);
-                            let (number_changed, expression_change) = draw_number(
-                                ui,
-                                &mut number,
-                                *step,
-                                *min,
-                                *max,
-                                *kind,
-                                field_id,
-                                stored_expression,
-                            );
-                            if number_changed {
-                                value = Value::from(number);
-                                changed = true;
-                            }
-                            if let Some(expression) = expression_change {
-                                output.expressions.push((spec.key.clone(), expression));
-                            }
-                        }
-                        Widget::Choice(choices) => {
-                            let mut selected = value.as_str().unwrap_or_default().to_owned();
-                            if draw_choice(ui, &spec.key, &mut selected, choices) {
-                                value = Value::String(selected);
-                                changed = true;
-                            }
-                        }
+        for spec in &specs {
+            let mut value = current_value(node, spec);
+            let mut changed = false;
+            field_row(ui, &spec.label, |ui, control_width| match &spec.widget {
+                Widget::Text => {
+                    let mut text = value.as_str().unwrap_or_default().to_owned();
+                    if ui
+                        .add_sized(
+                            [control_width, FIELD_ROW_HEIGHT],
+                            egui::TextEdit::singleline(&mut text),
+                        )
+                        .changed()
+                    {
+                        value = Value::String(text);
+                        changed = true;
                     }
-                    ui.end_row();
-                    if changed {
-                        output.changes.push(Change { field: spec.key.clone(), value });
+                }
+                Widget::Switch => {
+                    let mut enabled = value.as_bool().unwrap_or(false);
+                    if field_switch(ui, &mut enabled).changed() {
+                        value = Value::Bool(enabled);
+                        changed = true;
+                    }
+                }
+                Widget::Number { min, max, step, kind } => {
+                    let mut number = value.as_f64().unwrap_or(0.0);
+                    let field_id = egui::Id::new(("inspector-number", &node.id, &spec.key));
+                    let stored_expression = node.expressions.get(&spec.key).map(String::as_str);
+                    let (number_changed, expression_change) = draw_number(
+                        ui,
+                        &mut number,
+                        *step,
+                        *min,
+                        *max,
+                        *kind,
+                        field_id,
+                        stored_expression,
+                    );
+                    if number_changed {
+                        value = Value::from(number);
+                        changed = true;
+                    }
+                    if let Some(expression) = expression_change {
+                        output.expressions.push((spec.key.clone(), expression));
+                    }
+                }
+                Widget::Choice(choices) => {
+                    let mut selected = value.as_str().unwrap_or_default().to_owned();
+                    if draw_choice(ui, &spec.key, &mut selected, choices, control_width) {
+                        value = Value::String(selected);
+                        changed = true;
                     }
                 }
             });
+            if changed {
+                output.changes.push(Change { field: spec.key.clone(), value });
+            }
+        }
     }
     output
 }
@@ -1201,6 +1237,22 @@ mod tests {
             suppressed: false,
             x: 0.0,
             y: 0.0,
+        }
+    }
+
+    #[test]
+    fn field_columns_are_shared_and_stable() {
+        for width in [220.0, 280.0, 360.0, 480.0] {
+            let (label, control) = field_columns_for(width);
+            assert!(label >= 72.0 && label <= 140.0, "{width}: label {label}");
+            assert!(control >= 64.0, "{width}: control {control}");
+            assert!(
+                label + control + FIELD_COLUMN_GAP <= width + f32::EPSILON,
+                "{width}: columns overflow"
+            );
+            // The same width always produces the same columns. Labels and
+            // current widget values are not inputs to the layout.
+            assert_eq!((label, control), field_columns_for(width));
         }
     }
 

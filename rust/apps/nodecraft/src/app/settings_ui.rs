@@ -285,7 +285,7 @@ impl NodeCraftApp {
                     }
                     SettingsTab::Viewport => {
                         content.heading("Viewport");
-                        content.checkbox(&mut view.cad_mouse, "CAD mouse (middle orbit, Shift+middle pan)");
+                        crate::widgets::switch_row(&mut content, "CAD mouse (middle orbit, Shift+middle pan)", &mut view.cad_mouse);
                         content.add(
                             egui::Slider::new(&mut view.pan_speed, 0.25..=4.0)
                                 .text("Pan speed")
@@ -296,15 +296,16 @@ impl NodeCraftApp {
                                 .text("Orbit speed")
                                 .max_decimals(2),
                         );
-                        content.checkbox(&mut view.translucent, "Translucent");
-                        content.checkbox(&mut view.edges, "Edges");
-                        content.checkbox(&mut view.triangles, "Triangles");
-                        content.checkbox(&mut view.normals, "Face normals");
-                        content.checkbox(&mut view.face_colours, "Face colours");
-                        content.checkbox(&mut view.zebra, "Zebra analysis");
-                        content.checkbox(
-                            &mut feature_overlay,
+                        crate::widgets::switch_row(&mut content, "Translucent", &mut view.translucent);
+                        crate::widgets::switch_row(&mut content, "Edges", &mut view.edges);
+                        crate::widgets::switch_row(&mut content, "Triangles", &mut view.triangles);
+                        crate::widgets::switch_row(&mut content, "Face normals", &mut view.normals);
+                        crate::widgets::switch_row(&mut content, "Face colours", &mut view.face_colours);
+                        crate::widgets::switch_row(&mut content, "Zebra analysis", &mut view.zebra);
+                        crate::widgets::switch_row(
+                            &mut content,
                             "Editing action overlay",
+                            &mut feature_overlay,
                         );
                         content.small("Show translucent added/removed surfaces while a feature node is selected.");
                     }
@@ -350,9 +351,10 @@ impl NodeCraftApp {
                                 .unwrap_or(1)
                         ));
                         content.add_space(8.0);
-                        content.checkbox(
-                            &mut workload_profiler,
+                        crate::widgets::switch_row(
+                            &mut content,
                             "Adaptive workload dispatch (profiler)",
+                            &mut workload_profiler,
                         );
                         content.small(
                             "Chooses how many worker threads each evaluation uses. Narrow graphs use \
@@ -360,9 +362,10 @@ impl NodeCraftApp {
                              configured thread. Turn off for maximum throughput on complex graphs.",
                         );
                         content.add_space(8.0);
-                        content.checkbox(
-                            &mut kernel_fixes,
+                        crate::widgets::switch_row(
+                            &mut content,
                             "Latest SolidCore kernel fixes",
+                            &mut kernel_fixes,
                         );
                         content.small(
                             "Enables the newer offset, fillet and B-rep classification fixes. \
@@ -407,13 +410,15 @@ impl NodeCraftApp {
                         content.monospace(format!("SolidCore Git Hash: {SOLIDCORE_GIT_HASH}"));
                         #[cfg(feature = "gpu-viewport")]
                         content.monospace(format!("MSAA: {}x", crate::gpu_viewport::msaa_samples()));
-                        content.checkbox(
-                            &mut show_view_matrix,
+                        crate::widgets::switch_row(
+                            &mut content,
                             "Show view matrix / camera debug",
+                            &mut show_view_matrix,
                         );
-                        content.checkbox(
-                            &mut show_gpu_info,
+                        crate::widgets::switch_row(
+                            &mut content,
                             "Show GPU / frame debug",
+                            &mut show_gpu_info,
                         );
                         content.add_space(8.0);
                         content.heading("Node activity glow");

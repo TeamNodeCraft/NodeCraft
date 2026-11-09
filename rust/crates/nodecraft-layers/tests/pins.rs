@@ -63,7 +63,7 @@ fn member_manifests_do_not_repeat_the_solidcore_pin() {
         let manifest = rust.join(&member).join("Cargo.toml");
         let Ok(text) = std::fs::read_to_string(&manifest) else { continue };
         for line in text.lines() {
-            if line.contains("github.com/tangency-labs/solidcore") && !line.contains("solidcore-record-new") {
+            if line.contains("github.com/tangency-labs/solidcore") {
                 offenders.push(format!("{}: {}", manifest.display(), line.trim()));
             }
         }

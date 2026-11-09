@@ -47,17 +47,24 @@
 pub mod edge;
 pub mod error;
 pub mod exact;
+mod fillet_corner;
 pub mod missing;
 pub mod preview;
 pub mod treatment;
 
 pub use edge::{
-    EdgeSelection, brep_center, edge_selections, select_edge_by_midpoint, select_edges_by_midpoints,
-    select_edges_by_ordinals, select_edges_from_values, select_edges_from_values_center_first,
+    EdgeSelection, brep_center, edge_selections, select_edge_by_midpoint,
+    select_edges_by_midpoints, select_edges_by_ordinals, select_edges_from_values, tangent_chain,
 };
 pub use error::BlendError;
-pub use exact::{apply_edge_treatment_brep, chamfer_brep, fillet_brep, fillet_brep_exact, fillet_brep_exact_with_kernel, missing_calls, port_units};
-pub use preview::{FILLET_SEGMENTS, apply_edge_treatment, chamfer_brep_exact, chamfer_brep_exact_with_kernel, edge_treatment_preview};
+pub use exact::{
+    apply_edge_treatment_brep, chamfer_brep, fillet_brep, fillet_brep_exact,
+    fillet_brep_exact_with_kernel, missing_calls, port_units,
+};
+pub use preview::{
+    FILLET_SEGMENTS, apply_edge_treatment, chamfer_brep_exact, chamfer_brep_exact_with_kernel,
+    edge_treatment_preview,
+};
 pub use treatment::{ChamferType, Continuity, CornerTurn, EdgeMode, EdgeTreatment};
 
 use solidcore::kernel::Kernel;
@@ -80,7 +87,13 @@ pub fn box_brep(length: f64, width: f64, height: f64) -> Result<(Kernel, Brep), 
         )));
     }
     let mut kernel = nodecraft_solidcore::kernel::kernel();
-    let brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), length, width, height)
-        .map_err(|error| BlendError::Kernel(format!("create_box: {error}")))?;
+    let brep = api::create_box(
+        &mut kernel,
+        Point3::new(0.0, 0.0, 0.0),
+        length,
+        width,
+        height,
+    )
+    .map_err(|error| BlendError::Kernel(format!("create_box: {error}")))?;
     Ok((kernel, brep))
 }
