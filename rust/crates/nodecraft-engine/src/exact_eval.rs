@@ -78,16 +78,22 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             // directly instead of materializing an intermediate Part and copying
             // every body through `realized_solids` before the Boolean.
             let mut inputs = Vec::new();
+            let mut first_error: Option<String> = None;
             for link in self
                 .request
                 .connections
                 .iter()
                 .filter(|link| link.to == start && link.input == "shape")
             {
-                inputs.extend(self.operand_breps(&link.from)?);
+                match self.operand_breps(&link.from) {
+                    Ok(values) => inputs.extend(values),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
             if inputs.is_empty() {
-                return Err("Combine exact operand has no inputs".into());
+                return Err(first_error.unwrap_or_else(|| "Combine exact operand has no inputs".into()));
             }
             return Ok(inputs);
         }
@@ -530,12 +536,23 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 "combine" => {
                     let mut bodies = Vec::new();
                     let mut sketches = Vec::new();
+                    let mut first_error: Option<String> = None;
                     for link in self.request.connections.iter().filter(|link| link.to == node.id && link.input == "shape") {
-                        let part = self.evaluate_part(&link.from)?;
-                        bodies.extend(part.bodies.clone());
-                        sketches.extend(part.sketches.clone());
+                        // A failed import inside a Combine must not poison the
+                        // other, successfully imported operands.
+                        match self.evaluate_part(&link.from) {
+                            Ok(part) => {
+                                bodies.extend(part.bodies.clone());
+                                sketches.extend(part.sketches.clone());
+                            }
+                            Err(error) => {
+                                first_error.get_or_insert(error);
+                            }
+                        }
                     }
-                    if bodies.is_empty() && sketches.is_empty() { return Err("Combine Part has no inputs".into()); }
+                    if bodies.is_empty() && sketches.is_empty() {
+                        return Err(first_error.unwrap_or_else(|| "Combine Part has no inputs".into()));
+                    }
                     Ok(Part { bodies, sketches })
                 }
                 "boolean" | "fuse" => {

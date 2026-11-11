@@ -148,6 +148,20 @@
 
 ### Workspace and graph-model integration
 
+- File actions and their shortcuts now share one application command manager
+  and dispatcher (New, Open, Save, Save As, Close Tab).
+
+
+- Command-O opens the document file dialog, matching File -> Open.
+
+
+- Command-N opens a new blank document, matching the File -> New action.
+
+
+- Combine isolates failed STEP/import operands from successful ones, so one bad
+  file no longer blanks every other body in the part.
+
+
 - Display plan instances now carry kernel edge ids; ghost-edge selection uses
   those ids and arc-length midpoints instead of record indices/middle samples.
 

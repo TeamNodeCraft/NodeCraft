@@ -162,7 +162,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 .and_then(|node| node.cache.as_ref()?.key.clone())
                 .unwrap_or_default();
             let preview_detail = self.request.preview_detail;
-            let key = crate::display::MeshKey::new(node_id, content_hash, tolerance, preview_detail);
+            let key = crate::display::MeshKey::new(node_id, content_hash.clone(), tolerance, preview_detail);
             let mut outputs = BTreeMap::new();
             let mut pending = Vec::new();
             // Placement-only edits reuse each body's local tessellation. Only

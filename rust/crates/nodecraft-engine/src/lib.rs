@@ -1011,12 +1011,21 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
         Ok(inputs)
     } else if node.node_type == "combine" {
         // A Part is a collection of solids. Keep every connected operand rather than
-        // collapsing the Part to its first shape when it reaches a Boolean.
+        // collapsing the Part to its first shape when it reaches a Boolean, and
+        // isolate failed imports from the successfully evaluated operands.
         let mut inputs = Vec::new();
+        let mut first_error: Option<String> = None;
         for link in request.connections.iter().filter(|link| link.to == start && link.input == "shape") {
-            inputs.extend(exact_operand_breps(request, &link.from)?);
+            match exact_operand_breps(request, &link.from) {
+                Ok(values) => inputs.extend(values),
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
         }
-        if inputs.is_empty() { return Err("Combine exact operand has no inputs".into()); }
+        if inputs.is_empty() {
+            return Err(first_error.unwrap_or_else(|| "Combine exact operand has no inputs".into()));
+        }
         Ok(inputs)
     } else {
         Ok(vec![exact_operand_brep(request, start)?])
@@ -3801,6 +3810,26 @@ mod tests {
         let part = output.exact_parts.get("box").expect("box exact part");
         assert_eq!(part.bodies.len(), 1);
         assert!(part.bodies[0].transforms.is_empty());
+    }
+
+    #[test]
+    fn failed_combine_operand_does_not_hide_successful_ones() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["part"], "meshTargets": [],
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}},
+                {"id": "missing", "type": "stepimporter", "values": {"path": "/nonexistent/does-not-exist.step"}},
+                {"id": "part", "type": "combine", "values": {}}
+            ],
+            "connections": [
+                {"from": "box", "out": "shape", "to": "part", "in": "shape"},
+                {"from": "missing", "out": "shape", "to": "part", "in": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        let part = output.exact_parts.get("part").expect("partial combine part");
+        assert_eq!(part.bodies.len(), 1, "valid box must survive the failed import");
+        assert!(!output.response.node_errors.is_empty(), "failed import should still be reported");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod evaluation;
+mod commands;
 mod document_ops;
 mod settings;
 mod settings_ui;
@@ -648,6 +649,7 @@ pub struct NodeCraftApp {
     kernel_fixes: bool,
     cable_routing: CableRouting,
     eval_worker: EvalWorker,
+    commands: commands::CommandManager,
     display_worker: std::sync::Arc<nodecraft_display::service::DisplayWorker>,
     pending_display: Option<(u64, String, bool, Instant)>,
     quality_display: Option<(u64, u64, String, bool, Instant)>,
@@ -1218,6 +1220,7 @@ impl NodeCraftApp {
             kernel_fixes: settings.kernel_fixes,
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
             eval_worker: EvalWorker::new(std::sync::Arc::clone(&display_worker)),
+            commands: commands::CommandManager,
             display_worker,
             pending_display: None,
             quality_display: None,
@@ -2724,6 +2727,64 @@ impl NodeCraftApp {
             };
             self.evaluate();
         }
+    }
+
+    fn application_command_enabled(&self, command: commands::AppCommand) -> bool {
+        if !command.needs_document() {
+            return true;
+        }
+        match command {
+            commands::AppCommand::CloseTab => !self.tabs.is_empty(),
+            _ => self.session.is_some(),
+        }
+    }
+
+    fn execute_application_command(
+        &mut self,
+        ctx: &egui::Context,
+        command: commands::AppCommand,
+    ) {
+        if !self.application_command_enabled(command) {
+            return;
+        }
+        match command {
+            commands::AppCommand::NewDocument => self.new_blank(),
+            commands::AppCommand::OpenDocument => self.start_dialog(
+                ctx,
+                DialogAction::OpenDocument,
+                FileDialogKind::OpenDocument,
+            ),
+            commands::AppCommand::SaveDocument => self.save_document(ctx, false),
+            commands::AppCommand::SaveDocumentAs => self.save_document(ctx, true),
+            commands::AppCommand::CloseTab => {
+                let index = self.active_tab;
+                self.close_tab(index);
+            }
+        }
+    }
+
+    fn poll_application_commands(&mut self, ctx: &egui::Context) -> bool {
+        let commands = self.commands.poll(ctx);
+        if commands.is_empty() {
+            return false;
+        }
+        for command in commands {
+            self.execute_application_command(ctx, command);
+        }
+        true
+    }
+
+    fn application_command_menu_item(
+        &mut self,
+        ui: &mut egui::Ui,
+        command: commands::AppCommand,
+    ) -> bool {
+        let enabled = self.application_command_enabled(command);
+        let clicked = self.commands.menu_item(ui, command, enabled);
+        if clicked {
+            self.execute_application_command(ui.ctx(), command);
+        }
+        clicked
     }
 
     fn new_blank(&mut self) {
@@ -4338,26 +4399,6 @@ impl NodeCraftApp {
         }
         self.poll_dialog(ctx);
         self.node_editor.set_cable_routing(self.cable_routing);
-        {
-            let save_as = ctx.input_mut(|input| {
-                input.consume_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
-                    egui::Key::S,
-                ))
-            });
-            let save = !save_as
-                && ctx.input_mut(|input| {
-                    input.consume_shortcut(&egui::KeyboardShortcut::new(
-                        egui::Modifiers::COMMAND,
-                        egui::Key::S,
-                    ))
-                });
-            if save_as {
-                self.save_document(ctx, true);
-            } else if save {
-                self.save_document(ctx, false);
-            }
-        }
         let view = self.viewport.view();
         let theme_id = Some(crate::theme::active_preset().id);
         if view != self.last_saved_view
@@ -4541,12 +4582,10 @@ impl NodeCraftApp {
         self.advance_inspector_animation(ui.ctx());
         self.advance_layout_animation(ui.ctx());
         self.advance_node_position_animation(ui.ctx());
-        // Standard document shortcut: close the active tab, not the window.
-        // Keep this ahead of the tab bar so it also works while a node inspector
-        // field has focus.
-        if ui.ctx().input(|input| input.modifiers.command && input.key_pressed(egui::Key::W)) {
-            let index = self.active_tab;
-            self.close_tab(index);
+        // Shortcuts and menus both route through the application command
+        // manager. Keep this ahead of the tab bar so it also works while an
+        // inspector field has focus.
+        if self.poll_application_commands(ui.ctx()) {
             ui.ctx().request_repaint();
             return;
         }
@@ -4705,18 +4744,8 @@ impl NodeCraftApp {
                         .style(crate::theme::menu_style)
                         .show(|ui| {
                         ui.set_min_width(230.0);
-                        if ui.button("New").clicked() {
-                            ui.close();
-                            self.new_blank();
-                        }
-                        if ui.button("Open…").clicked() {
-                            ui.close();
-                            self.start_dialog(
-                                ui.ctx(),
-                                DialogAction::OpenDocument,
-                                FileDialogKind::OpenDocument,
-                            );
-                        }
+                        self.application_command_menu_item(ui, commands::AppCommand::NewDocument);
+                        self.application_command_menu_item(ui, commands::AppCommand::OpenDocument);
                         ui.menu_button("Open Recent", |ui| {
                             ui.set_min_width(230.0);
                             if self.recent_files.is_empty() {
@@ -4751,14 +4780,9 @@ impl NodeCraftApp {
                         });
                         ui.separator();
                         let has_document = self.session.is_some();
-                        if ui.add_enabled(has_document, egui::Button::new("Save").shortcut_text("⌘S")).clicked() {
-                            ui.close();
-                            self.save_document(ui.ctx(), false);
-                        }
-                        if ui.add_enabled(has_document, egui::Button::new("Save As…").shortcut_text("⇧⌘S")).clicked() {
-                            ui.close();
-                            self.save_document(ui.ctx(), true);
-                        }
+                        self.application_command_menu_item(ui, commands::AppCommand::SaveDocument);
+                        self.application_command_menu_item(ui, commands::AppCommand::SaveDocumentAs);
+                        self.application_command_menu_item(ui, commands::AppCommand::CloseTab);
                         if ui.add_enabled(has_document, egui::Button::new("Export STEP…")).clicked() {
                             ui.close();
                             self.export_document();
