@@ -46,8 +46,7 @@ nodecraft-worker = { path = "../../crates/nodecraft-worker" }
 solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
 solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
 solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831", optional = true }
+solidcore-record = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nodecraft-macos = { path = "../../crates/nodecraft-macos" }
-
-solidcore-record = { workspace = true }
