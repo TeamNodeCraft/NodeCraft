@@ -1,9 +1,12 @@
-//! Official STEP import: step-import -> step-brep -> solidcore-tess.
+//! Official STEP import: solidcore-step -> solidcore-convert -> solidcore-tess.
 //!
-//! Assembly placement, body metadata and diagnostics live in this module; the
-//! display triangles themselves come from the upstream layer through
-//! `nodecraft-layers` / `solidcore-tess`, the same mesher every evaluated Part
-//! node uses.
+//! `solidcore_step::p21` parses the exchange structure and
+//! `solidcore_step::topology` reads every solid into the schema-4 record form; the
+//! record is converted to a kernel B-rep with `solidcore-convert`, and the display
+//! triangles come from the upstream layer through `nodecraft-layers` /
+//! `solidcore-tess`, the same mesher every evaluated Part node uses.
+//!
+//! Assembly placement, body metadata and diagnostics live in this module.
 //!
 //! This is the worker's STEP import adapter.
 //!
@@ -11,9 +14,8 @@
 //!
 //! The official reader maps every B-rep in a file exactly, but it does not apply STEP
 //! product/assembly instancing: its bodies stay in the coordinates of the
-//! representation that defines them and [`step_import::Model::assembly_instances`]
-//! merely counts the occurrences. Rendering those bodies as-is stacks every component at
-//! the origin (or spreads unrelated, unplaced bodies through the viewport).
+//! representation that defines them. Rendering those bodies as-is stacks every component
+//! at the origin (or spreads unrelated, unplaced bodies through the viewport).
 //!
 //! When a file has placed occurrences, this module uses the product `step-assemblies`
 //! parser instead:
@@ -24,8 +26,8 @@
 //! * An `InFileRepresentation` names a shape representation. Its solid items are resolved
 //!   through untransformed `*_REPRESENTATION_RELATIONSHIP` links (CAD files routinely put
 //!   the solid in an `ADVANCED_BREP_SHAPE_REPRESENTATION` related to the placement-only
-//!   `SHAPE_REPRESENTATION` a product names), then matched to the official reader's body
-//!   `step_id`s.
+//!   `SHAPE_REPRESENTATION` a product names), then matched to the official reader's
+//!   solid items.
 //! * Every meshed body is placed with [`step_assemblies::ComponentInstance::world_transform_mm`]
 //!   (or the accumulated node transform for the root/sub-assembly's own geometry, whose
 //!   translation is in file units).
@@ -41,6 +43,8 @@ use std::path::PathBuf;
 
 use nodecraft_protocol::Mesh;
 use nodecraft_step::{StepFile, Value};
+use solidcore_step::p21;
+use solidcore_step::topology::{self, Solid};
 use step_assemblies::{
     Assembly, ComponentInstance, ComponentSource, Components, Representation, Transform,
 };
@@ -118,6 +122,128 @@ pub struct StepImport {
     pub diagnostics: StepDiagnostics,
 }
 
+/// The solids of one STEP file, read through `solidcore-step`, plus what the
+/// reader refused and noted. Coordinates are millimetres, in the frame of each
+/// solid's own representation (assembly placements are not applied here: see
+/// [`step_assemblies`]).
+#[derive(Debug, Clone, Default)]
+struct StepModel {
+    file_name: String,
+    /// Millimetres per file length unit (what the file's contexts state).
+    unit_mm: f64,
+    bodies: Vec<Solid>,
+    /// Solid items the reader refused, with why.
+    failures: Vec<topology::Failure>,
+    /// What the reader repaired or noted on the way.
+    notes: Vec<String>,
+}
+
+/// Millimetres per file length unit, from the first readable length unit the
+/// file declares (millimetres when it names none).
+fn file_unit_mm(exchange: &p21::Exchange) -> f64 {
+    for (id, entity) in &exchange.entities {
+        if !entity.has("LENGTH_UNIT") {
+            continue;
+        }
+        if let Some((solidcore_step::units::UnitKind::Length, factor)) =
+            solidcore_step::units::unit_factor(exchange, *id)
+            && factor.is_finite()
+            && factor > 0.0
+        {
+            return factor;
+        }
+    }
+    1.0
+}
+
+/// Parses and reads every solid of a STEP file with the official reader.
+fn read_step_model(path: &str) -> Result<StepModel, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    read_step_model_text(path, &text)
+}
+
+/// The pcurves of a face whose uses have no closed-form trim, made by the kernel
+/// (`solidcore_ops::pcurve`). The reader asks for them only where the file gives none:
+/// an approximated intersection curve on a cone, a file's spline edge on a spline
+/// surface. This is the same trim fit every modelling operation uses, and the old STEP
+/// builder's healing pass made the same pcurves.
+struct KernelTrims;
+
+impl solidcore_ops::pcurve::Trims for KernelTrims {
+    fn trims(&self, face: &solidcore_ops::pcurve::TrimFace<'_>) -> Result<Vec<Vec<solidcore_record::brep::Curve2>>, String> {
+        use solidcore_ops::pcurve::{EdgeUse, pcurves_within};
+        let mut loops: Vec<Vec<EdgeUse<'_>>> = Vec::with_capacity(face.loops.len());
+        for loop_ in &face.loops {
+            let mut uses = Vec::with_capacity(loop_.len());
+            for use_ in loop_ {
+                let edge = face
+                    .edges
+                    .get(use_.edge as usize)
+                    .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
+                uses.push(EdgeUse {
+                    edge: use_.edge,
+                    curve: edge.curve,
+                    interval: edge.interval,
+                    forward: use_.forward,
+                    tolerance: edge.tolerance,
+                    given: use_.pcurve.as_ref(),
+                });
+            }
+            loops.push(uses);
+        }
+        pcurves_within(face.surface, &loops, face.tolerance, Some(face.domain)).map_err(|error| error.to_string())
+    }
+}
+
+fn read_step_model_text(path: &str, text: &str) -> Result<StepModel, String> {
+    let exchange = p21::parse(text).map_err(|error| format!("{path}: official STEP reader: {error}"))?;
+    let solids = topology::read_solids_with(&exchange, &KernelTrims);
+    let mut bodies = solids.solids;
+    // Topology no product structure lists (a bare face, shell or solid in a file's DATA
+    // section) is still a body: read each root the representation walk did not reach as
+    // the same schema-4 record, in id order. Bare sheets are common in test files and in
+    // exporters that write a face without a shell.
+    let read: std::collections::BTreeSet<u64> = bodies.iter().map(|solid| solid.item).collect();
+    for item in topology::roots(&exchange) {
+        if read.contains(&item) || !exchange.get(item).is_some_and(|entity| topology::is_body_item(entity.name())) {
+            continue;
+        }
+        match topology::read_solid_with(&exchange, item, solidcore_step::units::Context::default(), &KernelTrims) {
+            Ok(solid) => bodies.push(solid),
+            Err(message) => {
+                // Keep the reason with the other refused bodies.
+                return Ok(StepModel {
+                    file_name: exchange.header.file_name.clone(),
+                    unit_mm: file_unit_mm(&exchange),
+                    bodies,
+                    failures: vec![topology::Failure { item, message }],
+                    notes: Vec::new(),
+                });
+            }
+        }
+    }
+    let notes: Vec<String> = bodies
+        .iter()
+        .flat_map(|solid| solid.notes.iter().map(|note| format!("solid #{}: {note}", solid.item)))
+        .collect();
+    Ok(StepModel {
+        file_name: exchange.header.file_name.clone(),
+        unit_mm: file_unit_mm(&exchange),
+        bodies,
+        failures: solids.failures,
+        notes,
+    })
+}
+
+/// A warning line for each solid the reader refused.
+fn failure_warnings(failures: &[topology::Failure]) -> Vec<String> {
+    failures
+        .iter()
+        .map(|failure| format!("solid #{} was not read: {}", failure.item, failure.message))
+        .collect()
+}
+
 /// Merges per-body meshes into one display mesh with namespaced groups/edges.
 pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
     let has_colors = meshes.iter().any(|mesh| !mesh.face_colors.is_empty());
@@ -163,8 +289,15 @@ fn root_body_count(path: &str) -> Option<usize> {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
-    let model = step_import::import(&bytes, &step_import::Limits::default()).ok()?;
-    Some(model.bodies.len())
+    let text = String::from_utf8_lossy(&bytes);
+    let exchange = p21::parse(&text).ok()?;
+    Some(
+        exchange
+            .entities
+            .values()
+            .filter(|entity| topology::is_solid_item(entity.name()))
+            .count(),
+    )
 }
 
 pub fn import_step(path: &str) -> Result<StepImport, String> {
@@ -240,11 +373,15 @@ fn import_step_guarded(path: &str, stack: &mut Vec<PathBuf>) -> Result<StepImpor
 }
 
 fn import_step_inner(path: &str, stack: &mut Vec<PathBuf>) -> Result<StepImport, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
-    let model = step_import::import(&bytes, &step_import::Limits::default())
-        .map_err(|error| format!("{path}: official STEP reader: {error}"))?;
+    let model = read_step_model(path)
+        .map_err(|error| if error.starts_with(path) { error } else { format!("{path}: {error}") })?;
     if model.bodies.is_empty() {
-        return Err(format!("{path}: official STEP reader found no B-rep bodies"));
+        let refused = model
+            .failures
+            .first()
+            .map(|failure| format!(" (solid #{}: {})", failure.item, failure.message))
+            .unwrap_or_default();
+        return Err(format!("{path}: official STEP reader found no B-rep bodies{refused}"));
     }
 
     match step_assemblies::component_instances(path) {
@@ -263,7 +400,7 @@ fn import_step_inner(path: &str, stack: &mut Vec<PathBuf>) -> Result<StepImport,
         Err(error) => {
             // A file that declares occurrences but whose product graph cannot be parsed
             // must not fall back to emitting unplaced bodies.
-            let text = String::from_utf8_lossy(&bytes);
+            let text = read_step_text(path)?;
             if text.contains("NEXT_ASSEMBLY_USAGE_OCCURRENCE") {
                 return Err(format!("{path}: STEP assembly occurrences could not be resolved: {error}"));
             }
@@ -272,42 +409,46 @@ fn import_step_inner(path: &str, stack: &mut Vec<PathBuf>) -> Result<StepImport,
     }
 }
 
+fn read_step_text(path: &str) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Builds the display mesh for the official reader's bodies without assembly placement.
-fn import_bodies(path: &str, model: &step_import::Model) -> Result<StepImport, String> {
-    let kernel = nodecraft_kernel_profile::kernel();
+fn import_bodies(path: &str, model: &StepModel) -> Result<StepImport, String> {
     let mut meshes = Vec::with_capacity(model.bodies.len());
     let mut body_names = Vec::with_capacity(model.bodies.len());
     let mut healed_bodies = 0usize;
     for body in &model.bodies {
-        body_names.push(body.name.clone().unwrap_or_default());
-        let (mesh, healed) = body_display_mesh(&kernel, body)
-            .map_err(|error| format!("{path}: solid #{}: {error}", body.step_id))?;
+        body_names.push(body.name.clone());
+        let (mesh, healed) = body_display_mesh(body)
+            .map_err(|error| format!("{path}: solid #{}: {error}", body.item))?;
         if healed {
             healed_bodies += 1;
         }
         meshes.push(mesh);
     }
     let mesh = merge_meshes(meshes);
-    let unit = model.bodies.first().map(|body| body.unit_mm).unwrap_or(1.0);
-    let mut warnings: Vec<String> = model.diagnostics.iter().map(|diagnostic| diagnostic.message.clone()).collect();
+    let mut warnings = failure_warnings(&model.failures);
+    warnings.extend(model.notes.iter().cloned());
     if healed_bodies > 0 {
-        warnings.push(format!("{healed_bodies} body/bodies required healing for display tessellation"));
+        warnings.push(format!("{healed_bodies} body/bodies needed STEP reader repairs (turned faces or raised tolerances)"));
     }
     let mut diagnostics = StepDiagnostics {
         kind: "solidcore-brep".into(),
         bodies: model.bodies.len(),
         breps: model.bodies.len(),
         body_names,
-        unit: Some(format!("{unit} mm/unit")),
-        name: Some(model.header.file_name.clone()).filter(|name| !name.is_empty()),
+        unit: Some(format!("{} mm/unit", model.unit_mm)),
+        name: Some(model.file_name.clone()).filter(|name| !name.is_empty()),
         mesh_vertices: mesh.vertices.len(),
         mesh_triangles: mesh.faces.len(),
         warnings,
         ..StepDiagnostics::default()
     };
-    diagnostics.brep_faces = model.bodies.iter().map(|body| body.faces.len()).sum();
-    diagnostics.brep_edges = model.bodies.iter().map(|body| body.edges.len()).sum();
-    diagnostics.brep_vertices = model.bodies.iter().map(|body| body.vertices.len()).sum();
+    diagnostics.brep_faces = model.bodies.iter().map(|body| body.brep.faces.len()).sum();
+    diagnostics.brep_edges = model.bodies.iter().map(|body| body.brep.edges.len()).sum();
+    diagnostics.brep_vertices = model.bodies.iter().map(|body| body.brep.vertices.len()).sum();
     Ok(StepImport { mesh, diagnostics })
 }
 
@@ -323,20 +464,10 @@ fn mesh_has_invalid_coordinates(mesh: &Mesh) -> bool {
     })
 }
 
-fn body_display_mesh(
-    kernel: &solidcore::kernel::Kernel,
-    body: &step_import::model::Body,
-) -> Result<(Mesh, bool), String> {
-    let mut brep = step_brep::build(body).map_err(|error| error.to_string())?;
-    let mut healed = false;
-    if !step_brep::has_uv_trims(&brep).unwrap_or(false) {
-        brep = step_brep::build_healed(body).map_err(|error| error.to_string())?;
-        healed = true;
-    }
-    step_brep::validate_for_display(&brep).map_err(|error| error.to_string())?;
-    // The file's `same_sense` flags are the authority on which way each face faces;
-    // the stitching/face-use metadata can expose a stale face use for some faces.
-    let senses: Vec<bool> = body.faces.iter().map(|face| face.same_sense).collect();
+fn body_display_mesh(body: &Solid) -> Result<(Mesh, bool), String> {
+    // Tessellate the reader's record directly: the record is the exact geometry the
+    // reader validated, and `solidcore-tess` plans on it (no kernel round trip).
+    let healed = !body.notes.is_empty() || !body.turned.is_empty();
     // ---------------------------------------------------------------------------
     // SolidCraft LOD contract (read before changing these factors)
     //
@@ -361,7 +492,7 @@ fn body_display_mesh(
     let requested = crate::display_tolerance();
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
-    for vertex in &body.vertices {
+    for vertex in &body.brep.vertices {
         for axis in 0..3 {
             min[axis] = min[axis].min(vertex.point[axis]);
             max[axis] = max[axis].max(vertex.point[axis]);
@@ -379,45 +510,21 @@ fn body_display_mesh(
     };
     let effective = if extent > 0.0 { requested.min(extent * factor).max(1.0e-9) } else { requested };
     crate::set_display_tolerance(Some(effective));
-    let render = |brep: &solidcore::topology::Brep| -> Result<Mesh, String> {
-        // Display tessellation belongs to the upstream layer just like every
-        // evaluated Part node: convert the imported kernel B-rep to the record
-        // form and let solidcore-tess plan/evaluate it. STEP assembly placement
-        // and diagnostics stay in this importer.
-        let mut copy = brep
-            .clone_standing_for_self()
-            .map_err(|error| format!("display copy: {error}"))?;
-        let mut tess_kernel = nodecraft_kernel_profile::kernel();
-        // The local LOD factor can ask for a sub-micrometre sag on a small
-        // imported body. solidcore-tess's planner then spends seconds on a
-        // planar face that needs none of it, while producing the same triangles.
-        // Keep the upstream tessellation at viewport-meaningful sag.
-        const MIN_TESSELLATION_SAG: f64 = 0.05;
-        match nodecraft_layers::tessellate_kernel(
-            &mut tess_kernel,
-            &mut copy,
-            effective.max(MIN_TESSELLATION_SAG),
-        ) {
-            Ok(mut display) => {
-                // Imported same_sense flags remain authoritative over stale face uses.
-                crate::orient_mesh_to_senses(kernel, brep, &mut display.mesh, &senses);
-                Ok(display.mesh)
-            }
-            Err(error) => Err(format!("upstream tessellation: {error}")),
-        }
-    };
-    let mut mesh = render(&brep)?;
+    // The local LOD factor can ask for a sub-micrometre sag on a small imported body.
+    // solidcore-tess's planner then spends seconds on a planar face that needs none of
+    // it, while producing the same triangles. Keep the upstream tessellation at a
+    // viewport-meaningful sag.
+    const MIN_TESSELLATION_SAG: f64 = 0.05;
+    let mesh = nodecraft_layers::tessellate_record(
+        &body.brep,
+        &nodecraft_layers::MeshTolerance::display(effective.max(MIN_TESSELLATION_SAG).max(1.0e-5)),
+        extent.max(1.0),
+    )
+    .map_err(|error| format!("upstream tessellation: {error}"))?
+    .mesh;
+
     if mesh_has_invalid_coordinates(&mesh) {
-        // ST-ACIS unbounded cones can carry a seam at SolidCore's infinity marker.
-        // Retry without inserted non-cylindrical cone seams; the source loops
-        // already bound those faces.
-        let fallback = step_brep::build_without_cone_seams(body)
-            .map_err(|error| error.to_string())?;
-        step_brep::validate_for_display(&fallback).map_err(|error| error.to_string())?;
-        mesh = render(&fallback)?;
-        if mesh_has_invalid_coordinates(&mesh) {
-            return Err("display mesh contains infinity-marker coordinates".into());
-        }
+        return Err("display mesh contains infinity-marker coordinates".into());
     }
     if mesh.faces.is_empty() {
         return Err("tessellation produced no triangles".into());
@@ -427,17 +534,14 @@ fn body_display_mesh(
 
 /// Mesh independent assembly bodies on the available cores.
 ///
-/// Bodies share only the read-only neutral model. Each worker gets its own kernel and
-/// thread-local display tolerance; the resulting meshes are later placed/instanced by
-/// the single-threaded assembly walk.
+/// Bodies share only the read-only neutral model; each worker sets the thread-local
+/// display tolerance, and the resulting meshes are later placed/instanced by the
+/// single-threaded assembly walk.
 fn premesh_bodies(
-    bodies: &BTreeMap<u64, &step_import::model::Body>,
+    bodies: &BTreeMap<u64, &Solid>,
 ) -> BTreeMap<u64, Result<(Mesh, bool), String>> {
     let requested = crate::display_tolerance();
-    let entries: Vec<(u64, &step_import::model::Body)> = bodies
-        .iter()
-        .map(|(id, body)| (*id, *body))
-        .collect();
+    let entries: Vec<(u64, &Solid)> = bodies.iter().map(|(id, body)| (*id, *body)).collect();
     let mut results = BTreeMap::new();
     let workers = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -449,17 +553,16 @@ fn premesh_bodies(
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
                 crate::set_display_tolerance(Some(requested));
-                let kernel = nodecraft_kernel_profile::kernel();
                 let mut local = Vec::new();
                 for index in (worker..entries.len()).step_by(workers) {
                     let (id, body) = entries[index];
-                    local.push((id, body_display_mesh(&kernel, body)));
+                    local.push((id, body_display_mesh(body)));
                 }
                 local
             }));
         }
         for handle in handles {
-            for (id, result) in handle.join().expect("body mesher thread panicked") {
+            for (id, result) in handle.join().expect("body tessellation thread panicked") {
                 results.insert(id, result);
             }
         }
@@ -471,8 +574,7 @@ fn premesh_bodies(
 struct AssemblyCollector<'a> {
     path: &'a str,
     root: &'a str,
-    kernel: solidcore::kernel::Kernel,
-    bodies: BTreeMap<u64, &'a step_import::model::Body>,
+    bodies: BTreeMap<u64, &'a Solid>,
     premesh: BTreeMap<u64, Result<(Mesh, bool), String>>,
     cache: BTreeMap<u64, Mesh>,
     meshes: Vec<Mesh>,
@@ -492,10 +594,10 @@ impl<'a> AssemblyCollector<'a> {
             .get(&body_id)
             .ok_or_else(|| format!("{}: assembly '{}' body #{body_id} was not mapped by the official reader", self.path, self.root))?;
         if !self.cache.contains_key(&body_id) {
-            let result = self
-                .premesh
-                .remove(&body_id)
-                .unwrap_or_else(|| body_display_mesh(&self.kernel, body));
+            let result = match self.premesh.remove(&body_id) {
+                Some(result) => result,
+                None => body_display_mesh(body),
+            };
             let (mesh, healed) = result
                 .map_err(|error| format!("{}: assembly '{}' body #{body_id}: {error}", self.path, self.root))?;
             if healed {
@@ -508,9 +610,9 @@ impl<'a> AssemblyCollector<'a> {
         self.meshes.push(mesh);
         self.placed_ids.insert(body_id);
         self.placed_bodies += 1;
-        self.brep_faces += body.faces.len();
-        self.brep_edges += body.edges.len();
-        self.brep_vertices += body.vertices.len();
+        self.brep_faces += body.brep.faces.len();
+        self.brep_edges += body.brep.edges.len();
+        self.brep_vertices += body.brep.vertices.len();
         self.body_names.push(name.to_string());
         Ok(())
     }
@@ -518,7 +620,7 @@ impl<'a> AssemblyCollector<'a> {
 
 fn import_assembly(
     path: &str,
-    model: &step_import::Model,
+    model: &StepModel,
     assembly: &Assembly,
     components: &Components,
     stack: &mut Vec<PathBuf>,
@@ -530,22 +632,16 @@ fn import_assembly(
         .root()
         .map(|node| node.name.clone())
         .unwrap_or_else(|| "assembly".into());
-    let bodies: BTreeMap<u64, &step_import::model::Body> =
-        model.bodies.iter().map(|body| (body.step_id, body)).collect();
+    let bodies: BTreeMap<u64, &Solid> = model.bodies.iter().map(|body| (body.item, body)).collect();
 
     let mut warnings: Vec<String> = components.warnings.clone();
-    for diagnostic in &model.diagnostics {
-        // The official reader's own "instances are not applied" note is superseded here.
-        if !diagnostic.message.contains("assembly instance") {
-            warnings.push(diagnostic.message.clone());
-        }
-    }
+    warnings.extend(failure_warnings(&model.failures));
+    warnings.extend(model.notes.iter().cloned());
 
     let premesh = premesh_bodies(&bodies);
     let mut collector = AssemblyCollector {
         path,
         root: &root,
-        kernel: nodecraft_kernel_profile::kernel(),
         bodies,
         premesh,
         cache: BTreeMap::new(),
@@ -662,18 +758,21 @@ fn import_assembly(
     }
 
     // Never silently render a representation body that no occurrence places.
-    let unplaced_bodies: Vec<&step_import::model::Body> = model
+    let unplaced_bodies: Vec<&Solid> = model
         .bodies
         .iter()
-        .filter(|body| !collector.placed_ids.contains(&body.step_id))
+        .filter(|body| !collector.placed_ids.contains(&body.item))
         .collect();
     if !unplaced_bodies.is_empty() {
         let sample = unplaced_bodies
             .iter()
             .take(6)
-            .map(|body| match &body.name {
-                Some(name) if !name.is_empty() => format!("#{} ({name})", body.step_id),
-                _ => format!("#{}", body.step_id),
+            .map(|body| {
+                if body.name.is_empty() {
+                    format!("#{}", body.item)
+                } else {
+                    format!("#{} ({})", body.item, body.name)
+                }
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -707,7 +806,7 @@ fn import_assembly(
         breps: collector.placed_bodies,
         body_names: collector.body_names,
         unit: Some(format!("{} mm/unit", components.unit_scale_mm)),
-        name: Some(model.header.file_name.clone()).filter(|name| !name.is_empty()),
+        name: Some(model.file_name.clone()).filter(|name| !name.is_empty()),
         mesh_vertices: mesh.vertices.len(),
         mesh_triangles: mesh.faces.len(),
         warnings,
@@ -722,7 +821,7 @@ fn import_assembly(
     if collector.healed > 0 {
         diagnostics
             .warnings
-            .push(format!("{} body/bodies required healing for display tessellation", collector.healed));
+            .push(format!("{} body/bodies needed STEP reader repairs (turned faces or raised tolerances)", collector.healed));
     }
     Ok(StepImport { mesh, diagnostics })
 }
@@ -880,12 +979,12 @@ struct ResolvedGeometry {
 }
 
 impl BodyResolver {
-    fn new(file: &StepFile, representations: &[Representation], model: &step_import::Model) -> Self {
+    fn new(file: &StepFile, representations: &[Representation], model: &StepModel) -> Self {
         let items: BTreeMap<u32, Vec<u32>> = representations
             .iter()
             .map(|representation| (representation.entity_id, representation.items.clone()))
             .collect();
-        let body_ids = model.bodies.iter().map(|body| body.step_id).collect();
+        let body_ids = model.bodies.iter().map(|body| body.item).collect();
         let mapped_items = file
             .entities
             .iter()
@@ -1015,16 +1114,20 @@ fn collect_representation_refs(
     }
 }
 
-/// Imports the first B-rep body from a STEP file through step-import + step-brep.
+/// Imports the first B-rep body of a STEP file as a kernel B-rep.
 ///
 /// Boolean/extrude nodes consume B-reps, not display meshes, so they must not use the
-/// legacy `brep_from_step` dispatch. This keeps the official reader authoritative.
+/// legacy `brep_from_step` dispatch. The official reader is authoritative here: the
+/// solid is read into its schema-4 record and converted through `solidcore-convert`.
 pub fn import_step_brep(path: &str) -> Result<solidcore::Brep, String> {
-    let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
-    let model = step_import::import(&bytes, &step_import::Limits::default())
-        .map_err(|error| format!("{path}: official STEP reader: {error}"))?;
-    let body = model.bodies.first().ok_or_else(|| format!("{path}: official STEP reader found no B-rep bodies"))?;
-    step_brep::build(body).map_err(|error| format!("{path}: solid #{}: {error}", body.step_id))
+    let model = read_step_model(path)?;
+    let body = model
+        .bodies
+        .first()
+        .ok_or_else(|| format!("{path}: official STEP reader found no B-rep bodies"))?;
+    let mut kernel = nodecraft_kernel_profile::kernel();
+    solidcore_convert::brep::to_kernel_body(&mut kernel, &body.brep, true)
+        .map_err(|error| format!("{path}: solid #{}: {error}", body.item))
 }
 
 #[cfg(test)]
@@ -1379,15 +1482,13 @@ mod tests {
         // SMLib's reference metrics describe the single MANIFOLD_SOLID_BREP (#1473):
         // SMLib reports zero bodies for faceted-only files (calo/cylcub), so its bernetl
         // result omits the DETAIL1 instances that this import places.
-        let bytes = std::fs::read(&path).expect("read fixture");
-        let model = step_import::import(&bytes, &step_import::Limits::default()).expect("official model");
-        let kernel = solidcore::kernel::Kernel::default();
+        let model = read_step_model(path.to_str().unwrap()).expect("official model");
         let master = model
             .bodies
             .iter()
-            .find(|body| body.step_id == 1473)
+            .find(|body| body.item == 1473)
             .expect("master MANIFOLD_SOLID_BREP");
-        let (master_mesh, _) = body_display_mesh(&kernel, master).expect("master display mesh");
+        let (master_mesh, _) = body_display_mesh(master).expect("master display mesh");
         let (master_min, master_max) = mesh_bounds(&master_mesh);
         assert_bbox(
             master_min,
@@ -1410,9 +1511,9 @@ mod tests {
         let detail = model
             .bodies
             .iter()
-            .find(|body| body.step_id == 3202)
+            .find(|body| body.item == 3202)
             .expect("DETAIL1 FACETED_BREP");
-        let (detail_mesh, _) = body_display_mesh(&kernel, detail).expect("detail display mesh");
+        let (detail_mesh, _) = body_display_mesh(detail).expect("detail display mesh");
         let (detail_volume, detail_area) = mesh_volume_area(&detail_mesh);
         let (total_volume, total_area) = mesh_volume_area(&import.mesh);
         assert!(
@@ -1426,7 +1527,7 @@ mod tests {
         );
         assert_eq!(
             import.diagnostics.brep_faces,
-            master.faces.len() + 3 * detail.faces.len()
+            master.brep.faces.len() + 3 * detail.brep.faces.len()
         );
     }
 

@@ -4,6 +4,15 @@ use super::*;
 
 /// Display-only tessellation through the upstream layer seam. Exact geometry
 /// never passes through this function.
+#[cfg(test)]
+fn display_quality(tolerance: f64, preview_detail: Option<u8>) -> nodecraft_display::DisplayQuality {
+    match preview_detail {
+        Some(detail) => nodecraft_display::DisplayQuality::Preview(detail),
+        None => nodecraft_display::DisplayQuality::Full(tolerance),
+    }
+}
+
+#[cfg(test)]
 fn display_mesh_for_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> Result<Mesh, String> {
     let mut kernel = nodecraft_solidcore::kernel::kernel();
     let mut brep = copy_brep(brep)?;
@@ -13,6 +22,7 @@ fn display_mesh_for_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) 
 impl<'req, 'prog> Eval<'req, 'prog> {
     /// Cache a display mesh only when the node itself has no recorded error.
     /// Bypassed meshes from failed nodes must never become healthy cache hits.
+    #[cfg(test)]
     pub(crate) fn cache_mesh_result(
         &mut self,
         node_id: &str,
@@ -20,22 +30,28 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         mesh: &Mesh,
     ) {
         if let Some(error) = self.errors.get(node_id) {
-            self.cache.insert_failure(cache_key.clone(), error.clone());
-            self.cache.remove_mesh(&cache_key);
+            self.cache.insert_failure(cache_key, error.clone());
         } else {
             self.cache.remove_failure(&cache_key);
-            self.cache.insert_mesh(cache_key, mesh.clone());
         }
+        let _ = mesh;
     }
 
     /// Evaluate and tessellate a Part display target without evaluating any
     /// upstream node as a mesh.
+    #[cfg(test)]
     pub(crate) fn evaluate_part_display(&mut self, node_id: &str) -> Option<Mesh> {
         let node = self.request.nodes.iter().find(|node| node.id == node_id)?.clone();
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_is_fresh = node_cache_is_fresh(&node);
         let mesh_quality = nodecraft_mesh::display_tolerance();
-        let cache_key = (format!("{node_id}@q{mesh_quality:.6}"), node_key);
+        // Preview quality is part of the display identity: otherwise a camera
+        // quality change could reuse the previous merged mesh.
+        let quality_key = match self.request.preview_detail {
+            Some(detail) => format!("p{detail}"),
+            None => format!("q{mesh_quality:.6}"),
+        };
+        let cache_key = (format!("{node_id}@{quality_key}"), node_key);
         if !self.bypass_cache && cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
             self.cache_hits += 1;
             self.cache.note_failure_hit();
@@ -48,12 +64,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 return Some(mesh);
             }
             return None;
-        }
-        if !self.bypass_cache && cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
-            self.cache_hits += 1;
-            self.objects.insert(node_id.into(), mesh.clone());
-            self.order.push(node_id.into());
-            return Some(mesh);
         }
         let started = Instant::now();
         self.cache_misses += 1;
@@ -76,7 +86,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
             Err(error) => {
                 self.cache.insert_failure(cache_key.clone(), error.clone());
-                self.cache.remove_mesh(&cache_key);
                 self.errors.insert(node_id.into(), error);
                 if let Some(source) = bypass_source(&node, &self.request.connections)
                     && let Some(mesh) = self.evaluate(&source)
@@ -99,11 +108,18 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node = self.request.nodes.iter().find(|node| node.id == node_id);
         let key = node.and_then(|node| node.cache.as_ref()?.key.clone()).unwrap_or_default();
         let cache_is_fresh = node.is_some_and(node_cache_is_fresh);
-        if !self.bypass_cache && cache_is_fresh && self.cache.part(&(node_id.to_owned(), key)).is_some() {
+        if !self.bypass_cache
+            && cache_is_fresh
+            && let Some(part) = self.cache.part(&(node_id.to_owned(), key))
+        {
             self.cache.note_part_hit();
             self.cache_hits += 1;
+            self.part_cache_hits += 1;
+            // Keep the exact result visible to the display service on a cache hit.
+            self.parts.insert(node_id.to_owned(), part);
             return;
         }
+        self.cache_misses += 1;
         let started = Instant::now();
         self.emit_progress(node_id, ProgressPhase::Start);
         match self.evaluate_part(node_id) {
@@ -123,10 +139,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     }
 
     /// Tessellate the final exact Part once, using standard display density.
+    #[cfg(test)]
     pub(crate) fn part_display_mesh(&mut self, node_id: &str, part: &Part) -> Result<Mesh, String> {
         self.part_mesh_asset(node_id, part).map(|asset| asset.merged())
     }
 
+    #[cfg(test)]
     pub(crate) fn part_mesh_asset(&mut self, node_id: &str, part: &Part) -> Result<crate::display::MeshAsset, String> {
         if part.bodies.is_empty() && part.sketches.is_empty() {
             return Err("Part has no geometry to display".into());
@@ -143,18 +161,26 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 .find(|node| node.id == node_id)
                 .and_then(|node| node.cache.as_ref()?.key.clone())
                 .unwrap_or_default();
-            let key = crate::display::MeshKey::new(node_id, content_hash, tolerance);
+            let preview_detail = self.request.preview_detail;
+            let key = crate::display::MeshKey::new(node_id, content_hash, tolerance, preview_detail);
             let mut outputs = BTreeMap::new();
             let mut pending = Vec::new();
             // Placement-only edits reuse each body's local tessellation. Only
             // the transform is reapplied; the B-rep is not tessellated again.
             for (index, body) in part.bodies.iter().enumerate() {
                 let transforms = body_transforms(body.body.as_ref(), part, index);
-                if !self.bypass_cache && let Some(local) = self.cache.body_mesh(&body.body, tolerance) {
-                    let mut mesh = (*local).clone();
+                let body_key = nodecraft_exact::BodyKey::new(fnv_seed(&content_hash), index as u32);
+                if !self.bypass_cache
+                    && let Some(cached) = self.display_plans.get(body_key, display_quality(tolerance, preview_detail))
+                {
+                    let display = nodecraft_layers::evaluate_plan(&cached.plan, &cached.edge_ids);
+                    let mut mesh = display.mesh;
                     apply_brep_face_colors(body.body.as_ref(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
                         mesh: std::sync::Arc::new(mesh),
+                        plan: Some(cached.plan),
+                        plan_edge_ids: cached.edge_ids,
+                        stats: Some(cached.stats),
                         transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                     });
                 } else {
@@ -162,21 +188,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 }
             }
             if !pending.is_empty() {
-                let mesher = crate::mesher::shared_mesher();
+                let tessellation = crate::tessellation::shared_tessellation();
                 let limit = if crate::workload_profiler_enabled() {
                     crate::workload::profile_request(self.request)
                         .mesh_bodies
                         .max(1)
-                        .min(mesher.workers().max(1) * 2)
+                        .min(tessellation.workers().max(1) * 2)
                 } else {
-                    mesher.workers().max(1) * 2
+                    tessellation.workers().max(1) * 2
                 };
                 let mut pending = pending.into_iter();
                 let mut running: std::collections::VecDeque<(
                     usize,
                     Arc<nodecraft_solidcore::solidcore::topology::Brep>,
                     Vec<BodyTransform>,
-                    std::sync::mpsc::Receiver<crate::mesher::MeshResult>,
+                    std::sync::mpsc::Receiver<crate::tessellation::MeshResult>,
                 )> = std::collections::VecDeque::new();
                 loop {
                     if token.is_cancelled() {
@@ -193,22 +219,34 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                                 transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                             },
                         };
-                        running.push_back((index, body, transforms, mesher.submit(request, revision)));
+                        running.push_back((index, body, transforms, tessellation.submit(request, revision)));
                     }
                     let Some((index, body, transforms, receiver)) = running.pop_front() else { break };
-                    let result = receiver.recv().map_err(|_| "mesher worker stopped".to_owned())?;
+                    let result = receiver.recv().map_err(|_| "tessellation worker stopped".to_owned())?;
                     if result.revision != self.request.request_id {
                         continue;
                     }
                     let mut result_asset = result.asset?;
                     let Some(instance) = result_asset.instances.pop() else {
-                        return Err("mesher returned no instance".into());
+                        return Err("tessellation returned no instance".into());
                     };
-                    self.cache.insert_body_mesh(body.clone(), tolerance, instance.mesh.clone());
+                    let plan = instance.plan.clone();
+                    let stats = instance.stats.clone();
+                    let plan_for_cache = plan.clone().unwrap_or_default();
+                    self.display_plans.insert(
+                        nodecraft_exact::BodyKey::new(fnv_seed(&content_hash), index as u32),
+                        display_quality(tolerance, preview_detail),
+                        plan_for_cache,
+                        instance.plan_edge_ids.clone(),
+                        stats.clone().unwrap_or_default(),
+                    );
                     let mut mesh = (*instance.mesh).clone();
                     apply_brep_face_colors(body.as_ref(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
                         mesh: std::sync::Arc::new(mesh),
+                        plan,
+                        plan_edge_ids: instance.plan_edge_ids.clone(),
+                        stats,
                         transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                     });
                 }
@@ -222,16 +260,27 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             transforms.push(crate::display::DisplayTransform::Place { offset: sketch.output.offset, rotation: [0.0; 3] });
             transforms.extend(sketch.transforms.iter().map(crate::display::DisplayTransform::from));
             mesh = crate::display::MeshAsset {
-                instances: vec![crate::display::MeshInstance { mesh: std::sync::Arc::new(mesh), transforms }],
+                instances: vec![crate::display::MeshInstance { mesh: std::sync::Arc::new(mesh), plan: None, plan_edge_ids: Vec::new(), stats: None, transforms }],
             }.merged();
             asset.instances.push(crate::display::MeshInstance {
                 mesh: std::sync::Arc::new(mesh),
+                plan: None,
+                plan_edge_ids: Vec::new(),
+                stats: None,
                 transforms: Vec::new(),
             });
+        }
+        for instance in &asset.instances {
+            if let Some(stats) = &instance.stats {
+                for line in &stats.diagnostics {
+                    self.tessellation_diagnostics.push(format!("{node_id}: {line}"));
+                }
+            }
         }
         Ok(asset)
     }
 
+    #[cfg(test)]
     pub(crate) fn evaluate(&mut self, node_id: &str) -> Option<Mesh> {
         // A newer edit cancels the display pass. Check between nodes so the
         // exact worker is not held up by the rest of a stale graph.
@@ -282,20 +331,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
             self.visiting.pop();
             return None;
-        }
-        if !self.bypass_cache && cache_is_fresh && let Some(mesh) = self.cache.mesh(&cache_key) {
-            self.cache_hits += 1;
-            self.visiting.pop();
-            self.objects.insert(node_id.into(), mesh.clone());
-            // A mesh-cache hit still has to restore the exact result used by
-            // exporters and exact consumers.
-            let brep_key = (node_id.to_string(), node_key.clone());
-            if !self.bypass_cache && let Some(brep) = self.cache.brep(&brep_key) {
-                self.cache.note_brep_hit();
-                self.breps.insert(node_id.into(), brep);
-            }
-            self.timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
-            return Some(mesh);
         }
         self.cache_misses += 1;
         // Supported modeling nodes have exactly one semantic implementation:
@@ -616,7 +651,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let b_breps = self.operand_breps(&b)?;
                 let result = crate::node_task::execute_exact(
                     crate::node_task::ExactNodeTask::Boolean {
-                        op: crate::ops_boolean(op),
+                        op,
                         a: a_breps,
                         b: b_breps,
                     },
@@ -645,7 +680,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let output = self
                         .sketch_output_for(&link.from)
                         .ok_or("Extrude sketch source did not evaluate")?;
-                    let result = Arc::new(sketch_extrude_brep(&output, amount)?);
+                    let result = Arc::new(crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::ExtrudeSketch { output: std::sync::Arc::new(output), amount },
+                        node_id,
+                        fnv_seed(node_id),
+                    )?.into_brep().ok_or_else(|| "sketch extrude task returned no shape".to_owned())?);
                     self.breps.insert(node_id.into(), result.clone());
                     if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                         self.cache.insert_brep((node_id.to_string(), cache), result.clone());
@@ -869,7 +908,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if node.node_type != "exporter" {
                     self.cache.insert_failure(cache_key.clone(), error.clone());
                 }
-                self.cache.remove_mesh(&cache_key);
                 self.errors.insert(node_id.into(), error);
                 None
             }

@@ -1,6 +1,6 @@
-//! Display-mesher boundary types.
+//! Display-tessellation boundary types.
 //!
-//! SolidCore owns exact B-reps. The mesher owns display meshes. The engine
+//! SolidCore owns exact B-reps. The tessellation worker owns display meshes. The engine
 //! describes a display target as a request of local body meshes plus instance
 //! transforms; the viewport can draw those instances without merging them.
 
@@ -8,8 +8,10 @@ use crate::kernel_pool::RevisionToken;
 use nodecraft_protocol::Mesh;
 use std::sync::Arc;
 
+pub use nodecraft_display::{DisplayTransform, PlanInstance, face_colors_by_index};
+
 /// Bump when the meshing algorithm changes so cached meshes are not reused.
-pub const MESHER_VERSION: u32 = 1;
+pub const TESSELLATION_VERSION: u32 = 1;
 
 /// Stable key for one display mesh.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -17,17 +19,24 @@ pub struct MeshKey {
     pub target: String,
     pub content_hash: String,
     pub tolerance_bits: u64,
-    pub mesher_version: u32,
+    pub preview_detail: Option<u8>,
+    pub tessellation_version: u32,
 }
 
 impl MeshKey {
     #[must_use]
-    pub fn new(target: impl Into<String>, content_hash: impl Into<String>, tolerance: f64) -> Self {
+    pub fn new(
+        target: impl Into<String>,
+        content_hash: impl Into<String>,
+        tolerance: f64,
+        preview_detail: Option<u8>,
+    ) -> Self {
         Self {
             target: target.into(),
             content_hash: content_hash.into(),
             tolerance_bits: tolerance.to_bits(),
-            mesher_version: MESHER_VERSION,
+            preview_detail,
+            tessellation_version: TESSELLATION_VERSION,
         }
     }
 }
@@ -37,7 +46,7 @@ impl MeshKey {
 pub struct DisplayTarget {
     pub node_id: String,
     pub key: MeshKey,
-    /// True when the target is also an exact Part consumer. The mesher still
+    /// True when the target is also an exact Part consumer. The tessellation worker still
     /// only receives B-reps; it never sees this flag.
     pub exact: bool,
 }
@@ -46,25 +55,24 @@ pub struct DisplayTarget {
 #[derive(Clone, Debug)]
 pub struct MeshInstance {
     pub mesh: Arc<Mesh>,
+    /// The plan the CPU mesh was evaluated from, when the body has one. The
+    /// viewport can evaluate this plan on the GPU; transforms remain separate.
+    pub plan: Option<Arc<solidcore_tess::TessPlan>>,
+    /// Kernel edge id by record edge index for deriving the CPU mesh from the plan.
+    pub plan_edge_ids: Vec<Option<String>>,
+    /// Planner diagnostics for this body, when it was just tessellated.
+    pub stats: Option<nodecraft_layers::TessStats>,
     pub transforms: Vec<DisplayTransform>,
 }
 
-/// Placement applied after the local mesh is produced.
-#[derive(Clone, Debug)]
-pub enum DisplayTransform {
-    Place { offset: [f64; 3], rotation: [f64; 3] },
-    Mirror { plane: &'static str, offset: f64 },
-    Scale { factor: f64 },
-}
-
-/// A body sent to the mesher. The mesher never mutates the B-rep.
+/// A body sent to the tessellation worker. The tessellation worker never mutates the B-rep.
 #[derive(Clone, Debug)]
 pub struct MeshBody {
     pub brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
     pub transforms: Vec<DisplayTransform>,
 }
 
-/// Job sent to an independent mesher worker.
+/// Job sent to an independent tessellation worker.
 #[derive(Clone, Debug)]
 pub struct MeshRequest {
     pub key: MeshKey,
@@ -112,7 +120,7 @@ impl MeshAsset {
     }
 }
 
-/// Cancellation and revision guard for mesher requests.
+/// Cancellation and revision guard for tessellation requests.
 #[derive(Clone, Debug)]
 pub struct MeshRevision {
     pub revision: u64,
@@ -144,6 +152,9 @@ mod tests {
         let asset = MeshAsset {
             instances: vec![MeshInstance {
                 mesh: Arc::new(local),
+                plan: None,
+                plan_edge_ids: Vec::new(),
+                stats: None,
                 transforms: vec![DisplayTransform::Place { offset: [10.0, 0.0, 0.0], rotation: [0.0; 3] }],
             }],
         };

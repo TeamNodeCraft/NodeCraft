@@ -34,6 +34,10 @@ pub struct Request {
     /// Display max-sag override for LOD. `None` uses the viewport default.
     #[serde(default)]
     pub mesh_tolerance: Option<f64>,
+    /// Coarse provisional display plan detail (1–8). `None` uses the full
+    /// display plan.
+    #[serde(default)]
+    pub preview_detail: Option<u8>,
     /// `[before, after]` feature targets for an exact comparison payload.
     #[serde(default)]
     pub comparison_targets: Option<Vec<String>>,
@@ -134,8 +138,6 @@ pub struct Response {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub graph_revision: Option<String>,
     #[serde(default)]
-    pub meshes: BTreeMap<String, MeshPayload>,
-    #[serde(default)]
     pub empty_targets: Vec<String>,
     #[serde(default)]
     pub node_errors: BTreeMap<String, String>,
@@ -174,6 +176,15 @@ pub struct CacheStats {
     pub hits: u32,
     #[serde(default)]
     pub misses: u32,
+    /// Exact B-rep cache hits during this evaluation.
+    #[serde(default)]
+    pub brep_hits: u32,
+    /// Exact Part cache hits during this evaluation.
+    #[serde(default)]
+    pub part_hits: u32,
+    /// Display-mesh cache hits during this evaluation.
+    #[serde(default)]
+    pub display_mesh_hits: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

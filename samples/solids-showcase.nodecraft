@@ -1,412 +1,418 @@
 {
   "schemaVersion": 1,
   "id": "solids-showcase",
-  "nodes": [
-    {
-      "id": "box",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "box",
-        "length": 40,
-        "width": 40,
-        "height": 40
-      },
-      "suppressed": false,
-      "x": 0,
-      "y": 0
+  "root": {
+    "id": "root",
+    "name": "Root",
+    "kind": "graph",
+    "interface": {
+      "inputs": [],
+      "outputs": []
     },
-    {
-      "id": "box-place",
-      "type": "translate",
-      "values": {
-        "x": -180,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
-      },
-      "suppressed": false,
-      "x": 0,
-      "y": 110
-    },
-    {
-      "id": "box-look",
-      "type": "look",
-      "values": {
-        "color": "#e85d75"
-      },
-      "suppressed": false,
-      "x": 0,
-      "y": 220
-    },
-    {
-      "id": "cylinder",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cylinder",
-        "radius": 18,
-        "height": 40
-      },
-      "suppressed": false,
-      "x": 220,
-      "y": 0
-    },
-    {
-      "id": "cylinder-place",
-      "type": "translate",
-      "values": {
-        "x": -120,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
-      },
-      "suppressed": false,
-      "x": 220,
-      "y": 110
-    },
-    {
-      "id": "cylinder-look",
-      "type": "look",
-      "values": {
-        "color": "#f2a65a"
-      },
-      "suppressed": false,
-      "x": 220,
-      "y": 220
-    },
-    {
-      "id": "cone",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "cone",
-        "bottomRadius": 20,
-        "topRadius": 0,
-        "height": 40
-      },
-      "suppressed": false,
-      "x": 440,
-      "y": 0
-    },
-    {
-      "id": "cone-place",
-      "type": "translate",
-      "values": {
-        "x": -60,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
-      },
-      "suppressed": false,
-      "x": 440,
-      "y": 110
-    },
-    {
-      "id": "cone-look",
-      "type": "look",
-      "values": {
-        "color": "#f5d76e"
-      },
-      "suppressed": false,
-      "x": 440,
-      "y": 220
-    },
-    {
-      "id": "sphere",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "sphere",
-        "radius": 20
-      },
-      "suppressed": false,
-      "x": 660,
-      "y": 0
-    },
-    {
-      "id": "sphere-place",
-      "type": "translate",
-      "values": {
+    "nodes": [
+      {
+        "id": "box",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "box",
+          "length": 40,
+          "width": 40,
+          "height": 40
+        },
+        "suppressed": false,
         "x": 0,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
+        "y": 0
       },
-      "suppressed": false,
-      "x": 660,
-      "y": 110
-    },
-    {
-      "id": "sphere-look",
-      "type": "look",
-      "values": {
-        "color": "#7ecb8b"
+      {
+        "id": "box-place",
+        "type": "translate",
+        "values": {
+          "x": -180,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 0,
+        "y": 110
       },
-      "suppressed": false,
-      "x": 660,
-      "y": 220
-    },
-    {
-      "id": "sphereNoPole",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "sphereNoPole",
-        "radius": 20
+      {
+        "id": "box-look",
+        "type": "look",
+        "values": {
+          "color": "#e85d75"
+        },
+        "suppressed": false,
+        "x": 0,
+        "y": 220
       },
-      "suppressed": false,
-      "x": 880,
-      "y": 0
-    },
-    {
-      "id": "sphereNoPole-place",
-      "type": "translate",
-      "values": {
-        "x": 60,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
+      {
+        "id": "cylinder",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "cylinder",
+          "radius": 18,
+          "height": 40
+        },
+        "suppressed": false,
+        "x": 220,
+        "y": 0
       },
-      "suppressed": false,
-      "x": 880,
-      "y": 110
-    },
-    {
-      "id": "sphereNoPole-look",
-      "type": "look",
-      "values": {
-        "color": "#64d8cb"
+      {
+        "id": "cylinder-place",
+        "type": "translate",
+        "values": {
+          "x": -120,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 220,
+        "y": 110
       },
-      "suppressed": false,
-      "x": 880,
-      "y": 220
-    },
-    {
-      "id": "torus",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "torus",
-        "majorRadius": 15,
-        "minorRadius": 5
+      {
+        "id": "cylinder-look",
+        "type": "look",
+        "values": {
+          "color": "#f2a65a"
+        },
+        "suppressed": false,
+        "x": 220,
+        "y": 220
       },
-      "suppressed": false,
-      "x": 1100,
-      "y": 0
-    },
-    {
-      "id": "torus-place",
-      "type": "translate",
-      "values": {
-        "x": 120,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
+      {
+        "id": "cone",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "cone",
+          "bottomRadius": 20,
+          "topRadius": 0,
+          "height": 40
+        },
+        "suppressed": false,
+        "x": 440,
+        "y": 0
       },
-      "suppressed": false,
-      "x": 1100,
-      "y": 110
-    },
-    {
-      "id": "torus-look",
-      "type": "look",
-      "values": {
-        "color": "#6699e8"
+      {
+        "id": "cone-place",
+        "type": "translate",
+        "values": {
+          "x": -60,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 440,
+        "y": 110
       },
-      "suppressed": false,
-      "x": 1100,
-      "y": 220
-    },
-    {
-      "id": "pyramid",
-      "type": "primitive",
-      "values": {
-        "primitiveType": "pyramid",
-        "length": 40,
-        "height": 40
+      {
+        "id": "cone-look",
+        "type": "look",
+        "values": {
+          "color": "#f5d76e"
+        },
+        "suppressed": false,
+        "x": 440,
+        "y": 220
       },
-      "suppressed": false,
-      "x": 1320,
-      "y": 0
-    },
-    {
-      "id": "pyramid-place",
-      "type": "translate",
-      "values": {
-        "x": 180,
-        "y": 0,
-        "z": 0,
-        "rx": 0,
-        "ry": 0,
-        "rz": 0,
-        "space": "world"
+      {
+        "id": "sphere",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "sphere",
+          "radius": 20
+        },
+        "suppressed": false,
+        "x": 660,
+        "y": 0
       },
-      "suppressed": false,
-      "x": 1320,
-      "y": 110
-    },
-    {
-      "id": "pyramid-look",
-      "type": "look",
-      "values": {
-        "color": "#8c7ae6"
+      {
+        "id": "sphere-place",
+        "type": "translate",
+        "values": {
+          "x": 0,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 660,
+        "y": 110
       },
-      "suppressed": false,
-      "x": 1320,
-      "y": 220
-    },
-    {
-      "id": "showcase",
-      "type": "combine",
-      "values": {},
-      "suppressed": false,
-      "x": 0,
-      "y": 440
-    }
-  ],
-  "connections": [
-    {
-      "from": "box",
-      "to": "box-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "box-place",
-      "to": "box-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cylinder",
-      "to": "cylinder-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cylinder-place",
-      "to": "cylinder-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cone",
-      "to": "cone-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cone-place",
-      "to": "cone-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphere",
-      "to": "sphere-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphere-place",
-      "to": "sphere-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphereNoPole",
-      "to": "sphereNoPole-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphereNoPole-place",
-      "to": "sphereNoPole-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "torus",
-      "to": "torus-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "torus-place",
-      "to": "torus-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "pyramid",
-      "to": "pyramid-place",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "pyramid-place",
-      "to": "pyramid-look",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "box-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cylinder-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "cone-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphere-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "sphereNoPole-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "torus-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    },
-    {
-      "from": "pyramid-look",
-      "to": "showcase",
-      "in": "shape",
-      "out": "shape"
-    }
-  ],
-  "interface": {
-    "inputs": [],
-    "outputs": []
-  }
+      {
+        "id": "sphere-look",
+        "type": "look",
+        "values": {
+          "color": "#7ecb8b"
+        },
+        "suppressed": false,
+        "x": 660,
+        "y": 220
+      },
+      {
+        "id": "sphereNoPole",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "sphereNoPole",
+          "radius": 20
+        },
+        "suppressed": false,
+        "x": 880,
+        "y": 0
+      },
+      {
+        "id": "sphereNoPole-place",
+        "type": "translate",
+        "values": {
+          "x": 60,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 880,
+        "y": 110
+      },
+      {
+        "id": "sphereNoPole-look",
+        "type": "look",
+        "values": {
+          "color": "#64d8cb"
+        },
+        "suppressed": false,
+        "x": 880,
+        "y": 220
+      },
+      {
+        "id": "torus",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "torus",
+          "majorRadius": 15,
+          "minorRadius": 5
+        },
+        "suppressed": false,
+        "x": 1100,
+        "y": 0
+      },
+      {
+        "id": "torus-place",
+        "type": "translate",
+        "values": {
+          "x": 120,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 1100,
+        "y": 110
+      },
+      {
+        "id": "torus-look",
+        "type": "look",
+        "values": {
+          "color": "#6699e8"
+        },
+        "suppressed": false,
+        "x": 1100,
+        "y": 220
+      },
+      {
+        "id": "pyramid",
+        "type": "primitive",
+        "values": {
+          "primitiveType": "pyramid",
+          "length": 40,
+          "height": 40
+        },
+        "suppressed": false,
+        "x": 1320,
+        "y": 0
+      },
+      {
+        "id": "pyramid-place",
+        "type": "translate",
+        "values": {
+          "x": 180,
+          "y": 0,
+          "z": 0,
+          "rx": 0,
+          "ry": 0,
+          "rz": 0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 1320,
+        "y": 110
+      },
+      {
+        "id": "pyramid-look",
+        "type": "look",
+        "values": {
+          "color": "#8c7ae6"
+        },
+        "suppressed": false,
+        "x": 1320,
+        "y": 220
+      },
+      {
+        "id": "showcase",
+        "type": "combine",
+        "values": {},
+        "suppressed": false,
+        "x": 0,
+        "y": 440
+      }
+    ],
+    "connections": [
+      {
+        "from": "box",
+        "to": "box-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "box-place",
+        "to": "box-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cylinder",
+        "to": "cylinder-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cylinder-place",
+        "to": "cylinder-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cone",
+        "to": "cone-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cone-place",
+        "to": "cone-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphere",
+        "to": "sphere-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphere-place",
+        "to": "sphere-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphereNoPole",
+        "to": "sphereNoPole-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphereNoPole-place",
+        "to": "sphereNoPole-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "torus",
+        "to": "torus-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "torus-place",
+        "to": "torus-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "pyramid",
+        "to": "pyramid-place",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "pyramid-place",
+        "to": "pyramid-look",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "box-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cylinder-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "cone-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphere-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "sphereNoPole-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "torus-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      },
+      {
+        "from": "pyramid-look",
+        "to": "showcase",
+        "in": "shape",
+        "out": "shape"
+      }
+    ]
+  },
+  "definitions": []
 }

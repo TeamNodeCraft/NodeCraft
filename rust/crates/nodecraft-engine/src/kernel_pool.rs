@@ -228,20 +228,12 @@ impl Drop for KernelPool {
 }
 
 static EXACT_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
-static MESH_POOL: std::sync::OnceLock<KernelPool> = std::sync::OnceLock::new();
 static REQUESTED_EXACT_THREADS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-static REQUESTED_MESH_THREADS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Configure the exact-evaluation pool before its first use. `0` means auto.
 pub fn configure_exact_threads(threads: usize) {
     REQUESTED_EXACT_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Configure the display-meshing pool before its first use. `0` means auto.
-pub fn configure_mesh_threads(threads: usize) {
-    REQUESTED_MESH_THREADS.store(threads, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Backwards-compatible alias for configuring exact kernel threads.
@@ -266,10 +258,10 @@ pub fn exact_pool_initialized() -> bool {
     EXACT_POOL.get().is_some()
 }
 
-/// Whether the meshing pool has already been created.
+/// Worker count of the initialized exact pool, if it has started.
 #[must_use]
-pub fn mesh_pool_initialized() -> bool {
-    MESH_POOL.get().is_some()
+pub fn exact_pool_worker_count() -> Option<usize> {
+    EXACT_POOL.get().map(KernelPool::workers)
 }
 
 /// Backwards-compatible alias for exact-pool initialisation.
@@ -282,13 +274,6 @@ pub fn shared_pool_initialized() -> bool {
 #[must_use]
 pub fn shared_exact_pool() -> &'static KernelPool {
     EXACT_POOL.get_or_init(|| KernelPool::new(pool_threads(&REQUESTED_EXACT_THREADS)))
-}
-
-/// Display-meshing pool. Separate from exact work so large mesh batches do not
-/// delay modeling tasks.
-#[must_use]
-pub fn shared_mesh_pool() -> &'static KernelPool {
-    MESH_POOL.get_or_init(|| KernelPool::new(pool_threads(&REQUESTED_MESH_THREADS)))
 }
 
 /// Backwards-compatible alias for the exact-evaluation pool.
@@ -361,12 +346,9 @@ mod tests {
 }
 
 
-/// Reset both shared kernel pools after an explicit rebuild.
+/// Reset the exact kernel pool after an explicit rebuild.
 pub fn reset_kernel_caches() {
     if let Some(pool) = EXACT_POOL.get() {
-        pool.reset_caches();
-    }
-    if let Some(pool) = MESH_POOL.get() {
         pool.reset_caches();
     }
 }

@@ -28,7 +28,8 @@ use std::fmt::Write as _;
 use std::fs;
 
 pub mod solidcore_export;
-pub use step_brep::brep_to_model;
+// The former `step_brep::brep_to_model` re-export is gone: the exact writer now
+// converts through `solidcore_convert::brep::to_record`. See `solidcore_export`.
 pub use solidcore_export::{write_brep_exact, write_breps_exact};
 mod analytic;
 pub mod units;
@@ -163,8 +164,38 @@ impl StepFile {
         counts
     }
 
+    /// The coordinate points of the file's vertices. A file's other
+    /// `CARTESIAN_POINT`s — pcurve parameter-space points, surface placement
+    /// origins — are not body geometry and must not widen a body's bounds.
+    pub fn vertex_points(&self) -> impl Iterator<Item = [f64; 3]> + '_ {
+        self.entities
+            .values()
+            .filter(|entity| entity.name == "VERTEX_POINT")
+            .filter_map(|entity| match entity.args.get(1) {
+                Some(Value::Ref(point)) => Some(*point),
+                _ => None,
+            })
+            .filter_map(|id| {
+                let entity = self.entities.get(&id)?;
+                let Value::List(values) = entity.args.get(1)? else { return None };
+                let mut point = [0.0; 3];
+                for (slot, value) in point.iter_mut().zip(values) {
+                    let Value::Number(number) = value else { return None };
+                    *slot = *number;
+                }
+                Some(point)
+            })
+    }
+
+    /// The file's geometry bounds in model units: the vertices' points, else every
+    /// `CARTESIAN_POINT` for a file with no vertex entities (bare geometry).
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
-        let mut points = self.points();
+        self.points_bounds(self.vertex_points())
+            .or_else(|| self.points_bounds(self.points()))
+    }
+
+    fn points_bounds(&self, points: impl Iterator<Item = [f64; 3]>) -> Option<([f64; 3], [f64; 3])> {
+        let mut points = points;
         let first = points.next()?;
         let mut min = first;
         let mut max = first;
@@ -713,8 +744,21 @@ fn planar_body_from_file(file: &StepFile) -> Result<PlanarBody, String> {
     let mut oriented_edges = BTreeMap::new();
     let mut loops = BTreeMap::new();
     let mut bounds: BTreeMap<u32, PlanarBound> = BTreeMap::new();
+    // A planar body's points are the points of its vertices. Every other CARTESIAN_POINT
+    // in the file — pcurve parameter-space points, surface placement origins — is not part
+    // of the body's geometry, and including them (as this reader used to) inflated
+    // `PlanarBody::bounds` and `points()` with points the solid never visits.
+    let vertex_points: std::collections::BTreeSet<u32> = file
+        .entities
+        .values()
+        .filter(|entity| entity.name == "VERTEX_POINT")
+        .filter_map(|entity| match entity.args.get(1) {
+            Some(Value::Ref(point)) => Some(*point),
+            _ => None,
+        })
+        .collect();
     for (id, entity) in &file.entities {
-        if entity.name != "CARTESIAN_POINT" { continue; }
+        if entity.name != "CARTESIAN_POINT" || !vertex_points.contains(id) { continue; }
         let Value::List(coords) = &entity.args[1] else { continue };
         let mut point = [0.0; 3];
         for (slot, value) in point.iter_mut().zip(coords) {

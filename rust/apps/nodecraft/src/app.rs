@@ -1,12 +1,11 @@
 //! Application shell and the first Swift/WebView-to-egui port slice.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 mod evaluation;
-mod preview_worker;
 mod document_ops;
 mod settings;
 mod settings_ui;
@@ -14,18 +13,20 @@ mod tabs;
 mod theme_editor;
 mod titlebar;
 mod tool_dock;
-use tabs::{DocumentTab, TabDrag};
+use tabs::{DocumentTab, TabDrag, TabViewMode};
 use theme_editor::*;
 use document_ops::*;
 use evaluation::EvalWorker;
-use preview_worker::{PreviewRequest, PreviewWorker};
 pub(crate) use tool_dock::tool_dock_style;
 use tool_dock::{ToolDockFocus, ToolItem, tool_dock_height, tool_dock_rect};
 use settings::{ActivitySettings, apply_saved_theme, choose_startup_document, default_document, load_app_settings, save_app_settings};
 
 use nodecraft_protocol::Mesh;
 use serde::{Deserialize, Serialize};
-use nodecraft_session::groups::{group_values, read_group, GroupPayload, GroupPort};
+use nodecraft_session::groups::{
+    group_values, is_graph_interface_node, read_group, resize_graph_interface, GraphReference,
+    GroupPayload, GroupPort,
+};
 use nodecraft_session::store::DocumentStore;
 use nodecraft_session::{Command, GraphConnection, GraphDocument, GraphNode, Session};
 
@@ -40,6 +41,15 @@ const BUILD_GIT_HASH: &str = match option_env!("NODECRAFT_GIT_HASH") {
 };
 
 use crate::engine_bridge;
+/// Panel overlays that must not cover menus/popups. egui paints same-Order
+/// layers by creation order, so a later-created panel overlay would otherwise
+/// lose to a menu created earlier in the frame.
+pub(super) const CONTENT_OVERLAY_ORDER: egui::Order = egui::Order::Middle;
+
+/// The breadcrumb belongs to the node canvas (Foreground), but the File menu is
+/// raised to the Tooltip order so it still paints above the breadcrumb.
+pub(super) const BREADCRUMB_LAYER_ORDER: egui::Order = egui::Order::Foreground;
+
 use crate::file_dialog::{FileDialogKind, FileDialogResult, PendingFileDialog};
 use crate::inspector;
 use nodecraft_node_canvas::canvas::{
@@ -118,7 +128,13 @@ impl NodePositionAnimation {
 #[derive(Clone, Debug)]
 struct EvalProgress {
     total: usize,
-    done: usize,
+    exact_done: usize,
+}
+
+impl EvalProgress {
+    fn done(&self) -> usize {
+        self.exact_done.min(self.total)
+    }
 }
 
 /// The part of the workspace that is actually the 3D viewer: between the node
@@ -217,7 +233,7 @@ fn progress_fraction(progress: &EvalProgress) -> f32 {
     if progress.total == 0 {
         return 0.0;
     }
-    (progress.done.min(progress.total) as f32 / progress.total as f32).clamp(0.0, 1.0)
+    (progress.exact_done as f32 / progress.total as f32).clamp(0.0, 1.0)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -241,9 +257,42 @@ impl SettingsTab {
     }
 }
 
+struct EvalBinding {
+    source_document_id: String,
+    instance_path: Vec<String>,
+    prefix: String,
+    document: GraphDocument,
+    body: GraphDocument,
+}
+
+#[derive(Clone, Debug)]
+struct BreadcrumbEntry {
+    label: String,
+    definition_id: Option<String>,
+}
+
+/// Identity of a graph view over a document definition.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ViewKey {
+    document_id: String,
+    definition_id: Option<String>,
+}
+
+impl ViewKey {
+    fn root(document_id: String) -> Self {
+        Self { document_id, definition_id: None }
+    }
+
+    fn definition(document_id: String, definition_id: String) -> Self {
+        Self { document_id, definition_id: Some(definition_id) }
+    }
+}
+
 #[derive(Clone)]
 struct GroupTab {
-    parent_document_id: String,
+    view: ViewKey,
+    instance_path: Vec<String>,
+    breadcrumb: Vec<BreadcrumbEntry>,
     group_id: String,
     inputs: Vec<GroupPort>,
     outputs: Vec<GroupPort>,
@@ -306,6 +355,7 @@ type EvalKey = (
     Option<String>,
     Vec<String>,
     bool,
+    Option<u8>,
 );
 
 fn eval_key(
@@ -318,6 +368,7 @@ fn eval_key(
     edit_preview: &Option<String>,
     validation_targets: &[String],
     run_exporters: bool,
+    preview_detail: Option<u8>,
 ) -> EvalKey {
     (
         session_generation,
@@ -329,6 +380,7 @@ fn eval_key(
         edit_preview.clone(),
         validation_targets.to_vec(),
         run_exporters,
+        preview_detail,
     )
 }
 
@@ -412,17 +464,19 @@ fn feature_ghost_input(document: &GraphDocument, selected: &str) -> Option<Strin
 /// spread node-type checks through the canvas or the action dispatcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NodeActivation {
-    /// Groups switch the canvas into the group's network.
+    /// Legacy groups switch the canvas into the group's network.
     EnterGroup,
+    /// Graph instances open their referenced definition.
+    EnterGraph,
     /// Everything else becomes the explicit edit target and reveals its inspector.
     EditNode,
 }
 
 fn node_activation(node_type: &str) -> NodeActivation {
-    if node_type == "group" {
-        NodeActivation::EnterGroup
-    } else {
-        NodeActivation::EditNode
+    match node_type {
+        "group" => NodeActivation::EnterGroup,
+        "graph" => NodeActivation::EnterGraph,
+        _ => NodeActivation::EditNode,
     }
 }
 
@@ -580,6 +634,8 @@ pub struct NodeCraftApp {
     validation_selection: Option<Vec<String>>,
     difference_stats: Option<(usize, usize)>,
     node_errors: HashSet<String>,
+    activity_seen: HashSet<String>,
+    activity_active: HashSet<String>,
     node_error_messages: std::collections::BTreeMap<String, String>,
     difference_error: Option<String>,
     difference_approximate: bool,
@@ -587,14 +643,31 @@ pub struct NodeCraftApp {
     crash_test: bool,
     feature_overlay: bool,
     engine_threads: usize,
-    mesher_threads: usize,
+    tessellation_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
     cable_routing: CableRouting,
     eval_worker: EvalWorker,
-    preview_worker: PreviewWorker,
-    preview_next: u64,
-    preview_pending: Option<u64>,
+    display_worker: std::sync::Arc<nodecraft_display::service::DisplayWorker>,
+    pending_display: Option<(u64, String, bool, Instant)>,
+    quality_display: Option<(u64, u64, String, bool, Instant)>,
+    display_snapshot: Option<evaluation::DisplaySnapshot>,
+    display_error: Option<String>,
+    last_display_us: Option<(u64, u64)>,
+    deferred_display: Option<(
+        std::sync::Arc<nodecraft_display::service::DisplayFrame>,
+        String,
+        bool,
+        Instant,
+    )>,
+    last_applied_display: Option<(
+        std::sync::Arc<nodecraft_display::service::DisplayFrame>,
+        String,
+        bool,
+    )>,
+    applying_deferred_display: bool,
+    displayed_target: Option<String>,
+    display_next: u64,
     eval_next: u64,
     eval_pending: Option<u64>,
     /// Bumped whenever the active session is installed. The evaluation cache is
@@ -619,6 +692,15 @@ pub struct NodeCraftApp {
     evaluation_ms: f64,
     cache_hits: u32,
     cache_misses: u32,
+    exact_brep_hits: u32,
+    exact_part_hits: u32,
+    brep_hits: u32,
+    part_hits: u32,
+    display_mesh_hits: u32,
+    /// Planner defects from the latest display tessellation.
+    tessellation_diagnostics: Vec<String>,
+    /// Provisional display quality detail; None is the full plan.
+    preview_detail: Option<u8>,
     warmup_until: Instant,
     screenshot: Option<(std::path::PathBuf, u32)>,
     render_model: bool,
@@ -645,11 +727,14 @@ pub struct NodeCraftApp {
     last_saved_recent: Vec<PathBuf>,
     view_save_due: Option<Instant>,
     auto_eval_due: Option<Instant>,
+    /// Last exact evaluation, used for display-only LOD swaps.
+    last_exact: Option<(u64, engine_bridge::Evaluation)>,
     pending_dirty: HashSet<String>,
     layout_animation: Option<LayoutAnimation>,
     node_position_animation: Option<NodePositionAnimation>,
     tabs: Vec<DocumentTab>,
     group_tabs: HashMap<u64, GroupTab>,
+    graph_tab_icon: Option<(egui::Color32, egui::TextureHandle)>,
     tab_positions: HashMap<u64, f32>,
     tab_drag: Option<TabDrag>,
     tab_strip: Option<egui::Rect>,
@@ -677,6 +762,8 @@ pub struct NodeCraftApp {
     tool_search_result_index: Option<usize>,
     tool_search_clear_due: Option<Instant>,
     tool_menu_index: Option<usize>,
+    /// Solid split menu: open the primitive list beside the main Create menu.
+    tool_solid_submenu_open: bool,
     tool_dock_offset_y: f32,
     tool_dock_measured_height: f32,
     sketch_gui: SketchGui,
@@ -698,6 +785,333 @@ fn mesh_preserves_camera(
     requested || (camera_initialized && had_mesh && same_target)
 }
 
+/// Build the atomic command set for resizing an inline graph's body ports.
+fn graph_port_commands(
+    node_id: &str,
+    node: &GraphNode,
+    connections: &[GraphConnection],
+    inputs: usize,
+    outputs: usize,
+) -> Option<Vec<Command>> {
+    let edit = resize_graph_interface(node, inputs, outputs).ok()?;
+    let mut commands = Vec::new();
+    for connection in connections {
+        let removed_input = connection.to == node_id
+            && edit.removed_inputs.iter().any(|port| *port == connection.input);
+        let removed_output = connection.from == node_id
+            && edit.removed_outputs.iter().any(|port| *port == connection.out);
+        if removed_input || removed_output {
+            commands.push(Command::Disconnect {
+                from: connection.from.clone(),
+                to: connection.to.clone(),
+                input: connection.input.clone(),
+            });
+        }
+    }
+    for (field, value) in [
+        ("nodes", serde_json::to_value(&edit.nodes).unwrap_or(serde_json::Value::Null)),
+        (
+            "connections",
+            serde_json::to_value(&edit.connections).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "inputs",
+            serde_json::to_value(&edit.inputs).unwrap_or(serde_json::Value::Null),
+        ),
+        (
+            "outputs",
+            serde_json::to_value(&edit.outputs).unwrap_or(serde_json::Value::Null),
+        ),
+    ] {
+        commands.push(Command::SetValue {
+            node: node_id.to_owned(),
+            field: field.to_owned(),
+            value,
+        });
+    }
+    Some(commands)
+}
+
+/// Build the atomic edits for resizing the current document's root interface.
+fn root_interface_commands(
+    document: &GraphDocument,
+    inputs: Option<usize>,
+    outputs: Option<usize>,
+) -> Option<Vec<Command>> {
+    let root = &document.root;
+    let input_count = inputs.unwrap_or(root.interface.inputs.len());
+    let output_count = outputs.unwrap_or(root.interface.outputs.len());
+    let edit = nodecraft_session::groups::resize_definition_interface(
+        root,
+        input_count,
+        output_count,
+    )
+    .ok()?;
+    let input_marker = root.nodes.iter().find(|node| node.node_type == "groupinput").map(|node| node.id.clone());
+    let output_marker = root.nodes.iter().find(|node| node.node_type == "groupoutput").map(|node| node.id.clone());
+    let mut commands = vec![Command::SetRootDefinition {
+        definition: edit.definition,
+    }];
+    for connection in &document.connections {
+        let removed_input = input_marker.as_deref() == Some(connection.from.as_str())
+            && edit.removed_inputs.iter().any(|port| *port == connection.out);
+        let removed_output = output_marker.as_deref() == Some(connection.to.as_str())
+            && edit.removed_outputs.iter().any(|port| *port == connection.input);
+        if removed_input || removed_output {
+            commands.push(Command::Disconnect {
+                from: connection.from.clone(),
+                to: connection.to.clone(),
+                input: connection.input.clone(),
+            });
+        }
+    }
+    Some(commands)
+}
+
+fn map_body_id_to_eval(binding: &EvalBinding, id: &str) -> Option<String> {
+    let node = binding.body.nodes.iter().find(|node| node.id == id)?;
+    match node.node_type.as_str() {
+        "groupinput" => {
+            // A first-level graph view can bind a Graph Input to the source
+            // connected to its owning graph node.
+            if binding.instance_path.len() != 1 {
+                return None;
+            }
+            let graph_id = binding.instance_path.first()?;
+            let mut sources = binding
+                .document
+                .connections
+                .iter()
+                .filter(|connection| &connection.to == graph_id);
+            let source = sources.next()?;
+            sources.next().is_none().then(|| source.from.clone())
+        }
+        "groupoutput" => Some(binding.prefix.clone()),
+        _ => Some(format!("{}::{id}", binding.prefix)),
+    }
+}
+
+fn map_eval_id_to_body(binding: &EvalBinding, id: &str) -> Option<String> {
+    if id == binding.prefix {
+        return binding
+            .body
+            .nodes
+            .iter()
+            .rev()
+            .find(|node| node.node_type == "groupoutput")
+            .map(|node| node.id.clone())
+            .or_else(|| Some(binding.prefix.clone()));
+    }
+    if let Some(id) = id.strip_prefix(&format!("{}::", binding.prefix)) {
+        return Some(id.to_owned());
+    }
+    // External input sources are shared with the parent graph. Reverse-map them
+    // to the Graph Input marker so the body sees a body-local preview target.
+    binding
+        .body
+        .nodes
+        .iter()
+        .find(|node| map_body_id_to_eval(binding, &node.id).as_deref() == Some(id))
+        .map(|node| node.id.clone())
+}
+
+fn nodecraft_graph_definition(
+    definition: &nodecraft_session::GraphDefinition,
+) -> nodecraft_session::GraphDefinition {
+    nodecraft_session::GraphDefinition {
+        id: definition.id.clone(),
+        name: definition.name.clone(),
+        kind: definition.kind.clone(),
+        interface: definition.interface.clone(),
+        nodes: definition.nodes.clone(),
+        connections: definition.connections.clone(),
+    }
+}
+
+fn cascade_removed_definitions(
+    document: &GraphDocument,
+    removed_nodes: &HashSet<String>,
+) -> BTreeSet<String> {
+    let mut refs: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut count_node = |node: &GraphNode| {
+        if node.node_type == "graph"
+            && let Some(GraphReference::Local(id)) = GraphReference::from_node(node)
+        {
+            *refs.entry(id).or_default() += 1;
+        }
+    };
+    for node in &document.nodes {
+        if !removed_nodes.contains(&node.id) {
+            count_node(node);
+        }
+    }
+    for definition in &document.definitions {
+        for node in &definition.nodes {
+            count_node(node);
+        }
+    }
+    let mut queue: Vec<String> = document
+        .nodes
+        .iter()
+        .filter(|node| removed_nodes.contains(&node.id))
+        .filter_map(|node| match GraphReference::from_node(node) {
+            Some(GraphReference::Local(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    let mut removed = BTreeSet::new();
+    while let Some(id) = queue.pop() {
+        if removed.contains(&id) || refs.get(&id).copied().unwrap_or(0) > 0 {
+            continue;
+        }
+        removed.insert(id.clone());
+        if let Some(definition) = document.definition(&id) {
+            for node in &definition.nodes {
+                if node.node_type == "graph"
+                    && let Some(GraphReference::Local(child)) = GraphReference::from_node(node)
+                {
+                    if let Some(count) = refs.get_mut(&child) {
+                        *count = count.saturating_sub(1);
+                    }
+                    if refs.get(&child).copied().unwrap_or(0) == 0 {
+                        queue.push(child);
+                    }
+                }
+            }
+        }
+    }
+    removed
+}
+
+fn commands_are_layout_only(commands: &[Command]) -> bool {
+    !commands.is_empty()
+        && commands
+            .iter()
+            .all(|command| matches!(command, Command::SetPosition { .. }))
+}
+
+/// Build the atomic edits for resizing a graph definition interface.
+///
+/// Returns the commands plus every definition whose body changed (the target
+/// first, then definitions containing nested instances).
+fn definition_port_commands(
+    document: &GraphDocument,
+    definition_id: &str,
+    inputs: usize,
+    outputs: usize,
+) -> Option<(Vec<Command>, Vec<nodecraft_session::GraphDefinition>)> {
+    let definition = document.definition(definition_id)?;
+    let edit = nodecraft_session::groups::resize_definition_interface(definition, inputs, outputs).ok()?;
+    let mut commands = vec![Command::SetDefinition {
+        definition: edit.definition.clone(),
+    }];
+    let mut refreshed = vec![edit.definition.clone()];
+    let references = |node: &GraphNode| {
+        node.node_type == "graph"
+            && matches!(
+                GraphReference::from_node(node),
+                Some(GraphReference::Local(ref id)) if id == definition_id
+            )
+    };
+    let instances: Vec<String> = document
+        .nodes
+        .iter()
+        .filter(|node| references(node))
+        .map(|node| node.id.clone())
+        .collect();
+    for instance in &instances {
+        for connection in &document.connections {
+            let removed_input = connection.to == *instance
+                && edit.removed_inputs.iter().any(|port| *port == connection.input);
+            let removed_output = connection.from == *instance
+                && edit.removed_outputs.iter().any(|port| *port == connection.out);
+            if removed_input || removed_output {
+                commands.push(Command::Disconnect {
+                    from: connection.from.clone(),
+                    to: connection.to.clone(),
+                    input: connection.input.clone(),
+                });
+            }
+        }
+        commands.push(Command::SetValue {
+            node: instance.clone(),
+            field: "inputs".to_owned(),
+            value: serde_json::to_value(&edit.definition.interface.inputs)
+                .unwrap_or(serde_json::Value::Null),
+        });
+        commands.push(Command::SetValue {
+            node: instance.clone(),
+            field: "outputs".to_owned(),
+            value: serde_json::to_value(&edit.definition.interface.outputs)
+                .unwrap_or(serde_json::Value::Null),
+        });
+    }
+    for definition in document.definitions.clone() {
+        if definition.id == definition_id {
+            continue;
+        }
+        let nested_instances: Vec<String> = definition
+            .nodes
+            .iter()
+            .filter(|node| references(node))
+            .map(|node| node.id.clone())
+            .collect();
+        if nested_instances.is_empty() {
+            continue;
+        }
+        let mut updated = definition;
+        for node in &mut updated.nodes {
+            if nested_instances.iter().any(|id| id == &node.id) {
+                node.values["inputs"] = serde_json::to_value(&edit.definition.interface.inputs)
+                    .unwrap_or(serde_json::Value::Null);
+                node.values["outputs"] = serde_json::to_value(&edit.definition.interface.outputs)
+                    .unwrap_or(serde_json::Value::Null);
+            }
+        }
+        updated.connections.retain(|connection| {
+            let removed_input = nested_instances.iter().any(|id| id == &connection.to)
+                && edit.removed_inputs.iter().any(|port| *port == connection.input);
+            let removed_output = nested_instances.iter().any(|id| id == &connection.from)
+                && edit.removed_outputs.iter().any(|port| *port == connection.out);
+            !removed_input && !removed_output
+        });
+        commands.push(Command::SetDefinition {
+            definition: updated.clone(),
+        });
+        refreshed.push(updated);
+    }
+    Some((commands, refreshed))
+}
+
+fn unique_graph_definition_id(base: &str, ids: &BTreeSet<String>) -> String {
+    if !ids.contains(base) {
+        return base.to_owned();
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base}{suffix}");
+        if !ids.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn unique_graph_definition_name(names: &BTreeSet<String>) -> String {
+    let base = "Graph";
+    if !names.contains(base) {
+        return base.to_owned();
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base} {suffix}");
+        if !names.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
 impl NodeCraftApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -706,6 +1120,10 @@ impl NodeCraftApp {
         render_model: bool,
         crash_test: bool,
     ) -> Self {
+        // Until the GPU tessellation pipeline finishes compiling in the
+        // background, plan frames carry a CPU mesh so the first window is
+        // visible and editable immediately.
+        nodecraft_display::service::set_gpu_tess_ready(false);
         // Installed before the first frame so node-type SVG icons can be loaded.
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // Keep egui and the native macOS titlebar in dark mode even on a light system.
@@ -728,7 +1146,7 @@ impl NodeCraftApp {
             node_editor.install_gpu(
                 render_state,
                 crate::gpu_viewport::msaa_samples(),
-                solidcraft_gpu::depth_format(&render_state.device, true),
+                solidcraft_viewport_gpu::depth_format(&render_state.device, true),
             );
         }
         if render_model {
@@ -737,8 +1155,7 @@ impl NodeCraftApp {
         let persisted_view = settings.view;
         let activity = settings.activity;
         nodecraft_engine::kernel_pool::configure_exact_threads(settings.engine_threads);
-        nodecraft_engine::kernel_pool::configure_mesh_threads(settings.mesher_threads);
-        nodecraft_engine::mesher::configure_mesher_threads(settings.mesher_threads);
+        nodecraft_engine::tessellation::configure_tessellation_threads(settings.tessellation_threads);
         nodecraft_engine::configure_workload_profiler(settings.workload_profiler);
         nodecraft_engine::configure_solidcore_fixes(settings.kernel_fixes);
         node_editor.set_activity_timings(
@@ -760,6 +1177,13 @@ impl NodeCraftApp {
         #[cfg(target_os = "macos")]
         nodecraft_macos::round_main_window();
         crate::window_chrome::prepare_main_window();
+        let display_worker = std::sync::Arc::new(
+            nodecraft_display::service::DisplayWorker::start(16384, {
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            })
+            .expect("display worker"),
+        );
         let mut app = Self {
             session: None,
             active_session_revision: 0,
@@ -781,20 +1205,30 @@ impl NodeCraftApp {
             validation_selection: None,
             difference_stats: None,
             node_errors: HashSet::new(),
+            activity_seen: HashSet::new(),
+            activity_active: HashSet::new(),
             node_error_messages: std::collections::BTreeMap::new(),
             difference_error: None,
             difference_approximate: false,
             crash_test,
             feature_overlay: settings.feature_overlay,
             engine_threads: settings.engine_threads,
-            mesher_threads: settings.mesher_threads,
+            tessellation_threads: settings.tessellation_threads,
             workload_profiler: settings.workload_profiler,
             kernel_fixes: settings.kernel_fixes,
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
-            eval_worker: EvalWorker::new(),
-            preview_worker: PreviewWorker::new(),
-            preview_next: 0,
-            preview_pending: None,
+            eval_worker: EvalWorker::new(std::sync::Arc::clone(&display_worker)),
+            display_worker,
+            pending_display: None,
+            quality_display: None,
+            display_snapshot: None,
+            display_error: None,
+            last_display_us: None,
+            deferred_display: None,
+            applying_deferred_display: false,
+            last_applied_display: None,
+            displayed_target: None,
+            display_next: 0,
             eval_next: 0,
             eval_pending: None,
             session_generation: 0,
@@ -811,6 +1245,13 @@ impl NodeCraftApp {
             evaluation_ms: 0.0,
             cache_hits: 0,
             cache_misses: 0,
+            exact_brep_hits: 0,
+            exact_part_hits: 0,
+            brep_hits: 0,
+            part_hits: 0,
+            display_mesh_hits: 0,
+            tessellation_diagnostics: Vec::new(),
+            preview_detail: Some(1),
             // The SolidCraft callback needs a prepare frame before its first blit.
             warmup_until: Instant::now() + std::time::Duration::from_secs(2),
             screenshot: screenshot.map(|path| (path, 0)),
@@ -829,11 +1270,13 @@ impl NodeCraftApp {
             last_saved_recent: persisted_recent,
             view_save_due: None,
             auto_eval_due: None,
+            last_exact: None,
             pending_dirty: HashSet::new(),
             layout_animation: None,
             node_position_animation: None,
             tabs: Vec::new(),
             group_tabs: HashMap::new(),
+            graph_tab_icon: None,
             tab_positions: HashMap::new(),
             tab_drag: None,
             tab_strip: None,
@@ -861,6 +1304,7 @@ impl NodeCraftApp {
             tool_search_result_index: None,
             tool_search_clear_due: None,
             tool_menu_index: None,
+            tool_solid_submenu_open: false,
             tool_dock_offset_y: settings.tool_dock_offset_y,
             tool_dock_measured_height: 0.0,
             sketch_gui: SketchGui::default(),
@@ -958,8 +1402,10 @@ impl NodeCraftApp {
     /// cache. Production invalidation must come from the graph content hashes, so
     /// this button is temporary and should not grow a record-cache dependency.
     fn reevaluate_non_export(&mut self) {
-        self.preview_worker.clear();
-        self.preview_pending = None;
+        // Re-evaluate bypasses cache lookups instead of freeing every cache.
+        // Content hashes already invalidate changed results; dropping large
+        // B-rep/mesh maps here only adds deallocation latency and is not needed
+        // for a fresh evaluation.
         self.edit_preview = None;
         self.edit_preview_target = None;
         let Some(session) = &self.session else {
@@ -988,7 +1434,7 @@ impl NodeCraftApp {
 
     fn primary_output(node_type: &str) -> Option<&'static str> {
         match node_type {
-            "exporter" | "time" | "linkedpart" => None,
+            "exporter" | "time" | "linkedpart" | "groupoutput" => None,
             "sketch" | "spline" => Some("sketch"),
             _ => Some("shape"),
         }
@@ -996,6 +1442,311 @@ impl NodeCraftApp {
 
     fn auto_connect_ports(previous: &str, added: &str) -> Option<(&'static str, &'static str)> {
         Some((Self::primary_geometry_input(added)?, Self::primary_output(previous)?))
+    }
+
+    fn active_eval_binding(&self) -> Option<EvalBinding> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let meta = self.group_tabs.get(&tab.id)?;
+        meta.view.definition_id.as_ref()?;
+        if meta.instance_path.is_empty() {
+            return None;
+        }
+        let source_document_id = meta.view.document_id.clone();
+        let document = self
+            .documents
+            .session(&source_document_id)?
+            .document()
+            .clone();
+        let body = self.session.as_ref()?.document().clone();
+        Some(EvalBinding {
+            source_document_id,
+            instance_path: meta.instance_path.clone(),
+            prefix: meta.instance_path.join("::"),
+            document,
+            body,
+        })
+    }
+
+    fn breadcrumb_entries(&self) -> Vec<BreadcrumbEntry> {
+        let Some(tab) = self.tabs.get(self.active_tab) else {
+            return Vec::new();
+        };
+        if let Some(meta) = self.group_tabs.get(&tab.id)
+            && !meta.breadcrumb.is_empty()
+        {
+            return meta.breadcrumb.clone();
+        }
+        vec![BreadcrumbEntry {
+            label: self.document_title(tab),
+            definition_id: None,
+        }]
+    }
+
+    fn show_breadcrumb(&mut self, ctx: &egui::Context, panel: egui::Rect) {
+        let entries = self.breadcrumb_entries();
+        if entries.is_empty() {
+            return;
+        }
+        let theme = crate::theme::get();
+        let font = egui::FontId::proportional(12.0);
+        let text = theme.color(theme.text);
+        let muted = theme.color(theme.muted);
+        let hover_fill = theme.with_alpha(theme.control, 225);
+        let mut clicked = None;
+        egui::Area::new(egui::Id::new("node-editor-breadcrumb"))
+            .order(BREADCRUMB_LAYER_ORDER)
+            .fixed_pos(panel.min + egui::vec2(16.0, 7.0))
+            .interactable(true)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                ui.horizontal(|ui| {
+                    let title_width = ui
+                        .painter()
+                        .layout_no_wrap("NODE EDITOR".to_owned(), font.clone(), text)
+                        .size()
+                        .x;
+                    let (title_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(title_width, 22.0),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().text(
+                        title_rect.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        "NODE EDITOR",
+                        font.clone(),
+                        text,
+                    );
+                    for (index, entry) in entries.iter().enumerate() {
+                        let (chevron_rect, _) = ui.allocate_exact_size(
+                            egui::vec2(14.0, 22.0),
+                            egui::Sense::hover(),
+                        );
+                        let centre = chevron_rect.center();
+                        let stroke = egui::Stroke::new(1.4, muted);
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(centre.x - 3.0, centre.y - 4.0),
+                                egui::pos2(centre.x + 1.5, centre.y),
+                            ],
+                            stroke,
+                        );
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(centre.x + 1.5, centre.y),
+                                egui::pos2(centre.x - 3.0, centre.y + 4.0),
+                            ],
+                            stroke,
+                        );
+                        let width = ui
+                            .painter()
+                            .layout_no_wrap(entry.label.clone(), font.clone(), text)
+                            .size()
+                            .x
+                            + 14.0;
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::vec2(width, 22.0),
+                            egui::Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter().add(nodecraft_node_canvas::squircle::shape(
+                                rect,
+                                8.0,
+                                hover_fill,
+                                egui::Stroke::NONE,
+                            ));
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        ui.painter().text(
+                            rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            entry.label.clone(),
+                            font.clone(),
+                            text,
+                        );
+                        if response.clicked() {
+                            clicked = Some(index);
+                        }
+                    }
+                });
+            });
+        if let Some(index) = clicked {
+            self.navigate_breadcrumb(index);
+        }
+    }
+
+    fn navigate_breadcrumb(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(self.active_tab).cloned() else {
+            return;
+        };
+        let Some(meta) = self.group_tabs.get(&tab.id).cloned() else {
+            return;
+        };
+        if index + 1 >= meta.breadcrumb.len() {
+            return;
+        }
+        let Some(entry) = meta.breadcrumb.get(index).cloned() else {
+            return;
+        };
+        let source_document_id = meta.view.document_id.clone();
+        if let Some(definition_id) = entry.definition_id {
+            self.navigate_definition_view(
+                &source_document_id,
+                &definition_id,
+                meta.breadcrumb[..=index].to_vec(),
+            );
+        } else {
+            self.navigate_root_view(&source_document_id);
+        }
+    }
+
+    fn navigate_root_view(&mut self, source_document_id: &str) {
+        let Some(parent) = self.documents.session(source_document_id).cloned() else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(self.active_tab).cloned() else {
+            return;
+        };
+        let path = self.documents.path(source_document_id).map(Path::to_path_buf);
+        self.group_tabs.remove(&tab.id);
+        self.documents.remove(&tab.document_id);
+        self.install_session(Some(parent));
+        self.active_session_revision = self.session.as_ref().map_or(0, Session::revision);
+        if let Some(current) = self.tabs.get_mut(self.active_tab) {
+            current.document_id = source_document_id.to_owned();
+            current.path = path.clone();
+            current.mesh = None;
+            current.selected_nodes.clear();
+            current.selected_connections.clear();
+            current.edit_target = None;
+            current.viewer_breakpoint = None;
+        }
+        self.path = path;
+        self.selected_nodes.clear();
+        self.selected_connections.clear();
+        self.edit_target = None;
+        self.viewer_breakpoint = None;
+        self.mesh = None;
+        self.node_editor.reset_view();
+        self.publish_active_document();
+        self.evaluate();
+    }
+
+    fn navigate_definition_view(
+        &mut self,
+        source_document_id: &str,
+        definition_id: &str,
+        breadcrumb: Vec<BreadcrumbEntry>,
+    ) {
+        let Some(parent) = self.documents.session(source_document_id) else {
+            return;
+        };
+        let Some(definition) = parent.document().definition(definition_id).cloned() else {
+            return;
+        };
+        let definitions = parent.document().definitions.clone();
+        let Some(tab) = self.tabs.get(self.active_tab).cloned() else {
+            return;
+        };
+        let projection = GraphDocument {
+            schema_version: 1,
+            id: format!("{definition_id}::graph"),
+            root: nodecraft_graph_definition(&definition),
+            definitions,
+        };
+        if let Some(meta) = self.group_tabs.get_mut(&tab.id) {
+            meta.view = ViewKey::definition(source_document_id.to_owned(), definition_id.to_owned());
+            meta.instance_path.truncate(breadcrumb.len().saturating_sub(1));
+            meta.breadcrumb = breadcrumb;
+            meta.group_id.clear();
+        }
+        self.documents.remove(&tab.document_id);
+        self.install_session(Some(Session::new(projection)));
+        self.active_session_revision = self.session.as_ref().map_or(0, Session::revision);
+        if let Some(current) = self.tabs.get_mut(self.active_tab) {
+            current.path = None;
+            current.mesh = None;
+            current.selected_nodes.clear();
+            current.selected_connections.clear();
+            current.edit_target = None;
+            current.viewer_breakpoint = None;
+        }
+        self.path = None;
+        self.selected_nodes.clear();
+        self.selected_connections.clear();
+        self.edit_target = None;
+        self.viewer_breakpoint = None;
+        self.mesh = None;
+        self.node_editor.reset_view();
+        self.evaluate();
+    }
+
+    fn add_definition_removals(
+        &self,
+        mut commands: Vec<Command>,
+        removed_nodes: &HashSet<String>,
+    ) -> (Vec<Command>, BTreeSet<String>) {
+        if self.active_definition_view().is_some() {
+            return (commands, BTreeSet::new());
+        }
+        let Some(document) = self.session.as_ref().map(Session::document) else {
+            return (commands, BTreeSet::new());
+        };
+        let removed = cascade_removed_definitions(document, removed_nodes);
+        for id in &removed {
+            commands.push(Command::RemoveDefinition { id: id.clone() });
+        }
+        (commands, removed)
+    }
+
+    fn close_tabs_for_removed_definitions(&mut self, removed: &BTreeSet<String>) {
+        if removed.is_empty() {
+            return;
+        }
+        loop {
+            let index = self.tabs.iter().position(|tab| {
+                self.group_tabs.get(&tab.id).is_some_and(|meta| {
+                    meta.view
+                        .definition_id
+                        .as_deref()
+                        .is_some_and(|id| removed.contains(id))
+                })
+            });
+            let Some(index) = index else { break };
+            self.close_tab(index);
+        }
+    }
+
+    /// Definition ids and names visible from the active view. Definition tabs
+    /// render a projection with an empty table, so uniqueness must come from the
+    /// parent document.
+    fn definition_registry(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let document = if let Some((source_document_id, _)) = self.active_definition_view() {
+            self.documents
+                .session(&source_document_id)
+                .map(Session::document)
+        } else {
+            self.session.as_ref().map(Session::document)
+        };
+        let mut ids = BTreeSet::new();
+        let mut names = BTreeSet::new();
+        if let Some(document) = document {
+            ids.insert(document.root.id.clone());
+            for definition in &document.definitions {
+                ids.insert(definition.id.clone());
+                names.insert(definition.name.clone());
+            }
+        }
+        (ids, names)
+    }
+
+    /// Initial vertical layout for a new graph's interface markers. The node
+    /// canvas fits to content on first entry, so keeping the two markers in one
+    /// column spans them across the available editor height.
+    fn new_graph_port_positions(workspace: egui::Rect) -> ((f64, f64), (f64, f64)) {
+        let panel_height = f64::from(workspace.height().max(480.0));
+        let half_span = (panel_height * 0.22).clamp(160.0, 320.0);
+        let x = 0.0;
+        ((x, -half_span), (x, half_span))
     }
 
     fn auto_connect_position(
@@ -1158,31 +1909,735 @@ impl NodeCraftApp {
         (x, y, moved.into_iter().map(|(id, (x, y))| (id, x, y)).collect())
     }
 
+    /// Apply edits made on a graph-owner inspector while viewing its body.
+    /// Only value edits (not actions or port-count rewrites) are routed to the
+    /// owning document; source ownership stays with the parent tab.
+    fn apply_background_inspector_output(
+        &mut self,
+        document_id: &str,
+        node_id: &str,
+        output: inspector::Output,
+    ) {
+        if output.changes.is_empty() {
+            return;
+        }
+        let Some(mut session) = self.documents.session(document_id).cloned() else {
+            return;
+        };
+        let commands: Vec<Command> = output
+            .changes
+            .iter()
+            .map(|change| Command::SetValue {
+                node: node_id.to_owned(),
+                field: change.field.clone(),
+                value: change.value.clone(),
+            })
+            .collect();
+        if session.apply_commands(&commands).is_ok() {
+            let _ = self.documents.set_session(document_id.to_owned(), session);
+            self.egui_ctx.request_repaint();
+        }
+    }
+
+    /// Replace an open definition tab's body with the resized definition.
+    fn refresh_definition_tab(&mut self, tab_id: u64, definition: &nodecraft_session::GraphDefinition) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id).cloned() else {
+            return;
+        };
+        let command = Command::SetRootDefinition {
+            definition: definition.clone(),
+        };
+        if self.tabs.get(self.active_tab).is_some_and(|active| active.id == tab_id) {
+            if let Some(session) = self.session.as_mut()
+                && session.apply_derived_commands(&[command]).is_ok()
+            {
+                self.active_session_revision = session.revision();
+                self.last_eval_key = None;
+                self.publish_active_document();
+            }
+            self.mesh = None;
+        } else if let Some(mut child) = self.documents.session(&tab.document_id).cloned() {
+            if child.apply_derived_commands(&[command]).is_ok() {
+                let _ = self.documents.set_session(tab.document_id.clone(), child);
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                    tab.mesh = None;
+                    tab.status = "Definition ports updated".to_owned();
+                }
+            }
+        }
+    }
+
+    /// Refresh every open definition tab whose definition changed with the port
+    /// resize, including definitions that merely contain nested instances.
+    fn refresh_definition_tabs_for(
+        &mut self,
+        source_document_id: &str,
+        definitions: &[nodecraft_session::GraphDefinition],
+    ) {
+        let tab_ids: Vec<(u64, nodecraft_session::GraphDefinition)> = definitions
+            .iter()
+            .flat_map(|definition| {
+                self.tabs
+                    .iter()
+                    .filter(|tab| {
+                        self.group_tabs.get(&tab.id).is_some_and(|meta| {
+                            meta.view.document_id == source_document_id
+                                && meta.view.definition_id.as_deref()
+                                    == Some(definition.id.as_str())
+                        })
+                    })
+                    .map(|tab| (tab.id, definition.clone()))
+            })
+            .collect();
+        for (tab_id, definition) in tab_ids {
+            self.refresh_definition_tab(tab_id, &definition);
+        }
+    }
+
+    /// Resize the current document's root graph interface from a Graph
+    /// Input/Output marker. Only shown outside definition tabs.
+    fn resize_root_graph_interface(&mut self, inputs: Option<usize>, outputs: Option<usize>) {
+        if let Some((source_document_id, definition_id)) = self.active_definition_view() {
+            let Some(mut parent) = self.documents.session(&source_document_id).cloned() else {
+                return;
+            };
+            let Some(definition) = parent.document().definition(&definition_id).cloned() else {
+                return;
+            };
+            let input_count = inputs.unwrap_or(definition.interface.inputs.len());
+            let output_count = outputs.unwrap_or(definition.interface.outputs.len());
+            let Some((commands, refreshed)) = definition_port_commands(
+                parent.document(),
+                &definition_id,
+                input_count,
+                output_count,
+            ) else {
+                return;
+            };
+            if parent.apply_commands(&commands).is_err() {
+                return;
+            }
+            let Some(target) = refreshed
+                .iter()
+                .find(|definition| definition.id == definition_id)
+                .cloned()
+            else {
+                return;
+            };
+            if self
+                .documents
+                .set_session(source_document_id.clone(), parent)
+                .is_err()
+            {
+                return;
+            }
+            if let Some(session) = self.session.as_mut()
+                && session
+                    .apply_derived_commands(&[Command::SetRootDefinition {
+                        definition: target,
+                    }])
+                    .is_ok()
+            {
+                self.active_session_revision = session.revision();
+                self.last_eval_key = None;
+                self.publish_active_document();
+            }
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|tab| tab.document_id == source_document_id)
+            {
+                tab.mesh = None;
+            }
+            self.evaluate();
+            return;
+        }
+        let Some(session) = &self.session else { return };
+        let Some(commands) = root_interface_commands(session.document(), inputs, outputs) else {
+            return;
+        };
+        if self.apply_commands(&commands, Some("root-interface-ports")) {
+            self.evaluate();
+        }
+    }
+
+    /// Import an external graph definition (and its local definition closure)
+    /// into the current document, then repoint this instance at the copy.
+    fn make_graph_local(&mut self, graph_id: &str) {
+        let Some(active_session) = &self.session else { return };
+        let Some(node) = active_session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_id && node.node_type == "graph")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(GraphReference::External { path, definition }) = GraphReference::from_node(&node) else {
+            return;
+        };
+        let Ok(external) = nodecraft_session::store::load(std::path::Path::new(&path)) else {
+            self.status = format!("Could not load external graph {path}");
+            return;
+        };
+        let Some(target) = external.definition(&definition).cloned() else {
+            self.status = format!("External graph {path} has no definition {definition}");
+            return;
+        };
+        let Some(active_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else {
+            return;
+        };
+        let source_document_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.document_id == active_document_id)
+            .and_then(|tab| self.group_tabs.get(&tab.id))
+            .map(|meta| meta.view.document_id.clone())
+            .unwrap_or_else(|| active_document_id.clone());
+        let source = if source_document_id == active_document_id {
+            self.session.clone()
+        } else {
+            self.documents.session(&source_document_id).cloned()
+        };
+        let Some(mut source) = source else { return };
+        let mut used_ids: std::collections::BTreeSet<String> = source
+            .document()
+            .definitions
+            .iter()
+            .map(|definition| definition.id.clone())
+            .chain(std::iter::once(source.document().root.id.clone()))
+            .collect();
+        let mut used_names: std::collections::BTreeSet<String> = source
+            .document()
+            .definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        let mut imported = Vec::new();
+        let mut mapping: std::collections::BTreeMap<String, (String, String)> = Default::default();
+        let mut queue = vec![target.id.clone()];
+        while let Some(old_id) = queue.pop() {
+            if mapping.contains_key(&old_id) {
+                continue;
+            }
+            let Some(original) = external.definition(&old_id) else { continue };
+            let base_id = if old_id == target.id { old_id.clone() } else { format!("{old_id}_local") };
+            let mut new_id = base_id.clone();
+            let mut suffix = 2;
+            while !used_ids.insert(new_id.clone()) {
+                new_id = format!("{base_id}_{suffix}");
+                suffix += 1;
+            }
+            let base_name = original.name.clone();
+            let mut new_name = base_name.clone();
+            suffix = 2;
+            while !used_names.insert(new_name.clone()) {
+                new_name = format!("{base_name} {suffix}");
+                suffix += 1;
+            }
+            for child in &original.nodes {
+                if child.node_type == "graph"
+                    && let Some(GraphReference::Local(id)) = GraphReference::from_node(child)
+                {
+                    queue.push(id);
+                }
+            }
+            mapping.insert(old_id, (new_id, new_name));
+            imported.push(original.clone());
+        }
+        let mut definitions = Vec::new();
+        for mut definition in imported {
+            let Some((new_id, new_name)) = mapping
+                .get(&definition.id)
+                .cloned()
+            else {
+                continue;
+            };
+            definition.id = new_id.clone();
+            definition.name = new_name.clone();
+            for node in &mut definition.nodes {
+                if node.node_type == "graph"
+                    && let Some(GraphReference::Local(id)) = GraphReference::from_node(node)
+                    && let Some((mapped, _)) = mapping.get(&id)
+                {
+                    node.values["definition"] = serde_json::Value::String(mapped.clone());
+                }
+            }
+            definitions.push(definition);
+        }
+        let Some((target_id, target_name)) = mapping.get(&target.id).cloned() else {
+            return;
+        };
+        let mut commands: Vec<Command> = definitions
+            .into_iter()
+            .map(|definition| Command::AddDefinition { definition })
+            .collect();
+        commands.push(Command::SetValue {
+            node: graph_id.to_owned(),
+            field: "definition".to_owned(),
+            value: serde_json::Value::String(target_id),
+        });
+        commands.push(Command::SetValue {
+            node: graph_id.to_owned(),
+            field: "name".to_owned(),
+            value: serde_json::Value::String(target_name),
+        });
+        if source_document_id == active_document_id {
+            if self.apply_commands(&commands, Some(&format!("graph-local:{graph_id}"))) {
+                self.evaluate();
+            }
+            return;
+        }
+        let add_count = commands.len().saturating_sub(2);
+        if source.apply_commands(&commands[..add_count]).is_err() {
+            return;
+        }
+        let _ = self
+            .documents
+            .set_session(source_document_id, source);
+        let _ = self.apply_commands(
+            &commands[add_count..],
+            Some(&format!("graph-local:{graph_id}")),
+        );
+        self.evaluate();
+    }
+
+    /// Clone this instance's local definition and point the instance at the
+    /// copy, giving the definition a fresh id and name.
+    fn make_graph_unique(&mut self, graph_id: &str) {
+        let Some(active_session) = &self.session else { return };
+        let Some(node) = active_session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_id && node.node_type == "graph")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(GraphReference::Local(definition_id)) = GraphReference::from_node(&node) else {
+            self.status = "Make unique is only available for local definitions".to_owned();
+            return;
+        };
+        let Some(active_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else {
+            return;
+        };
+        let source_document_id = self
+            .tabs
+            .iter()
+            .find(|tab| tab.document_id == active_document_id)
+            .and_then(|tab| self.group_tabs.get(&tab.id))
+            .map(|meta| meta.view.document_id.clone())
+            .unwrap_or_else(|| active_document_id.clone());
+        let source = if source_document_id == active_document_id {
+            self.session.clone()
+        } else {
+            self.documents.session(&source_document_id).cloned()
+        };
+        let Some(mut source) = source else { return };
+        let Some(original) = source.document().definition(&definition_id).cloned() else {
+            return;
+        };
+        let mut id = format!("{definition_id}_copy");
+        let mut suffix = 2;
+        while source.document().root.id == id
+            || source.document().definitions.iter().any(|definition| definition.id == id)
+        {
+            id = format!("{definition_id}_copy{suffix}");
+            suffix += 1;
+        }
+        let mut name = format!("{} Copy", original.name);
+        suffix = 2;
+        while source.document().definitions.iter().any(|definition| definition.name == name) {
+            name = format!("{} Copy {suffix}", original.name);
+            suffix += 1;
+        }
+        let mut definition = original;
+        definition.id = id.clone();
+        definition.name = name.clone();
+        let mut commands = vec![Command::AddDefinition {
+            definition,
+        }];
+        if source_document_id == active_document_id {
+            commands.push(Command::SetValue {
+                node: graph_id.to_owned(),
+                field: "definition".to_owned(),
+                value: serde_json::Value::String(id),
+            });
+            commands.push(Command::SetValue {
+                node: graph_id.to_owned(),
+                field: "name".to_owned(),
+                value: serde_json::Value::String(name),
+            });
+            if self.apply_commands(&commands, Some(&format!("graph-unique:{graph_id}"))) {
+                self.evaluate();
+            }
+            return;
+        }
+        if source.apply_commands(&commands[..1]).is_err() {
+            return;
+        }
+        let _ = self
+            .documents
+            .set_session(source_document_id.clone(), source);
+        let _ = self.apply_commands(
+            &[
+                Command::SetValue {
+                    node: graph_id.to_owned(),
+                    field: "definition".to_owned(),
+                    value: serde_json::Value::String(id),
+                },
+                Command::SetValue {
+                    node: graph_id.to_owned(),
+                    field: "name".to_owned(),
+                    value: serde_json::Value::String(name),
+                },
+            ],
+            Some(&format!("graph-unique:{graph_id}")),
+        );
+        self.evaluate();
+    }
+
+    /// Resize a local graph definition from its graph-instance inspector.
+    ///
+    /// Editing a definition while one of its body tabs is open would leave that
+    /// tab's marker nodes stale, so this path asks for the tab to be closed first.
+    fn resize_graph_definition_ports(&mut self, graph_id: &str, inputs: usize, outputs: usize) {
+        let Some(active_session) = &self.session else { return };
+        let Some(node) = active_session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_id && node.node_type == "graph")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(active_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else {
+            return;
+        };
+        let Some(reference) = GraphReference::from_node(&node) else {
+            return;
+        };
+        let (source_document_id, definition_id) = match reference {
+            GraphReference::Local(definition_id) => {
+                let source_document_id = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.document_id == active_document_id)
+                    .and_then(|tab| self.group_tabs.get(&tab.id))
+                    .map(|meta| meta.view.document_id.clone())
+                    .unwrap_or_else(|| active_document_id.clone());
+                (source_document_id, definition_id)
+            }
+            GraphReference::External { path, definition } => {
+                let Some(source_document_id) = self
+                    .documents
+                    .id_for_path(std::path::Path::new(&path))
+                    .map(str::to_owned)
+                else {
+                    self.status = "Open the external graph before editing its ports".to_owned();
+                    return;
+                };
+                (source_document_id, definition)
+            }
+        };
+        let open_definition_tabs: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                self.group_tabs.get(&tab.id).is_some_and(|meta| {
+                    meta.view.document_id == source_document_id
+                        && meta.view.definition_id.as_deref() == Some(definition_id.as_str())
+                })
+            })
+            .map(|tab| tab.id)
+            .collect();
+        // Flush body edits before resizing the interface, then replace each open
+        // body session with the resized definition so marker nodes cannot go stale.
+        for tab_id in &open_definition_tabs {
+            self.sync_group_tab(*tab_id);
+        }
+        let source_session = if source_document_id == active_document_id {
+            self.session.clone()
+        } else {
+            self.documents.session(&source_document_id).cloned()
+        };
+        let Some(mut source_session) = source_session else { return };
+        let Some((commands, refreshed_definitions)) = definition_port_commands(
+            source_session.document(),
+            &definition_id,
+            inputs,
+            outputs,
+        ) else {
+            return;
+        };
+        let target = refreshed_definitions
+            .iter()
+            .find(|definition| definition.id == definition_id)
+            .cloned()
+            .unwrap_or_else(|| source_session.document().root.clone());
+        if source_document_id == active_document_id {
+            if self.apply_commands(&commands, Some(&format!("graph-ports:{graph_id}"))) {
+                self.refresh_definition_tabs_for(&source_document_id, &refreshed_definitions);
+                self.evaluate();
+            }
+            return;
+        }
+        if source_session.apply_commands(&commands).is_err() {
+            return;
+        }
+        let _ = self
+            .documents
+            .set_session(source_document_id.clone(), source_session);
+        if let Some(parent_tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.document_id == source_document_id)
+        {
+            parent_tab.mesh = None;
+            parent_tab.status = "Definition ports updated".to_owned();
+        }
+        self.refresh_definition_tabs_for(&source_document_id, &refreshed_definitions);
+        let _ = self.apply_commands(
+            &[
+                Command::SetValue {
+                    node: graph_id.to_owned(),
+                    field: "inputs".to_owned(),
+                    value: serde_json::to_value(&target.interface.inputs)
+                        .unwrap_or(serde_json::Value::Null),
+                },
+                Command::SetValue {
+                    node: graph_id.to_owned(),
+                    field: "outputs".to_owned(),
+                    value: serde_json::to_value(&target.interface.outputs)
+                        .unwrap_or(serde_json::Value::Null),
+                },
+            ],
+            Some(&format!("graph-ports:{graph_id}")),
+        );
+        self.evaluate();
+    }
+
+    /// Rename a local graph definition from its graph-instance inspector.
+    fn rename_graph_definition(&mut self, graph_id: &str, name: String) {
+        let Some(active_session) = &self.session else { return };
+        let Some(node) = active_session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == graph_id && node.node_type == "graph")
+            .cloned()
+        else {
+            return;
+        };
+        let Some(active_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else {
+            return;
+        };
+        let Some(reference) = GraphReference::from_node(&node) else {
+            return;
+        };
+        let (source_document_id, definition_id) = match reference {
+            GraphReference::Local(definition_id) => {
+                let source_document_id = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.document_id == active_document_id)
+                    .and_then(|tab| self.group_tabs.get(&tab.id))
+                    .map(|meta| meta.view.document_id.clone())
+                    .unwrap_or_else(|| active_document_id.clone());
+                (source_document_id, definition_id)
+            }
+            GraphReference::External { path, definition } => {
+                let Some(source_document_id) = self
+                    .documents
+                    .id_for_path(std::path::Path::new(&path))
+                    .map(str::to_owned)
+                else {
+                    self.status = "Open the external graph before renaming it".to_owned();
+                    return;
+                };
+                (source_document_id, definition)
+            }
+        };
+        let mut source = if source_document_id == active_document_id {
+            self.session.clone()
+        } else {
+            self.documents.session(&source_document_id).cloned()
+        };
+        let Some(source_session) = source.as_mut() else {
+            return;
+        };
+        let Some(mut definition) = source_session
+            .document()
+            .definition(&definition_id)
+            .cloned()
+        else {
+            return;
+        };
+        definition.name = name.clone();
+        let mut commands = vec![Command::SetDefinition { definition }];
+        let references = |node: &GraphNode| {
+            node.node_type == "graph"
+                && matches!(
+                    GraphReference::from_node(node),
+                    Some(GraphReference::Local(ref id)) if id == &definition_id
+                )
+        };
+        for node in source_session.document().nodes.clone() {
+            if references(&node) {
+                commands.push(Command::SetValue {
+                    node: node.id,
+                    field: "name".to_owned(),
+                    value: serde_json::Value::String(name.clone()),
+                });
+            }
+        }
+        for definition in source_session.document().definitions.clone() {
+            if definition.id == definition_id {
+                continue;
+            }
+            let mut updated = definition;
+            let mut changed = false;
+            for node in &mut updated.nodes {
+                if references(node) {
+                    node.values["name"] = serde_json::Value::String(name.clone());
+                    changed = true;
+                }
+            }
+            if changed {
+                commands.push(Command::SetDefinition { definition: updated });
+            }
+        }
+        if source_document_id == active_document_id {
+            let _ = self.apply_commands(&commands, Some(&format!("graph-name:{graph_id}")));
+        } else {
+            if source_session.apply_commands(&commands).is_err() {
+                return;
+            }
+            let updated_source = source_session.clone();
+            let _ = self
+                .documents
+                .set_session(source_document_id.clone(), updated_source);
+            let _ = self.apply_commands(
+                &[Command::SetValue {
+                    node: graph_id.to_owned(),
+                    field: "name".to_owned(),
+                    value: serde_json::Value::String(name),
+                }],
+                Some(&format!("graph-name:{graph_id}")),
+            );
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    /// Apply a body-port count change to an inline graph. Port arrays, marker
+    /// nodes, child wires and parent wires must move as one undoable edit.
+    fn apply_graph_ports(&mut self, node_id: &str, inputs: usize, outputs: usize) {
+        let Some(session) = &self.session else { return };
+        let Some(node) = session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(commands) = graph_port_commands(
+            node_id,
+            &node,
+            &session.document().connections,
+            inputs,
+            outputs,
+        ) else {
+            return;
+        };
+        if self.apply_commands(&commands, Some(&format!("graph-ports:{node_id}"))) {
+            self.evaluate();
+        }
+    }
+
     fn add_tool_node(
         &mut self,
         tool: ToolItem,
         workspace: egui::Rect,
         connect_source: Option<String>,
     ) {
+        let (definition_ids, definition_names) = self.definition_registry();
         let Some(session) = &self.session else {
             self.status = "No document".to_owned();
             return;
         };
         let mut used: HashSet<String> = session.document().nodes.iter().map(|node| node.id.clone()).collect();
         let id = unique_node_id(tool.node_type, &mut used);
-        let values = match tool.primitive {
+        let mut graph_definition = None;
+        let values = if tool.node_type == "graph" {
+            let definition_id = unique_graph_definition_id(
+                &format!("{id}_definition"),
+                &definition_ids,
+            );
+            let definition_name = unique_graph_definition_name(&definition_names);
+            graph_definition = Some(nodecraft_session::GraphDefinition {
+                id: definition_id.clone(),
+                name: definition_name.clone(),
+                kind: "graph".to_owned(),
+                interface: nodecraft_session::GraphInterface {
+                    inputs: vec!["shape".into()],
+                    outputs: vec!["shape".into()],
+                },
+                nodes: {
+                    let ((in_x, in_y), (out_x, out_y)) = Self::new_graph_port_positions(workspace);
+                    vec![
+                        GraphNode {
+                            expressions: Default::default(),
+                            id: "in".into(),
+                            node_type: "groupinput".into(),
+                            values: serde_json::json!({"ports":["shape"]}),
+                            suppressed: false,
+                            x: in_x,
+                            y: in_y,
+                        },
+                        GraphNode {
+                            expressions: Default::default(),
+                            id: "out".into(),
+                            node_type: "groupoutput".into(),
+                            values: serde_json::json!({"ports":["shape"]}),
+                            suppressed: false,
+                            x: out_x,
+                            y: out_y,
+                        },
+                    ]
+                },
+                connections: vec![GraphConnection {
+                    from: "in".into(),
+                    to: "out".into(),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                }],
+            });
+            serde_json::json!({
+                "definition": definition_id,
+                "name": definition_name,
+                "inputs": ["shape"],
+                "outputs": ["shape"],
+            })
+        } else {
+            match tool.primitive {
             Some(primitive) => serde_json::json!({ "primitiveType": primitive }),
             None if tool.node_type == "group" => serde_json::json!({
                 "collapsed": false,
                 "nodes": [
-                    {"id":"in","type":"groupinput","values":{"port":"shape"},"suppressed":false,"x":-120.0,"y":0.0},
-                    {"id":"out","type":"groupoutput","values":{"port":"shape"},"suppressed":false,"x":120.0,"y":0.0}
+                    {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
                 ],
                 "connections": [{"from":"in","to":"out","in":"shape","out":"shape"}],
                 "inputs": [{"port":"shape","node":"in"}],
                 "outputs": [{"port":"shape","node":"out"}]
             }),
             None => serde_json::json!({}),
+            }
         };
         let mut node = GraphNode { expressions: Default::default(),
             id: id.clone(),
@@ -1225,7 +2680,11 @@ impl NodeCraftApp {
         );
         let selection_before = self.selected_nodes.clone();
         let connections_before = self.selected_connections.clone();
-        let mut commands = vec![Command::AddNode { node }];
+        let mut commands = Vec::new();
+        if let Some(definition) = graph_definition {
+            commands.push(Command::AddDefinition { definition });
+        }
+        commands.push(Command::AddNode { node });
         if let Some((selected, input, output, _, _, _)) = connect {
             commands.push(Command::Connect {
                 from: selected,
@@ -1339,13 +2798,27 @@ impl NodeCraftApp {
         if !self.copy_selected_nodes() {
             return;
         }
-        let ids: Vec<String> = self.selected_nodes.iter().cloned().collect();
+        let ids: Vec<String> = self
+            .selected_nodes
+            .iter()
+            .filter(|id| {
+                self.session
+                    .as_ref()
+                    .and_then(|session| session.document().nodes.iter().find(|node| &node.id == *id))
+                    .is_none_or(|node| !is_graph_interface_node(node))
+            })
+            .cloned()
+            .collect();
         let count = ids.len();
+        let removed_nodes: HashSet<String> = ids.iter().cloned().collect();
         let commands: Vec<Command> = ids
             .into_iter()
             .map(|id| Command::RemoveNode { id })
             .collect();
+        let (commands, removed_definitions) =
+            self.add_definition_removals(commands, &removed_nodes);
         if self.apply_commands(&commands, Some("cut-nodes")) {
+            self.close_tabs_for_removed_definitions(&removed_definitions);
             self.selected_nodes.clear();
             self.selected_connections.clear();
             self.viewer_breakpoint = None;
@@ -1397,6 +2870,7 @@ impl NodeCraftApp {
         };
         match node_activation(&node_type) {
             NodeActivation::EnterGroup => self.enter_group(id),
+            NodeActivation::EnterGraph => self.enter_graph(id),
             NodeActivation::EditNode => {
                 self.selected_nodes.clear();
                 self.selected_nodes.insert(id.to_owned());
@@ -1412,12 +2886,6 @@ impl NodeCraftApp {
                     self.last_eval_key = None;
                 }
                 self.edit_target = Some(id.to_owned());
-                if self.edit_preview.is_none()
-                    && self.preview_pending.is_none()
-                    && let Some(input) = expected
-                {
-                    self.request_transform_preview(&input);
-                }
                 self.open_inspector();
                 self.status = format!("Editing {id}");
                 self.evaluate();
@@ -1540,17 +3008,16 @@ impl NodeCraftApp {
         // branch mesh is not ready, show no preview rather than falling back to
         // the breakpoint mesh.
         let frame = transform_frame(document, &node.id, target)?;
-        let ghost = self.transform_ghost();
         Some(GizmoDragPreview {
             node_id: node.id.clone(),
             start_values: node.values.clone(),
             chain: frame.chain,
             scope: PreviewScope::All,
             base_transform: frame.placement,
-            // The branch mesh may still be in flight. The drag values can start
-            // immediately; `attach_pending_edit_ghost` adds the visual when the
-            // preview evaluation returns.
-            preview_mesh: ghost.map(|ghost| ghost.branch),
+            // The branch mesh and its GPU plans may still be in flight. The drag
+            // values can start immediately; `attach_pending_edit_ghost` adds the
+            // GPU ghost when the preview evaluation returns.
+            preview_mesh: None,
             branch_preview: true,
         })
     }
@@ -1612,6 +3079,9 @@ impl NodeCraftApp {
         if !drag.branch_preview || drag.preview_mesh.is_some() {
             return;
         }
+        if !self.viewport.has_edit_ghost_plans() {
+            return;
+        }
         let (Some(edit_target), Some(target)) = (self.edit_target.clone(), self.eval_target.clone()) else {
             return;
         };
@@ -1660,7 +3130,11 @@ impl NodeCraftApp {
                 self.gizmo_edited = false;
                 if self.gizmo_publish_pending {
                     self.gizmo_publish_pending = false;
+                    let started = Instant::now();
                     self.publish_active_document();
+                    if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                        eprintln!("[gizmo] publish {}ms", started.elapsed().as_millis());
+                    }
                 }
                 self.viewport.set_preview_transform(None, PreviewScope::All);
             }
@@ -1671,19 +3145,18 @@ impl NodeCraftApp {
             self.gizmo_drag = selected_node.and_then(|node| self.begin_gizmo_preview(node));
             self.gizmo_edited = false;
             self.gizmo_publish_pending = false;
-            if let Some(mesh) = self.gizmo_drag.as_ref().and_then(|drag| drag.preview_mesh.clone()) {
-                if self
+            if let Some(mesh) = self.gizmo_drag.as_ref().and_then(|drag| drag.preview_mesh.clone())
+                && !self
                     .gizmo_drag
                     .as_ref()
                     .is_some_and(|drag| drag.branch_preview)
-                {
-                    // Base dim mesh is already installed by edit mode; upload the
-                    // branch only to the standalone ghost renderer.
-                    self.viewport.set_ghost_mesh(&mesh);
-                } else {
-                    self.viewport.set_mesh_preserving_camera(Some(&mesh));
-                }
+            {
+                self.viewport.set_mesh_preserving_camera(Some(&mesh));
             }
+            // The service-published edit ghost may already have arrived before
+            // the drag began; attach it now instead of waiting for another
+            // preview result.
+            self.attach_pending_edit_ghost();
         }
         if let Some(node) = selected_node
             && node.node_type == "translate"
@@ -1700,7 +3173,11 @@ impl NodeCraftApp {
                     value: serde_json::Value::from(value),
                 })
                 .collect();
+            let started = Instant::now();
             let changed = self.apply_commands(&commands, Some(&format!("gizmo:{}", node.id)));
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                eprintln!("[gizmo] apply_commands {}ms", started.elapsed().as_millis());
+            }
             self.gizmo_edited |= changed;
         }
         if update.dragging || update.started || update.ended {
@@ -1721,7 +3198,11 @@ impl NodeCraftApp {
                 // Keep the preview on screen while the kernel catches up; the
                 // authoritative mesh retires it when it arrives.
                 self.preserve_view_for_next_mesh = true;
+                let started = Instant::now();
                 self.evaluate();
+                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                    eprintln!("[gizmo] release evaluate {}ms", started.elapsed().as_millis());
+                }
                 if self.eval_pending.is_none() {
                     // Nothing started (the viewed target is unaffected), so no
                     // new mesh will replace the preview.
@@ -1742,16 +3223,123 @@ impl NodeCraftApp {
     /// Make the active editor revision the canonical document that linked roots
     /// flatten from. Tabs remain views; the document store is the shared source.
     fn publish_active_document(&mut self) {
+        if self.active_definition_view().is_some() {
+            return;
+        }
         let Some(session) = &self.session else { return };
         let Some(tab) = self.tabs.get(self.active_tab) else { return };
         self.documents
             .publish_document(&tab.document_id, session.document());
     }
 
+    fn active_definition_view(&self) -> Option<(String, String)> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let meta = self.group_tabs.get(&tab.id)?;
+        Some((meta.view.document_id.clone(), meta.view.definition_id.clone()?))
+    }
+
+    /// Definition-backed tabs edit the parent document session directly. The
+    /// visible child session is a projection and is refreshed without its own
+    /// history; the parent session owns the undo entry.
+    fn apply_definition_view_commands(
+        &mut self,
+        source_document_id: &str,
+        definition_id: &str,
+        commands: &[Command],
+    ) -> bool {
+        let Some(mut parent) = self.documents.session(source_document_id).cloned() else {
+            return false;
+        };
+        let scope = self.history_scope();
+        match parent.apply_definition_commands_scoped(definition_id, &scope, commands) {
+            Ok(change) if change.changed => {
+                let updated = parent
+                    .document()
+                    .definition(definition_id)
+                    .cloned();
+                let projection_definitions = parent.document().definitions.clone();
+                if self
+                    .documents
+                    .set_session(source_document_id.to_owned(), parent)
+                    .is_err()
+                {
+                    return false;
+                }
+                if let Some(updated) = updated {
+                    let layout_only = commands_are_layout_only(commands);
+                    let structural = commands.iter().any(|command| {
+                        matches!(
+                            command,
+                            Command::AddNode { .. }
+                                | Command::RemoveNode { .. }
+                                | Command::AddDefinition { .. }
+                                | Command::RemoveDefinition { .. }
+                        )
+                    });
+                    if structural {
+                        // Structural graph-view edits rebuild the projection so a
+                        // newly added node/definition is present immediately rather
+                        // than only after re-entering the tab.
+                        let projection = GraphDocument {
+                            schema_version: 1,
+                            id: format!("{}::graph", updated.id),
+                            root: updated,
+                            definitions: projection_definitions,
+                        };
+                        self.install_session(Some(Session::new(projection)));
+                        self.active_session_revision =
+                            self.session.as_ref().map_or(0, Session::revision);
+                        self.last_eval_key = None;
+                        self.node_editor.request_fit();
+                    } else if let Some(session) = self.session.as_mut()
+                        && session
+                            .apply_derived_commands(&[Command::SetRootDefinition {
+                                definition: updated,
+                            }])
+                            .is_ok()
+                    {
+                        self.active_session_revision = session.revision();
+                        if !layout_only {
+                            self.last_eval_key = None;
+                        }
+                    }
+                    if !layout_only {
+                        self.auto_eval_due = Some(Instant::now());
+                    }
+                }
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.document_id == source_document_id)
+                {
+                    if !commands_are_layout_only(commands) {
+                        tab.mesh = None;
+                    }
+                    tab.status = "Definition updated".to_owned();
+                }
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                self.error = Some(format!("Graph edit failed: {error}"));
+                false
+            }
+        }
+    }
+
     fn apply_commands(&mut self, commands: &[Command], coalesce: Option<&str>) -> bool {
+        if let Some((source_document_id, definition_id)) = self.active_definition_view() {
+            return self.apply_definition_view_commands(
+                &source_document_id,
+                &definition_id,
+                commands,
+            );
+        }
+        let scope = self.history_scope();
         let Some(session) = self.session.as_mut() else { return false };
-        match session.apply_commands_coalesced(
+        match session.apply_commands_scoped(
             commands,
+            &scope,
             coalesce,
             std::time::Duration::from_millis(700),
         ) {
@@ -1779,9 +3367,104 @@ impl NodeCraftApp {
         }
     }
 
+    fn history_scope(&self) -> String {
+        let tab_id = self.tabs.get(self.active_tab).map_or(0, |tab| tab.id);
+        if let Some((_, definition_id)) = self.active_definition_view() {
+            return format!("definition:{definition_id}:view:{tab_id}");
+        }
+        format!("view:{tab_id}")
+    }
+
+    fn can_undo(&self) -> bool {
+        let scope = self.history_scope();
+        if let Some((source_document_id, _)) = self.active_definition_view() {
+            return self
+                .documents
+                .session(&source_document_id)
+                .is_some_and(|session| session.has_scope_undo(&scope));
+        }
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.has_scope_undo(&scope))
+    }
+
+    fn can_redo(&self) -> bool {
+        let scope = self.history_scope();
+        if let Some((source_document_id, _)) = self.active_definition_view() {
+            return self
+                .documents
+                .session(&source_document_id)
+                .is_some_and(|session| session.has_scope_redo(&scope));
+        }
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.has_scope_redo(&scope))
+    }
+
+    fn definition_view_history(&mut self, redo: bool) -> bool {
+        let Some((source_document_id, definition_id)) = self.active_definition_view() else {
+            return false;
+        };
+        let Some(mut parent) = self.documents.session(&source_document_id).cloned() else {
+            return false;
+        };
+        let scope = self.history_scope();
+        let change = if redo {
+            parent.redo_scope(&scope)
+        } else {
+            parent.undo_scope(&scope)
+        };
+        let Ok(Some(_)) = change else {
+            self.status = if redo {
+                "Nothing to redo in this graph".to_owned()
+            } else {
+                "Nothing to undo in this graph".to_owned()
+            };
+            return false;
+        };
+        let Some(updated) = parent.document().definition(&definition_id).cloned() else {
+            return false;
+        };
+        if self
+            .documents
+            .set_session(source_document_id.clone(), parent)
+            .is_err()
+        {
+            return false;
+        }
+        if let Some(session) = self.session.as_mut()
+            && session
+                .apply_derived_commands(&[Command::SetRootDefinition { definition: updated }])
+                .is_ok()
+        {
+            self.active_session_revision = session.revision();
+            self.last_eval_key = None;
+            self.publish_active_document();
+        }
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.document_id == source_document_id)
+        {
+            tab.mesh = None;
+            tab.status = "Definition history".to_owned();
+        }
+        self.evaluate();
+        true
+    }
+
     fn undo(&mut self) {
+        if self.active_definition_view().is_some() {
+            self.definition_view_history(false);
+            return;
+        }
+        let scope = self.history_scope();
+        if self.session.as_ref().is_some_and(|session| session.has_undo() && !session.has_scope_undo(&scope)) {
+            self.status = "Next undo belongs to another view".to_owned();
+            return;
+        }
         let before = self.session.as_ref().map(|session| node_positions(session.document()));
-        let changed = self.session.as_mut().is_some_and(|session| session.undo().ok().flatten().is_some());
+        let changed = self.session.as_mut().is_some_and(|session| session.undo_scope(&scope).ok().flatten().is_some());
         if changed {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
@@ -1801,8 +3484,17 @@ impl NodeCraftApp {
     }
 
     fn redo(&mut self) {
+        if self.active_definition_view().is_some() {
+            self.definition_view_history(true);
+            return;
+        }
+        let scope = self.history_scope();
+        if self.session.as_ref().is_some_and(|session| session.has_redo() && !session.has_scope_redo(&scope)) {
+            self.status = "Next redo belongs to another view".to_owned();
+            return;
+        }
         let before = self.session.as_ref().map(|session| node_positions(session.document()));
-        let changed = self.session.as_mut().is_some_and(|session| session.redo().ok().flatten().is_some());
+        let changed = self.session.as_mut().is_some_and(|session| session.redo_scope(&scope).ok().flatten().is_some());
         if changed {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
@@ -1880,9 +3572,6 @@ impl NodeCraftApp {
             if self.edit_preview_target != self.face_pick_target {
                 self.edit_preview = None;
                 self.edit_preview_target = None;
-                if let Some(input) = self.face_pick_target.clone() {
-                    self.request_transform_preview(&input);
-                }
             }
         }
         self.comparison_pair = None;
@@ -2448,6 +4137,20 @@ impl NodeCraftApp {
                     self.egui_ctx.request_repaint();
                     "{\"ok\":true}".to_owned()
                 }
+                control_server::Command::SetValue { node, field, value } => {
+                    let changed = self.apply_commands(
+                        &[nodecraft_session::Command::SetValue {
+                            node: node.clone(),
+                            field: field.clone(),
+                            value,
+                        }],
+                        Some("control:set"),
+                    );
+                    if changed {
+                        self.evaluate();
+                    }
+                    serde_json::json!({ "ok": true, "changed": changed }).to_string()
+                }
                 control_server::Command::BeginSelection { node, field } => {
                     if self.begin_selection_session(&node, &field) {
                         self.egui_ctx.request_repaint();
@@ -2472,6 +4175,36 @@ impl NodeCraftApp {
                     self.egui_ctx.request_repaint();
                     "{\"ok\":true}".to_owned()
                 }
+                control_server::Command::Zoom(factor) => {
+                    self.viewport.camera.zoom_at(factor.max(0.01), None);
+                    self.viewport.mark_dirty();
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::Translucent(enabled) => {
+                    let mut view = self.viewport.view();
+                    view.translucent = enabled;
+                    self.viewport.set_view(view);
+                    self.viewport.mark_dirty();
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::Triangles(enabled) => {
+                    let mut view = self.viewport.view();
+                    view.triangles = enabled;
+                    self.viewport.set_view(view);
+                    self.viewport.mark_dirty();
+                    self.egui_ctx.request_repaint();
+                    "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::ActivateTab(index) => {
+                    if index < self.tabs.len() {
+                        self.activate_tab(index);
+                        "{\"ok\":true}".to_owned()
+                    } else {
+                        "{\"ok\":false,\"error\":\"tab index out of range\"}".to_owned()
+                    }
+                }
                 control_server::Command::Capture(path) => {
                     self.screenshot = Some((PathBuf::from(path), 0));
                     self.egui_ctx.request_repaint();
@@ -2479,6 +4212,20 @@ impl NodeCraftApp {
                 }
                 control_server::Command::State => {
                     if let Some(session) = &self.session {
+                        let display_plan_count = self.viewport.plans.len();
+                        let unique_plan_count = self.viewport.plans.iter()
+                            .map(|plan| std::sync::Arc::as_ptr(&plan.plan) as usize)
+                            .collect::<std::collections::HashSet<_>>()
+                            .len();
+                        let body_keys = self.last_exact.as_ref().map(|(_, exact)| {
+                            let keys: std::collections::HashSet<_> = exact.exact_parts.values()
+                                .flat_map(|part| part.bodies.iter().map(|body| body.key))
+                                .collect();
+                            let first: Vec<_> = exact.exact_parts.values()
+                                .flat_map(|part| part.bodies.iter().map(|body| (body.key.source, body.key.body)))
+                                .take(5).collect();
+                            (keys.len(), first)
+                        });
                         serde_json::json!({
                         "nodes": session.document().nodes,
                         "connections": session.document().connections,
@@ -2489,6 +4236,26 @@ impl NodeCraftApp {
                         "selectionMode": format!("{:?}", self.viewport.selection_mode()),
                         "edgePicking": self.viewport.edge_picking_enabled(),
                         "visibleEdges": self.viewport.edge_ids().len(),
+                        "displayPlans": display_plan_count,
+                        "planDebug": self.viewport.plan_debug(),
+                        "displayTiming": self.last_display_us,
+                        "deferredDisplay": self.deferred_display.is_some(),
+                        "viewPlansHash": self.viewport.view_plans_hash(),
+                        "uniquePlans": unique_plan_count,
+                        "bodyKeys": body_keys,
+                        "evalPending": self.eval_pending,
+                        "qualityDisplay": self.quality_display.as_ref().map(|(revision, _, _, _, _)| *revision),
+                        "displaySnapshot": self.display_snapshot.as_ref().map(|snapshot| snapshot.id),
+                        "pendingDisplay": self.pending_display.as_ref().map(|(id, _, _, _)| *id),
+                        "displayPlans": self.viewport.plans.len(),
+                        "nodeActivity": self.activity_active.len(),
+                        "previewDetail": self.preview_detail,
+                        "editTarget": self.edit_target,
+                        "editPreview": self.edit_preview.is_some(),
+                        "editPreviewTarget": self.edit_preview_target,
+                        "gizmoDragging": self.gizmo_dragging,
+                        "gizmoEdit": self.gizmo_edited,
+                        "gizmoDrag": self.gizmo_drag.as_ref().map(|drag| drag.node_id.clone()),
                         "beginSelectionActive": self.active_selection_field(),
                         "comparisonActive": self.comparison_pair.is_some(),
                         "differenceFaces": self.difference_stats,
@@ -2496,11 +4263,11 @@ impl NodeCraftApp {
                         "differenceApproximate": self.difference_approximate,
                         "errors": self.error,
                         "nodeErrors": self.node_errors,
+                        "tessellationDiagnostics": self.tessellation_diagnostics.iter().take(64).collect::<Vec<_>>(),
+                        "tessellationDiagnosticCount": self.tessellation_diagnostics.len(),
                         "status": self.status,
-                        "mesh": self.mesh.as_ref().map(|mesh| serde_json::json!({
-                            "vertices": mesh.vertices.len(),
-                            "faces": mesh.faces.len(),
-                        })),
+                        "meshVertices": self.mesh.as_ref().map_or(0, |mesh| mesh.vertices.len()),
+                        "meshFaces": self.mesh.as_ref().map_or(0, |mesh| mesh.faces.len()),
                         }).to_string()
                     } else {
                         "{\"ok\":false,\"error\":\"no document\"}".to_owned()
@@ -2515,18 +4282,32 @@ impl NodeCraftApp {
 
 impl eframe::App for NodeCraftApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let started = Instant::now();
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.logic_inner(ctx, frame);
         }));
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            let elapsed = started.elapsed();
+            if elapsed.as_millis() >= 50 {
+                eprintln!("[ui] logic {}ms", elapsed.as_millis());
+            }
+        }
         if let Err(payload) = guarded {
             crate::crash_report::handle_payload(payload);
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let started = Instant::now();
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.ui_inner(ui, frame);
         }));
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            let elapsed = started.elapsed();
+            if elapsed.as_millis() >= 50 {
+                eprintln!("[ui] ui {}ms", elapsed.as_millis());
+            }
+        }
         if let Err(payload) = guarded {
             crate::crash_report::handle_payload(payload);
         }
@@ -2535,6 +4316,13 @@ impl eframe::App for NodeCraftApp {
 
 impl NodeCraftApp {
     fn logic_inner(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let tess_ready = self.viewport.plan_ready();
+        let tess_was_ready = nodecraft_display::service::gpu_tess_ready();
+        nodecraft_display::service::set_gpu_tess_ready(tess_ready);
+        if tess_ready && !tess_was_ready {
+            // The pending plan swap was waiting on the tessellation pipeline.
+            ctx.request_repaint();
+        }
         if self.crash_test {
             self.crash_test = false;
             panic!("NodeCraft crash-handler test");
@@ -2589,7 +4377,7 @@ impl NodeCraftApp {
                 self.activity,
                 self.feature_overlay,
                 self.engine_threads,
-                self.mesher_threads,
+                self.tessellation_threads,
                 self.workload_profiler,
                 self.kernel_fixes,
                 self.cable_routing,
@@ -2606,6 +4394,19 @@ impl NodeCraftApp {
             }
         }
         self.poll_evaluation();
+        if self.deferred_display.is_some() {
+            let expired = self
+                .deferred_display
+                .as_ref()
+                .is_some_and(|(_, _, _, at)| at.elapsed() >= std::time::Duration::from_millis(250));
+            if self.viewport.plan_pending() && !expired {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            } else if let Some((frame, target, feature_ghost, _)) = self.deferred_display.take() {
+                self.applying_deferred_display = true;
+                self.apply_display_frame(&frame, &target, feature_ghost, false);
+                self.applying_deferred_display = false;
+            }
+        }
         if self.eval_pending.is_none()
             // A drag previews the placement on the GPU; evaluating mid-drag would
             // replace that geometry and double-apply the transform.
@@ -2615,6 +4416,52 @@ impl NodeCraftApp {
                 .is_some_and(|due| due.elapsed() >= std::time::Duration::from_millis(32))
         {
             self.evaluate();
+        }
+        if self.eval_pending.is_none()
+            && self.quality_display.is_none()
+            // The display worker has a single latest-frame slot. A quality
+            // request submitted while an exact frame is in flight overwrites
+            // that frame before the app can poll it.
+            && self.pending_display.is_none()
+            && self
+                .display_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.id == self.eval_next)
+            && self.gizmo_drag.is_none()
+            && self.session.is_some()
+        {
+            let target = self.viewport.quality_detail();
+            if target != self.preview_detail {
+                self.preview_detail = target;
+                // A quality tier is display work, not graph work. Reuse the
+                // exact snapshot and submit straight to the display worker; do
+                // not enter evaluate(), which would reset node activity and run
+                // the legacy planner.
+                if let Some(snapshot) = self.display_snapshot.clone() {
+                    self.display_next = self.display_next.wrapping_add(1);
+                    // Revisions share one display worker with evaluation
+                    // requests; camera-only frames use a distinct range.
+                    let revision = (1u64 << 63) | self.display_next;
+                    self.display_worker.submit(nodecraft_display::service::DisplayRequest {
+                        revision,
+                        snapshot_id: snapshot.id,
+                        quality: self.preview_detail.map_or(
+                            nodecraft_display::DisplayQuality::Full(0.35),
+                            nodecraft_display::DisplayQuality::Preview,
+                        ),
+                        feature_ghost: snapshot.feature_ghost,
+                        snapshot: snapshot.snapshot,
+                    });
+                    self.quality_display = Some((
+                        revision,
+                        snapshot.id,
+                        snapshot.target,
+                        snapshot.feature_ghost,
+                        Instant::now(),
+                    ));
+                    self.egui_ctx.request_repaint();
+                }
+            }
         }
         if self.auto_eval_due.is_some() || self.eval_pending.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
@@ -2770,13 +4617,21 @@ impl NodeCraftApp {
             && (!self.selected_nodes.is_empty() || !self.selected_connections.is_empty())
             && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         {
-            let commands = delete_selection_commands(&self.selected_nodes, &self.selected_connections);
+            let removed_nodes = self.selected_nodes.clone();
+            let commands = delete_selection_commands(
+                self.session.as_ref().map(Session::document),
+                &self.selected_nodes,
+                &self.selected_connections,
+            );
+            let (commands, removed_definitions) =
+                self.add_definition_removals(commands, &removed_nodes);
             let node_count = self.selected_nodes.len();
             let cable_count = self.selected_connections.len();
             self.selected_nodes.clear();
             self.selected_connections.clear();
             self.viewer_breakpoint = None;
             if self.apply_commands(&commands, Some("delete-selection")) {
+                self.close_tabs_for_removed_definitions(&removed_definitions);
                 self.evaluate();
                 self.status = format!(
                     "Deleted {node_count} node{} and {cable_count} cable{}",
@@ -2841,15 +4696,14 @@ impl NodeCraftApp {
                     ui.add_space(4.0);
                     ui.strong("NodeCraft");
                     ui.add_space(8.0);
-                    let (file_button, _) = egui::containers::menu::MenuButton::from_button(
+                    let file_button = ui.add(
                         egui::Button::new(egui::RichText::new("File   ").size(13.0))
                             .frame(false),
-                    )
-                    .config(
-                        egui::containers::menu::MenuConfig::new()
-                            .style(crate::theme::menu_style),
-                    )
-                    .ui(ui, |ui| {
+                    );
+                    egui::Popup::menu(&file_button)
+                        .kind(egui::PopupKind::Tooltip)
+                        .style(crate::theme::menu_style)
+                        .show(|ui| {
                         ui.set_min_width(230.0);
                         if ui.button("New").clicked() {
                             ui.close();
@@ -2909,6 +4763,32 @@ impl NodeCraftApp {
                             ui.close();
                             self.export_document();
                         }
+                        let view_mode = self
+                            .tabs
+                            .get(self.active_tab)
+                            .map_or(TabViewMode::Split, |tab| tab.view_mode);
+                        for (mode, label) in [
+                            (TabViewMode::Split, "Split view"),
+                            (TabViewMode::NodesOnly, "Nodes only view"),
+                            (TabViewMode::ViewportOnly, "3D only view"),
+                        ] {
+                            if ui
+                                .add_enabled(
+                                    has_document,
+                                    egui::Button::new(if view_mode == mode {
+                                        format!("✓ {label}")
+                                    } else {
+                                        label.to_owned()
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                                    tab.view_mode = mode;
+                                }
+                                ui.close();
+                            }
+                        }
                         ui.separator();
                         if ui
                             .add_enabled(!self.tabs.is_empty(), egui::Button::new("Close Tab"))
@@ -2918,11 +4798,18 @@ impl NodeCraftApp {
                             let index = self.active_tab;
                             self.close_tab(index);
                         }
+                        if ui
+                            .add_enabled(has_document, egui::Button::new("Duplicate Tab"))
+                            .clicked()
+                        {
+                            ui.close();
+                            self.duplicate_active_tab();
+                        }
                         ui.separator();
                         if ui.button("Quit").clicked() {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
-                    });
+                        });
                     let chevron = egui::Pos2::new(
                         file_button.rect.right() - 2.0,
                         file_button.rect.center().y + 4.0,
@@ -2941,8 +4828,8 @@ impl NodeCraftApp {
                         [chevron + egui::vec2(0.0, 2.0), chevron + egui::vec2(4.0, -2.0)],
                         stroke,
                     );
-                    let can_undo = self.session.as_ref().is_some_and(Session::has_undo);
-                    let can_redo = self.session.as_ref().is_some_and(Session::has_redo);
+                    let can_undo = self.can_undo();
+                    let can_redo = self.can_redo();
                     let spacing = ui.spacing().item_spacing.x;
                     // The File chevron sits 2 px inside the menu's right edge;
                     // 4 px here plus the 8 px arrow spacing puts the arrow 10 px
@@ -3024,23 +4911,65 @@ impl NodeCraftApp {
                             egui::Vec2::splat(28.0),
                             egui::Sense::hover(),
                         );
-                        let runner_hovered = ui.rect_contains_pointer(runner_rect);
-                        let tint = crate::theme::Theme::hex(if runner_hovered {
-                            theme.icon_hover
+                        let runner = if self.eval_pending.is_some() {
+                            let response = ui.interact(
+                                runner_rect,
+                                ui.id().with("reevaluate-progress"),
+                                egui::Sense::click(),
+                            );
+                            let painter = ui.painter();
+                            let centre = runner_rect.center();
+                            let radius = 7.0;
+                            painter.circle_stroke(
+                                centre,
+                                radius,
+                                egui::Stroke::new(
+                                    1.4,
+                                    theme.with_alpha(theme.icon, 90),
+                                ),
+                            );
+                            let colour = theme.color(theme.node_activity);
+                            let fraction = self
+                                .eval_progress
+                                .as_ref()
+                                .map(progress_fraction)
+                                .unwrap_or(0.0);
+                            let start = -std::f32::consts::FRAC_PI_2;
+                            let sweep = fraction * std::f32::consts::TAU;
+                            if sweep > 0.0 {
+                                let steps = ((sweep.abs() / std::f32::consts::TAU) * 96.0)
+                                    .ceil()
+                                    .max(2.0) as usize;
+                                let points: Vec<egui::Pos2> = (0..=steps)
+                                    .map(|index| {
+                                        let angle = start + sweep * index as f32 / steps as f32;
+                                        centre + egui::vec2(angle.cos(), angle.sin()) * radius
+                                    })
+                                    .collect();
+                                painter.add(egui::Shape::line(
+                                    points,
+                                    egui::Stroke::new(1.8, colour),
+                                ));
+                            }
+                            response
                         } else {
-                            theme.icon
-                        });
-                        let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/arrow_clockwise.svg"))
-                            .unwrap_or_default()
-                            .replace("#212121", &tint);
-                        let image = egui::Image::from_bytes(
-                            "bytes://nodecraft-reevaluate.svg",
-                            svg.into_bytes(),
-                        )
-                        .fit_to_exact_size(egui::Vec2::splat(16.0))
-                        .sense(egui::Sense::click());
-                        let runner = ui
-                            .put(runner_rect, image)
+                            let tint = crate::theme::Theme::hex(if ui.rect_contains_pointer(runner_rect) {
+                                theme.icon_hover
+                            } else {
+                                theme.icon
+                            });
+                            let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/arrow_clockwise.svg"))
+                                .unwrap_or_default()
+                                .replace("#212121", &tint);
+                            let image = egui::Image::from_bytes(
+                                "bytes://nodecraft-reevaluate.svg",
+                                svg.into_bytes(),
+                            )
+                            .fit_to_exact_size(egui::Vec2::splat(16.0))
+                            .sense(egui::Sense::click());
+                            ui.put(runner_rect, image)
+                        };
+                        let runner = runner
                             .on_hover_text("Re-evaluate graph without running exporters");
                         if runner.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -3149,7 +5078,7 @@ impl NodeCraftApp {
                     );
                     ui.add_sized(
                         [70.0, row_height],
-                        egui::Label::new(format!("{}/{}", progress.done, progress.total)),
+                        egui::Label::new(format!("{}/{}", progress.done(), progress.total)),
                     );
                 }
                 if let Some(error) = &self.error {
@@ -3178,13 +5107,32 @@ impl NodeCraftApp {
             });
         });
 
-        let selected_node = if self.selected_nodes.len() == 1 {
+        let active_document_id = self
+            .tabs
+            .get(self.active_tab)
+            .map(|tab| tab.document_id.clone());
+        let selected = if self.selected_nodes.len() == 1 {
             self.session.as_ref().and_then(|session| {
                 let id = self.selected_nodes.iter().next()?.as_str();
                 session.document().nodes.iter().find(|node| node.id == id).cloned()
             })
         } else {
             None
+        };
+        let no_selection =
+            self.selected_nodes.is_empty() && self.selected_connections.is_empty();
+        let fallback_owner = if selected.is_none() && no_selection {
+            self.tabs
+                .get(self.active_tab)
+                .and_then(|tab| self.group_owner_node(tab.id))
+        } else {
+            None
+        };
+        let inspector_is_fallback = fallback_owner.is_some();
+        let (selected_node, inspector_document_id) = match (selected, fallback_owner) {
+            (Some(node), _) => (Some(node), active_document_id),
+            (None, Some((document_id, node))) => (Some(node), Some(document_id)),
+            (None, None) => (None, active_document_id),
         };
         if let Some(editing) = &self.editing_sketch
             && selected_node.as_ref().is_none_or(|node| node.id != *editing)
@@ -3259,6 +5207,20 @@ impl NodeCraftApp {
                 workspace_rect.bottom() - inspector_margin,
             ),
         );
+        let view_mode = self
+            .tabs
+            .get(self.active_tab)
+            .map_or(TabViewMode::Split, |tab| tab.view_mode);
+        let node_only = view_mode == TabViewMode::NodesOnly;
+        let viewport_only = view_mode == TabViewMode::ViewportOnly;
+        self.node_editor.set_maximized(node_only);
+        self.node_editor.set_right_inset(if node_only {
+            inspector_width + inspector_margin + 12.0
+        } else {
+            0.0
+        });
+        self.node_editor.set_view_label(None);
+        self.node_editor.set_header_visible(false);
         let node_panel_rect = self.node_editor.panel_rect(workspace_rect);
         let backdrop_rect = node_panel_rect.union(inspector_rect);
         let node_backdrop = self.viewport.backdrop_view_for(node_panel_rect, backdrop_rect);
@@ -3288,13 +5250,15 @@ impl NodeCraftApp {
                 blockers.push(menu);
             }
             self.node_editor.set_pointer_blockers(blockers);
-            self.viewport.show_with_backdrop_blockers(
-                ui,
-                panel_rect,
-                &[panel_rect, inspector_rect],
-                backdrop_rect,
-            );
-            if let Some(session) = &self.session {
+            if !viewport_only {
+                self.viewport.show_with_backdrop_blockers(
+                    ui,
+                    panel_rect,
+                    &[panel_rect, inspector_rect],
+                    backdrop_rect,
+                );
+            }
+            if !viewport_only && let Some(session) = &self.session {
                 let animated = self.node_position_animation.as_ref().map(|animation| {
                     let duration = Duration::from_millis(450).as_secs_f32();
                     let progress = (animation.started.elapsed().as_secs_f32() / duration)
@@ -3309,10 +5273,11 @@ impl NodeCraftApp {
                     &self.selected_nodes,
                     &self.selected_connections,
                     self.viewer_breakpoint.as_deref(),
-                    node_backdrop,
+                    if node_only { None } else { node_backdrop },
                 );
             }
         });
+        self.show_breadcrumb(ui.ctx(), node_panel_rect);
         self.sync_comparison_target();
         self.handle_gizmo_update(selected_node.as_ref());
 
@@ -3527,7 +5492,9 @@ impl NodeCraftApp {
                             egui::pos2(ui.max_rect().right() - 13.0, header_rect.center().y),
                             egui::vec2(26.0, 26.0),
                         );
-                        if inspector::reset_icon_button_at(ui, reset_rect).clicked() {
+                        if !inspector_is_fallback
+                            && inspector::reset_icon_button_at(ui, reset_rect).clicked()
+                        {
                             reset_inspector = true;
                         }
                         let header_double_clicked = ui.ctx().input(|input| {
@@ -3609,6 +5576,13 @@ impl NodeCraftApp {
                                         &surface_sections,
                                         active_selection.as_deref(),
                                         self.editing_sketch.as_deref() == Some(node.id.as_str()),
+                                        !inspector_is_fallback,
+                                        !inspector_is_fallback
+                                            && self.tabs.get(self.active_tab).is_some_and(|tab| {
+                                                self.group_tabs.get(&tab.id).map_or(true, |meta| {
+                                                    meta.view.definition_id.is_some()
+                                                })
+                                            }),
                                     );
                                     if sketch_editing {
                                         self.sketch_gui.show_palette(ui);
@@ -3616,7 +5590,9 @@ impl NodeCraftApp {
                                     }
                                     inspector::note(ui, node);
                                     ui.add_space(8.0);
-                                    inspector::actions(ui, node, &mut output);
+                                    if !inspector_is_fallback {
+                                        inspector::actions(ui, node, &mut output);
+                                    }
                                     inspector_output = Some(output);
                                 });
                             if reflow {
@@ -3639,25 +5615,59 @@ impl NodeCraftApp {
         if toggle_inspector {
             self.toggle_inspector();
         }
-        if let Some(node) = &selected_node
+        if !inspector_is_fallback
+            && let Some(node) = &selected_node
             && let Some(error) = self.node_error_messages.get(&node.id)
         {
             show_viewer_error(ui.ctx(), viewport_rect, node_panel_rect, inspector_rect, error);
         }
-        if let (Some(output), Some(node)) = (inspector_output, &selected_node) {
+        if inspector_is_fallback {
+            if let (Some(output), Some(node), Some(document_id)) = (
+                inspector_output,
+                &selected_node,
+                inspector_document_id.as_deref(),
+            ) {
+                self.apply_background_inspector_output(document_id, &node.id, output);
+            }
+        } else if let (Some(output), Some(node)) = (inspector_output, &selected_node) {
             if output.delete {
                 let mut nodes = HashSet::new();
                 nodes.insert(node.id.clone());
-                let commands = delete_selection_commands(&nodes, &HashSet::new());
+                let commands = delete_selection_commands(
+                    self.session.as_ref().map(Session::document),
+                    &nodes,
+                    &HashSet::new(),
+                );
+                let (commands, removed_definitions) =
+                    self.add_definition_removals(commands, &nodes);
                 self.selected_nodes.clear();
                 self.selected_connections.clear();
                 if self.viewer_breakpoint.as_deref() == Some(node.id.as_str()) {
                     self.viewer_breakpoint = None;
                 }
                 if self.apply_commands(&commands, Some("inspector-delete")) {
+                    self.close_tabs_for_removed_definitions(&removed_definitions);
                     self.evaluate();
                 }
             } else {
+                if output.open_definition {
+                    self.enter_graph(&node.id);
+                }
+                if let Some(name) = output.graph_name.clone() {
+                    self.rename_graph_definition(&node.id, name);
+                }
+                if let Some((inputs, outputs)) = output.definition_ports {
+                    self.resize_graph_definition_ports(&node.id, inputs, outputs);
+                }
+                if let Some((inputs, outputs)) = output.root_interface_ports {
+                    self.resize_root_graph_interface(inputs, outputs);
+                }
+                if output.make_unique {
+                    self.make_graph_unique(&node.id);
+                }
+                if output.make_local {
+                    self.make_graph_local(&node.id);
+                }
                 if output.toggle_sketch_edit {
                     if self.editing_sketch.as_deref() == Some(node.id.as_str()) {
                         self.editing_sketch = None;
@@ -3699,6 +5709,9 @@ impl NodeCraftApp {
                     if self.apply_commands(&commands, Some("surface-loft-sections")) {
                         self.evaluate();
                     }
+                }
+                if let Some((inputs, outputs)) = output.graph_ports {
+                    self.apply_graph_ports(&node.id, inputs, outputs);
                 }
                 // Apply the whole frame's inspector edits before asking the engine
                 // to evaluate the resulting document. Each field keeps its own
@@ -3799,17 +5812,6 @@ impl NodeCraftApp {
                         self.selected_nodes.insert(id);
                     }
                     self.selected_connections.clear();
-                    if self.edit_target.is_none()
-                        && self.selected_nodes.len() == 1
-                        && let Some(session) = &self.session
-                        && let Some(input) = self
-                            .selected_nodes
-                            .iter()
-                            .next()
-                            .and_then(|id| transform_edit_input(session.document(), id))
-                    {
-                        self.request_transform_preview(&input);
-                    }
                 }
                 NodeEditorAction::SetLassoSelection { nodes, .. } => {
                     self.selected_nodes = nodes;
@@ -4096,8 +6098,8 @@ fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
 }
 
 fn configure_style(ctx: &egui::Context) {
-    // The Swift/WebView app ships Inter (vendor/InterVariable.woff2); use the same
-    // Inter family as the leading egui proportional font.
+    // Use the embedded Inter family as the leading egui proportional font on
+    // every platform.
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "inter".to_owned(),
@@ -4212,18 +6214,339 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_graph_instance_cascades_unreferenced_definitions() {
+        let node = |id: &str, node_type: &str, definition: Option<&str>| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values: definition.map_or_else(|| json!({}), |id| json!({"definition": id})),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let def = |id: &str, body: Vec<GraphNode>| nodecraft_session::GraphDefinition {
+            id: id.into(),
+            name: id.into(),
+            kind: "graph".into(),
+            interface: nodecraft_session::GraphInterface::default(),
+            nodes: body,
+            connections: Vec::new(),
+        };
+        let mut document = GraphDocument::new("cascade");
+        document.nodes.push(node("g1", "graph", Some("g1")));
+        document.definitions.push(def("g1", vec![node("g2", "graph", Some("g2"))]));
+        document.definitions.push(def("g2", vec![node("g3", "graph", Some("g3"))]));
+        document.definitions.push(def("g3", Vec::new()));
+        let removed: HashSet<String> = ["g1".to_owned()].into_iter().collect();
+        let cascade = cascade_removed_definitions(&document, &removed);
+        assert_eq!(cascade.into_iter().collect::<Vec<_>>(), vec!["g1", "g2", "g3"]);
+
+        let mut shared = document.clone();
+        shared.definitions.push(def("g2_shared", vec![node("shared_g3", "graph", Some("g3"))]));
+        let cascade = cascade_removed_definitions(&shared, &removed);
+        assert!(cascade.contains("g1"));
+        assert!(cascade.contains("g2"));
+        assert!(!cascade.contains("g3"), "g3 still has another reference");
+    }
+
+    #[test]
+    fn body_targets_map_to_the_instance_flat_path() {
+        let node = |id: &str, node_type: &str| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values: json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let body = GraphDocument {
+            schema_version: 1,
+            id: "g1::graph".into(),
+            root: nodecraft_session::GraphDefinition {
+                id: "g1".into(),
+                name: "G1".into(),
+                kind: "graph".into(),
+                interface: nodecraft_session::GraphInterface::default(),
+                nodes: vec![node("in", "groupinput"), node("solid", "solid"), node("out", "groupoutput")],
+                connections: Vec::new(),
+            },
+            definitions: Vec::new(),
+        };
+        let binding = EvalBinding {
+            source_document_id: "root".into(),
+            instance_path: vec!["g1".into(), "g2".into()],
+            prefix: "g1::g2".into(),
+            document: GraphDocument::new("root"),
+            body: body.clone(),
+        };
+        assert_eq!(map_body_id_to_eval(&binding, "solid").as_deref(), Some("g1::g2::solid"));
+        assert_eq!(map_body_id_to_eval(&binding, "out").as_deref(), Some("g1::g2"));
+        assert_eq!(map_body_id_to_eval(&binding, "in"), None);
+        assert_eq!(map_eval_id_to_body(&binding, "g1::g2::solid").as_deref(), Some("solid"));
+        assert_eq!(map_eval_id_to_body(&binding, "g1::g2").as_deref(), Some("out"));
+
+        let mut root = GraphDocument::new("root");
+        root.nodes.push(node("solid", "solid"));
+        root.nodes.push(node("graph", "graph"));
+        root.connections.push(GraphConnection {
+            from: "solid".into(),
+            to: "graph".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
+        let input_binding = EvalBinding {
+            source_document_id: "root".into(),
+            instance_path: vec!["graph".into()],
+            prefix: "graph".into(),
+            document: root,
+            body,
+        };
+        assert_eq!(map_body_id_to_eval(&input_binding, "in").as_deref(), Some("solid"));
+        assert_eq!(map_eval_id_to_body(&input_binding, "solid").as_deref(), Some("in"));
+    }
+
+    #[test]
+    fn target_closure_handles_large_chains_linearly() {
+        let mut document = GraphDocument::new("chain");
+        for index in 0..5_000 {
+            document.nodes.push(GraphNode {
+                expressions: Default::default(),
+                id: format!("n{index}"),
+                node_type: "boolean".into(),
+                values: json!({}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            });
+            if index > 0 {
+                document.connections.push(GraphConnection {
+                    from: format!("n{}", index - 1),
+                    to: format!("n{index}"),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                });
+            }
+        }
+        let closure = target_closure(&document, "n4999");
+        assert_eq!(closure.len(), 5_000);
+        assert!(closure.contains("n0"));
+    }
+
+    #[test]
+    fn layout_only_commands_do_not_trigger_engine_updates() {
+        assert!(commands_are_layout_only(&[Command::SetPosition {
+            node: "a".into(), x: 1.0, y: 2.0
+        }]));
+        assert!(!commands_are_layout_only(&[
+            Command::SetPosition { node: "a".into(), x: 1.0, y: 2.0 },
+            Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(2.0) },
+        ]));
+        assert!(!commands_are_layout_only(&[]));
+    }
+
+    #[test]
+    fn graph_port_counts_commit_and_survive_the_session() {
+        let graph = GraphNode {
+            expressions: Default::default(),
+            id: "g".into(),
+            node_type: "group".into(),
+            values: json!({
+                "name": "Rounded Box",
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"port":"shape"},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"port":"shape"},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections": [{"from":"in","to":"out","in":"shape","out":"shape"}],
+                "inputs": [{"port":"shape","node":"in"}],
+                "outputs": [{"port":"shape","node":"out"}]
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("graph-ports");
+        document.nodes.push(graph.clone());
+        let mut session = Session::new(document);
+        let commands = graph_port_commands("g", &graph, &session.document().connections, 3, 2)
+            .expect("port commands");
+        session.apply_commands(&commands).expect("apply");
+        let node = session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == "g")
+            .expect("graph");
+        let payload = read_group(node).expect("graph payload");
+        assert_eq!(payload.inputs.len(), 3);
+        assert_eq!(payload.outputs.len(), 2);
+        assert_eq!(payload.name, "Rounded Box");
+        assert_eq!(payload.inputs[2].port, "shape3");
+        assert_eq!(payload.outputs[1].port, "shape2");
+        assert_eq!(
+            payload
+                .nodes
+                .iter()
+                .find(|node| node.node_type == "groupinput")
+                .unwrap()
+                .values["ports"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn nested_graph_identity_skips_definitions_in_the_parent_document() {
+        let ids: BTreeSet<String> = ["graph_definition", "graph_definition2"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            unique_graph_definition_id("graph_definition", &ids),
+            "graph_definition3"
+        );
+        let names: BTreeSet<String> = ["Graph", "Graph 2"].into_iter().map(str::to_owned).collect();
+        assert_eq!(unique_graph_definition_name(&names), "Graph 3");
+    }
+
+    #[test]
+    fn new_graph_interface_starts_in_a_vertical_column() {
+        let workspace = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 900.0));
+        let ((in_x, in_y), (out_x, out_y)) = NodeCraftApp::new_graph_port_positions(workspace);
+        assert_eq!(in_x, 0.0);
+        assert_eq!(out_x, 0.0);
+        assert_eq!(in_x, out_x, "no horizontal offset between the markers");
+        assert!(in_y < 0.0);
+        assert!(out_y > 0.0);
+        assert!(out_y - in_y >= 380.0, "markers span the available height");
+    }
+
+    #[test]
+    fn definition_port_commands_update_nested_instances_and_drop_removed_wires() {
+        let node = |id: &str, node_type: &str, values: Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let definition = nodecraft_session::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: nodecraft_session::GraphInterface {
+                inputs: vec!["shape".into(), "shape2".into()],
+                outputs: vec!["shape".into()],
+            },
+            nodes: vec![
+                node("in", "groupinput", json!({"ports":["shape", "shape2"]})),
+                node("out", "groupoutput", json!({"ports":["shape"]})),
+            ],
+            connections: vec![GraphConnection { from: "in".into(), to: "out".into(), input: "shape".into(), out: "shape".into() }],
+        };
+        let mut document = GraphDocument::new("definition-ports");
+        document.definitions.push(definition.clone());
+        document.nodes.push(node("g", "graph", json!({"definition":"feature","inputs":["shape","shape2"],"outputs":["shape"]})));
+        document.nodes.push(node("src", "solid", json!({"primitiveType":"box"})));
+        document.connections.push(GraphConnection { from: "src".into(), to: "g".into(), input: "shape2".into(), out: "shape".into() });
+        document.definitions.push(nodecraft_session::GraphDefinition {
+            id: "outer".into(),
+            name: "Outer".into(),
+            kind: "graph".into(),
+            interface: nodecraft_session::GraphInterface::default(),
+            nodes: vec![
+                node("nested", "graph", json!({"definition":"feature","inputs":["shape","shape2"],"outputs":["shape"]})),
+                node("inner_src", "solid", json!({"primitiveType":"box"})),
+            ],
+            connections: vec![GraphConnection { from: "inner_src".into(), to: "nested".into(), input: "shape2".into(), out: "shape".into() }],
+        });
+        let (commands, refreshed) = definition_port_commands(&document, "feature", 1, 1).expect("commands");
+        assert_eq!(refreshed[0].interface.inputs, vec!["shape"]);
+        let outer = refreshed.iter().find(|definition| definition.id == "outer").expect("outer refreshed");
+        assert!(outer.connections.is_empty());
+        let mut session = Session::new(document);
+        session.apply_commands(&commands).expect("apply");
+        assert!(session.document().connections.is_empty());
+        let outer = session.document().definition("outer").expect("outer");
+        assert!(outer.connections.is_empty());
+        assert_eq!(outer.nodes.iter().find(|node| node.id == "nested").unwrap().values["inputs"], json!(["shape"]));
+        session.undo().expect("undo").expect("change");
+        assert_eq!(session.document().definition("feature").unwrap().interface.inputs.len(), 2);
+        assert_eq!(session.document().connections.len(), 1);
+    }
+
+    #[test]
+    fn root_interface_commands_resize_markers_and_drop_removed_wires() {
+        let node = |id: &str, node_type: &str, values: Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("root-interface");
+        document.root.interface = nodecraft_session::GraphInterface {
+            inputs: vec!["shape".into(), "shape2".into()],
+            outputs: vec!["shape".into()],
+        };
+        document.root.nodes = vec![
+            node("in", "groupinput", json!({"ports":["shape", "shape2"]})),
+            node("box", "solid", json!({"primitiveType":"box"})),
+            node("out", "groupoutput", json!({"ports":["shape"]})),
+        ];
+        document.root.connections = vec![
+            GraphConnection { from: "in".into(), to: "box".into(), input: "shape".into(), out: "shape2".into() },
+            GraphConnection { from: "box".into(), to: "out".into(), input: "shape".into(), out: "shape".into() },
+        ];
+        let commands = root_interface_commands(&document, Some(1), None).expect("commands");
+        let mut session = Session::new(document);
+        session.apply_commands(&commands).expect("apply");
+        assert_eq!(session.document().root.interface.inputs, vec!["shape"]);
+        assert_eq!(session.document().connections.len(), 1);
+        assert_eq!(session.document().connections[0].from, "box");
+        session.undo().expect("undo").expect("change");
+        assert_eq!(session.document().root.interface.inputs.len(), 2);
+        assert_eq!(session.document().connections.len(), 2);
+    }
+
+    #[test]
     fn replaced_sessions_get_a_new_evaluation_identity() {
         let selection = Some("extrude".to_owned());
         let comparison = None;
-        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false);
-        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false);
+        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false, None);
+        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false, None);
         assert_ne!(first, replacement, "a replaced session must not reuse the old result");
     }
 
 
+    fn legacy_document(value: Value) -> GraphDocument {
+        if value.get("root").is_some() {
+            return serde_json::from_value(value).expect("document");
+        }
+        serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "root",
+            "root": {
+                "id": "root",
+                "name": "Root",
+                "kind": "graph",
+                "nodes": value["nodes"].clone(),
+                "connections": value["connections"].clone(),
+            },
+            "definitions": [],
+        }))
+        .expect("document")
+    }
+
     #[test]
     fn selected_feature_previews_without_changing_the_breakpoint() {
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document = legacy_document(json!({
             "nodes": [
                 {"id": "extrude", "type": "extrude", "values": {}, "x": 0.0, "y": 0.0},
                 {"id": "fillet", "type": "fillet", "values": {"edges": [{"id": "edge:0"}]}, "x": 0.0, "y": 0.0},
@@ -4233,7 +6556,7 @@ mod tests {
                 {"from": "extrude", "to": "fillet", "in": "shape", "out": "shape"},
                 {"from": "fillet", "to": "fillet-copy1", "in": "shape", "out": "shape"}
             ]
-        })).expect("comparison graph");
+        }));
 
         assert_eq!(
             comparison_for_selection(&document, Some("fillet"), true),
@@ -4248,7 +6571,7 @@ mod tests {
             Some("fillet".to_owned())
         );
 
-        let inactive: GraphDocument = serde_json::from_value(json!({
+        let inactive = legacy_document(json!({
             "nodes": [
                 {"id": "extrude", "type": "extrude", "values": {}, "x": 0.0, "y": 0.0},
                 {"id": "fillet", "type": "fillet", "values": {"edges": []}, "x": 0.0, "y": 0.0}
@@ -4256,7 +6579,7 @@ mod tests {
             "connections": [
                 {"from": "extrude", "to": "fillet", "in": "shape", "out": "shape"}
             ]
-        })).expect("inactive comparison graph");
+        }));
         assert_eq!(feature_ghost_input(&inactive, "fillet"), None);
         assert_eq!(comparison_for_selection(&inactive, Some("fillet"), true), None);
     }
@@ -4308,9 +6631,15 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: "history-fixture".into(),
-            nodes,
-            connections,
-            interface: Default::default(),
+            root: nodecraft_session::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes,
+                connections,
+                interface: Default::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -4355,17 +6684,16 @@ mod tests {
     fn stable_connection_key_ignores_document_order() {
         let document = history_fixture();
         let key = ConnectionKey::from_connection(&document.connections[0]);
-        let moved = GraphDocument {
-            nodes: document.nodes.iter().rev().cloned().collect(),
-            ..document.clone()
-        };
+        let mut moved = document.clone();
+        moved.root.nodes = document.nodes.iter().rev().cloned().collect();
         assert_eq!(ConnectionKey::from_connection(&moved.connections[0]), key);
     }
     #[test]
     fn clipboard_payload_roundtrips_node_descriptions() {
         let payload = NodeClipboard {
-            nodes: history_fixture().nodes,
-            connections: history_fixture().connections,
+            nodes: history_fixture().root.nodes,
+            connections: history_fixture().root.connections,
+            definitions: Vec::new(),
         };
         let text = serde_json::to_string(&payload).expect("serialize");
         let decoded: NodeClipboard = serde_json::from_str(&text).expect("deserialize");
@@ -4373,6 +6701,80 @@ mod tests {
         assert_eq!(decoded.connections, payload.connections);
         assert!(text.contains("\"nodes\""));
         assert!(text.contains("\"type\""));
+    }
+
+    #[test]
+    fn graph_node_paste_carries_and_remaps_its_definition() {
+        let definition = nodecraft_session::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: nodecraft_session::GraphInterface {
+                inputs: vec!["shape".into()],
+                outputs: vec!["shape".into()],
+            },
+            nodes: vec![
+                GraphNode {
+                    expressions: Default::default(),
+                    id: "in".into(),
+                    node_type: "groupinput".into(),
+                    values: json!({"ports":["shape"]}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                },
+                GraphNode {
+                    expressions: Default::default(),
+                    id: "out".into(),
+                    node_type: "groupoutput".into(),
+                    values: json!({"ports":["shape"]}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                },
+            ],
+            connections: Vec::new(),
+        };
+        let mut source = GraphDocument::new("source");
+        source.definitions.push(definition);
+        source.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "graph".into(),
+            node_type: "graph".into(),
+            values: json!({"definition":"feature","name":"Feature","inputs":["shape"],"outputs":["shape"]}),
+            suppressed: false,
+            x: 4.0,
+            y: 8.0,
+        });
+        let selected: HashSet<&str> = ["graph".to_owned()].into_iter().map(|id| Box::leak(id.into_boxed_str()) as &str).collect();
+        let payload = clipboard_payload(&source, &selected).expect("payload");
+        assert_eq!(payload.definitions.len(), 1);
+        let target = GraphDocument::new("target");
+        let (commands, _, _) = paste_plan(&target, payload, None);
+        let added_definition = commands.iter().find_map(|command| match command {
+            Command::AddDefinition { definition } => Some(definition),
+            _ => None,
+        }).expect("definition must be pasted with the node");
+        let added_node = commands.iter().find_map(|command| match command {
+            Command::AddNode { node } => Some(node),
+            _ => None,
+        }).expect("node");
+        assert_eq!(added_node.values["definition"], added_definition.id);
+        assert_eq!(added_definition.name, "Feature");
+    }
+
+    #[test]
+    fn hand_written_graph_clipboard_synthesizes_a_passthrough_definition() {
+        let json = r#"{
+            "nodes": [{"id":"graph","type":"graph","values":{"definition":"graph_definition","name":"Graph","inputs":["shape"],"outputs":["shape"]},"suppressed":false,"x":0,"y":0}],
+            "connections": []
+        }"#;
+        let payload = parse_node_clipboard(json).expect("parse");
+        let (commands, _, _) = paste_plan(&GraphDocument::new("target"), payload, None);
+        assert!(commands.iter().any(|command| matches!(command, Command::AddDefinition { definition } if definition.id == "graph_definition")));
+        assert!(commands.iter().any(|command| matches!(command, Command::AddNode { node } if node.values["definition"] == "graph_definition")));
+        let mut session = Session::new(GraphDocument::new("target"));
+        session.apply_commands(&commands).expect("paste applies");
     }
 
     #[test]
@@ -4475,10 +6877,11 @@ mod tests {
 
     #[test]
     fn evaluation_progress_fraction_is_bounded() {
-        assert_eq!(progress_fraction(&EvalProgress { total: 10, done: 0 }), 0.0);
-        assert!((progress_fraction(&EvalProgress { total: 10, done: 5 }) - 0.5).abs() < 1e-6);
-        assert_eq!(progress_fraction(&EvalProgress { total: 10, done: 20 }), 1.0);
-        assert_eq!(progress_fraction(&EvalProgress { total: 0, done: 0 }), 0.0);
+        assert_eq!(progress_fraction(&EvalProgress { total: 10, exact_done: 0 }), 0.0);
+        assert!((progress_fraction(&EvalProgress { total: 10, exact_done: 5 }) - 0.5).abs() < 1e-6);
+        assert_eq!(progress_fraction(&EvalProgress { total: 10, exact_done: 10 }), 1.0);
+        assert_eq!(progress_fraction(&EvalProgress { total: 10, exact_done: 20 }), 1.0);
+        assert_eq!(progress_fraction(&EvalProgress { total: 0, exact_done: 0 }), 0.0);
     }
 
     #[test]
@@ -4649,6 +7052,7 @@ mod tests {
     #[test]
     fn double_click_activation_policy_is_one_place() {
         assert_eq!(node_activation("group"), NodeActivation::EnterGroup);
+        assert_eq!(node_activation("graph"), NodeActivation::EnterGraph);
         assert_eq!(node_activation("translate"), NodeActivation::EditNode);
         assert_eq!(node_activation("boolean"), NodeActivation::EditNode);
     }
@@ -4718,7 +7122,7 @@ mod tests {
             activity: ActivitySettings::default(),
             feature_overlay: true,
             engine_threads: 0,
-            mesher_threads: 0,
+            tessellation_threads: 0,
             workload_profiler: true,
             kernel_fixes: true,
             cable_routing: "bezier-routing".to_owned(),
@@ -4932,6 +7336,52 @@ mod tests {
     }
 
     #[test]
+    fn graph_interface_cables_can_be_deleted() {
+        let mut document = GraphDocument::new("interface");
+        document.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "in".into(),
+            node_type: "groupinput".into(),
+            values: json!({"ports": ["shape"]}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        document.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "out".into(),
+            node_type: "groupoutput".into(),
+            values: json!({"ports": ["shape"]}),
+            suppressed: false,
+            x: 120.0,
+            y: 0.0,
+        });
+        document.connections.push(GraphConnection {
+            from: "in".into(),
+            to: "out".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
+        let cables: HashSet<ConnectionKey> = [ConnectionKey {
+            from: "in".into(),
+            to: "out".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }]
+        .into_iter()
+        .collect();
+        let commands = delete_selection_commands(Some(&document), &HashSet::new(), &cables);
+        assert_eq!(
+            commands,
+            vec![Command::Disconnect {
+                from: "in".into(),
+                to: "out".into(),
+                input: "shape".into(),
+            }]
+        );
+    }
+
+    #[test]
     fn deleting_nodes_does_not_disconnect_cables_removed_with_them() {
         let nodes: HashSet<String> = ["a".to_owned()].into_iter().collect();
         let cables: HashSet<ConnectionKey> = [ConnectionKey {
@@ -4942,7 +7392,7 @@ mod tests {
         }]
         .into_iter()
         .collect();
-        let commands = delete_selection_commands(&nodes, &cables);
+        let commands = delete_selection_commands(None, &nodes, &cables);
         assert_eq!(commands, vec![Command::RemoveNode { id: "a".into() }]);
     }
 
@@ -4955,6 +7405,7 @@ mod tests {
         assert_eq!(NodeCraftApp::auto_connect_ports("sketch", "loft"), Some(("bottom", "sketch")));
         assert_eq!(NodeCraftApp::auto_connect_ports("spline", "surfaceloft"), Some(("sections", "sketch")));
         assert_eq!(NodeCraftApp::auto_connect_ports("exporter", "chamfer"), None);
+        assert_eq!(NodeCraftApp::auto_connect_ports("groupoutput", "graph"), None);
         assert_eq!(NodeCraftApp::auto_connect_ports("primitive", "primitive"), None);
     }
 

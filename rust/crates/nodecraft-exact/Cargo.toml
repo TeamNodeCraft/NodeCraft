@@ -1,0 +1,9 @@
+[package]
+name = "nodecraft-exact"
+description = "Exact Part/BRep handles shared by evaluation and display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solidcore = { workspace = true }

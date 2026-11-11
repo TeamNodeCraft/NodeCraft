@@ -6,7 +6,7 @@
 mod layout;
 
 use serde::Deserialize;
-use nodecraft_engine::{evaluate, EngineCache, ProgressEvent};
+use nodecraft_engine::{EngineCache, ProgressEvent};
 use nodecraft_protocol::Request;
 use nodecraft_session::{Command, GraphDocument, GraphRuntime};
 use std::collections::HashMap;
@@ -183,6 +183,8 @@ fn handle_session(envelope: SessionEnvelope, sessions: &mut HashMap<String, Grap
                     value["tabId"] = serde_json::json!(tab);
                     value["revision"] = serde_json::json!(runtime.revision());
                     value["dirtyNodes"] = serde_json::json!(result.dirty_nodes);
+                    value["meshes"] = serde_json::to_value(&result.meshes)
+                        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
                     if let Some(id) = request_id { value["requestId"] = serde_json::json!(id); }
                     send(out, value);
                 }
@@ -228,8 +230,8 @@ fn handle_document(message: DocumentRequest, out: &mpsc::Sender<Vec<u8>>) {
                     // returning canonical graph values.
                     let text = std::fs::read_to_string(&path).unwrap_or_default();
                     let mut value: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({}));
-                    value["nodes"] = serde_json::to_value(&document.nodes).unwrap_or(serde_json::Value::Null);
-                    value["connections"] = serde_json::to_value(&document.connections).unwrap_or(serde_json::Value::Null);
+                    value["root"] = serde_json::to_value(&document.root).unwrap_or(serde_json::Value::Null);
+                    value["definitions"] = serde_json::to_value(&document.definitions).unwrap_or(serde_json::Value::Null);
                     let file_name = message.file_name.clone().or_else(|| {
                         path.file_name().map(|name| name.to_string_lossy().into_owned())
                     });
@@ -242,7 +244,7 @@ fn handle_document(message: DocumentRequest, out: &mpsc::Sender<Vec<u8>>) {
     }
 }
 
-fn handle_evaluation(request: Request, cache: &mut EngineCache, out: &mpsc::Sender<Vec<u8>>) {
+fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut nodecraft_display::PlanCache, out: &mpsc::Sender<Vec<u8>>) {
     let include_diagnostics = request.nodes.iter().any(|node| {
         node.node_type == "stepimporter"
             && node.values.get("diagnostics").and_then(serde_json::Value::as_bool) == Some(true)
@@ -251,13 +253,37 @@ fn handle_evaluation(request: Request, cache: &mut EngineCache, out: &mpsc::Send
         .unwrap_or(false);
     let request_cache = if include_diagnostics { EngineCache::new() } else { std::mem::take(cache) };
     let mut progress = |event: ProgressEvent| emit_progress(out, event);
-    let output = evaluate(request, request_cache, Some(&mut progress));
-    *cache = output.cache;
-    let mut value = serde_json::to_value(&output.response)
+    let output = nodecraft_engine::evaluate_exact(
+        request.clone(),
+        request_cache,
+        Some(&mut progress),
+    );
+    let nodecraft_engine::EngineOutput {
+        mut response,
+        cache: cache_output,
+        exact_parts,
+        exact_comparison: _,
+        diagnostics: engine_diagnostics,
+        tessellation_diagnostics: _,
+    } = output;
+    let quality = request.preview_detail.map_or(
+        nodecraft_display::DisplayQuality::Full(0.35),
+        nodecraft_display::DisplayQuality::Preview,
+    );
+    let (meshes, empty_targets) = nodecraft_display::protocol_meshes(
+        &request,
+        &exact_parts,
+        quality,
+        plans,
+    );
+    response.empty_targets = empty_targets;
+    *cache = cache_output;
+    let mut value = serde_json::to_value(&response)
         .unwrap_or_else(|error| serde_json::json!({"error":error.to_string()}));
-    if include_diagnostics && !output.diagnostics.is_empty() {
-        let entries: serde_json::Map<String, serde_json::Value> = output
-            .diagnostics
+    value["meshes"] = serde_json::to_value(&meshes)
+        .unwrap_or_else(|_| serde_json::Value::Object(Default::default()));
+    if include_diagnostics && !engine_diagnostics.is_empty() {
+        let entries: serde_json::Map<String, serde_json::Value> = engine_diagnostics
             .iter()
             .map(|(id, item)| (id.clone(), item.to_json()))
             .collect();
@@ -283,10 +309,11 @@ fn main() {
     let (request_tx, request_rx) = mpsc::channel::<Incoming>();
     let engine = std::thread::spawn(move || {
         let mut cache = EngineCache::new();
+        let mut plans = nodecraft_display::PlanCache::new(16384);
         let mut sessions: HashMap<String, GraphRuntime> = HashMap::new();
         while let Ok(message) = request_rx.recv() {
             match message {
-                Incoming::Evaluation(request) => handle_evaluation(request, &mut cache, &engine_out),
+                Incoming::Evaluation(request) => handle_evaluation(request, &mut cache, &mut plans, &engine_out),
                 Incoming::Session(envelope) => handle_session(envelope, &mut sessions, &engine_out),
                 Incoming::Document(document) => handle_document(document, &engine_out),
             }
@@ -330,17 +357,38 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn legacy_document(value: serde_json::Value) -> GraphDocument {
+        let value = if value.get("root").is_some() {
+            value
+        } else {
+            json!({
+                "schemaVersion": 1,
+                "id": value["id"].clone(),
+                "root": {
+                    "id": "root",
+                    "name": "Root",
+                    "kind": "graph",
+                    "interface": {"inputs": [], "outputs": []},
+                    "nodes": value["nodes"].clone(),
+                    "connections": value["connections"].clone(),
+                },
+                "definitions": [],
+            })
+        };
+        serde_json::from_value(value).expect("document")
+    }
+
     #[test]
     fn document_save_and_load_use_the_rust_store() {
         let (out_tx, out_rx) = mpsc::channel();
         let dir = std::env::temp_dir().join(format!("sn-worker-doc-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("part.nodecraft");
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document: GraphDocument = legacy_document(json!({
             "id":"doc",
             "nodes":[{"id":"a","type":"primitive","values":{},"x":10.0,"y":20.0}],
             "connections":[]
-        })).expect("document");
+        }));
         handle_document(DocumentRequest { action:"documentSave".into(), path:path.to_string_lossy().into(), tab_id:"t".into(), file_name:Some("part.nodecraft".into()), document:Some(serde_json::to_value(document).unwrap()) }, &out_tx);
         let saved = serde_json::from_slice::<serde_json::Value>(&out_rx.recv().expect("save")).expect("json");
         assert_eq!(saved["type"], "document-saved");
@@ -348,7 +396,7 @@ mod tests {
         handle_document(DocumentRequest { action:"documentLoad".into(), path:path.to_string_lossy().into(), tab_id:"t".into(), file_name:Some("part.nodecraft".into()), document:None }, &out_tx);
         let loaded = serde_json::from_slice::<serde_json::Value>(&out_rx.recv().expect("load")).expect("json");
         assert_eq!(loaded["type"], "document-loaded");
-        assert_eq!(loaded["document"]["nodes"][0]["values"]["primitiveType"], "box");
+        assert_eq!(loaded["document"]["root"]["nodes"][0]["values"]["primitiveType"], "box");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -356,11 +404,11 @@ mod tests {
     fn session_command_then_undo_returns_the_previous_document() {
         let (out_tx, out_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document: GraphDocument = legacy_document(json!({
             "id":"tab-2",
             "nodes":[{"id":"a","type":"primitive","values":{"primitiveType":"box","length":10}}],
             "connections":[]
-        })).expect("document");
+        }));
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionOpen".into(), tab_id:"tab-2".into(), document:Some(document), command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
         let _ = out_rx.recv().expect("open");
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionCommand".into(), tab_id:"tab-2".into(), document:None, command:None, commands:vec![Command::SetValue { node:"a".into(), field:"length".into(), value:json!(20) }], targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
@@ -369,18 +417,18 @@ mod tests {
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionUndo".into(), tab_id:"tab-2".into(), document:None, command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
         let undone = serde_json::from_slice::<serde_json::Value>(&out_rx.recv().expect("undo")).expect("json");
         assert_eq!(undone["type"], "session-undo");
-        assert_eq!(undone["document"]["nodes"][0]["values"]["length"], 10);
+        assert_eq!(undone["document"]["root"]["nodes"][0]["values"]["length"], 10);
     }
 
     #[test]
     fn session_derived_commands_do_not_add_undo_history() {
         let (out_tx, out_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document: GraphDocument = legacy_document(json!({
             "id":"tab-3",
             "nodes":[{"id":"a","type":"primitive","values":{"primitiveType":"box","length":10}}],
             "connections":[]
-        })).expect("document");
+        }));
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionOpen".into(), tab_id:"tab-3".into(), document:Some(document), command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
         let _ = out_rx.recv().expect("open");
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionCommand".into(), tab_id:"tab-3".into(), document:None, command:None, commands:vec![Command::SetValue { node:"a".into(), field:"length".into(), value:json!(20) }], targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
@@ -392,22 +440,22 @@ mod tests {
         assert_eq!(derived["canUndo"], true);
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionUndo".into(), tab_id:"tab-3".into(), document:None, command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
         let undone = serde_json::from_slice::<serde_json::Value>(&out_rx.recv().expect("undo")).expect("json");
-        assert_eq!(undone["document"]["nodes"][0]["values"]["length"], 10);
-        assert_eq!(undone["document"]["nodes"][0]["values"]["faces"][0]["id"], "face:0");
+        assert_eq!(undone["document"]["root"]["nodes"][0]["values"]["length"], 10);
+        assert_eq!(undone["document"]["root"]["nodes"][0]["values"]["faces"][0]["id"], "face:0");
     }
 
     #[test]
     fn session_evaluate_uses_selected_export_and_view_state() {
         let (out_tx, out_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document: GraphDocument = legacy_document(json!({
             "id":"tab-4",
             "nodes":[
                 {"id":"a","type":"primitive","values":{"primitiveType":"box","length":10}},
                 {"id":"b","type":"primitive","values":{"primitiveType":"box","length":10}}
             ],
             "connections":[]
-        })).expect("document");
+        }));
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionOpen".into(), tab_id:"tab-4".into(), document:Some(document), command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:None, mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:None, export_targets:Vec::new(), selected:None }, &mut sessions, &out_tx);
         let _ = out_rx.recv().expect("open");
         handle_session(SessionEnvelope { mesh_tolerance: None, action:"sessionEvaluate".into(), tab_id:"tab-4".into(), document:None, command:None, commands:Vec::new(), targets:Vec::new(), progress:false, request_id:Some(9), mesh_targets:Vec::new(), force:false, coalesce_key:None, view_targets:Some(vec!["a".into()]), export_targets:vec!["b".into()], selected:Some("a".into()) }, &mut sessions, &out_tx);
@@ -423,14 +471,14 @@ mod tests {
     fn session_protocol_opens_commands_and_evaluates_with_cache() {
         let (out_tx, out_rx) = mpsc::channel();
         let mut sessions = HashMap::new();
-        let document: GraphDocument = serde_json::from_value(json!({
+        let document: GraphDocument = legacy_document(json!({
             "id": "tab-1",
             "nodes": [
                 {"id":"a","type":"primitive","values":{"primitiveType":"box","length":10,"width":10,"height":10}},
                 {"id":"b","type":"translate","values":{"x":5}}
             ],
             "connections": [{"from":"a","to":"b","in":"shape","out":"shape"}]
-        })).expect("document");
+        }));
         handle_session(SessionEnvelope {
             mesh_tolerance: None,
             action: "sessionOpen".into(), tab_id: "tab-1".into(), document: Some(document),
@@ -439,7 +487,7 @@ mod tests {
         }, &mut sessions, &out_tx);
         let opened = serde_json::from_slice::<serde_json::Value>(&out_rx.recv().expect("opened")).expect("json");
         assert_eq!(opened["type"], "session-opened");
-        assert!(opened["document"]["nodes"].is_array());
+        assert!(opened["document"]["root"]["nodes"].is_array());
         handle_session(SessionEnvelope {
             mesh_tolerance: None,
             action: "sessionEvaluate".into(), tab_id: "tab-1".into(), document: None,

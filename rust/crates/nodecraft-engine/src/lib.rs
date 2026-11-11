@@ -4,7 +4,9 @@
 //! thread, request/output queues, and JSON transport. Progress is reported through
 //! a typed callback so the engine never performs I/O.
 
-use nodecraft_kernel::{Kernel, ProceduralKernel};
+use nodecraft_kernel::ProceduralKernel;
+#[cfg(test)]
+use nodecraft_kernel::Kernel;
 use base64::Engine as _;
 mod comparison;
 mod cache;
@@ -12,10 +14,14 @@ mod display_eval;
 mod exact_eval;
 
 pub use cache::EngineCache;
-use cache::{import_cache_key, node_cache_is_fresh, stepio_error};
+use cache::{import_cache_key, node_cache_is_fresh};
+#[cfg(test)]
+use cache::stepio_error;
 mod look;
 mod primitive;
-use look::{apply_brep_face_colors, apply_look_color, parse_look_color};
+use look::parse_look_color;
+#[cfg(test)]
+use look::apply_brep_face_colors;
 use primitive::{apply_brep_placement, apply_brep_placement_with_kernel, copy_brep, primitive_brep, primitive_brep_with_kernel, snapshot_brep};
 mod bypass;
 mod face_ref;
@@ -25,7 +31,9 @@ use face_ref::{face_reference_body_and_index, face_reference_index};
 pub(crate) use comparison::compare_parts;
 
 use nodecraft_protocol::{CacheStats, Connection, Mesh, MeshPayload, Node, Request, Response};
-use nodecraft_mesh::{import_step, merge_meshes, StepDiagnostics};
+use nodecraft_mesh::{import_step, StepDiagnostics};
+#[cfg(test)]
+use nodecraft_mesh::merge_meshes;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
@@ -40,7 +48,7 @@ pub fn nodecraft_solidcore_kernel() -> nodecraft_solidcore::solidcore::kernel::K
 /// profile detection. This replaces the retired JS/Python sketch implementation.
 mod node_task;
 pub mod display;
-pub mod mesher;
+pub mod tessellation;
 pub mod workload;
 pub mod scheduler;
 pub mod kernel_pool;
@@ -725,6 +733,16 @@ fn loft_exact(
 ) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
     let bottom = exact_operand_brep(request, bottom_start)?;
     let top = exact_operand_brep(request, top_start)?;
+    loft_breps(kernel, bottom, top, ruled, cap_ends)
+}
+
+fn loft_breps(
+    kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel,
+    bottom: nodecraft_solidcore::solidcore::topology::Brep,
+    top: nodecraft_solidcore::solidcore::topology::Brep,
+    ruled: bool,
+    cap_ends: bool,
+) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
     let bottom_face = loft_face(kernel, &bottom, true).ok_or("Loft bottom has no upward planar face")?;
     let top_face = loft_face(kernel, &top, false).ok_or("Loft top has no downward planar face")?;
     let bottom_loop = nodecraft_extrude::face_boundary(kernel, &bottom, bottom_face)
@@ -767,6 +785,18 @@ fn loft_exact(
 
 /// Boolean two B-reps through the upstream ops layer, with an empty ops
 /// result represented as an empty B-rep (the graph value contract).
+pub(crate) fn boolean_breps_ops_with_kernel(
+    kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel,
+    a: &nodecraft_solidcore::solidcore::topology::Brep,
+    b: &nodecraft_solidcore::solidcore::topology::Brep,
+    op: nodecraft_bool::BooleanOp,
+) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+    let mut a = a.clone_standing_for_self().map_err(|error| error.to_string())?;
+    let mut b = b.clone_standing_for_self().map_err(|error| error.to_string())?;
+    Ok(nodecraft_layers::boolean_breps_ops(kernel, &mut a, &mut b, ops_boolean(op))?
+        .ok_or_else(|| "Boolean produced no solids".to_owned())?)
+}
+
 fn boolean_breps_ops(
     a: &nodecraft_solidcore::solidcore::topology::Brep,
     b: &nodecraft_solidcore::solidcore::topology::Brep,
@@ -798,6 +828,7 @@ fn boolean_mode(values: &serde_json::Value) -> Result<(nodecraft_bool::BooleanOp
     Ok((op, reverse))
 }
 
+#[cfg(test)]
 fn export_extrude_exact(request: &Request, extrude_id: &str, path: &str) -> Result<(), String> {
     let node = request.nodes.iter().find(|item| item.id == extrude_id).ok_or("extrude node missing")?;
     let link = request.connections.iter().find(|link| link.to == extrude_id && (link.input == "profile" || link.input == "shape")).ok_or("extrude has no profile")?;
@@ -839,6 +870,7 @@ fn resolve_extrude_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a N
     None
 }
 
+#[cfg(test)]
 fn export_extrude_chain(request: &Request, start: &str, path: &str) -> Result<(), String> {
     let (extrude, offset, rotation) = resolve_extrude_chain(request, start).ok_or("no extrude in chain")?;
     export_extrude_exact(request, &extrude.id, path)?;
@@ -870,6 +902,7 @@ fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node
     None
 }
 
+#[cfg(test)]
 fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::PlanarBody, String> {
     if node.node_type == "solid" || node.node_type == "primitive" {
         let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -911,6 +944,7 @@ fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::Pla
     Err("unsupported assembly part type".into())
 }
 
+#[cfg(test)]
 fn export_combine_assembly(request: &Request, combine_id: &str, path: &str) -> Result<(), String> {
     let mut parts = Vec::new();
     for (index, link) in request.connections.iter().filter(|link| link.to == combine_id && link.input == "shape").enumerate() {
@@ -989,15 +1023,18 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
     }
 }
 
-fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
     let node = request.nodes.iter().find(|item| item.id == start).ok_or("Boolean operand node missing")?;
     if node.node_type == "translate" {
         let link = request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
-        let mut brep = exact_operand_brep(request, &link.from)?;
+        let brep = exact_operand_brep(request, &link.from)?;
         let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
         let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-        apply_brep_placement(&mut brep, offset, rotation)?;
-        return Ok(brep);
+        return crate::node_task::execute_exact(
+            crate::node_task::ExactNodeTask::Translate { brep, offset, rotation },
+            &node.id,
+            fnv_seed(&node.id),
+        )?.into_brep().ok_or_else(|| "translate task returned no shape".to_owned());
     }
     if node.node_type == "solid" || node.node_type == "primitive" {
         return primitive_brep(node);
@@ -1013,7 +1050,14 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
             let source = request.nodes.iter().find(|item| item.id == link.from).ok_or("extrude profile source missing")?;
             let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
             if source.node_type == "sketch" || source.node_type == "spline" {
-                return sketch_extrude_brep(&sketch_from_node(source)?, amount);
+                return crate::node_task::execute_exact(
+                    crate::node_task::ExactNodeTask::ExtrudeSketch {
+                        output: std::sync::Arc::new(sketch_from_node(source)?),
+                        amount,
+                    },
+                    &node.id,
+                    fnv_seed(&node.id),
+                )?.into_brep().ok_or_else(|| "sketch extrude task returned no shape".to_owned());
             }
             let path = source.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
             if path.is_empty() { return Err("extrude operand requires a STEP profile".into()); }
@@ -1087,7 +1131,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
                 let Some(reference) = face.get("id").and_then(serde_json::Value::as_str) else { continue };
                 let Some((body, index)) = face_reference_body_and_index(reference) else { continue };
                 if body.unwrap_or(0) != 0 { continue; }
-                if let Some(face) = source.faces().ids().nth(index) { openings.push(face); }
+                if source.faces().ids().nth(index).is_some() { openings.push(index); }
             }
             crate::node_task::execute_exact(
                 crate::node_task::ExactNodeTask::Shell {
@@ -1104,8 +1148,16 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
         "mirror" => {
             let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("mirror has no shape input")?;
             let source_brep = exact_operand_brep(request, &link.from)?;
-            let mut mirrored = copy_brep(&source_brep)?;
-            mirror_brep(&mut mirrored, &node.values)?;
+            let mirrored = crate::node_task::execute_exact(
+                crate::node_task::ExactNodeTask::Mirror {
+                    brep: copy_brep(&source_brep)?,
+                    values: node.values.clone(),
+                },
+                &node.id,
+                fnv_seed(&node.id),
+            )?
+            .into_brep()
+            .ok_or_else(|| "mirror task returned no shape".to_owned())?;
             if mirror_combine(&node.values) {
                 boolean_breps_ops(&source_brep, &mirrored, nodecraft_bool::BooleanOp::Union)
             } else {
@@ -1128,6 +1180,7 @@ fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidc
 }
 
 
+#[cfg(test)]
 fn export_boolean_exact(request: &Request, boolean_id: &str, path: &str) -> Result<(), String> {
     let node = request.nodes.iter().find(|item| item.id == boolean_id).ok_or("boolean node missing")?;
     let link_a = request.connections.iter().find(|link| link.to == boolean_id && link.input == "a");
@@ -1150,6 +1203,7 @@ fn export_boolean_exact(request: &Request, boolean_id: &str, path: &str) -> Resu
 }
 
 
+#[cfg(test)]
 fn exports_boolean_chain(request: &Request, start: &str) -> bool {
     let mut current = start.to_string();
     for _ in 0..64 {
@@ -1186,6 +1240,7 @@ fn exact_brep_demands(request: &Request) -> HashSet<String> {
     demands
 }
 
+#[cfg(test)]
 fn cacheable_exact_operand(request: &Request, start: &str) -> bool {
     let mut current = start.to_owned();
     for _ in 0..64 {
@@ -1202,6 +1257,7 @@ fn cacheable_exact_operand(request: &Request, start: &str) -> bool {
     false
 }
 
+#[cfg(test)]
 fn export_boolean_chain(request: &Request, start: &str, path: &str) -> Result<(), String> {
     let mut current = start.to_string();
     let mut offset = [0.0; 3];
@@ -1229,6 +1285,7 @@ fn export_boolean_chain(request: &Request, start: &str, path: &str) -> Result<()
 
 
 
+#[cfg(test)]
 fn write_faceted_from_mesh(path: &str, mesh: &Mesh) -> Result<(), String> {
     if mesh.faces.is_empty() { return Err("cannot export an empty mesh".into()); }
     let mut body = nodecraft_step::PlanarBody::default();
@@ -1247,6 +1304,7 @@ fn write_faceted_from_mesh(path: &str, mesh: &Mesh) -> Result<(), String> {
     nodecraft_step::write_faceted_brep(path, &body)
 }
 
+#[cfg(test)]
 fn apply_export_metadata(node: &Node, path: &str) -> Result<(), String> {
     let target = match node.values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase().as_str() {
         "cm" | "centimetre" | "centimeter" => Some(nodecraft_step::LengthUnit::Centimetre),
@@ -1277,6 +1335,7 @@ fn apply_export_metadata(node: &Node, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
 fn export_imported_step(request: &Request, start: &str, path: &str) -> Result<(), String> {
     let (importer, offset, rotation) = resolve_part_chain(request, start).ok_or("no STEP import in chain")?;
     if importer.node_type != "stepimporter" { return Err("not an imported STEP source".into()); }
@@ -1286,6 +1345,7 @@ fn export_imported_step(request: &Request, start: &str, path: &str) -> Result<()
     nodecraft_step::transform_step_file(path, rotation, offset)
 }
 
+#[cfg(test)]
 fn write_primitive_step(node: &Node, path: &str) -> Result<(), String> {
     let number = |key: &str, default: f64| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
     let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -1325,6 +1385,7 @@ fn resolve_primitive_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a
     None
 }
 
+#[cfg(test)]
 fn export_combine_exact(request: &Request, combine_id: &str, output: &str) -> Result<(), String> {
     let mut paths = Vec::new();
     let mut temporary = Vec::new();
@@ -1354,6 +1415,7 @@ fn mirror_plane(values: &serde_json::Value) -> (&'static str, f64) {
     }
 }
 
+#[cfg(test)]
 fn mirror_mesh(mesh: &Mesh, values: &serde_json::Value) -> Mesh {
     let (plane, offset) = mirror_plane(values);
     let mut mirrored = mesh.clone();
@@ -1387,6 +1449,7 @@ fn mirror_combine(values: &serde_json::Value) -> bool {
     }
 }
 
+#[cfg(test)]
 fn mirror_brep(brep: &mut nodecraft_solidcore::solidcore::topology::Brep, values: &serde_json::Value) -> Result<(), String> {
     let mut kernel = nodecraft_solidcore::kernel::kernel();
     mirror_brep_with_kernel(&mut kernel, brep, values)
@@ -1415,7 +1478,7 @@ fn mirror_brep_with_kernel(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProgressPhase { Start, Complete, BrepStart, BrepComplete }
+pub enum ProgressPhase { Start, Complete, BrepStart, BrepComplete, ExactComplete }
 
 impl ProgressPhase {
     pub fn as_str(self) -> &'static str {
@@ -1424,6 +1487,7 @@ impl ProgressPhase {
             Self::Complete => "node-complete",
             Self::BrepStart => "brep-start",
             Self::BrepComplete => "brep-complete",
+            Self::ExactComplete => "exact-complete",
         }
     }
 }
@@ -1439,12 +1503,40 @@ pub struct ProgressEvent {
 
 const MAX_BOOLEAN_SOLIDS: usize = 256;
 
+/// Exact before/after feature difference, returned by the exact pass for the
+/// display service. The engine does not mesh it.
+#[derive(Clone, Debug)]
+pub struct ExactComparison {
+    pub before: String,
+    pub after: String,
+    pub removed: Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>>,
+    pub added: Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>>,
+    pub removed_key: Option<nodecraft_exact::BodyKey>,
+    pub added_key: Option<nodecraft_exact::BodyKey>,
+    pub unchanged_volume: bool,
+    pub error: Option<String>,
+}
+
 pub struct EngineOutput {
     pub response: Response,
     pub cache: EngineCache,
+    /// Test-only compatibility view of the display pass. The protocol response
+    /// no longer carries meshes; production display output is built by
+    /// `nodecraft-display`.
+    #[cfg(test)]
+    pub meshes: BTreeMap<String, MeshPayload>,
     pub diagnostics: HashMap<String, StepDiagnostics>,
+    /// Exact Part/BRep inputs for a separate display service. The engine does
+    /// not create plans or meshes for these.
+    pub exact_parts: BTreeMap<String, nodecraft_exact::ExactPart>,
+    /// Exact before/after feature difference, when requested.
+    pub exact_comparison: Option<ExactComparison>,
+    /// Planner defects from the display tessellation (lenient/capped/over-tolerance
+    /// faces and edges).
+    pub tessellation_diagnostics: Vec<String>,
 }
 
+#[cfg(test)]
 fn spline_display_mesh(sketch: &crate::sketch::Sketch) -> Mesh {
     use solidcraft_geom::Vec2Geom;
     let points = sketch.polyline(0);
@@ -1524,13 +1616,77 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
 struct BodyInstance {
     body: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
     transforms: Vec<BodyTransform>,
+    /// Content key of the node that produced this geometry. Placement and
+    /// scatter preserve it, so every instance of one B-rep shares one display
+    /// plan and one resident GPU mesh.
+    source: Option<u64>,
+    /// Body index in that producing node's output.
+    source_body: u32,
 }
 
 #[derive(Clone, Debug)]
-enum BodyTransform {
+pub(crate) enum BodyTransform {
     Place { offset: [f64; 3], rotation: [f64; 3] },
     Mirror { plane: &'static str, offset: f64 },
     Scale { factor: f64 },
+}
+
+/// Content seed for a node when the request omitted its cache key. It hashes
+/// the node's values and upstream content, so raw worker/CLI requests still get
+/// a key that changes when the geometry changes.
+pub(crate) fn node_content_seed(
+    request: &Request,
+    id: &str,
+    visiting: &mut std::collections::HashSet<String>,
+) -> u64 {
+    if let Some(key) = request
+        .nodes
+        .iter()
+        .find(|node| node.id == id)
+        .and_then(|node| node.cache.as_ref())
+        .and_then(|cache| cache.key.as_deref())
+    {
+        return fnv_seed(key);
+    }
+    if !visiting.insert(id.to_owned()) {
+        return fnv_seed(id);
+    }
+    let mut text = id.to_owned();
+    if let Some(node) = request.nodes.iter().find(|node| node.id == id) {
+        text.push_str(&serde_json::to_string(&node.values).unwrap_or_default());
+    }
+    let mut links: Vec<&nodecraft_protocol::Connection> = request
+        .connections
+        .iter()
+        .filter(|link| link.to == id)
+        .collect();
+    links.sort_by(|a, b| (&a.input, &a.from).cmp(&(&b.input, &b.from)));
+    for link in links {
+        text.push('|');
+        text.push_str(&link.input);
+        text.push(':');
+        text.push_str(&node_content_seed(request, &link.from, visiting).to_string());
+    }
+    visiting.remove(id);
+    fnv_seed(&text)
+}
+
+fn exact_part_from(part: &Part, source: u64) -> nodecraft_exact::ExactPart {
+    nodecraft_exact::ExactPart {
+        bodies: part
+            .bodies
+            .iter()
+            .enumerate()
+            .map(|(index, body)| nodecraft_exact::ExactBody {
+                key: nodecraft_exact::BodyKey::new(
+                    body.source.unwrap_or(source),
+                    body.source.map_or(index as u32, |_| body.source_body),
+                ),
+                brep: body.body.clone(),
+                transforms: body.transforms.iter().map(crate::display::DisplayTransform::from).collect(),
+            })
+            .collect(),
+    }
 }
 
 impl From<&BodyTransform> for crate::display::DisplayTransform {
@@ -1566,7 +1722,7 @@ impl Part {
     /// Mutating consumers must take an owning copy at their operation boundary.
     fn from_arc(brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>) -> Self {
         Self {
-            bodies: vec![BodyInstance { body: brep, transforms: Vec::new() }],
+            bodies: vec![BodyInstance { body: brep, transforms: Vec::new(), source: None, source_body: 0 }],
             sketches: Vec::new(),
         }
     }
@@ -1582,33 +1738,70 @@ impl Part {
         Self { bodies: Vec::new(), sketches: Vec::new() }
     }
 
+    /// Give untagged bodies this node's provenance. Bodies that already carry
+    /// an upstream key are left alone.
+    fn tagged(mut self, source: u64) -> Self {
+        for (index, body) in self.bodies.iter_mut().enumerate() {
+            if body.source.is_none() {
+                body.source = Some(source);
+                body.source_body = index as u32;
+            }
+        }
+        self
+    }
+
+    /// Mirror this Part without copying its bodies. The transform is applied
+    /// when the Part is realized, through the same `ExactNodeTask::Mirror`
+    /// implementation the operand path uses.
+    fn mirrored(&self, values: &serde_json::Value) -> Part {
+        let (plane, offset) = mirror_plane(values);
+        let mut mirrored = self.bodies.clone();
+        for body in &mut mirrored {
+            body.transforms.push(BodyTransform::Mirror { plane, offset });
+        }
+        let mut sketches = self.sketches.clone();
+        for sketch in &mut sketches {
+            sketch.transforms.push(BodyTransform::Mirror { plane, offset });
+        }
+        if !mirror_combine(values) {
+            return Part { bodies: mirrored, sketches };
+        }
+        let mut bodies = self.bodies.clone();
+        bodies.extend(mirrored);
+        let mut all_sketches = self.sketches.clone();
+        all_sketches.extend(sketches);
+        Part { bodies, sketches: all_sketches }
+    }
+
+    /// Translate/rotate this Part without copying its bodies. The placement is
+    /// recorded on each instance and baked only when geometry is realized.
+    fn translated(&self, offset: [f64; 3], rotation: [f64; 3]) -> Part {
+        let mut bodies = self.bodies.clone();
+        for body in &mut bodies {
+            body.transforms.push(BodyTransform::Place { offset, rotation });
+        }
+        let mut sketches = self.sketches.clone();
+        for sketch in &mut sketches {
+            sketch.transforms.push(BodyTransform::Place { offset, rotation });
+        }
+        Part { bodies, sketches }
+    }
+
     /// Bake placements into standalone BReps for operations that need actual
     /// geometry (Boolean, exact export).
     fn realized_solids(&self) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
         let mut solids = Vec::with_capacity(self.bodies.len());
-        let mut copy_kernel = nodecraft_solidcore::kernel::kernel();
         for body in &self.bodies {
-            let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
-                &mut copy_kernel,
-                &body.body,
-            )
-            .map_err(|error| error.to_string())?;
-            for transform in &body.transforms {
-                match transform {
-                    BodyTransform::Place { offset, rotation } => apply_brep_placement(&mut brep, *offset, *rotation)?,
-                    BodyTransform::Mirror { plane, offset } => {
-                        let values = serde_json::json!({"plane": plane, "offset": offset});
-                        brep = crate::node_task::execute_exact(
-                            crate::node_task::ExactNodeTask::Mirror { brep, values },
-                            "part-mirror",
-                            fnv_seed("part-mirror"),
-                        )?
-                        .into_brep()
-                        .ok_or_else(|| "mirror task returned no shape".to_owned())?;
-                    }
-                    BodyTransform::Scale { factor } => scale_brep(&mut brep, *factor)?,
-                }
-            }
+            let brep = crate::node_task::execute_exact(
+                crate::node_task::ExactNodeTask::Realize {
+                    brep: std::sync::Arc::clone(&body.body),
+                    transforms: body.transforms.clone(),
+                },
+                "part-realize",
+                fnv_seed("part-realize"),
+            )?
+            .into_brep()
+            .ok_or_else(|| "realize task returned no shape".to_owned())?;
             solids.push(brep);
         }
         Ok(solids)
@@ -1633,6 +1826,7 @@ fn scale_brep(
     .map_err(|error| error.to_string())
 }
 
+#[cfg(test)]
 fn body_transforms(
     body: &nodecraft_solidcore::solidcore::topology::Brep,
     part: &Part,
@@ -1714,7 +1908,12 @@ struct Eval<'req, 'prog> {
     visiting: Vec<String>,
     cache_hits: u32,
     cache_misses: u32,
+    brep_cache_hits: u32,
+    part_cache_hits: u32,
+    display_mesh_cache_hits: u32,
     breps: HashMap<String, Arc<nodecraft_solidcore::solidcore::topology::Brep>>,
+    /// Nodes whose B-rep came from the parallel prewarm scheduler.
+    prewarmed: HashSet<String>,
     /// Exact Part results for this evaluation pass.
     parts: HashMap<String, Arc<Part>>,
     part_visiting: Vec<String>,
@@ -1726,6 +1925,11 @@ struct Eval<'req, 'prog> {
     needs_brep: HashSet<String>,
     sketches: HashMap<String, Arc<SketchOutput>>,
     progress: Option<&'prog mut dyn FnMut(ProgressEvent)>,
+    tessellation_diagnostics: Vec<String>,
+    /// Display plans for the test-only display pass. Production evaluation is
+    /// exact-only; display callers own their plan caches.
+    #[cfg(test)]
+    display_plans: nodecraft_display::PlanCache,
 }
 
 impl<'req, 'prog> Eval<'req, 'prog> {
@@ -1744,13 +1948,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             visiting: Vec::new(),
             cache_hits: 0,
             cache_misses: 0,
+            brep_cache_hits: 0,
+            part_cache_hits: 0,
+            display_mesh_cache_hits: 0,
             breps: HashMap::new(),
+            prewarmed: HashSet::new(),
             parts: HashMap::new(),
             part_visiting: Vec::new(),
             bypassed: HashSet::new(),
             needs_brep: exact_brep_demands(request),
             sketches: HashMap::new(),
             progress,
+            tessellation_diagnostics: Vec::new(),
+            #[cfg(test)]
+            display_plans: nodecraft_display::PlanCache::new(16384),
         }
     }
 
@@ -1837,12 +2048,16 @@ impl ScatterRng {
 }
 
 fn ancestors_of(request: &Request, target: &str) -> HashSet<String> {
+    let mut inputs: HashMap<&str, Vec<&str>> = HashMap::new();
+    for link in &request.connections {
+        inputs.entry(link.to.as_str()).or_default().push(link.from.as_str());
+    }
     let mut seen = HashSet::new();
-    let mut stack = vec![target.to_owned()];
+    let mut stack = vec![target];
     while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) { continue; }
-        for link in request.connections.iter().filter(|link| link.to == id) {
-            stack.push(link.from.clone());
+        if !seen.insert(id.to_owned()) { continue; }
+        if let Some(upstream) = inputs.get(id) {
+            stack.extend(upstream.iter().copied());
         }
     }
     seen
@@ -1884,25 +2099,22 @@ fn part_display_targets(request: &Request) -> HashSet<String> {
     if request.mesh_targets.as_ref().is_some_and(Vec::is_empty) {
         return HashSet::new();
     }
+    let node_types: HashMap<&str, &str> = request
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.node_type.as_str()))
+        .collect();
     let requested: HashSet<String> = request
         .targets
         .iter()
         .filter(|id| {
-            request
-                .nodes
-                .iter()
-                .find(|node| node.id == **id)
-                .is_some_and(|node| {
-                    !sketch_is_2d_overlay_only(&node.node_type)
-                        && part_supported(&node.node_type)
-                })
-                && ancestors_of(request, id).iter().all(|ancestor| {
-                    request
-                        .nodes
-                        .iter()
-                        .find(|node| node.id == *ancestor)
-                        .is_some_and(|node| part_supported(&node.node_type))
-                })
+            node_types.get(id.as_str()).is_some_and(|node_type| {
+                !sketch_is_2d_overlay_only(node_type) && part_supported(node_type)
+            }) && ancestors_of(request, id).iter().all(|ancestor| {
+                node_types
+                    .get(ancestor.as_str())
+                    .is_some_and(|node_type| part_supported(node_type))
+            })
         })
         .cloned()
         .collect();
@@ -1957,12 +2169,31 @@ fn diagnostics_requested(request: &Request) -> bool {
 }
 
 #[cfg(test)]
+struct TestResponse {
+    response: Response,
+    meshes: BTreeMap<String, MeshPayload>,
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestResponse {
+    type Target = Response;
+    fn deref(&self) -> &Response {
+        &self.response
+    }
+}
+
+
+#[cfg(test)]
 fn respond(
     request: Request,
     cache: EngineCache,
-) -> (Response, EngineCache, HashMap<String, StepDiagnostics>) {
+) -> (TestResponse, EngineCache, HashMap<String, StepDiagnostics>) {
     let output = evaluate(request, cache, None);
-    (output.response, output.cache, output.diagnostics)
+    (
+        TestResponse { response: output.response, meshes: output.meshes },
+        output.cache,
+        output.diagnostics,
+    )
 }
 
 fn exact_comparison_unsupported(request: &Request, targets: &[String]) -> bool {
@@ -2107,6 +2338,7 @@ fn comparison_cache_key(request: &Request, targets: &[String]) -> Option<(String
 }
 
 /// Evaluate the exact graph result and its display meshes.
+#[cfg(test)]
 pub fn evaluate(
     request: Request,
     cache: EngineCache,
@@ -2144,7 +2376,13 @@ fn evaluate_mode(
     let mut eval = Eval::new(&request, progress);
     eval.cache = cache;
     eval.cache.ensure_part_capacity(request.nodes.len());
-    eval.prewarm_primitives();
+    // The exact pre-pass warms the target closure before its serial exact loop.
+    // For wide graphs this dispatches independent branches across the exact
+    // pool; serial graphs are rejected by the workload profile inside prewarm.
+    // The display pass consumes the warmed B-reps from the shared cache.
+    if exact_only {
+        eval.prewarm_primitives();
+    }
     // Evaluate the target closure once in topological order. Downstream nodes only
     // consume already-computed outputs; no branch/target can re-enter a node.
     let part_targets = part_display_targets(&request);
@@ -2155,6 +2393,8 @@ fn evaluate_mode(
         .iter()
         .cloned()
         .collect();
+    #[cfg(not(test))]
+    let _ = &mesh_targets;
     // Nodes needed by a mesh-only target must still produce a Mesh even when
     // they are also ancestors of a Part target.
     let mut mesh_required = HashSet::new();
@@ -2166,12 +2406,24 @@ fn evaluate_mode(
     }
     for node_id in evaluation_order_for_targets(&request) {
         if exact_only {
-            if node(&request, &node_id).is_some_and(|node| part_supported(&node.node_type)) {
+            let node_type = node(&request, &node_id).map(|node| node.node_type.as_str());
+            if node_type.is_some_and(part_supported) {
                 eval.evaluate_part_only(&node_id);
-            } else {
-                eval.evaluate(&node_id);
+            } else if node_type == Some("exporter") {
+                // Export side effects belong to the display/export service. The
+                // exact pass only exposes the exporter's input Part.
+                if let Some(link) = request
+                    .connections
+                    .iter()
+                    .find(|link| link.to == node_id && link.input == "shape")
+                {
+                    eval.evaluate_part_only(&link.from);
+                }
             }
-        } else if mesh_required.contains(&node_id) {
+            continue;
+        }
+        #[cfg(test)]
+        if mesh_required.contains(&node_id) {
             eval.evaluate(&node_id);
         } else if part_targets.contains(&node_id) {
             if mesh_targets.contains(&node_id) {
@@ -2192,6 +2444,8 @@ fn evaluate_mode(
             .unwrap_or_else(|| request.targets.clone())
     };
     let mut mesh_payloads = BTreeMap::new();
+    #[cfg(not(test))]
+    let _ = &mesh_payloads;
     let mut empty_targets = Vec::new();
     for id in &mesh_targets {
         if !request.targets.contains(id) {
@@ -2289,23 +2543,95 @@ fn evaluate_mode(
                 }
             }
         });
+    let exact_parts: BTreeMap<String, nodecraft_exact::ExactPart> = eval
+        .parts
+        .iter()
+        .map(|(id, part)| {
+            // Plan identity must follow geometry content, not the node id: a
+            // transform changes the B-rep while the id stays the same. The
+            // display plan cache otherwise serves stale geometry for the
+            // breakpoint after an upstream transform edit.
+            let source = node_content_seed(&request, id, &mut std::collections::HashSet::new());
+            (id.clone(), exact_part_from(part.as_ref(), source))
+        })
+        .collect();
+    let exact_comparison = if exact_only {
+        request.comparison_targets.as_ref().and_then(|targets| {
+            let before = targets.first()?.clone();
+            let after = targets.get(1)?.clone();
+            let result = (|| {
+                let before_part = eval.evaluate_part(&before).map_err(|error| error.to_string())?;
+                let after_part = eval.evaluate_part(&after).map_err(|error| error.to_string())?;
+                comparison::compare_part_breps(before_part.as_ref(), after_part.as_ref())
+            })();
+            let content = |id: &str| {
+                request.nodes.iter()
+                    .find(|node| node.id == id)
+                    .and_then(|node| node.cache.as_ref())
+                    .and_then(|cache| cache.key.as_deref())
+                    .map_or_else(|| fnv_seed(id).to_string(), str::to_owned)
+            };
+            let difference_key = |role: &str| nodecraft_exact::BodyKey::new(
+                fnv_seed(&format!("{}:{}:{role}", content(&before), content(&after))),
+                0,
+            );
+            Some(match result {
+                Ok(difference) => ExactComparison {
+                    removed_key: difference.removed.as_ref().map(|_| difference_key("removed")),
+                    added_key: difference.added.as_ref().map(|_| difference_key("added")),
+                    before,
+                    after,
+                    removed: difference.removed.map(Arc::new),
+                    added: difference.added.map(Arc::new),
+                    unchanged_volume: difference.unchanged_volume,
+                    error: None,
+                },
+                Err(error) => ExactComparison {
+                    before,
+                    after,
+                    removed: None,
+                    added: None,
+                    removed_key: None,
+                    added_key: None,
+                    unchanged_volume: false,
+                    error: Some(error),
+                },
+            })
+        })
+    } else {
+        None
+    };
     let response = Response {
         request_id,
         tab_id,
         graph_revision,
-        meshes: mesh_payloads,
         empty_targets,
         node_errors: eval.errors,
         evaluation_order: eval.order,
         timings: eval.timings,
         brep_timings: eval.brep_timings,
         evaluation_ms: started.elapsed().as_secs_f64() * 1000.0,
-        cache_stats: Some(CacheStats { hits: eval.cache_hits, misses: eval.cache_misses }),
+        cache_stats: Some(CacheStats {
+            hits: eval.cache_hits,
+            misses: eval.cache_misses,
+            brep_hits: eval.brep_cache_hits,
+            part_hits: eval.part_cache_hits,
+            display_mesh_hits: eval.display_mesh_cache_hits,
+        }),
         comparison,
         engine: "solidcore-experiment".into(),
     };
     nodecraft_mesh::set_display_tolerance(None);
-    EngineOutput { response, cache: eval.cache, diagnostics: eval.step_diagnostics }
+    EngineOutput {
+        response,
+        cache: eval.cache,
+        #[cfg(test)]
+        meshes: mesh_payloads,
+        diagnostics: eval.step_diagnostics,
+        exact_parts,
+        exact_comparison,
+        tessellation_diagnostics: eval.tessellation_diagnostics,
+    }
 }
 
 #[cfg(test)]
@@ -2317,7 +2643,7 @@ mod tests {
         request: Request,
         cache: EngineCache,
         progress_tx: Option<mpsc::Sender<Vec<u8>>>,
-    ) -> (Response, EngineCache, HashMap<String, StepDiagnostics>) {
+    ) -> (TestResponse, EngineCache, HashMap<String, StepDiagnostics>) {
         let mut callback = |event: ProgressEvent| {
             let Some(tx) = &progress_tx else { return; };
             let frame = serde_json::json!({
@@ -2331,7 +2657,11 @@ mod tests {
             let _ = tx.send(format!("{frame}\n").into_bytes());
         };
         let output = evaluate(request, cache, Some(&mut callback));
-        (output.response, output.cache, output.diagnostics)
+        (
+            TestResponse { response: output.response, meshes: output.meshes },
+            output.cache,
+            output.diagnostics,
+        )
     }
     use nodecraft_mesh::StepImport;
     use std::collections::BTreeSet;
@@ -2489,7 +2819,7 @@ mod tests {
         })).expect("chamfer request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("chamfer").expect("chamfer mesh").mesh;
+        let mesh = &output.meshes.get("chamfer").expect("chamfer mesh").mesh;
         assert!(!mesh.faces.is_empty(), "chamfer preview should have faces");
         assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
     }
@@ -2508,7 +2838,7 @@ mod tests {
         })).expect("time request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("time").expect("time mesh").mesh;
+        let mesh = &output.meshes.get("time").expect("time mesh").mesh;
         assert!(mesh.faces.is_empty());
     }
 
@@ -2535,8 +2865,8 @@ mod tests {
         let second = evaluate(request(8.0), EngineCache::new(), None);
         assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
         assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
-        let first = &first.response.meshes.get("scatter").expect("scatter mesh").mesh;
-        let second = &second.response.meshes.get("scatter").expect("scatter mesh").mesh;
+        let first = &first.meshes.get("scatter").expect("scatter mesh").mesh;
+        let second = &second.meshes.get("scatter").expect("scatter mesh").mesh;
         assert!(!first.vertices.is_empty());
         assert_ne!(first.vertices[0], second.vertices[0], "seed must change scatter positions");
     }
@@ -2555,7 +2885,7 @@ mod tests {
         })).expect("chamfer request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        let mesh = &output.meshes.get("c").expect("chamfer mesh").mesh;
         assert!(!mesh.faces.is_empty());
         assert!(!mesh.face_groups.iter().any(|group| group.starts_with("blend:")), "preview should wait for an edge selection");
     }
@@ -2578,7 +2908,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        assert!(!output.response.meshes["c2"].mesh.faces.is_empty());
+        assert!(!output.meshes["c2"].mesh.faces.is_empty());
     }
 
     #[test]
@@ -2597,7 +2927,7 @@ mod tests {
         let output = evaluate(request, EngineCache::new(), None);
         let _ = started;
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes["chamfer"].mesh;
+        let mesh = &output.meshes["chamfer"].mesh;
         assert!(!mesh.faces.is_empty());
         assert!(mesh.brep_edges.iter().any(|edge| edge.kind == "edge"));
     }
@@ -2616,7 +2946,7 @@ mod tests {
         })).expect("chamfer request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        let mesh = &output.meshes.get("c").expect("chamfer mesh").mesh;
         assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
     }
 
@@ -2640,7 +2970,7 @@ mod tests {
         })).expect("chamfer request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("c").expect("chamfer mesh").mesh;
+        let mesh = &output.meshes.get("c").expect("chamfer mesh").mesh;
         assert!(!mesh.faces.is_empty());
         assert!(!mesh.faces.is_empty(), "exact chamfer should produce faces");
     }
@@ -2660,7 +2990,7 @@ mod tests {
         })).expect("fillet request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
+        let mesh = &output.meshes.get("fillet").expect("fillet mesh").mesh;
         assert!(!mesh.faces.is_empty(), "fillet preview should have faces");
         assert!(!mesh.faces.is_empty(), "exact fillet should have faces");
     }
@@ -2680,7 +3010,7 @@ mod tests {
         })).expect("look request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("look").expect("look mesh").mesh;
+        let mesh = &output.meshes.get("look").expect("look mesh").mesh;
         assert!(!mesh.faces.is_empty());
         assert_eq!(mesh.face_colors.len(), mesh.faces.len());
         for color in &mesh.face_colors {
@@ -2894,7 +3224,7 @@ mod tests {
         })).expect("look after fillet request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("look").expect("look mesh").mesh;
+        let mesh = &output.meshes.get("look").expect("look mesh").mesh;
         assert_eq!(mesh.face_colors.len(), mesh.faces.len());
         let unmatched = mesh
             .face_colors
@@ -2923,7 +3253,7 @@ mod tests {
         })).expect("fillet look request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
+        let mesh = &output.meshes.get("fillet").expect("fillet mesh").mesh;
         assert!(!mesh.faces.is_empty());
         assert_eq!(mesh.face_colors.len(), mesh.faces.len());
         assert!(mesh.face_colors.iter().any(|color| color[0] > 0.5), "look colour was lost by the fillet");
@@ -2952,7 +3282,7 @@ mod tests {
         })).expect("boolean look request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = &output.response.meshes.get("boolean").expect("boolean mesh").mesh;
+        let mesh = &output.meshes.get("boolean").expect("boolean mesh").mesh;
         assert!(!mesh.faces.is_empty());
         assert_eq!(mesh.face_colors.len(), mesh.faces.len());
         assert!(mesh.face_colors.iter().any(|color| color != &[0.32, 0.34, 0.37]), "no look colours survived");
@@ -2974,7 +3304,7 @@ mod tests {
             })).expect("fillet request json");
             let output = evaluate(request, EngineCache::new(), None);
             assert!(output.response.node_errors.is_empty(), "{continuity}: {:?}", output.response.node_errors);
-            let mesh = &output.response.meshes.get("fillet").expect("fillet mesh").mesh;
+            let mesh = &output.meshes.get("fillet").expect("fillet mesh").mesh;
             assert!(!mesh.faces.is_empty(), "{continuity} fillet should have faces");
         }
     }
@@ -2983,7 +3313,7 @@ mod tests {
     fn train_graph_execution_regression() {
         let sample = std::fs::read_to_string(fixture("samples/train.nodecraft")).expect("train sample");
         let sample: serde_json::Value = serde_json::from_str(&sample).expect("train sample json");
-        let nodes: Vec<serde_json::Value> = sample["nodes"]
+        let nodes: Vec<serde_json::Value> = sample["root"]["nodes"]
             .as_array()
             .expect("train nodes")
             .iter()
@@ -3003,7 +3333,7 @@ mod tests {
             "meshTargets": ["n69"],
             "binaryMesh": false,
             "nodes": nodes,
-            "connections": sample["connections"].clone(),
+            "connections": sample["root"]["connections"].clone(),
         })).expect("train execution json");
         let mut starts = Vec::new();
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -3025,7 +3355,7 @@ mod tests {
         assert!(!response.node_errors.contains_key("n74"));
         assert!(!response.node_errors.contains_key("n75"));
         assert!(starts.len() == 76 && starts.iter().collect::<std::collections::HashSet<_>>().len() == 76);
-        let mesh = &output.response.meshes.get("n69").expect("n69 mesh").mesh;
+        let mesh = &output.meshes.get("n69").expect("n69 mesh").mesh;
         assert!(!mesh.faces.is_empty(), "n69 should produce geometry");
         assert!(!mesh.vertices.is_empty());
         let mut execution_ms = response.evaluation_ms;
@@ -3045,7 +3375,7 @@ mod tests {
     fn train_graph_emits_one_start_and_stop_per_processed_node() {
         let sample = std::fs::read_to_string(fixture("samples/train.nodecraft")).expect("train sample");
         let sample: serde_json::Value = serde_json::from_str(&sample).expect("train sample json");
-        let nodes: Vec<serde_json::Value> = sample["nodes"]
+        let nodes: Vec<serde_json::Value> = sample["root"]["nodes"]
             .as_array()
             .expect("train nodes")
             .iter()
@@ -3064,7 +3394,7 @@ mod tests {
             "meshTargets": [],
             "binaryMesh": false,
             "nodes": nodes,
-            "connections": sample["connections"].clone(),
+            "connections": sample["root"]["connections"].clone(),
         })).expect("train request json");
         let (progress_tx, progress_rx) = std::sync::mpsc::channel();
         let (response, _cache, _diagnostics) = respond_with_progress(request, EngineCache::new(), Some(progress_tx));
@@ -3094,7 +3424,7 @@ mod tests {
             assert!(response.timings.contains_key(id), "progress for unprocessed node {id}");
             assert!(starts[id] < stops[id], "stop before start for {id}");
         }
-        let sample_connections = sample["connections"].as_array().expect("connections");
+        let sample_connections = sample["root"]["connections"].as_array().expect("connections");
         for connection in sample_connections {
             let from = connection["from"].as_str().unwrap_or_default();
             let to = connection["to"].as_str().unwrap_or_default();
@@ -3196,34 +3526,6 @@ mod tests {
     }
 
     #[test]
-    fn cached_node_does_not_emit_progress() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 101,
-            "progress": true,
-            "targets": ["a"],
-            "meshTargets": [],
-            "binaryMesh": false,
-            "nodes": [{"id": "a", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "cached-key", "state": "dirty"}}],
-            "connections": []
-        })).expect("cached request json");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (_response, cache, _diagnostics) = respond_with_progress(request, EngineCache::new(), Some(tx));
-        let _ = rx.try_iter().count();
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 102,
-            "progress": true,
-            "targets": ["a"],
-            "meshTargets": [],
-            "binaryMesh": false,
-            "nodes": [{"id": "a", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "cached-key", "state": "cached"}}],
-            "connections": []
-        })).expect("cached request json");
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (_response, _cache, _diagnostics) = respond_with_progress(request, cache, Some(tx));
-        assert_eq!(rx.try_iter().count(), 0, "cached node must not emit progress");
-    }
-
-    #[test]
     fn failed_node_is_not_reprocessed_from_multiple_branches() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 99,
@@ -3275,7 +3577,7 @@ mod tests {
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.contains_key("bad"));
         assert!(!output.response.node_errors.contains_key("move"));
-        let mesh = output.response.meshes.get("move").expect("bypassed mesh");
+        let mesh = output.meshes.get("move").expect("bypassed mesh");
         assert!(!mesh.mesh.faces.is_empty(), "bypassed output is empty");
     }
 
@@ -3479,6 +3781,26 @@ mod tests {
         let demands = exact_brep_demands(&boolean_request);
         assert!(demands.contains("p"));
         assert!(demands.contains("b"));
+    }
+
+    #[test]
+    fn exact_pass_exposes_parts_without_meshing() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 702,
+            "targets": ["box"],
+            "binaryMesh": false,
+            "runExporters": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}}
+            ],
+            "connections": []
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.meshes.is_empty(), "exact pass must not mesh");
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("box").expect("box exact part");
+        assert_eq!(part.bodies.len(), 1);
+        assert!(part.bodies[0].transforms.is_empty());
     }
 
     #[test]
@@ -3721,6 +4043,52 @@ mod tests {
         assert!((body.volume() - 1600.0).abs() < 1e-6, "volume {}", body.volume());
         let (min, max) = body.bounds().unwrap();
         assert!((min[0] - -5.0).abs() < 1e-6 && (max[0] - 25.0).abs() < 1e-6, "{min:?} {max:?}");
+    }
+
+    #[test]
+    fn deferred_part_mirror_realizes_through_the_mirror_task() {
+        let source = primitive_brep(&Node {
+            id: "b".into(),
+            node_type: "primitive".into(),
+            values: serde_json::json!({"primitiveType": "box", "length": 40.0, "width": 40.0, "height": 40.0}),
+            suppressed: false,
+            cache: None,
+        }).expect("box");
+        let values = serde_json::json!({"plane": "yz", "offset": 10.0});
+        let part = Part::from_brep(source);
+        let mirrored = part.mirrored(&values);
+        let realized = mirrored.realized_solids().expect("realized mirror");
+        assert_eq!(realized.len(), 1);
+        let expected = crate::node_task::execute_exact(
+            crate::node_task::ExactNodeTask::Mirror {
+                brep: primitive_brep(&Node {
+                    id: "b".into(),
+                    node_type: "primitive".into(),
+                    values: serde_json::json!({"primitiveType": "box", "length": 40.0, "width": 40.0, "height": 40.0}),
+                    suppressed: false,
+                    cache: None,
+                }).expect("box"),
+                values,
+            },
+            "m",
+            fnv_seed("m"),
+        )
+        .expect("mirror task")
+        .into_brep()
+        .expect("mirror shape");
+        let bounds = |brep: &nodecraft_solidcore::solidcore::topology::Brep| {
+            let mut min = [f64::INFINITY; 3];
+            let mut max = [f64::NEG_INFINITY; 3];
+            for vertex in brep.vertex_list() {
+                let point = brep.vertex(*vertex).expect("vertex").point;
+                for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+                    min[axis] = min[axis].min(value);
+                    max[axis] = max[axis].max(value);
+                }
+            }
+            (min, max)
+        };
+        assert_eq!(bounds(&realized[0]), bounds(&expected));
     }
 
     #[test]
@@ -4034,7 +4402,8 @@ mod tests {
                 {"from": "b", "out": "shape", "to": "u", "in": "b"}
             ]
         })).expect("request");
-        let response = evaluate(request, EngineCache::new(), None).response;
+        let evaluated = evaluate(request, EngineCache::new(), None);
+        let response = TestResponse { response: evaluated.response, meshes: evaluated.meshes };
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         assert!(!response.meshes["u"].mesh.faces.is_empty());
     }
@@ -4059,7 +4428,8 @@ mod tests {
                 {"from": "c", "out": "shape", "to": "u", "in": "a"}
             ]
         })).expect("request");
-        let response = evaluate(request, EngineCache::new(), None).response;
+        let evaluated = evaluate(request, EngineCache::new(), None);
+        let response = TestResponse { response: evaluated.response, meshes: evaluated.meshes };
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         assert!(!response.meshes["u"].mesh.faces.is_empty());
     }
@@ -4148,8 +4518,7 @@ mod tests {
         assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
         let second = evaluate(make(), first.cache, None);
         assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
-        assert!(second.cache.mesh_entries() > 0);
-        assert!(second.response.cache_stats.expect("cache stats").hits > 0, "display mesh was not reused");
+        assert!(second.response.cache_stats.expect("cache stats").hits > 0);
         assert!(second.cache.part_hits() > 0, "Part was not reused");
     }
 
@@ -4318,10 +4687,10 @@ mod tests {
         })).expect("subtract-reverse request json");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let normal = bounds(&output.response.meshes["normal"].mesh);
-        let reverse = bounds(&output.response.meshes["reverse"].mesh);
-        assert!(!output.response.meshes["normal"].mesh.faces.is_empty());
-        assert!(!output.response.meshes["reverse"].mesh.faces.is_empty());
+        let normal = bounds(&output.meshes["normal"].mesh);
+        let reverse = bounds(&output.meshes["reverse"].mesh);
+        assert!(!output.meshes["normal"].mesh.faces.is_empty());
+        assert!(!output.meshes["reverse"].mesh.faces.is_empty());
         assert!(normal.0[0] < reverse.0[0], "reverse must swap A/B: normal={normal:?} reverse={reverse:?}");
     }
 
@@ -4625,7 +4994,7 @@ mod tests {
         })).expect("exact request");
         let output = evaluate_exact(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        assert!(output.response.meshes.is_empty(), "exact evaluation produced display geometry");
+        assert!(output.meshes.is_empty(), "exact evaluation produced display geometry");
         assert!(output.cache.part_entries() > 0, "exact evaluation did not cache the Part");
     }
 
@@ -4766,7 +5135,7 @@ mod tests {
         assert!(response.empty_targets.is_empty());
         assert!(response.meshes.get("step").is_some(), "no mesh payload");
         // The typed response remains diagnostics-free; only main() adds the debug object.
-        let payload = serde_json::to_value(&response).expect("response json");
+        let payload = serde_json::to_value(&response.response).expect("response json");
         assert!(payload.get("diagnostics").is_none());
 
         let debug = request_for(&path, true);
@@ -4786,16 +5155,6 @@ mod tests {
         // diagnostic count to be present, not equal to the new mesher's count.
         assert!(json["meshTriangles"].as_u64().unwrap_or(0) > 0);
     }
-    #[test]
-    fn cache_evicts_oldest_mesh_over_budget() {
-        let mut cache = EngineCache::with_limits(1, 1);
-        cache.insert_mesh(("a".into(), "a".into()), Mesh::default());
-        cache.insert_mesh(("b".into(), "b".into()), Mesh::default());
-        assert_eq!(cache.mesh_entries(), 1);
-        assert!(cache.mesh(&("a".into(), "a".into())).is_none());
-        assert!(cache.mesh(&("b".into(), "b".into())).is_some());
-    }
-
     #[test]
     fn step_import_error_names_the_file_path() {
         let path = "/tmp/nodecraft-missing-stepio-file.step";
@@ -4852,7 +5211,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("loft").expect("loft mesh");
+        let mesh = output.meshes.get("loft").expect("loft mesh");
         assert!(!mesh.mesh.faces.is_empty());
     }
 
@@ -4885,7 +5244,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("loft").expect("loft mesh");
+        let mesh = output.meshes.get("loft").expect("loft mesh");
         assert!(!mesh.mesh.faces.is_empty());
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
@@ -4917,9 +5276,9 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let curve = output.response.meshes.get("curve").expect("spline display mesh");
+        let curve = output.meshes.get("curve").expect("spline display mesh");
         assert!(!curve.mesh.faces.is_empty(), "spline display curve is empty");
-        let mesh = output.response.meshes.get("loft").expect("loft mesh");
+        let mesh = output.meshes.get("loft").expect("loft mesh");
         assert!(!mesh.mesh.faces.is_empty());
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
@@ -4958,7 +5317,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("loft").expect("surface loft mesh");
+        let mesh = output.meshes.get("loft").expect("surface loft mesh");
         assert!(!mesh.mesh.faces.is_empty());
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
@@ -5019,7 +5378,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("loft").expect("surface loft mesh");
+        let mesh = output.meshes.get("loft").expect("surface loft mesh");
         assert!(!mesh.mesh.faces.is_empty(), "open spline loft produced no faces");
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
@@ -5091,7 +5450,7 @@ mod tests {
         assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
         let second = evaluate(request(20.0, "top-at-v2", "loft-v2"), first.cache, None);
         assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
-        let mesh = second.response.meshes.get("loft").expect("loft mesh");
+        let mesh = second.meshes.get("loft").expect("loft mesh");
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
         assert!((max_z - min_z - 20.0).abs() < 0.05, "edited loft height {}..{}", min_z, max_z);
@@ -5136,7 +5495,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("extrude").expect("extrude mesh");
+        let mesh = output.meshes.get("extrude").expect("extrude mesh");
         let volume = mesh_signed_volume(&mesh.mesh);
         let expected = std::f64::consts::PI * 51.960239979110156_f64.powi(2) * 6.7;
         let (min, max) = nodecraft_kernel::bounds(&mesh.mesh).expect("bounds");
@@ -5188,7 +5547,7 @@ mod tests {
         );
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let mesh = output.response.meshes.get("extrude").expect("extrude mesh");
+        let mesh = output.meshes.get("extrude").expect("extrude mesh");
         assert!(!mesh.mesh.faces.is_empty(), "extrude produced no faces");
         let min_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::INFINITY, f32::min);
         let max_z = mesh.mesh.vertices.iter().map(|v| v[2]).fold(f32::NEG_INFINITY, f32::max);
@@ -5217,7 +5576,7 @@ mod tests {
         })).expect("request");
         let output = evaluate(request, EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        if let Some(mesh) = output.response.meshes.get("sketch") {
+        if let Some(mesh) = output.meshes.get("sketch") {
             assert!(mesh.mesh.faces.is_empty(), "sketch must not display as a 3D mesh");
             assert!(mesh.mesh.vertices.is_empty(), "sketch must not display as a 3D mesh");
         }
@@ -5343,6 +5702,83 @@ mod tests {
         let second = evaluate(request, first.cache, None);
         assert!(second.response.node_errors.contains_key("bad"));
         assert!(second.cache.failure_hits() > 0);
+    }
+
+    #[test]
+    fn scatter_instances_share_one_display_body_key() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
+
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 1.0, 1.0, 1.0)
+            .expect("box");
+        let body = BodyInstance {
+            body: Arc::new(brep),
+            transforms: Vec::new(),
+            source: Some(41),
+            source_body: 3,
+        };
+        let part = Part { bodies: vec![body.clone(), body], sketches: Vec::new() };
+        let exact = exact_part_from(&part, 999);
+        assert_eq!(exact.bodies[0].key, exact.bodies[1].key);
+        assert_eq!(exact.bodies[0].key, nodecraft_exact::BodyKey::new(41, 3));
+        let translated = part.translated([10.0, 0.0, 0.0], [0.0; 3]);
+        let translated = exact_part_from(&translated, 999);
+        assert_eq!(translated.bodies[0].key, exact.bodies[0].key);
+    }
+
+    #[test]
+    fn scatter_instances_share_exact_body_keys_end_to_end() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["forest"],
+            "meshTargets": ["forest"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "trunk", "type": "primitive", "values": {"primitiveType": "cylinder", "radius": 1.0, "height": 8.0}},
+                {"id": "canopy", "type": "primitive", "values": {"primitiveType": "sphere", "radius": 4.0}},
+                {"id": "tree", "type": "combine", "values": {}},
+                {"id": "forest", "type": "scatter", "values": {"count": 10.0, "spanX": 20.0, "spanY": 20.0, "seed": 1.0, "minScale": 0.8, "maxScale": 1.2, "distribution": "grid"}}
+            ],
+            "connections": [
+                {"from": "trunk", "to": "tree", "in": "shape", "out": "shape"},
+                {"from": "canopy", "to": "tree", "in": "shape", "out": "shape"},
+                {"from": "tree", "to": "forest", "in": "shape", "out": "shape"}
+            ]
+        })).expect("scatter request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let forest = output.exact_parts.get("forest").expect("forest exact part");
+        assert_eq!(forest.bodies.len(), 20);
+        let keys: std::collections::HashSet<_> = forest.bodies.iter().map(|body| body.key).collect();
+        assert_eq!(keys.len(), 2, "scatter bodies must share their source plans");
+    }
+
+    #[test]
+    fn exact_difference_bodies_get_content_keys() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 995,
+            "targets": ["box", "chamfer"],
+            "meshTargets": ["box", "chamfer"],
+            "comparisonTargets": ["box", "chamfer"],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "box-v1", "state": "cached"}},
+                {"id": "chamfer", "type": "chamfer", "values": {"length": 2.0, "edges": [{"ordinal": 0}]}, "cache": {"key": "chamfer-v1", "state": "cached"}}
+            ],
+            "connections": [{"from": "box", "to": "chamfer", "in": "shape", "out": "shape"}]
+        })).expect("exact difference request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let comparison = output.exact_comparison.expect("exact comparison");
+        assert!(comparison.added.is_some() || comparison.removed.is_some());
+        if comparison.added.is_some() {
+            assert!(comparison.added_key.is_some());
+        }
+        if comparison.removed.is_some() {
+            assert!(comparison.removed_key.is_some());
+        }
+        assert_ne!(comparison.added_key, comparison.removed_key);
     }
 
 }

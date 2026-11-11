@@ -8,5 +8,9 @@ license.workspace = true
 name = "nodecraft"
 path = "src/main.rs"
 
+[[bin]]
+name = "nodecraft-bench"
+path = "src/bin/bench.rs"
+
 [dependencies]
 serde_json.workspace = true

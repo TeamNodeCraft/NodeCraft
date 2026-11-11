@@ -17,7 +17,7 @@ impl NodeCraftApp {
         let mut show_view_matrix = self.viewport.show_view_matrix();
         let mut show_gpu_info = self.viewport.show_gpu_info();
         let mut engine_threads = self.engine_threads;
-        let mut mesher_threads = self.mesher_threads;
+        let mut tessellation_threads = self.tessellation_threads;
         let mut workload_profiler = self.workload_profiler;
         let mut kernel_fixes = self.kernel_fixes;
         let mut activity = self.activity;
@@ -321,27 +321,25 @@ impl NodeCraftApp {
                                 .integer(),
                         );
                         engine_threads = threads as usize;
-                        let mut mesher = mesher_threads as u32;
+                        let mut threads = tessellation_threads as u32;
                         content.add(
-                            egui::Slider::new(&mut mesher, 0..=64)
-                                .text("Mesher threads (0 = auto)")
+                            egui::Slider::new(&mut threads, 0..=64)
+                                .text("Tessellation threads (0 = auto)")
                                 .integer(),
                         );
-                        mesher_threads = mesher as usize;
+                        tessellation_threads = threads as usize;
                         content.monospace(format!(
                             "Exact pool: {}",
-                            if nodecraft_engine::kernel_pool::exact_pool_initialized() {
-                                "already started"
-                            } else {
-                                "lazy"
+                            match nodecraft_engine::kernel_pool::exact_pool_worker_count() {
+                                Some(workers) => format!("started, {workers} workers"),
+                                None => "lazy".to_owned(),
                             }
                         ));
                         content.monospace(format!(
-                            "Mesh pool: {}",
-                            if nodecraft_engine::mesher::mesher_initialized() {
-                                "already started"
-                            } else {
-                                "lazy"
+                            "Display tessellation: {}",
+                            match nodecraft_engine::tessellation::tessellation_worker_count() {
+                                Some(workers) => format!("started, {workers} workers"),
+                                None => "lazy".to_owned(),
                             }
                         ));
                         content.monospace(format!(
@@ -350,6 +348,9 @@ impl NodeCraftApp {
                                 .map(|count| count.get())
                                 .unwrap_or(1)
                         ));
+                        content.small(
+                            "Threads affect parallel exact dispatch and display-mesh bodies. A serial                              Boolean chain and a single displayed body can be identical at 1 and auto.",
+                        );
                         content.add_space(8.0);
                         crate::widgets::switch_row(
                             &mut content,
@@ -485,10 +486,9 @@ impl NodeCraftApp {
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
-        if mesher_threads != self.mesher_threads {
-            self.mesher_threads = mesher_threads;
-            nodecraft_engine::kernel_pool::configure_mesh_threads(mesher_threads);
-            nodecraft_engine::mesher::configure_mesher_threads(mesher_threads);
+        if tessellation_threads != self.tessellation_threads {
+            self.tessellation_threads = tessellation_threads;
+            nodecraft_engine::tessellation::configure_tessellation_threads(tessellation_threads);
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }

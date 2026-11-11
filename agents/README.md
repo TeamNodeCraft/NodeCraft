@@ -6,6 +6,10 @@ changing geometry, the node canvas, or the viewport.
 ## Documents
 
 - [How NodeCraft works](architecture.md) — DAG, session, evaluation and planned threading.
+- [Workspace transition TODO](../docs/workspace-transition-todo.md) — current checklist.
+- [Workspace and graph-model integration plan](../docs/workspace-integration-plan.md) — implementation order.
+- [Graph definitions, instances and flattening](../docs/graph-definition-instance-plan.md) — target nesting/reuse model.
+- [Iterator nodes](../docs/node/iterator.md) — target iteration/map model.
 - [Philosophy](philosophy.md) — invariants and rules for changes.
 - [Vision](vision.md) — what NodeCraft is and why it exists.
 - [Current state](current-state.md) — what works today.

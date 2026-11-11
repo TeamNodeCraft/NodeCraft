@@ -322,7 +322,14 @@ fn len(a: [f64; 3]) -> f64 { dot(a, a).sqrt() }
 ///
 /// Parts are flattened to their realized solids. A multi-solid Part is unioned
 /// into one operand first, so the result is independent of input body count.
-pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
+pub(crate) struct DifferenceBreps {
+    pub removed: Option<nodecraft_solidcore::solidcore::topology::Brep>,
+    pub added: Option<nodecraft_solidcore::solidcore::topology::Brep>,
+    /// True when the two Parts have the same exact volume; no Booleans needed.
+    pub unchanged_volume: bool,
+}
+
+pub(crate) fn compare_part_breps(before: &Part, after: &Part) -> Result<DifferenceBreps, String> {
     let mut kernel = nodecraft_solidcore::kernel::kernel();
     let before_solids = before.realized_solids()?;
     let after_solids = after.realized_solids()?;
@@ -332,12 +339,10 @@ pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMes
     let Some(after) = nodecraft_layers::union_breps_ops(&mut kernel, &after_solids)? else {
         return Err("comparison after Part has no solids".into());
     };
-    // Exact B-rep volume, not display-mesh volume. Mesh density must not hide a
-    // real feature change or make coincident bodies look different.
     let before_volume = nodecraft_layers::kernel_volume(&mut kernel, &before)?;
     let after_volume = nodecraft_layers::kernel_volume(&mut kernel, &after)?;
     if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
-        return Ok(DifferenceMeshes { removed: Mesh::default(), added: Mesh::default() });
+        return Ok(DifferenceBreps { removed: None, added: None, unchanged_volume: true });
     }
     let removed = nodecraft_layers::boolean_breps_ops(
         &mut kernel,
@@ -351,17 +356,19 @@ pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMes
         &before,
         nodecraft_layers::BooleanOp::Subtract,
     )?;
-    let tolerance = 0.05;
+    Ok(DifferenceBreps { removed, added, unchanged_volume: false })
+}
+
+pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMeshes, String> {
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    let breps = compare_part_breps(before, after)?;
     let mut mesh_of = |brep: Option<nodecraft_solidcore::solidcore::topology::Brep>| {
         let Some(mut brep) = brep else { return Mesh::default() };
-        nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, tolerance)
+        nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05)
             .map(|display| display.mesh)
             .unwrap_or_default()
     };
-    Ok(DifferenceMeshes {
-        removed: mesh_of(removed),
-        added: mesh_of(added),
-    })
+    Ok(DifferenceMeshes { removed: mesh_of(breps.removed), added: mesh_of(breps.added) })
 }
 
 pub(crate) fn mesh_volume(mesh: &Mesh) -> f64 {

@@ -5,6 +5,7 @@
 //! tessellates and renders with wgpu. The editor never reduces the viewport size: it
 //! is an overlay over the full 3D view.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -185,7 +186,7 @@ struct NodeDrag {
 #[derive(Clone)]
 struct WirePort {
     node_id: String,
-    port: &'static str,
+    port: String,
     is_input: bool,
     position: Pos2,
 }
@@ -248,6 +249,10 @@ pub struct NodeEditor {
     gpu_ready: bool,
     width: f32,
     left_dock: f32,
+    maximized: bool,
+    right_inset: f32,
+    view_label: Option<String>,
+    header_visible: bool,
     resize_start: Option<(f32, f32)>,
     resize_dragging: bool,
     geometry_key: Option<u64>,
@@ -300,6 +305,10 @@ impl Default for NodeEditor {
             gpu_ready: false,
             width: 0.0,
             left_dock: 0.0,
+            maximized: false,
+            right_inset: 0.0,
+            view_label: None,
+            header_visible: true,
             resize_start: None,
             resize_dragging: false,
             geometry_key: None,
@@ -390,6 +399,30 @@ fn activity_strength(
 }
 
 impl NodeEditor {
+    pub fn panel_width(&self) -> f32 {
+        self.width
+    }
+
+    pub fn set_panel_width(&mut self, width: f32) {
+        self.width = width;
+    }
+
+    pub fn set_maximized(&mut self, maximized: bool) {
+        self.maximized = maximized;
+    }
+
+    pub fn set_view_label(&mut self, label: Option<String>) {
+        self.view_label = label;
+    }
+
+    pub fn set_header_visible(&mut self, visible: bool) {
+        self.header_visible = visible;
+    }
+
+    pub fn set_right_inset(&mut self, right_inset: f32) {
+        self.right_inset = right_inset;
+    }
+
     pub fn set_left_dock_width(&mut self, width: f32) {
         self.left_dock = width.max(0.0);
     }
@@ -414,6 +447,14 @@ impl NodeEditor {
 
     pub fn panel_rect(&self, viewport: Rect) -> Rect {
         let inset_viewport = viewport.shrink(PANEL_INSET);
+        if self.maximized {
+            let left = inset_viewport.min.x + self.left_dock;
+            let right = (inset_viewport.max.x - self.right_inset.max(0.0)).max(left + PANEL_MIN);
+            return Rect::from_min_max(
+                Pos2::new(left, inset_viewport.min.y),
+                Pos2::new(right, inset_viewport.max.y),
+            );
+        }
         let default = (viewport.width() * PANEL_FRACTION).clamp(PANEL_MIN, PANEL_DEFAULT_MAX);
         let width = if self.width > 0.0 { self.width } else { default };
         let max_width = ((inset_viewport.width() - self.left_dock).max(PANEL_MIN) * PANEL_MAX_FRACTION)
@@ -524,6 +565,21 @@ impl NodeEditor {
         }
     }
 
+    /// Drop transient pointer state when switching editor tabs/sessions.
+    pub fn reset_interaction(&mut self) {
+        self.node_drag = None;
+        self.wire_drag = None;
+        self.context_menu = None;
+        self.lasso = None;
+        self.lasso_base = None;
+        self.lasso_additive = false;
+        self.lasso_last = None;
+        self.resize_start = None;
+        self.resize_dragging = false;
+        self.layout_menu_open = false;
+        self.minimap_drag = None;
+    }
+
     pub fn reset_view(&mut self) {
         self.view_document = None;
         self.view_animation = None;
@@ -593,9 +649,9 @@ impl NodeEditor {
             );
             let outputs = node_outputs(from);
             let inputs = node_inputs(to);
-            let x0 = port_x(source, port_index(outputs, &connection.out), outputs.len(), 1.0);
+            let x0 = port_x(source, port_index(&outputs, &connection.out), outputs.len(), 1.0);
             let y0 = source.max.y;
-            let x1 = port_x(target, port_index(inputs, &connection.input), inputs.len(), 1.0);
+            let x1 = port_x(target, port_index(&inputs, &connection.input), inputs.len(), 1.0);
             let y1 = target.min.y;
             let points = crate::routing::route_nodes_for(
                 style,
@@ -1015,14 +1071,59 @@ impl NodeEditor {
                     Color32::TRANSPARENT,
                     Stroke::new(1.0, self.theme.color(self.theme.border)),
                 ));
-                // No header band: the panel name sits directly on the canvas.
-                painter.text(
-                    panel.min + Vec2::new(16.0, 18.0),
-                    egui::Align2::LEFT_CENTER,
-                    "NODE EDITOR",
-                    egui::FontId::proportional(12.0),
-                    self.theme.color(self.theme.text),
-                );
+                if self.header_visible {
+                    // No header band: the panel name sits directly on the canvas.
+                    let header_font = egui::FontId::proportional(12.0);
+                    let header_colour = self.theme.color(self.theme.text);
+                    let header_y = panel.min.y + 18.0;
+                    let mut cursor_x = panel.min.x + 16.0;
+                    painter.text(
+                        egui::pos2(cursor_x, header_y),
+                        egui::Align2::LEFT_CENTER,
+                        "NODE EDITOR",
+                        header_font.clone(),
+                        header_colour,
+                    );
+                    cursor_x += painter
+                        .layout_no_wrap("NODE EDITOR".to_owned(), header_font.clone(), header_colour)
+                        .size()
+                        .x;
+                    if let Some(label) = self.view_label.as_deref() {
+                        let chevron_colour = self.theme.color(self.theme.muted);
+                        let stroke = egui::Stroke::new(1.4, chevron_colour);
+                        for segment in label.split(" ❯ ") {
+                            cursor_x += 9.0;
+                            let chevron_x = cursor_x - 4.5;
+                            painter.line_segment(
+                                [
+                                    egui::pos2(chevron_x, header_y - 4.0),
+                                    egui::pos2(chevron_x + 4.5, header_y),
+                                ],
+                                stroke,
+                            );
+                            painter.line_segment(
+                                [
+                                    egui::pos2(chevron_x + 4.5, header_y),
+                                    egui::pos2(chevron_x, header_y + 4.0),
+                                ],
+                                stroke,
+                            );
+                            cursor_x += 6.0;
+                            painter.text(
+                                egui::pos2(cursor_x, header_y),
+                                egui::Align2::LEFT_CENTER,
+                                segment,
+                                header_font.clone(),
+                                header_colour,
+                            );
+                            cursor_x += painter
+                                .layout_no_wrap(segment.to_owned(), header_font.clone(), header_colour)
+                                .size()
+                                .x;
+                        }
+                    }
+    
+                }
 
                 let canvas = panel_canvas(panel);
                 let mini = node_minimap_rect(panel);
@@ -1433,7 +1534,8 @@ impl NodeEditor {
                     if text_size < 7.0 {
                         break;
                     }
-                    let text_width = (node.node_type.chars().count() as f32 * text_size * 0.62)
+                    let title = node_title(&node.node_type).to_uppercase();
+                    let text_width = (title.chars().count() as f32 * text_size * 0.62)
                         .max(text_size * 2.0);
                     let text_top = rect.max.y - 24.0 * self.zoom;
                     let label_rect = Rect::from_min_size(
@@ -1444,7 +1546,7 @@ impl NodeEditor {
                     if blockers.map_or(true, Vec::is_empty) {
                         let fade = self.node_fade_alpha(&node.id, now);
                         draw.texts.push(NodeText {
-                            text: node.node_type.to_uppercase(),
+                            text: title.clone(),
                             center_x: rect.center().x,
                             top: rect.max.y - 24.0 * self.zoom,
                             size: 11.0 * self.zoom,
@@ -1453,7 +1555,7 @@ impl NodeEditor {
                         });
                     } else {
                         overlay_texts.push((
-                            node.node_type.to_uppercase(),
+                            title.clone(),
                             Pos2::new(rect.center().x, text_top),
                             text_size,
                             label_rect,
@@ -1488,9 +1590,9 @@ impl NodeEditor {
                         let end = node_rect(to, canvas, draw_pan, self.zoom);
                         let outputs = node_outputs(from);
                         let inputs = node_inputs(to);
-                        let x0 = port_x(start, port_index(outputs, &connection.out), outputs.len(), self.zoom);
+                        let x0 = port_x(start, port_index(&outputs, &connection.out), outputs.len(), self.zoom);
                         let y0 = start.max.y;
-                        let x1 = port_x(end, port_index(inputs, &connection.input), inputs.len(), self.zoom);
+                        let x1 = port_x(end, port_index(&inputs, &connection.input), inputs.len(), self.zoom);
                         let y1 = end.min.y;
                         let points = crate::routing::route_nodes_for(
                             self.cable_routing,
@@ -1561,7 +1663,7 @@ impl NodeEditor {
                                 8.0 * self.zoom,
                                 Stroke::new(
                                     2.0,
-                                    self.theme.color(if inlet_is_data(port) {
+                                    self.theme.color(if inlet_is_data(node, port) {
                                         self.theme.port_input
                                     } else {
                                         self.theme.accent
@@ -1585,7 +1687,7 @@ impl NodeEditor {
                         painter.text(
                             Pos2::new(rect.center().x, rect.max.y - 24.0 * self.zoom),
                             egui::Align2::CENTER_CENTER,
-                            node.node_type.to_uppercase(),
+                            node_title(&node.node_type).to_uppercase(),
                             egui::FontId::proportional(11.0 * self.zoom),
                             {
                                 let fade = self.node_fade_alpha(&node.id, now);
@@ -2032,19 +2134,19 @@ impl NodeEditor {
                             let target_rect = node_rect(target, canvas, draw_pan, self.zoom);
                             let inserted_rect = node_rect(inserted, canvas, draw_pan, self.zoom);
                             let source_out = Pos2::new(
-                                port_x(source_rect, port_index(node_outputs(source), &candidate.connection.out), node_outputs(source).len(), self.zoom),
+                                port_x(source_rect, port_index(&node_outputs(source), &candidate.connection.out), node_outputs(source).len(), self.zoom),
                                 source_rect.max.y,
                             );
                             let inserted_in = Pos2::new(
-                                port_x(inserted_rect, port_index(node_inputs(inserted), &candidate.input), node_inputs(inserted).len(), self.zoom),
+                                port_x(inserted_rect, port_index(&node_inputs(inserted), &candidate.input), node_inputs(inserted).len(), self.zoom),
                                 inserted_rect.min.y,
                             );
                             let inserted_out = Pos2::new(
-                                port_x(inserted_rect, port_index(node_outputs(inserted), &candidate.out), node_outputs(inserted).len(), self.zoom),
+                                port_x(inserted_rect, port_index(&node_outputs(inserted), &candidate.out), node_outputs(inserted).len(), self.zoom),
                                 inserted_rect.max.y,
                             );
                             let target_in = Pos2::new(
-                                port_x(target_rect, port_index(node_inputs(target), &candidate.connection.input), node_inputs(target).len(), self.zoom),
+                                port_x(target_rect, port_index(&node_inputs(target), &candidate.connection.input), node_inputs(target).len(), self.zoom),
                                 target_rect.min.y,
                             );
                             let alpha = (preview.progress * 255.0) as u8;
@@ -2411,7 +2513,8 @@ fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
         .replace("#d8d8dc", &colour)
         // Affinity exports the boolean mode SVGs with CSS rgb() fills.
         .replace("rgb(33,33,33)", &colour)
-        .replace("rgb(33, 33, 33)", &colour);
+        .replace("rgb(33, 33, 33)", &colour)
+        .replace("currentColor", &colour);
     // Fluent outline SVGs often rely on the SVG default black fill. Inject the
     // theme colour on the root only when there is no explicit root paint.
     if let Some(root_end) = svg.find('>') {
@@ -2475,6 +2578,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
             _ => "union",
         },
         "combine" => "combine",
+        "graph" => "graph",
         "group" => "group",
         "scatter" => "scatter",
         "exporter" => "export",
@@ -2493,7 +2597,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "sketch" => include_bytes!("../../../../vendor/iconify-design/nodes/sketch.svg"),
         "spline" => include_bytes!("../../../../vendor/iconify-design/nodes/spline.svg"),
         "translate" => include_bytes!("../../../../vendor/iconify-design/nodes/translate.svg"),
-        "mirror" => include_bytes!("../../../../vendor/iconify-design/nodes/mirror.svg"),
+        "mirror" => include_bytes!("../../../../vendor/iconify-design/nodes/butterfly.svg"),
         "intersection" => include_bytes!("../../../../vendor/icons/boolean/intersection.svg"),
         "union" => include_bytes!("../../../../vendor/icons/boolean/union.svg"),
         "subtract" => include_bytes!("../../../../vendor/icons/boolean/subtract-a-b.svg"),
@@ -2508,6 +2612,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "loft" => include_bytes!("../../../../vendor/iconify-design/nodes/loft.svg"),
         "surfaceloft" => include_bytes!("../../../../vendor/iconify-design/nodes/surfaceloft.svg"),
         "scatter" => include_bytes!("../../../../vendor/iconify-design/nodes/scatter.svg"),
+        "graph" => include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg"),
         "group" => include_bytes!("../../../../vendor/iconify-design/nodes/group.svg"),
         "import" => include_bytes!("../../../../vendor/iconify-design/nodes/import.svg"),
         "export" => include_bytes!("../../../../vendor/iconify-design/nodes/export.svg"),
@@ -2543,15 +2648,28 @@ fn node_title(node_type: &str) -> &'static str {
         "loft" => "Loft",
         "surfaceloft" => "Surface Loft",
         "mirror" => "Mirror",
-        "group" => "Group",
-        "groupinput" => "Group Input",
-        "groupoutput" => "Group Output",
+        "graph" => "Graph",
+        "group" => "Graph",
+        "groupinput" => "Graph Input",
+        "groupoutput" => "Graph Output",
         _ => "Node",
     }
 }
 
-fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
-    match node.node_type.as_str() {
+fn node_inputs<'a>(node: &'a nodecraft_session::GraphNode) -> Cow<'a, [&'a str]> {
+    if node.node_type == "group" {
+        return Cow::Owned(graph_port_names(node, "inputs"));
+    }
+    if node.node_type == "graph" {
+        return Cow::Owned(graph_node_ports(node, "inputs"));
+    }
+    if node.node_type == "groupinput" {
+        return Cow::Owned(Vec::new());
+    }
+    if node.node_type == "groupoutput" {
+        return Cow::Owned(graph_marker_ports(node));
+    }
+    Cow::Borrowed(match node.node_type.as_str() {
         "solid" | "primitive" => match node.values.get("primitiveType").and_then(|value| value.as_str()) {
             Some("sphere") => &["radius"],
             Some("cylinder") => &["radius", "height"],
@@ -2576,12 +2694,47 @@ fn node_inputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
         "surfaceloft" => &["sections", "ruled"],
         "exporter" | "mirror" => &["shape"],
         _ => &["shape"],
+    })
+}
+
+fn graph_node_ports<'a>(node: &'a nodecraft_session::GraphNode, field: &str) -> Vec<&'a str> {
+    node.values
+        .get(field)
+        .and_then(|value| value.as_array())
+        .map(|ports| ports.iter().filter_map(|port| port.as_str()).collect())
+        .unwrap_or_else(|| vec!["shape"])
+}
+
+fn graph_marker_ports<'a>(node: &'a nodecraft_session::GraphNode) -> Vec<&'a str> {
+    if let Some(ports) = node.values.get("ports").and_then(|value| value.as_array()) {
+        return ports.iter().filter_map(|port| port.as_str()).collect();
     }
+    node.values
+        .get("port")
+        .and_then(|value| value.as_str())
+        .into_iter()
+        .collect()
+}
+
+fn graph_port_names<'a>(node: &'a nodecraft_session::GraphNode, field: &str) -> Vec<&'a str> {
+    node.values
+        .get(field)
+        .and_then(|value| value.as_array())
+        .map(|ports| {
+            ports
+                .iter()
+                .filter_map(|port| port.get("port").and_then(|value| value.as_str()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["shape"])
 }
 
 /// Inlet ports that carry geometry rather than scalar data. Only data inlets
 /// use the orange port colour; geometry inlets and every outlet stay blue.
-fn inlet_is_data(port: &str) -> bool {
+fn inlet_is_data(node: &nodecraft_session::GraphNode, port: &str) -> bool {
+    if matches!(node.node_type.as_str(), "graph" | "group" | "groupinput" | "groupoutput") {
+        return false;
+    }
     !matches!(
         port,
         "shape" | "profile" | "sketch" | "sections" | "bottom" | "top" | "a" | "b" | "faces" | "edges"
@@ -2602,18 +2755,30 @@ fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet<String> {
     result
 }
 
-fn insertion_ports(node: &nodecraft_session::GraphNode) -> Option<(&'static str, &'static str)> {
-    let input = node_inputs(node).iter().copied().find(|port| !inlet_is_data(port))?;
+fn insertion_ports<'a>(node: &'a nodecraft_session::GraphNode) -> Option<(&'a str, &'a str)> {
+    let input = node_inputs(node).iter().copied().find(|port| !inlet_is_data(node, port))?;
     let output = node_outputs(node).first().copied()?;
     Some((input, output))
 }
 
-fn node_outputs(node: &nodecraft_session::GraphNode) -> &'static [&'static str] {
-    match node.node_type.as_str() {
+fn node_outputs<'a>(node: &'a nodecraft_session::GraphNode) -> Cow<'a, [&'a str]> {
+    if node.node_type == "group" {
+        return Cow::Owned(graph_port_names(node, "outputs"));
+    }
+    if node.node_type == "graph" {
+        return Cow::Owned(graph_node_ports(node, "outputs"));
+    }
+    if node.node_type == "groupinput" {
+        return Cow::Owned(graph_marker_ports(node));
+    }
+    if node.node_type == "groupoutput" {
+        return Cow::Owned(Vec::new());
+    }
+    Cow::Borrowed(match node.node_type.as_str() {
         "exporter" => &[],
         "sketch" | "spline" => &["sketch"],
         _ => &["shape"],
-    }
+    })
 }
 
 fn node_input_count(node: &nodecraft_session::GraphNode) -> usize {
@@ -2648,14 +2813,14 @@ fn port_at(
             let position = Pos2::new(port_x(rect, index, node_inputs(node).len(), zoom), rect.min.y);
             let distance = position.distance(pointer);
             if distance <= radius && best.as_ref().is_none_or(|(best, _)| distance < *best) {
-                best = Some((distance, WirePort { node_id: node.id.clone(), port, is_input: true, position }));
+                best = Some((distance, WirePort { node_id: node.id.clone(), port: port.to_string(), is_input: true, position }));
             }
         }
         for (index, port) in node_outputs(node).iter().enumerate() {
             let position = Pos2::new(port_x(rect, index, node_outputs(node).len(), zoom), rect.max.y);
             let distance = position.distance(pointer);
             if distance <= radius && best.as_ref().is_none_or(|(best, _)| distance < *best) {
-                best = Some((distance, WirePort { node_id: node.id.clone(), port, is_input: false, position }));
+                best = Some((distance, WirePort { node_id: node.id.clone(), port: port.to_string(), is_input: false, position }));
             }
         }
     }
@@ -2730,7 +2895,7 @@ fn port_index(ports: &[&str], name: &str) -> usize {
 
 pub fn node_width(node: &nodecraft_session::GraphNode) -> f32 {
     if node.node_type == "group" {
-        // Subpatch cards are intentionally wider than operation cards.
+        // Graph cards are intentionally wider than operation cards.
         return 280.0;
     }
     let title = node_title(&node.node_type).chars().count() as f32;
@@ -2865,9 +3030,9 @@ fn cable_hit_with_hold_for(
         let target_rect = Rect::from_min_size(target, Vec2::new(node_width(to), NODE_HEIGHT) * zoom);
         let outputs = node_outputs(from);
         let inputs = node_inputs(to);
-        let x0 = port_x(source_rect, port_index(outputs, &connection.out), outputs.len(), zoom);
+        let x0 = port_x(source_rect, port_index(&outputs, &connection.out), outputs.len(), zoom);
         let y0 = source_rect.max.y;
-        let x1 = port_x(target_rect, port_index(inputs, &connection.input), inputs.len(), zoom);
+        let x1 = port_x(target_rect, port_index(&inputs, &connection.input), inputs.len(), zoom);
         let y1 = target_rect.min.y;
         let route = crate::routing::route_nodes_for(
             style,
@@ -3014,6 +3179,52 @@ fn geometry_key(
     )
 }
 
+fn hash_card_ports(node: &nodecraft_session::GraphNode, hasher: &mut std::collections::hash_map::DefaultHasher) {
+    use std::hash::Hash;
+    match node.node_type.as_str() {
+        "group" => {
+            for field in ["inputs", "outputs"] {
+                let Some(ports) = node.values.get(field).and_then(|value| value.as_array()) else {
+                    continue;
+                };
+                field.hash(hasher);
+                for port in ports {
+                    port.get("port")
+                        .and_then(|value| value.as_str())
+                        .hash(hasher);
+                }
+            }
+        }
+        "graph" => {
+            for field in ["inputs", "outputs"] {
+                let Some(ports) = node.values.get(field).and_then(|value| value.as_array()) else {
+                    continue;
+                };
+                field.hash(hasher);
+                for port in ports {
+                    port.as_str().hash(hasher);
+                }
+            }
+        }
+        "groupinput" | "groupoutput" => {
+            if let Some(ports) = node.values.get("ports").and_then(|value| value.as_array()) {
+                for port in ports {
+                    port.as_str().hash(hasher);
+                }
+            } else {
+                node.values.get("port").and_then(|value| value.as_str()).hash(hasher);
+            }
+        }
+        "solid" | "primitive" => {
+            node.values
+                .get("primitiveType")
+                .and_then(|value| value.as_str())
+                .hash(hasher);
+        }
+        _ => {}
+    }
+}
+
 fn geometry_key_for(
     routing: CableRouting,
     document: &GraphDocument,
@@ -3030,6 +3241,10 @@ fn geometry_key_for(
         node.node_type.hash(&mut hasher);
         node.x.to_bits().hash(&mut hasher);
         node.y.to_bits().hash(&mut hasher);
+        // Card port eyelets depend on these values. They are not part of the
+        // node content hash, so without this the card would keep stale ports
+        // until some unrelated interaction changed the geometry key.
+        hash_card_ports(node, &mut hasher);
         // Suppression changes the shader hatch flag, so it must invalidate the
         // cached shape instances just like selection does.
         node.suppressed.hash(&mut hasher);
@@ -3106,7 +3321,7 @@ fn build_geometry(
             let x = port_x(rect, index, inputs.len(), 1.0);
             let input = circle_path(x, rect.min.y, 8.0);
             builder.fill_path(&input, card_colour);
-            let colour = if inlet_is_data(port) {
+            let colour = if inlet_is_data(node, port) {
                 theme.port_input
             } else {
                 theme.accent
@@ -3257,7 +3472,7 @@ fn build_shape_instances(
         for (port_index, port) in inputs.iter().enumerate() {
             let x = port_x(rect, port_index, inputs.len(), 1.0);
             let center = Pos2::new(x, rect.min.y);
-            let ring = if inlet_is_data(port) {
+            let ring = if inlet_is_data(node, port) {
                 theme.f32(theme.port_input)
             } else {
                 accent
@@ -3385,8 +3600,8 @@ fn build_cables_for(
         let end = graph_rect(to_node);
         let outputs = node_outputs(from_node);
         let inputs = node_inputs(to_node);
-        let from_x = port_x(start, port_index(outputs, &connection.out), outputs.len(), 1.0);
-        let to_x = port_x(end, port_index(inputs, &connection.input), inputs.len(), 1.0);
+        let from_x = port_x(start, port_index(&outputs, &connection.out), outputs.len(), 1.0);
+        let to_x = port_x(end, port_index(&inputs, &connection.input), inputs.len(), 1.0);
         let routing = crate::routing::route_nodes_for(
             routing_style,
             start,
@@ -3608,8 +3823,8 @@ mod tests {
         let to_rect = graph_rect(to);
         let outputs = node_outputs(from);
         let inputs = node_inputs(to);
-        let x0 = port_x(from_rect, port_index(outputs, &connection.out), outputs.len(), 1.0);
-        let x1 = port_x(to_rect, port_index(inputs, &connection.input), inputs.len(), 1.0);
+        let x0 = port_x(from_rect, port_index(&outputs, &connection.out), outputs.len(), 1.0);
+        let x1 = port_x(to_rect, port_index(&inputs, &connection.input), inputs.len(), 1.0);
         let route = crate::routing::route_nodes(
             from_rect,
             to_rect,
@@ -3800,8 +4015,8 @@ mod tests {
         let to = graph_rect(&document.nodes[1]);
         let outputs = node_outputs(&document.nodes[0]);
         let inputs = node_inputs(&document.nodes[1]);
-        let x0 = port_x(from, port_index(outputs, "shape"), outputs.len(), 1.0);
-        let x1 = port_x(to, port_index(inputs, "shape"), inputs.len(), 1.0);
+        let x0 = port_x(from, port_index(&outputs, "shape"), outputs.len(), 1.0);
+        let x1 = port_x(to, port_index(&inputs, "shape"), inputs.len(), 1.0);
         let expected =
             crate::routing::route_nodes(from, to, x0, from.max.y, x1, to.min.y, 1.0);
         assert_eq!(cable.params[2], expected.count as f32);
@@ -4077,8 +4292,8 @@ mod tests {
                     let to_rect = graph_rect(to);
                     let outputs = node_outputs(from);
                     let inputs = node_inputs(to);
-                    let x0 = port_x(from_rect, port_index(outputs, "shape"), outputs.len(), 1.0);
-                    let x1 = port_x(to_rect, port_index(inputs, "shape"), inputs.len(), 1.0);
+                    let x0 = port_x(from_rect, port_index(&outputs, "shape"), outputs.len(), 1.0);
+                    let x1 = port_x(to_rect, port_index(&inputs, "shape"), inputs.len(), 1.0);
                     let _ = crate::routing::route_nodes_for(
                         CableRouting::J,
                         from_rect,
@@ -4484,6 +4699,129 @@ mod tests {
     }
 
     #[test]
+    fn graph_interface_nodes_have_only_their_own_side_ports() {
+        let mut input = node_at(0.0, 0.0);
+        input.node_type = "groupinput".into();
+        input.values = serde_json::json!({"ports": ["shape", "shape2"]});
+        assert!(node_inputs(&input).is_empty());
+        assert_eq!(node_outputs(&input).as_ref(), &["shape", "shape2"]);
+
+        let mut output = node_at(0.0, 0.0);
+        output.node_type = "groupoutput".into();
+        output.values = serde_json::json!({"ports": ["shape", "shape2"]});
+        assert_eq!(node_inputs(&output).as_ref(), &["shape", "shape2"]);
+        assert!(node_outputs(&output).is_empty());
+    }
+
+    #[test]
+    fn graph_instance_cards_use_definition_interface_ports() {
+        let mut node = node_at(0.0, 0.0);
+        node.node_type = "graph".into();
+        node.values = serde_json::json!({
+            "name": "Rounded",
+            "inputs": ["shape", "shape2"],
+            "outputs": ["shape"]
+        });
+        assert_eq!(node_inputs(&node).as_ref(), &["shape", "shape2"]);
+        assert_eq!(node_outputs(&node).as_ref(), &["shape"]);
+        assert!(!inlet_is_data(&node, "shape2"));
+        assert_eq!(node_title(&node.node_type), "Graph");
+    }
+
+    #[test]
+    fn graph_port_count_invalidates_cached_card_geometry() {
+        let mut node = node_at(0.0, 0.0);
+        node.node_type = "group".into();
+        node.values = serde_json::json!({
+            "inputs": [{"port": "shape", "node": "in"}],
+            "outputs": [{"port": "shape", "node": "out"}]
+        });
+        let mut document = GraphDocument::new("ports");
+        document.nodes.push(node);
+        let selected = HashSet::new();
+        let selected_connections = HashSet::new();
+        let before = geometry_key(
+            &document,
+            &selected,
+            &selected_connections,
+            &[],
+            None,
+            &crate::theme::CanvasTheme::default(),
+        );
+        document.nodes[0].values = serde_json::json!({
+            "inputs": [{"port": "shape", "node": "in"}, {"port": "shape2", "node": "in"}],
+            "outputs": [{"port": "shape", "node": "out"}]
+        });
+        let after = geometry_key(
+            &document,
+            &selected,
+            &selected_connections,
+            &[],
+            None,
+            &crate::theme::CanvasTheme::default(),
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn graph_instance_port_count_invalidates_cached_card_geometry() {
+        let mut node = node_at(0.0, 0.0);
+        node.node_type = "graph".into();
+        node.values = serde_json::json!({
+            "definition": "feature",
+            "inputs": ["shape"],
+            "outputs": ["shape"]
+        });
+        let mut document = GraphDocument::new("graph-ports");
+        document.nodes.push(node);
+        let selected = HashSet::new();
+        let selected_connections = HashSet::new();
+        let before = geometry_key(
+            &document,
+            &selected,
+            &selected_connections,
+            &[],
+            None,
+            &crate::theme::CanvasTheme::default(),
+        );
+        document.nodes[0].values = serde_json::json!({
+            "definition": "feature",
+            "inputs": ["shape", "shape2"],
+            "outputs": ["shape"]
+        });
+        let after = geometry_key(
+            &document,
+            &selected,
+            &selected_connections,
+            &[],
+            None,
+            &crate::theme::CanvasTheme::default(),
+        );
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn graph_cards_expose_all_declared_body_ports() {
+        let mut node = node_at(0.0, 0.0);
+        node.node_type = "group".into();
+        node.values = serde_json::json!({
+            "inputs": [
+                {"port": "shape", "node": "in"},
+                {"port": "shape2", "node": "in2"}
+            ],
+            "outputs": [
+                {"port": "shape", "node": "out"},
+                {"port": "shape2", "node": "out2"},
+                {"port": "shape3", "node": "out3"}
+            ]
+        });
+        assert_eq!(node_inputs(&node).as_ref(), &["shape", "shape2"]);
+        assert_eq!(node_outputs(&node).as_ref(), &["shape", "shape2", "shape3"]);
+        assert!(!inlet_is_data(&node, "shape2"));
+        assert_eq!(node_width(&node), 280.0);
+    }
+
+    #[test]
     fn cable_insertion_uses_the_first_geometry_inlet_and_outlet() {
         let primitive = node_at(0.0, 0.0);
         assert!(insertion_ports(&primitive).is_none());
@@ -4557,6 +4895,14 @@ mod tests {
     }
 
     #[test]
+    fn graph_nodes_use_the_share_network_icon() {
+        let mut node = node_at(0.0, 0.0);
+        node.node_type = "graph".into();
+        assert_eq!(icon_for(&node).0, "graph");
+        assert_eq!(icon_for(&node).1, include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg"));
+    }
+
+    #[test]
     fn boolean_subtract_icons_are_tinted() {
         for source in [
             include_bytes!("../../../../vendor/icons/boolean/subtract-a-b.svg") as &[u8],
@@ -4595,13 +4941,14 @@ mod tests {
 
     #[test]
     fn only_data_inlets_use_the_orange_port_colour() {
-        assert!(inlet_is_data("x"));
-        assert!(inlet_is_data("radius"));
-        assert!(inlet_is_data("amount"));
-        assert!(!inlet_is_data("shape"));
-        assert!(!inlet_is_data("profile"));
-        assert!(!inlet_is_data("a"));
-        assert!(!inlet_is_data("bottom"));
+        let node = node_at(0.0, 0.0);
+        assert!(inlet_is_data(&node, "x"));
+        assert!(inlet_is_data(&node, "radius"));
+        assert!(inlet_is_data(&node, "amount"));
+        assert!(!inlet_is_data(&node, "shape"));
+        assert!(!inlet_is_data(&node, "profile"));
+        assert!(!inlet_is_data(&node, "a"));
+        assert!(!inlet_is_data(&node, "bottom"));
     }
 
     #[test]
@@ -4628,9 +4975,15 @@ mod tests {
         let document = GraphDocument {
             schema_version: 1,
             id: "d".into(),
-            nodes: vec![node.clone()],
-            connections: Vec::new(),
-            interface: GraphInterface::default(),
+            root: nodecraft_session::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![node.clone()],
+                connections: Vec::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         let theme = crate::theme::CanvasTheme::default();
         let selected = HashSet::new();
@@ -4700,8 +5053,8 @@ mod tests {
         let to_rect = graph_rect(&to);
         let outputs = node_outputs(&from);
         let inputs = node_inputs(&to);
-        let x0 = port_x(from_rect, port_index(outputs, "shape"), outputs.len(), 1.0);
-        let x1 = port_x(to_rect, port_index(inputs, "shape"), inputs.len(), 1.0);
+        let x0 = port_x(from_rect, port_index(&outputs, "shape"), outputs.len(), 1.0);
+        let x1 = port_x(to_rect, port_index(&inputs, "shape"), inputs.len(), 1.0);
         // This is the same world-space path the retained GPU geometry builds.
         let world = crate::routing::route_nodes(
             from_rect,

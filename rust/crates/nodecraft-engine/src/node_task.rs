@@ -17,6 +17,7 @@ use nodecraft_solidcore::solidcore::{
 #[allow(dead_code)] // Part/Sketch/Mesh outputs are the planned typed-input path.
 pub(crate) enum NodeOutput {
     Shape(std::sync::Arc<Brep>),
+    Shapes(Vec<std::sync::Arc<Brep>>),
     Part(std::sync::Arc<crate::Part>),
     Sketch(std::sync::Arc<crate::SketchOutput>),
     Mesh(std::sync::Arc<nodecraft_protocol::Mesh>),
@@ -28,6 +29,13 @@ impl NodeOutput {
     pub(crate) fn into_shape(self) -> Option<std::sync::Arc<Brep>> {
         match self {
             Self::Shape(shape) => Some(shape),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn into_shapes(self) -> Option<Vec<std::sync::Arc<Brep>>> {
+        match self {
+            Self::Shapes(shapes) => Some(shapes),
             _ => None,
         }
     }
@@ -54,6 +62,7 @@ impl NodeOutput {
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Self::Shape(_) => "shape",
+            Self::Shapes(_) => "shapes",
             Self::Part(_) => "part",
             Self::Sketch(_) => "sketch",
             Self::Mesh(_) => "mesh",
@@ -91,7 +100,7 @@ impl NodeInputs {
 pub(crate) enum ExactNodeTask {
     Primitive(Node),
     Boolean {
-        op: nodecraft_layers::BooleanOp,
+        op: nodecraft_bool::BooleanOp,
         a: Vec<Brep>,
         b: Vec<Brep>,
     },
@@ -100,6 +109,15 @@ pub(crate) enum ExactNodeTask {
         face_index: usize,
         amount: f64,
     },
+    ExtrudeSketch {
+        output: std::sync::Arc<crate::SketchOutput>,
+        amount: f64,
+    },
+    Translate {
+        brep: Brep,
+        offset: [f64; 3],
+        rotation: [f64; 3],
+    },
     Fillet {
         brep: Brep,
         values: serde_json::Value,
@@ -107,7 +125,7 @@ pub(crate) enum ExactNodeTask {
     Shell {
         brep: Brep,
         signed_thickness: f64,
-        openings: Vec<nodecraft_solidcore::solidcore::topology::FaceId>,
+        openings: Vec<usize>,
     },
     Mirror {
         brep: Brep,
@@ -126,6 +144,39 @@ pub(crate) enum ExactNodeTask {
         sections: Vec<crate::SketchOutput>,
         ruled: bool,
     },
+    BooleanLists {
+        op: nodecraft_bool::BooleanOp,
+        a: Vec<Brep>,
+        b: Vec<Brep>,
+    },
+    ExtrudeFeature {
+        brep: Brep,
+        face_index: usize,
+        amount: f64,
+        operation: String,
+    },
+    OffsetFaces {
+        brep: Brep,
+        faces: Vec<usize>,
+        distance: f64,
+    },
+    Look {
+        brep: std::sync::Arc<Brep>,
+        colour: [f64; 3],
+    },
+    Realize {
+        brep: std::sync::Arc<Brep>,
+        transforms: Vec<crate::BodyTransform>,
+    },
+    ImportStep {
+        path: String,
+    },
+    FaceLoft {
+        bottom: Brep,
+        top: Brep,
+        ruled: bool,
+        cap_ends: bool,
+    },
 }
 
 impl ExactNodeTask {
@@ -140,6 +191,14 @@ impl ExactNodeTask {
         match self {
             Self::Primitive(node) => crate::primitive_brep_with_kernel(kernel, &node)
                 .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep))),
+            Self::Translate { mut brep, offset, rotation } => {
+                crate::apply_brep_placement_with_kernel(kernel, &mut brep, offset, rotation)?;
+                Ok(NodeOutput::Shape(std::sync::Arc::new(brep)))
+            }
+            Self::ExtrudeSketch { output, amount } => {
+                crate::sketch_extrude_brep(&output, amount)
+                    .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep)))
+            }
             Self::Extrude { brep, face_index, amount } => {
                 let face = brep
                     .faces()
@@ -167,12 +226,12 @@ impl ExactNodeTask {
                 crate::mirror_brep_with_kernel(kernel, &mut brep, &values)
                     .map(|()| NodeOutput::Shape(std::sync::Arc::new(brep)))
             }
-            Self::Shell { brep, signed_thickness, openings } => {
-                nodecraft_bool::shell_brep_solid_with_kernel(
+            Self::Shell { mut brep, signed_thickness, openings } => {
+                nodecraft_layers::shell_record_faces(
                     kernel,
-                    brep,
-                    signed_thickness,
+                    &mut brep,
                     &openings,
+                    signed_thickness,
                 )
                 .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep)))
             }
@@ -180,12 +239,68 @@ impl ExactNodeTask {
                 nodecraft_blend::fillet_brep_exact_with_kernel(kernel, &brep, &values)
                     .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep)))
             }
+            Self::BooleanLists { op, a, b } => {
+                let shapes = nodecraft_bool::boolean_lists_batched(kernel, &a, &b, op)?;
+                Ok(NodeOutput::Shapes(shapes.into_iter().map(std::sync::Arc::new).collect()))
+            }
+            Self::ExtrudeFeature { brep, face_index, amount, operation } => {
+                let face = brep
+                    .faces()
+                    .ids()
+                    .nth(face_index)
+                    .ok_or_else(|| format!("Extrude face {face_index} does not exist"))?;
+                let tool = nodecraft_extrude::extrude_planar_face_exact(kernel, &brep, face, amount)
+                    .map_err(|error| format!("extrude: {error}"))?;
+                let op = match operation.as_str() {
+                    "remove" => nodecraft_bool::BooleanOp::Difference,
+                    "intersect" => nodecraft_bool::BooleanOp::Intersection,
+                    _ => nodecraft_bool::BooleanOp::Union,
+                };
+                let result = crate::boolean_breps_ops_with_kernel(kernel, &brep, &tool, op)?;
+                Ok(NodeOutput::Shape(std::sync::Arc::new(result)))
+            }
+            Self::OffsetFaces { mut brep, faces, distance } => {
+                let offset = nodecraft_layers::offset_faces_record_faces(kernel, &mut brep, &faces, distance)
+                    .map_err(|error| format!("Offset Faces: {error}"))?;
+                Ok(NodeOutput::Shape(std::sync::Arc::new(offset)))
+            }
+            Self::Look { brep, colour } => {
+                let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, &brep)
+                    .map_err(|error| error.to_string())?;
+                crate::look::apply_look_color(&mut brep, colour)?;
+                Ok(NodeOutput::Shape(std::sync::Arc::new(brep)))
+            }
+            Self::Realize { brep, transforms } => {
+                let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, &brep)
+                    .map_err(|error| error.to_string())?;
+                for transform in &transforms {
+                    match transform {
+                        crate::BodyTransform::Place { offset, rotation } => {
+                            crate::apply_brep_placement_with_kernel(kernel, &mut brep, *offset, *rotation)?;
+                        }
+                        crate::BodyTransform::Mirror { plane, offset } => {
+                            let values = serde_json::json!({"plane": plane, "offset": offset});
+                            crate::mirror_brep_with_kernel(kernel, &mut brep, &values)?;
+                        }
+                        crate::BodyTransform::Scale { factor } => crate::scale_brep(&mut brep, *factor)?,
+                    }
+                }
+                Ok(NodeOutput::Shape(std::sync::Arc::new(brep)))
+            }
+            Self::ImportStep { path } => nodecraft_mesh::import_step_brep(&path)
+                .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep))),
+            Self::FaceLoft { bottom, top, ruled, cap_ends } => {
+                crate::loft_breps(kernel, bottom, top, ruled, cap_ends)
+                    .map(|brep| NodeOutput::Shape(std::sync::Arc::new(brep)))
+            }
             Self::Boolean { op, a, b } => {
-                let mut a = a.into_iter();
-                let mut result = a.next().ok_or("Boolean operand A is empty")?;
-                // Combine/Part inputs must be unioned before a later
-                // Subtract/Intersect applies to the whole Part.
-                for brep in a {
+                let shapes = nodecraft_bool::boolean_lists_batched(kernel, &a, &b, op)?;
+                let mut shapes = shapes.into_iter();
+                let mut result = shapes.next().ok_or("Boolean produced no solids")?;
+                // A tagged single-shape result keeps the operand/export contract.
+                // Disjoint pieces become one multi-shell body, as the old
+                // pairwise path did.
+                for brep in shapes {
                     result = nodecraft_layers::boolean_breps_ops(
                         kernel,
                         &result,
@@ -193,10 +308,6 @@ impl ExactNodeTask {
                         nodecraft_layers::BooleanOp::Union,
                     )?
                     .unwrap_or_else(Brep::new);
-                }
-                for brep in b {
-                    result = nodecraft_layers::boolean_breps_ops(kernel, &result, &brep, op)?
-                        .unwrap_or_else(Brep::new);
                 }
                 Ok(NodeOutput::Shape(std::sync::Arc::new(result)))
             }

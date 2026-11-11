@@ -11,10 +11,10 @@ Working:
 - `glyphon`/`cosmic-text` GPU text labels
 - node cards, connection curves, node drag/select, graph pan/zoom
 - eframe/egui shell: menu bar, node editor overlay, full model viewport, inspector, status bar
-- wgpu viewport through `solidcraft-gpu` (`solidcraft-render` CPU fallback retained)
+- wgpu viewport through `solidcraft-viewport-gpu` (`solidcraft-viewport` CPU fallback retained)
 - `.nodecraft` graph loading through `nodecraft-session::GraphDocument`
 - evaluation through the existing `nodecraft-engine` (the authority; no UI geometry work)
-- CPU viewport built on `solidcraft-render` (`Camera`, `Scene`, `Canvas`)
+- CPU viewport built on `solidcraft-viewport` (`Camera`, `Scene`, `Canvas`)
 - NodeCraft mesh/edge conversion through `solidcraft-geom`
 - fit / iso / front / top camera commands
 - headless smoke check: `nodecraft --check path.nodecraft`
@@ -64,8 +64,8 @@ separate:
 ```text
 solidcore                 immutable upstream git dependency; no local patches
 solidcraft-geom           upstream git dependency
-solidcraft-render         upstream git dependency
-solidcraft-gpu            upstream git dependency (optional until the wgpu viewport lands)
+solidcraft-viewport       upstream git dependency
+solidcraft-viewport-gpu   upstream git dependency (optional wgpu pipelines)
 nodecraft-*               this repository
 ```
 
@@ -78,7 +78,7 @@ pins the exact commit; update with:
 ```
 
 Do not edit files under `.cargo/git/checkouts` or copy `solidcraft-geom`,
-`solidcraft-render` or `solidcraft-gpu` into this repository. UI changes belong in
+`solidcraft-viewport` or `solidcraft-viewport-gpu` into this repository. UI changes belong in
 `rust/apps/nodecraft`.
 
 If a SolidCraft UI component must be modified, vendor only the UI crate (for
@@ -91,8 +91,6 @@ solidcore code stay upstream and are changed only with an upstream PR.
 | Swift/WebView | Rust front end |
 |---|---|
 | AppKit window and menus | eframe viewport / egui `MenuBar` |
-| graph canvas (`app.js`) | future egui node editor |
-| Three.js viewer (`viewer.js`) | `solidcraft-gpu` wgpu viewport (CPU `solidcraft-render` fallback now) |
 | inspector | `Panel::right` |
 | node browser | `Panel::left` |
 | settings dialog | upstream `solidcraft-ui-egui` patterns where reusable |

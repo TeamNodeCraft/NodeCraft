@@ -241,6 +241,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-swap"
+version = "1.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "arg_enum_proc_macro"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -559,15 +568,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block-buffer"
-version = "0.10.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
-dependencies = [
- "generic-array",
-]
-
-[[package]]
 name = "block2"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -853,15 +853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cpufeatures"
-version = "0.2.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "crc32fast"
 version = "1.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -902,16 +893,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crypto-common"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
-dependencies = [
- "generic-array",
- "typenum",
-]
-
-[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -922,16 +903,6 @@ name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
-
-[[package]]
-name = "digest"
-version = "0.10.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
-dependencies = [
- "block-buffer",
- "crypto-common",
-]
 
 [[package]]
 name = "dispatch"
@@ -1521,16 +1492,6 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "generic-array"
-version = "0.14.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
-dependencies = [
- "typenum",
- "version_check",
 ]
 
 [[package]]
@@ -2460,9 +2421,12 @@ dependencies = [
  "lyon",
  "mimalloc",
  "nodecraft-color-picker",
+ "nodecraft-display",
  "nodecraft-dock",
  "nodecraft-engine",
+ "nodecraft-exact",
  "nodecraft-expr",
+ "nodecraft-layers",
  "nodecraft-macos",
  "nodecraft-mesh",
  "nodecraft-node-canvas",
@@ -2477,8 +2441,8 @@ dependencies = [
  "serde_json",
  "solidcore-record",
  "solidcraft-geom",
- "solidcraft-gpu",
- "solidcraft-render",
+ "solidcraft-viewport",
+ "solidcraft-viewport-gpu",
 ]
 
 [[package]]
@@ -2524,6 +2488,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nodecraft-display"
+version = "0.0.1"
+dependencies = [
+ "arc-swap",
+ "base64",
+ "nodecraft-exact",
+ "nodecraft-layers",
+ "nodecraft-mesh",
+ "nodecraft-protocol",
+ "nodecraft-solidcore",
+ "nodecraft-step",
+ "serde_json",
+ "solidcore-tess",
+]
+
+[[package]]
 name = "nodecraft-dock"
 version = "0.0.1"
 dependencies = [
@@ -2539,6 +2519,8 @@ dependencies = [
  "base64",
  "nodecraft-blend",
  "nodecraft-bool",
+ "nodecraft-display",
+ "nodecraft-exact",
  "nodecraft-extrude",
  "nodecraft-kernel",
  "nodecraft-layers",
@@ -2552,11 +2534,19 @@ dependencies = [
  "serde_json",
  "solidcore-convert",
  "solidcore-record",
+ "solidcore-tess",
  "solidcraft-geom",
  "solidcraft-sketch",
  "step-assemblies",
  "step-nurbs",
  "step-schema",
+]
+
+[[package]]
+name = "nodecraft-exact"
+version = "0.0.1"
+dependencies = [
+ "solidcore",
 ]
 
 [[package]]
@@ -2629,9 +2619,11 @@ dependencies = [
  "nodecraft-step",
  "serde_json",
  "solidcore",
+ "solidcore-convert",
+ "solidcore-ops",
+ "solidcore-record",
+ "solidcore-step",
  "step-assemblies",
- "step-brep",
- "step-import",
 ]
 
 [[package]]
@@ -2673,6 +2665,7 @@ version = "0.0.1"
 name = "nodecraft-session"
 version = "0.0.1"
 dependencies = [
+ "nodecraft-display",
  "nodecraft-engine",
  "nodecraft-node-contract",
  "nodecraft-protocol",
@@ -2697,9 +2690,10 @@ version = "0.0.1"
 dependencies = [
  "earcutr",
  "solidcore",
- "step-brep",
+ "solidcore-convert",
+ "solidcore-record",
+ "solidcore-step",
  "step-export",
- "step-import",
 ]
 
 [[package]]
@@ -2723,6 +2717,7 @@ dependencies = [
 name = "nodecraft-worker"
 version = "0.0.1"
 dependencies = [
+ "nodecraft-display",
  "nodecraft-engine",
  "nodecraft-protocol",
  "nodecraft-session",
@@ -3974,7 +3969,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4094,17 +4089,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
-]
-
-[[package]]
-name = "sha2"
-version = "0.10.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
-dependencies = [
- "cfg-if",
- "cpufeatures",
- "digest",
 ]
 
 [[package]]
@@ -4291,7 +4275,7 @@ checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 [[package]]
 name = "solidcore"
 version = "1.0.1"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -4300,7 +4284,7 @@ dependencies = [
 [[package]]
 name = "solidcore-convert"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "solidcore",
  "solidcore-record",
@@ -4309,7 +4293,7 @@ dependencies = [
 [[package]]
 name = "solidcore-ops"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "solidcore",
  "solidcore-convert",
@@ -4319,7 +4303,7 @@ dependencies = [
 [[package]]
 name = "solidcore-record"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "serde",
  "serde_json",
@@ -4327,9 +4311,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "solidcore-step"
+version = "0.1.0"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
+dependencies = [
+ "solidcore",
+ "solidcore-convert",
+ "solidcore-ops",
+ "solidcore-record",
+]
+
+[[package]]
 name = "solidcore-tess"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "rayon",
  "serde",
@@ -4342,58 +4337,26 @@ dependencies = [
 
 [[package]]
 name = "solidcraft-color"
-version = "0.40.0-rc.3"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+version = "0.40.0-rc.4"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 
 [[package]]
 name = "solidcraft-geom"
-version = "0.40.0-rc.3"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+version = "0.40.0-rc.4"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "serde",
+ "solidcore",
+ "solidcore-ops",
  "solidcore-record",
+ "solidcore-tess",
  "thiserror 2.0.21",
-]
-
-[[package]]
-name = "solidcraft-gpu"
-version = "0.40.0-rc.3"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
-dependencies = [
- "log",
- "pollster 0.4.0",
- "robust",
- "serde",
- "solidcore-record",
- "solidcraft-color",
- "solidcraft-geom",
- "solidcraft-render",
- "thiserror 2.0.21",
- "wgpu",
-]
-
-[[package]]
-name = "solidcraft-render"
-version = "0.40.0-rc.3"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
-dependencies = [
- "image",
- "moxcms",
- "png 0.18.1",
- "serde",
- "serde_json",
- "sha2",
- "solidcore-record",
- "solidcraft-color",
- "solidcraft-geom",
- "web-time",
- "weezl",
 ]
 
 [[package]]
 name = "solidcraft-sketch"
-version = "0.40.0-rc.3"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+version = "0.40.0-rc.4"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
  "harfrust 0.12.0",
  "serde",
@@ -4402,6 +4365,34 @@ dependencies = [
  "thiserror 2.0.21",
  "ttf-parser",
  "unicode-bidi",
+]
+
+[[package]]
+name = "solidcraft-viewport"
+version = "0.40.0-rc.4"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
+dependencies = [
+ "image",
+ "serde",
+ "solidcore-record",
+ "solidcore-tess",
+ "solidcraft-color",
+]
+
+[[package]]
+name = "solidcraft-viewport-gpu"
+version = "0.40.0-rc.4"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
+dependencies = [
+ "log",
+ "pollster 0.4.0",
+ "serde",
+ "solidcore-record",
+ "solidcore-tess",
+ "solidcraft-color",
+ "solidcraft-viewport",
+ "thiserror 2.0.21",
+ "wgpu",
 ]
 
 [[package]]
@@ -4445,15 +4436,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "step-brep"
-version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
-dependencies = [
- "solidcore",
- "step-import",
-]
-
-[[package]]
 name = "step-conics"
 version = "0.0.1"
 dependencies = [
@@ -4463,15 +4445,11 @@ dependencies = [
 [[package]]
 name = "step-export"
 version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
+source = "git+https://github.com/tangency-labs/solidcraft?rev=525171eb861f172bdc1e23c7c5c070a44a8fc831#525171eb861f172bdc1e23c7c5c070a44a8fc831"
 dependencies = [
- "step-import",
+ "solidcore",
+ "solidcore-record",
 ]
-
-[[package]]
-name = "step-import"
-version = "0.1.0"
-source = "git+https://github.com/tangency-labs/solidcraft?rev=9b559c4c0727b2c626622d86e00e7d4c63f52400#9b559c4c0727b2c626622d86e00e7d4c63f52400"
 
 [[package]]
 name = "step-nurbs"
@@ -4765,12 +4743,6 @@ checksum = "cb30dbbd9036155e74adad6812e9898d03ec374946234fbcebd5dfc7b9187b90"
 dependencies = [
  "rustc-hash 2.1.3",
 ]
-
-[[package]]
-name = "typenum"
-version = "1.20.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "uds_windows"
@@ -5484,15 +5456,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets",
 ]

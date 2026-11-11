@@ -75,7 +75,7 @@ use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::tol::{USE_DEFAULT, zone_tol3d};
 use solidcore::kernel::Kernel;
-use solidcore::math::{Point3, Vec3};
+use solidcore::math::{INFINITE_PARAMETER, Point3, Vec3};
 use solidcore::nurbs::b_spline_curve_n_lib::TrimMode;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::nurbs::knots::Side;
@@ -302,6 +302,7 @@ impl LoopSegment {
             .curve
             .copy(k)
             .map_err(|error| ExtrudeError::solid("curve::Curve::copy", error))?;
+        curve = bound_infinite_line(curve, &self.interval);
         if !self.sense {
             curve
                 .reverse_parameterization(k, &self.interval)
@@ -311,6 +312,34 @@ impl LoopSegment {
         }
         Ok(curve)
     }
+}
+
+/// The sweep needs the part of a profile curve its edge runs on. A curve read from a
+/// STEP record is the kernel's infinite line (analytic domain
+/// `[-INFINITE_PARAMETER, INFINITE_PARAMETER]`); `create_taper_extrude` builds its walls
+/// from bounded lines, and refuses (returning the profile's cap alone) an infinite one.
+/// Bounding the line to `interval` keeps exactly the geometry the edge has there.
+fn bound_infinite_line(curve: Curve, interval: &Extent1d) -> Curve {
+    use solidcore::curve::line::{BoundedLineOptions, Line};
+    let CurveKind::Line(line) = curve.kind() else { return curve };
+    let canonical = line.canonical_unit();
+    let infinite = (canonical.domain.min() + INFINITE_PARAMETER).abs() < 1.0
+        && (canonical.domain.max() - INFINITE_PARAMETER).abs() < 1.0;
+    if !infinite || !(interval.max() > interval.min()) {
+        return curve;
+    }
+    let bounded = Line::bounded(
+        canonical.point,
+        canonical.vector,
+        interval,
+        &BoundedLineOptions {
+            scale: 1.0,
+            dim: 3,
+            nurb: None,
+            inside_out: canonical.inside_out,
+        },
+    );
+    Curve::from(bounded)
 }
 
 /// One closed boundary loop of a face, in loop order.

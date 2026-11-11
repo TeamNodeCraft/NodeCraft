@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use egui_wgpu::wgpu;
-use solidcraft_gpu::view::{Frame, GpuScene, GpuTarget, Renderer, SceneSlot};
+use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Renderer, SceneSlot};
 
 // The framebuffer is rendered wider/taller than the displayed panel so the
 // blur can sample content just outside the crop instead of clamping at its edge.
@@ -301,7 +301,7 @@ impl BackdropRenderer {
         // Keep the finished buffer at the same precision as the scratch.
         let display = linear;
         let scene_format = wgpu::TextureFormat::Rgba8Unorm;
-        let depth = solidcraft_gpu::depth_format(&rs.device, true);
+        let depth = solidcraft_viewport_gpu::depth_format(&rs.device, true);
         // egui's window target is Bgra8Unorm: values are gamma-encoded and written
         // raw. Render the scene into the same raw format, decode once into the
         // linear float scratch, and encode only on the final display pass.
@@ -549,6 +549,7 @@ impl BackdropRenderer {
             upload_error: None,
             clouds: Vec::new(),
             key: frame.key,
+            turned_depth: None,
             slot: self.slot.clone(),
             sketch_key: 0,
             sketch_slot: Arc::new(Mutex::new(None)),
@@ -569,7 +570,7 @@ impl BackdropRenderer {
             outline: false,
             eye: frame.eye,
             ao_radius: 0.0,
-            ao_samples: solidcraft_gpu::view::AO_SAMPLES,
+            ao_samples: solidcraft_viewport_gpu::view::AO_SAMPLES,
             ssaa: 1.0,
             hover_tint: [0.0; 3],
             selection_tint: [0.0; 3],

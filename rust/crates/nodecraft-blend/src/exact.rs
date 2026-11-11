@@ -74,6 +74,14 @@ pub const fn port_units() -> &'static [&'static str] {
 /// Reject a fillet result that the upstream validity checker does not accept.
 /// The report text is the kernel's own; do not reduce it to a status number.
 fn validate_result(kernel: &mut Kernel, brep: &Brep) -> Result<(), String> {
+    // Full topology validation is a debug/test invariant. Release previews and
+    // edits rely on the upstream operation's own validity contract; opt back in
+    // with NODECRAFT_VALIDATE_RESULTS=1 when diagnosing a model.
+    if !cfg!(any(test, debug_assertions))
+        && std::env::var_os("NODECRAFT_VALIDATE_RESULTS").is_none()
+    {
+        return Ok(());
+    }
     let report = nodecraft_layers::check_kernel_brep(kernel, brep)?;
     if report.is_valid() {
         Ok(())
@@ -92,6 +100,35 @@ pub fn fillet_brep_exact(brep: &Brep, values: &serde_json::Value) -> Result<Brep
 }
 
 /// [`fillet_brep_exact`] on a caller-owned (worker) kernel.
+fn mark_made_blend_faces(
+    kernel: &nodecraft_solidcore::solidcore::kernel::Kernel,
+    result: &mut nodecraft_solidcore::solidcore::topology::Brep,
+) -> Result<(), String> {
+    // A fillet over several edges/tangent chains finishes one session per edge.
+    // Keep every generated face, not just the last session's, or an additive
+    // fillet would leave most of its new surface out of the overlay.
+    let made: Vec<_> = kernel
+        .blend_face_log
+        .as_ref()
+        .map(|log| {
+            let mut made: Vec<nodecraft_solidcore::solidcore::blend::definition_check::MadeBlendFace> = Vec::new();
+            for session in &log.sessions {
+                for face in session {
+                    if !made.iter().any(|candidate: &nodecraft_solidcore::solidcore::blend::definition_check::MadeBlendFace| candidate.face == face.face) {
+                        made.push(*face);
+                    }
+                }
+            }
+            made
+        })
+        .unwrap_or_default();
+    if made.is_empty() {
+        return Ok(());
+    }
+    nodecraft_solidcore::solidcore::blend::definition_check::mark_blend_faces(result, &made)
+        .map_err(|error| error.to_string())
+}
+
 pub fn fillet_brep_exact_with_kernel(
     kernel: &mut Kernel,
     brep: &Brep,
@@ -108,6 +145,7 @@ pub fn fillet_brep_exact_with_kernel(
     // A saved viewer pick carries both a display-space centre and an edge id.
     // After a Boolean the id can address a different edge entirely, so prefer
     // the centre; if SolidCore refuses that edge as smooth, retry by id.
+    kernel.blend_face_log = Some(Default::default());
     let primary = crate::edge::select_edges_from_values(kernel, brep, values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if primary.is_empty() {
@@ -135,6 +173,8 @@ pub fn fillet_brep_exact_with_kernel(
             .map_err(|error| nodecraft_solidcore::error::user_message(error))?
     {
         validate_result(kernel, &result)?;
+        let mut result = result;
+        mark_made_blend_faces(kernel, &mut result)?;
         return Ok(result);
     }
     // A refused edge is an upstream modelling refusal, not permission to round
@@ -157,6 +197,8 @@ pub fn fillet_brep_exact_with_kernel(
         }
     };
     validate_result(kernel, &result)?;
+    let mut result = result;
+    mark_made_blend_faces(kernel, &mut result)?;
     Ok(result)
 }
 
@@ -238,7 +280,13 @@ fn fillet_selection(
         treatment.length,
         xsect_type,
         continuity,
-        1.0,
+        // The G^n section refuses upstream's 1.0 thumbweight; use the kernel's
+        // default for G2/G3 blend-curve cross-sections.
+        if xsect_type == 2 {
+            solidcore::blend::fillet_section::section::GN_DEFAULT_THUMBWEIGHT
+        } else {
+            1.0
+        },
     )
     .map_err(|error| {
         let text = error.to_string();

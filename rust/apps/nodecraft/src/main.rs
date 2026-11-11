@@ -22,6 +22,8 @@ mod ui_shape;
 mod gpu_backdrop;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_viewport;
+#[cfg(feature = "gpu-viewport")]
+mod gpu_plan;
 mod inspector;
 mod viewport;
 mod viewport_grid;
@@ -136,20 +138,45 @@ fn check(path: Option<PathBuf>) -> eframe::Result {
         eprintln!("{}: {error}", path.display());
         std::process::exit(2);
     });
-    let (evaluation, _) = engine_bridge::evaluate(&document, nodecraft_engine::EngineCache::new(), None);
+    let Some(target) = engine_bridge::target_for(&document, None) else {
+        eprintln!("{}: document has no target", path.display());
+        std::process::exit(2);
+    };
+    let (evaluation, _) = engine_bridge::evaluate_flat_exact(
+        &document,
+        target.clone(),
+        nodecraft_engine::EngineCache::new(),
+        None,
+        None,
+        false,
+        &Default::default(),
+        None,
+        &[],
+        None,
+        false,
+    );
     let Some(evaluation) = evaluation else {
         eprintln!("{}: document has no target", path.display());
         std::process::exit(2);
     };
-    let mesh = evaluation.mesh.as_ref();
+    let mut plan_cache = nodecraft_display::PlanCache::new(1024);
+    let mesh = evaluation
+        .exact_parts
+        .get(&target)
+        .and_then(|part| nodecraft_display::mesh_part(
+            part,
+            nodecraft_display::DisplayQuality::Full(0.35),
+            &mut plan_cache,
+        ).ok())
+        .map(|display| display.mesh);
     println!(
         "{} target={} ok={} verts={} tris={} edges={} elapsed_ms={:.1}",
         path.display(),
         evaluation.target,
         evaluation.error.is_none(),
-        mesh.map_or(0, |mesh| mesh.vertices.len()),
-        mesh.map_or(0, |mesh| mesh.faces.len()),
-        mesh.map_or(0, |mesh| mesh.brep_edges.len()),
+        mesh.as_ref().map_or(0, |mesh| mesh.vertices.len()),
+        mesh.as_ref().map_or(0, |mesh| mesh.faces.len()),
+        mesh.as_ref().map_or(0, |mesh| mesh.brep_edges.len()),
         evaluation.elapsed_ms
     );
     if let Some(error) = evaluation.error {

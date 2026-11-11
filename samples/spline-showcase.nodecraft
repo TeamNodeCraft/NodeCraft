@@ -1,334 +1,340 @@
 {
   "schemaVersion": 1,
   "id": "spline-showcase",
-  "nodes": [
-    {
-      "id": "curve-0",
-      "type": "spline",
-      "values": {
-        "points": [
-          {
-            "x": -150.0,
-            "y": 0.0
-          },
-          {
-            "x": -85.0,
-            "y": 38.0
-          },
-          {
-            "x": -20.0,
-            "y": -28.0
-          },
-          {
-            "x": 45.0,
-            "y": 34.0
-          },
-          {
-            "x": 115.0,
-            "y": 0.0
-          }
-        ],
-        "degree": 3,
-        "control": false,
-        "periodic": false
+  "root": {
+    "id": "root",
+    "name": "Root",
+    "kind": "graph",
+    "interface": {
+      "inputs": [],
+      "outputs": [
+        "canopy"
+      ]
+    },
+    "nodes": [
+      {
+        "id": "curve-0",
+        "type": "spline",
+        "values": {
+          "points": [
+            {
+              "x": -150.0,
+              "y": 0.0
+            },
+            {
+              "x": -85.0,
+              "y": 38.0
+            },
+            {
+              "x": -20.0,
+              "y": -28.0
+            },
+            {
+              "x": 45.0,
+              "y": 34.0
+            },
+            {
+              "x": 115.0,
+              "y": 0.0
+            }
+          ],
+          "degree": 3,
+          "control": false,
+          "periodic": false
+        },
+        "suppressed": false,
+        "x": 40.0,
+        "y": 40.0
       },
-      "suppressed": false,
-      "x": 40.0,
-      "y": 40.0
-    },
-    {
-      "id": "place-0",
-      "type": "translate",
-      "values": {
-        "x": -45.0,
-        "y": 0.0,
-        "z": 0.0,
-        "rx": 0.0,
-        "ry": -32.0,
-        "rz": 0.0,
-        "space": "world"
+      {
+        "id": "place-0",
+        "type": "translate",
+        "values": {
+          "x": -45.0,
+          "y": 0.0,
+          "z": 0.0,
+          "rx": 0.0,
+          "ry": -32.0,
+          "rz": 0.0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 300.0,
+        "y": 40.0
       },
-      "suppressed": false,
-      "x": 300.0,
-      "y": 40.0
-    },
-    {
-      "id": "curve-1",
-      "type": "spline",
-      "values": {
-        "points": [
-          {
-            "x": -145.0,
-            "y": 12.0
-          },
-          {
-            "x": -80.0,
-            "y": 48.0
-          },
-          {
-            "x": -15.0,
-            "y": -18.0
-          },
-          {
-            "x": 50.0,
-            "y": 42.0
-          },
-          {
-            "x": 118.0,
-            "y": 10.0
-          }
-        ],
-        "degree": 3,
-        "control": false,
-        "periodic": false
+      {
+        "id": "curve-1",
+        "type": "spline",
+        "values": {
+          "points": [
+            {
+              "x": -145.0,
+              "y": 12.0
+            },
+            {
+              "x": -80.0,
+              "y": 48.0
+            },
+            {
+              "x": -15.0,
+              "y": -18.0
+            },
+            {
+              "x": 50.0,
+              "y": 42.0
+            },
+            {
+              "x": 118.0,
+              "y": 10.0
+            }
+          ],
+          "degree": 3,
+          "control": false,
+          "periodic": false
+        },
+        "suppressed": false,
+        "x": 40.0,
+        "y": 180.0
       },
-      "suppressed": false,
-      "x": 40.0,
-      "y": 180.0
-    },
-    {
-      "id": "place-1",
-      "type": "translate",
-      "values": {
-        "x": -24.0,
-        "y": 0.0,
-        "z": 38.0,
-        "rx": 0.0,
-        "ry": -16.0,
-        "rz": 0.0,
-        "space": "world"
+      {
+        "id": "place-1",
+        "type": "translate",
+        "values": {
+          "x": -24.0,
+          "y": 0.0,
+          "z": 38.0,
+          "rx": 0.0,
+          "ry": -16.0,
+          "rz": 0.0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 300.0,
+        "y": 180.0
       },
-      "suppressed": false,
-      "x": 300.0,
-      "y": 180.0
-    },
-    {
-      "id": "curve-2",
-      "type": "spline",
-      "values": {
-        "points": [
-          {
-            "x": -120.0,
-            "y": 20.0
-          },
-          {
-            "x": -65.0,
-            "y": 55.0
-          },
-          {
-            "x": 0.0,
-            "y": -5.0
-          },
-          {
-            "x": 65.0,
-            "y": 48.0
-          },
-          {
-            "x": 110.0,
-            "y": 18.0
-          }
-        ],
-        "degree": 3,
-        "control": false,
-        "periodic": false
+      {
+        "id": "curve-2",
+        "type": "spline",
+        "values": {
+          "points": [
+            {
+              "x": -120.0,
+              "y": 20.0
+            },
+            {
+              "x": -65.0,
+              "y": 55.0
+            },
+            {
+              "x": 0.0,
+              "y": -5.0
+            },
+            {
+              "x": 65.0,
+              "y": 48.0
+            },
+            {
+              "x": 110.0,
+              "y": 18.0
+            }
+          ],
+          "degree": 3,
+          "control": false,
+          "periodic": false
+        },
+        "suppressed": false,
+        "x": 40.0,
+        "y": 320.0
       },
-      "suppressed": false,
-      "x": 40.0,
-      "y": 320.0
-    },
-    {
-      "id": "place-2",
-      "type": "translate",
-      "values": {
-        "x": 0.0,
-        "y": 0.0,
-        "z": 80.0,
-        "rx": 0.0,
-        "ry": 0.0,
-        "rz": 0.0,
-        "space": "world"
+      {
+        "id": "place-2",
+        "type": "translate",
+        "values": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 80.0,
+          "rx": 0.0,
+          "ry": 0.0,
+          "rz": 0.0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 300.0,
+        "y": 320.0
       },
-      "suppressed": false,
-      "x": 300.0,
-      "y": 320.0
-    },
-    {
-      "id": "curve-3",
-      "type": "spline",
-      "values": {
-        "points": [
-          {
-            "x": -80.0,
-            "y": 24.0
-          },
-          {
-            "x": -42.0,
-            "y": 50.0
-          },
-          {
-            "x": 0.0,
-            "y": 8.0
-          },
-          {
-            "x": 42.0,
-            "y": 46.0
-          },
-          {
-            "x": 80.0,
-            "y": 20.0
-          }
-        ],
-        "degree": 3,
-        "control": false,
-        "periodic": false
+      {
+        "id": "curve-3",
+        "type": "spline",
+        "values": {
+          "points": [
+            {
+              "x": -80.0,
+              "y": 24.0
+            },
+            {
+              "x": -42.0,
+              "y": 50.0
+            },
+            {
+              "x": 0.0,
+              "y": 8.0
+            },
+            {
+              "x": 42.0,
+              "y": 46.0
+            },
+            {
+              "x": 80.0,
+              "y": 20.0
+            }
+          ],
+          "degree": 3,
+          "control": false,
+          "periodic": false
+        },
+        "suppressed": false,
+        "x": 40.0,
+        "y": 460.0
       },
-      "suppressed": false,
-      "x": 40.0,
-      "y": 460.0
-    },
-    {
-      "id": "place-3",
-      "type": "translate",
-      "values": {
-        "x": 24.0,
-        "y": 0.0,
-        "z": 122.0,
-        "rx": 0.0,
-        "ry": 16.0,
-        "rz": 0.0,
-        "space": "world"
+      {
+        "id": "place-3",
+        "type": "translate",
+        "values": {
+          "x": 24.0,
+          "y": 0.0,
+          "z": 122.0,
+          "rx": 0.0,
+          "ry": 16.0,
+          "rz": 0.0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 300.0,
+        "y": 460.0
       },
-      "suppressed": false,
-      "x": 300.0,
-      "y": 460.0
-    },
-    {
-      "id": "curve-4",
-      "type": "spline",
-      "values": {
-        "points": [
-          {
-            "x": -38.0,
-            "y": 18.0
-          },
-          {
-            "x": -18.0,
-            "y": 32.0
-          },
-          {
-            "x": 0.0,
-            "y": 15.0
-          },
-          {
-            "x": 18.0,
-            "y": 32.0
-          },
-          {
-            "x": 38.0,
-            "y": 18.0
-          }
-        ],
-        "degree": 3,
-        "control": false,
-        "periodic": false
+      {
+        "id": "curve-4",
+        "type": "spline",
+        "values": {
+          "points": [
+            {
+              "x": -38.0,
+              "y": 18.0
+            },
+            {
+              "x": -18.0,
+              "y": 32.0
+            },
+            {
+              "x": 0.0,
+              "y": 15.0
+            },
+            {
+              "x": 18.0,
+              "y": 32.0
+            },
+            {
+              "x": 38.0,
+              "y": 18.0
+            }
+          ],
+          "degree": 3,
+          "control": false,
+          "periodic": false
+        },
+        "suppressed": false,
+        "x": 40.0,
+        "y": 600.0
       },
-      "suppressed": false,
-      "x": 40.0,
-      "y": 600.0
-    },
-    {
-      "id": "place-4",
-      "type": "translate",
-      "values": {
-        "x": 45.0,
-        "y": 0.0,
-        "z": 165.0,
-        "rx": 0.0,
-        "ry": 32.0,
-        "rz": 0.0,
-        "space": "world"
+      {
+        "id": "place-4",
+        "type": "translate",
+        "values": {
+          "x": 45.0,
+          "y": 0.0,
+          "z": 165.0,
+          "rx": 0.0,
+          "ry": 32.0,
+          "rz": 0.0,
+          "space": "world"
+        },
+        "suppressed": false,
+        "x": 300.0,
+        "y": 600.0
       },
-      "suppressed": false,
-      "x": 300.0,
-      "y": 600.0
-    },
-    {
-      "id": "canopy",
-      "type": "surfaceloft",
-      "values": {
-        "ruled": 0
+      {
+        "id": "canopy",
+        "type": "surfaceloft",
+        "values": {
+          "ruled": 0
+        },
+        "suppressed": false,
+        "x": 560.0,
+        "y": 310.0
+      }
+    ],
+    "connections": [
+      {
+        "from": "curve-0",
+        "to": "place-0",
+        "in": "shape",
+        "out": "sketch"
       },
-      "suppressed": false,
-      "x": 560.0,
-      "y": 310.0
-    }
-  ],
-  "connections": [
-    {
-      "from": "curve-0",
-      "to": "place-0",
-      "in": "shape",
-      "out": "sketch"
-    },
-    {
-      "from": "place-0",
-      "to": "canopy",
-      "in": "sections",
-      "out": "shape"
-    },
-    {
-      "from": "curve-1",
-      "to": "place-1",
-      "in": "shape",
-      "out": "sketch"
-    },
-    {
-      "from": "place-1",
-      "to": "canopy",
-      "in": "sections",
-      "out": "shape"
-    },
-    {
-      "from": "curve-2",
-      "to": "place-2",
-      "in": "shape",
-      "out": "sketch"
-    },
-    {
-      "from": "place-2",
-      "to": "canopy",
-      "in": "sections",
-      "out": "shape"
-    },
-    {
-      "from": "curve-3",
-      "to": "place-3",
-      "in": "shape",
-      "out": "sketch"
-    },
-    {
-      "from": "place-3",
-      "to": "canopy",
-      "in": "sections",
-      "out": "shape"
-    },
-    {
-      "from": "curve-4",
-      "to": "place-4",
-      "in": "shape",
-      "out": "sketch"
-    },
-    {
-      "from": "place-4",
-      "to": "canopy",
-      "in": "sections",
-      "out": "shape"
-    }
-  ],
-  "interface": {
-    "inputs": [],
-    "outputs": [
-      "canopy"
+      {
+        "from": "place-0",
+        "to": "canopy",
+        "in": "sections",
+        "out": "shape"
+      },
+      {
+        "from": "curve-1",
+        "to": "place-1",
+        "in": "shape",
+        "out": "sketch"
+      },
+      {
+        "from": "place-1",
+        "to": "canopy",
+        "in": "sections",
+        "out": "shape"
+      },
+      {
+        "from": "curve-2",
+        "to": "place-2",
+        "in": "shape",
+        "out": "sketch"
+      },
+      {
+        "from": "place-2",
+        "to": "canopy",
+        "in": "sections",
+        "out": "shape"
+      },
+      {
+        "from": "curve-3",
+        "to": "place-3",
+        "in": "shape",
+        "out": "sketch"
+      },
+      {
+        "from": "place-3",
+        "to": "canopy",
+        "in": "sections",
+        "out": "shape"
+      },
+      {
+        "from": "curve-4",
+        "to": "place-4",
+        "in": "shape",
+        "out": "sketch"
+      },
+      {
+        "from": "place-4",
+        "to": "canopy",
+        "in": "sections",
+        "out": "shape"
+      }
     ]
-  }
+  },
+  "definitions": []
 }

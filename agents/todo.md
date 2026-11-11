@@ -4,15 +4,23 @@ Priority order is approximate.
 
 ## Current state (2026-11-08)
 
-- SolidCore is vendored in SolidCraft at `9b559c4c0727b2c626622d86e00e7d4c63f52400`.
+- SolidCore is vendored in SolidCraft at `c314b6d26ca756184ef2bdd1742f5056854d3d07`.
 - Every SolidCraft module, including the sketch stack, is pinned to
-  `9b559c4c0727b2c626622d86e00e7d4c63f52400`.
+  `c314b6d26ca756184ef2bdd1742f5056854d3d07`.
 - Evaluated Part, comparison and STEP import display meshes use
   `nodecraft-layers` / `solidcore-tess`. STEP keeps a legacy fallback only for
   analytic edge curves that `solidcore-convert` cannot yet record.
 - The app evaluates in two phases: exact result first, then display against the
   warmed Part cache. A separate branch-only `PreviewWorker` supplies transform
   ghost meshes without waiting for the breakpoint pass.
+- Display tessellation retains each body's `TessPlan`; the viewport evaluates
+  plans on the GPU through `TessGpu`/`GpuMesh` (background compile, chunked
+  batches, per-plan placement/mirror/scale and per-vertex face colours) while
+  keeping the CPU display mesh as the authority for edges, faces, ghosts,
+  comparison and fallback.
+- Feature edge selection uses the edit-input body's `TessPlan` edge polylines
+  from `PreviewWorker`, with body-scoped ids, so picking does not depend on the
+  displayed result or LOD.
 - The `solidcore-ops` session receives the same upstream fix profile as
   NodeCraft kernels.
 - Fillet refusals are no longer converted into partial successes. Exact fillet
@@ -30,6 +38,429 @@ Priority order is approximate.
   59 and layers pin tests pass. The last full workspace baseline before the pin
   bump was 879 passed / 1 known `nodecraft-mesh` sphere seam failure / 11
   ignored.
+
+## SolidCraft reference implementations
+
+When implementing the GPU/LOD/picking work, read SolidCraft at the pinned revision
+first. Port the structure, not the app-specific code.
+
+- `crates/ui-egui/src/display_lod.rs` — view-dependent refinement: screen-space
+  error, hysteresis, still-camera delay, per-body refined `TessPlan` + CPU mesh,
+  off-thread planning, triangle budget and cache.
+- `crates/doc/src/display_quality.rs` — `DisplayQuality`, chord/angle refinement,
+  `MAX_REFINE`, `refinement_for` and hysteresis.
+- `crates/viewport-gpu/src/view.rs` — `Batches`/resident `GpuMesh` cache keyed by
+  plan identity, plan upload and GPU evaluation.
+- `crates/viewport-gpu/src/lib.rs` — `TessGpu`, `GpuMesh`, `prepare_many`,
+  `evaluate`, `record`.
+- `crates/ui-egui/src/viewport.rs` — how a viewport chooses plans, builds
+  scenes and draws refined bodies.
+- `crates/ui-egui/src/view_pick.rs` — screen/ray picking, edge pixel tolerance
+  and exact body/face/point resolution.
+- `crates/engine/src/cmd/edit.rs` / `measure_sel.rs` — resolving picks to exact
+  `Sel::Face`/`Sel::Edge` indices and points.
+- `crates/kernel/src/continuity.rs` — `pick_edges` for exact edge handling after
+  a hit.
+
+Caveats: upstream LOD **refines up from the chosen quality, it does not start
+coarse**; upstream picking is mesh-candidate-first even when the final selection
+is exact. NodeCraft currently receives one merged protocol mesh, while SolidCraft
+works per `ModelBody` with plans, so the body-level plan map is the main adapter
+difference.
+
+## Display tessellation density (in progress)
+
+- [x] Add a coarse display tier (`preview_detail`) selected from the camera.
+      Forest fitted view: ~3.24M -> ~2.31M faces, mesh ~1.15 s -> ~0.94 s.
+- [ ] Refine only visible bodies/screen regions with per-body screen-space error
+      instead of one target-wide quality tier.
+- [ ] Tune the tier thresholds and verify zoom transitions do not re-evaluate
+      unnecessarily.
+
+The GPU plan path does **not** reduce tessellation density or plan-generation
+time. It only moves `TessPlan::evaluate` to the GPU. `gigatest-forest-5000` still
+plans/evaluates a full-quality mesh:
+
+```text
+faces    3,195,208
+vertices 1,735,641
+mesh     ~1.1 s
+```
+
+The LOD simplifier runs after this full mesh exists, so it improves rendered
+frame cost but not meshing cost. A chord/angle coarse-first experiment saved
+only ~1% of triangles (~3,157,928 faces) and added a refinement pass.
+
+Plan:
+
+- [x] Collect `PlanStats` per body and expose lenient/over-tolerance/capped/
+      unsampled/averaged-pole diagnostics through the engine, app status and
+      `/state`. Per-node-type aggregation remains open.
+- [ ] Identify which bodies produce most of the 3.2M triangles and whether their
+      plan honors the requested chord/angle.
+- [ ] Add a real display-quality tier (chord + facet angle) to the engine
+      request and include it in the plan/mesh cache key.
+- [ ] Choose a coarse plan for far/large views and refine view-dependently on
+      zoom, rather than simplifying after a full mesh.
+- [ ] Keep exact edge/picking/ghost/fallback data on the full B-rep side.
+- [ ] Add a triangle-budget regression for the forest so density cannot silently
+      regress.
+
+## SolidCore integration opportunities
+
+See [SolidCore/SolidCraft integration opportunities](../docs/solidcore-integration-opportunities.md).
+Prioritized: `PlanStats` diagnostics, `solidcore_tess::preview` coarse-first
+display, per-body plan profiling, continuity-backed edge chains, typed
+boolean/check failures, then sweep stations.
+
+## Engine/display boundary refactor (in progress)
+
+The engine currently owns exact evaluation, Part/BRep caches, the tessellation
+pool, `TessPlan` creation, CPU `Mesh` caches and the protocol mesh response.
+That is too many layers. Plans are display artifacts, not graph-evaluation
+results.
+
+Target boundary:
+
+```text
+nodecraft-engine        exact graph evaluation -> Part/BRep handles
+nodecraft-display       BRep + quality -> plan cache / PlanStats
+viewport                plan -> GpuMesh cache, CPU fallback/picking data
+```
+
+Plan caching:
+
+- cache the **plan**, not the mesh;
+- `plan.evaluate()` is cheap and the GPU path does not need a CPU mesh;
+- derive CPU meshes/edges/face topology on demand in the display/view layer;
+- remove the `(BRep, Mesh, Plan, Stats)` body cache from `EngineCache`;
+- keep exact BRep/Part caches in the engine.
+
+Migration checklist:
+
+- [x] Add `EngineOutput.exact_parts` (B-rep + placement handles) from the exact
+      pass; regression proves the exact pass returns no meshes.
+- [x] Add `nodecraft-display` with quality selection, plan-only cache, body
+      tessellation and derived plan evaluation; move the engine's plan cache onto
+      it. Still needs the workers/cache ownership moved fully out of the engine.
+- [x] `EngineOutput.exact_parts` exposes exact display-side Part/BRep handles;
+      `nodecraft-display::mesh_part` meshes them without a graph. Switching the
+      app display path off the engine is still open.
+- [x] Store body plans only in `EngineCache`; derive CPU meshes from cached
+      plans. Move the plan cache itself out of the engine next.
+- [x] Display types live in `nodecraft-display`; the app's normal target display
+      path now meshes exact handles through it. Comparison/ghost/edit-preview and
+      the engine response path remain transitional.
+- [ ] Keep exact B-rep picking independent of plan/mesh caches.
+- [x] Remove `EngineOutput.plans`. Normal/ghost/preview/comparison display plans
+      come from `nodecraft-display`; only `Response.meshes` remains for exporter
+      runs.
+- [x] ExactPart can realize world B-reps for exporters without engine meshing;
+      `export_step` writes/validates exact STEP with metadata.
+- [x] Add display/export quality separation: `ExportOptions`/`export_mesh` with
+      export tolerances, closed-topology checking and a distinct plan-cache key.
+- [x] Removed `Response.meshes`; worker/session JSON meshes come from the display
+      service and `evaluate()` is test-only.
+- [x] Removed the plan cache from `EngineCache`; worker/session own display plan
+      caches. Engine display methods are test-only and exact mirror Booleans use
+      exact B-reps.
+- [x] The Rust worker uses the exact engine + `nodecraft-display::protocol_meshes`;
+      `Response.meshes` is now display-service compatibility output for the
+      worker/CLI/STEP scripts, not engine display output. The app exporter now
+      uses `export_step`; `step_report_mesh` now uses the display service too.
+      Only engine tests still use `evaluate()` for mesh assertions.
+
+## GPU plan / B-rep picking follow-ups
+
+Implemented (2026-11-10):
+
+- [x] Capture and carry `TessPlan` per body through mesh asset, body cache,
+  `EngineOutput` and app evaluation.
+- [x] Chunked `TessGpu`/`GpuMesh` rendering through the NodeCraft PBR shader.
+- [x] Background `TessLater` compile with CPU display-mesh fallback.
+- [x] Per-plan placement/mirror/scale instance matrices.
+- [x] Per-vertex face colours from `GpuMesh::vertex_face` and B-rep face colours.
+- [x] Input-body plan edges for feature edge picking.
+
+Still worth doing:
+
+- [ ] Analytic edge-curve intersection. Current picking uses the B-rep plan's
+  edge polylines; they are exact body topology but sampled geometry. This is an
+  accuracy enhancement, not a dependency of selection.
+- [x] Plan-based face picking: face mode now derives triangle→face ids from the
+  display target's `TessPlan` faces (`face:N` / `body:B:face:N`) before
+  raycasting the CPU display mesh.
+- [ ] A hardware regression that asserts `GpuMesh` output matches
+  `TessPlan::evaluate` on a simple body.
+- [ ] Measure plan generation vs GPU evaluation separately on the forest.
+
+## Development order (current)
+
+Work in this order; do not start a later item before its dependency is settled.
+
+1. [ ] **Per-body tessellation profiling** — instrument `PlanStats`, plan
+       generation, `TessPlan::evaluate`, display preparation and GPU upload
+       separately. Determine whether the forest cost is CPU planning, CPU
+       evaluation, mesh merge or upload.
+2. [x] **B-rep picking contract** — the preview worker returns the edit-input
+       body's `TessPlan`; edge picking uses its B-rep edge polylines with
+       body-scoped ids. Face picking uses the input body's exact face ids from
+       its display mesh. Picking does not depend on display LOD.
+3. [x] **GPU tessellation from `TessPlan`** — carry plans through the display
+       path, use `TessGpu`/`GpuMesh`, cache by plan identity, and retain the CPU
+       `TessPlan::evaluate` + protocol-mesh fallback.
+4. [ ] **Coarse-first / view-dependent display** — use the profiling data to pick a
+       real coarse plan or preview, define quality tiers, refine when the camera
+       settles, and keep exact picking/edges. Do not retry chord/angle-only tuning
+       without plan statistics.
+5. [ ] **Progressive GPU upload** — upload a bounded number of vertex/index chunks
+       per frame and draw chunks as they become resident.
+6. [ ] **Re-evaluate/cache semantics** — settle bypass versus free, phase
+       counters, cold-versus-warm reporting, nested-view targets and progress.
+7. [ ] **Autosave and recovery** — dirty tracking, debounced atomic saves,
+       conflicts, untitled recovery and cascade-deletion undo.
+8. [ ] **Deferred graph/runtime work** — multiple panes/viewports, iterator,
+       externalise/pack lifecycle, fold/accumulator.
+
+Dependency: **1 → 2 → 3 → 4**. Building GPU tessellation or another LOD tier
+before profiling and picking risks optimizing the wrong layer.
+
+## Workspace integration (start here)
+
+Transition checklist: [Workspace transition TODO](../docs/workspace-transition-todo.md).
+Full sequence: [Workspace and graph-model integration plan](../docs/workspace-integration-plan.md).
+
+- [x] **Phase 0 groundwork:** add `GraphDocument.root` + `GraphDefinition`
+      list without a schemaVersion bump; convert current `.nodecraft` files;
+      update store/worker save-load; root field access remains compatible.
+- [ ] **Phase 0A:** define graph-instance values and migrate `group` payloads to
+      local definitions.
+- [ ] **Phase 0B:** migrate `linkedpart` to external definition references.
+- [ ] **Phase 0C:** validate/hash/canonicalize definitions and round-trip a
+      migrated document.
+- [ ] **Phase 1:** definition-scoped APIs and one local/external flattener.
+- [ ] **Phase 2:** workspace/view/tab/pane state; graph tabs as views; remove
+      child-session sync.
+- [ ] **Phase 3:** tab-owned undo journals and cross-tab conflict checks.
+- [ ] **Phase 4+:** panes/3D, runtime ownership, iterator, linked lifecycle.
+- Fold/accumulator execution is deferred for the current transition.
+
+## Re-evaluate semantics (open questions)
+
+The current button bypasses cache reads, prewarms the exact closure, reuses warmed
+B-reps and runs a non-export display pass. This works but the contract, cache
+reporting, progress and activity behaviour need a design pass. See
+[Re-evaluate behaviour: open questions](../docs/re-evaluate-questions.md).
+
+- [ ] Decide the user-facing contract (refresh vs cold rebuild vs debug action).
+- [ ] Decide whether re-evaluate frees caches or only bypasses reads; split a
+      separate clear-cache action if needed.
+- [ ] Define exact/prewarm/display progress and cold-vs-reuse cache statistics.
+- [ ] Define re-evaluate behaviour for nested/definition views and multiple tabs.
+- [ ] Add phase timings and regression coverage.
+- [ ] Revisit whether the button should remain user-visible.
+
+## Document autosave (planned)
+
+Autosave is not implemented: edits currently reach disk only through an explicit
+Save/Save As. The definition-cascade cleanup also removes definitions from the
+in-memory document immediately but only from the file on the next save.
+
+- [ ] Track per-document dirty state from the saved content hash/revision, shared
+      by all tabs/views over that document. Show a dirty marker per tab and
+      document title.
+- [ ] Debounced atomic autosave for documents with a path, using the existing
+      temp-file + rename path. Skip while a gizmo/node drag, file dialog, export,
+      or other blocking operation is active; flush on idle, focus loss, tab close
+      and app quit.
+- [ ] Flush the owning document when a definition view edits a definition, and
+      when an external definition is edited through its canonical document.
+- [ ] Before overwriting, compare the on-disk hash with the loaded hash. On a
+      conflict, pause autosave and surface the same conflict flow as manual save.
+- [ ] Pause autosave while evaluation/export writes are in flight; never
+      autosave a partially published or partially restored session.
+- [ ] Untitled documents: store a recovery draft in the app data directory rather
+      than inventing a filename, and offer recovery on next launch.
+- [ ] Setting for autosave enable/disable and debounce interval; default policy
+      to be decided after recovery/conflict tests pass.
+- [ ] Make definition cascade/GC safe under autosave: deletion becomes durable
+      quickly, so undo must be able to restore the definitions and closed tabs
+      before a later flush.
+- [ ] Tests: dirty/save transitions, debounce coalescing, failed atomic write,
+      external-edit conflict, quiescence during drag, tab switch, external
+      definition document, untitled recovery and undo after autosave.
+- [ ] Document the autosave/recovery lifecycle in the README and architecture
+      notes once the behavior is settled.
+
+## Contextual subgraph evaluation (planned)
+
+Opening a graph definition tab currently evaluates that definition body in
+isolation. A Graph Input marker has no external source there, so the body (and
+its breakpoint) sees no parent geometry. This is not a renderer bug; it is the
+missing evaluation-context binding.
+
+- [x] Track the instance path for each graph view (`g1::g2`, with graph-node ids),
+      alongside the existing `ViewKey`.
+- [x] Evaluate the owning flat graph in context: use the parent instance path as
+      the prefix, and map a body breakpoint/selection to the prefixed flat node or
+      the graph-card combine for a Graph Output marker.
+- [x] Map displayed target, node errors, activity and dirty nodes back to the body
+      view; comparison/ghost targets use the prefixed selection.
+- [x] Support nested paths and external definition documents; shared definitions
+      use the path of the instance the view was opened from.
+- [x] Map transform previews through the prefix. First-level Graph Input markers
+      bind to the owning graph node's upstream source; deeper input markers and
+      topology-picking sessions remain.
+- [ ] Add end-to-end regressions for passthrough/transformed inputs, nested bodies
+      and a definition used by two differently-fed instances.
+- [ ] Remove the isolated-body fallback once preview/picking mapping is stable.
+- [x] Re-evaluate bypasses cache lookups for the fresh run instead of freeing all
+      flat/engine caches; content hashes already invalidate changed nested graphs.
+
+## Coarse-first tessellation profiling (planned)
+
+A coarse initial tolerance/angle pass on `gigatest-forest-5000` reduced faces by
+only ~1% and added a refinement evaluation, so it was reverted. LOD after the full
+mesh cannot reduce tessellation cost.
+
+- [ ] Collect per-body `PlanStats` for the forest: faces/triangles by node type,
+      by tree group vs STEP import.
+- [ ] Check whether `MeshTolerance` angle/chord are actually reducing those
+      bodies' plans; the 30°/60° experiment barely changed the total.
+- [ ] Identify whether the dominant meshing cost is solidcore-tess or the STEP
+      import/display path.
+- [ ] Only then consider view-dependent plans, a true coarse preview, or GPU plan
+      evaluation.
+
+## GPU upload profiling (planned)
+
+The display-preparation worker moves mesh conversion off the UI thread, but
+`ObjectRenderer::prepare` still creates and uploads all pending vertex/index
+buffers in one frame. Large forests can hitch on the first upload even when
+evaluation is threaded.
+
+- [ ] Time first-frame upload separately from evaluation/display preparation.
+- [ ] Add a per-frame upload budget and progressive draw for large meshes.
+- [ ] Consider uploading a coarse LOD first, then upgrading.
+- [ ] Evaluate using `Device`/`Queue` clones from a worker while keeping draw
+      state synchronized.
+- [ ] Add a large-mesh regression that asserts the UI frame does not stall during
+      buffer upload.
+
+## Pure B-rep picking and GPU plan tessellation (planned)
+
+Two connected follow-ups for the display/picking boundary.
+
+### Pure B-rep edge/face picking
+
+The display mesh should be allowed to be a coarse LOD or GPU-evaluated plan while
+picking remains exact and independent of that mesh.
+
+- [ ] Keep exact record/kernel edge curves and stable edge ids available for
+      picking. Edge picking should use analytic curve/screen projection, not
+      triangle adjacency or a sampled display polyline.
+- [ ] Decide the UI boundary: send exact edge curves (plus body/face ids) to the
+      UI, or run edge picking in the engine worker and return selection ids.
+- [ ] Preserve exact face/provenance for face picking: surface-domain ray tests
+      or a dedicated exact face-picking service; do not infer faces from LOD
+      triangles.
+- [ ] Verify selection remains correct at high zoom on curved edges and with the
+      display at a coarse LOD.
+- [ ] Keep hover/selection overlays display-only; returning the exact edge/face
+      id is the authoritative operation.
+- [ ] Add regressions for edge/face picking across LOD changes and body
+      placements, including transformed/mirrored bodies.
+- [x] Pick edges against the **selected feature node's input body**, not the
+      viewport breakpoint/output mesh: the preview worker now returns that body's
+      `TessPlan`, and the viewport derives pickable B-rep plan edges from it with
+      body-scoped ids. Face picking still uses the display mesh.
+- [ ] Handle multi-body inputs, placement/mirror transforms, suppressed bodies and
+      nested graph/instance paths when resolving the edited node's input body.
+- [x] Keep the displayed result/ghost separate from the pick-input body; the
+      preview worker returns the input body's plan and edge selection uses it
+      independently of the viewer breakpoint.
+
+### GPU tessellation from `TessPlan`
+
+`solidcraft-viewport-gpu` exposes `TessGpu`/`GpuMesh`: upload a `TessPlan`, evaluate
+vertices/normals in a compute shader, and render the resulting buffers directly.
+
+- [x] Carry `TessPlan` through the display request/cache instead of only the
+      CPU-evaluated protocol mesh.
+- [x] Use `TessGpu::prepare_many`/`record` and the shared `GpuMesh` path; retain
+      the CPU `TessPlan::evaluate` + protocol-mesh fallback for headless, export
+      and environments without GPU plan support.
+- [x] Keep edge polylines, face ids/face groups and exact picking data on the
+      CPU/B-rep side; GPU mesh vertex/index buffers are rendering-only.
+- [ ] Cache `GpuMesh` by `TessPlan` identity and discard plans/buffers on graph
+      or viewport changes.
+- [ ] Measure whether the forest cost is plan generation/triangulation (CPU) or
+      plan evaluation (GPU candidate). GPU tessellation does not remove plan
+      generation cost.
+- [ ] Add plan/`PlanStats` instrumentation per body and a GpuMesh regression on
+      a large document.
+
+### Integration boundary
+
+Keep NodeCraft's PBR object shader, transparent/ghost layers, comparison meshes,
+edge/face overlays and picking. Port only the tessellation architecture:
+
+- engine/display returns a `TessPlan` per display body plus exact edge data,
+  instead of only one merged protocol mesh;
+- a new plan renderer owns `TessGpu`, `GpuMesh` residency and the background
+  `TessReady`/`TessLater` compile, with CPU `TessPlan::evaluate` fallback;
+- drawing the main body from `GpuMesh` must preserve NodeCraft's per-face colours:
+  `GpuMesh::vertex_face` can drive a compact colour buffer/table instead of
+  rebuilding CPU `ObjectVertex` positions;
+- ghosts, comparison layers and edge/face overlays remain on the existing
+  NodeCraft renderer/full data;
+- NodeCraft picking stays independent of the plan mesh and authoritative on the
+  B-rep/full display data.
+
+Do not replace the PBR/ghost/layer renderer wholesale with SolidCraft's viewport;
+the portable part is plan generation, GPU plan evaluation, `GpuMesh` buffers and
+their cache lifecycle.
+
+## GPU tessellation plan path (planned)
+
+NodeCraft currently plans with `solidcore_tess::plan` and evaluates the plan on
+the CPU in `nodecraft-layers`, then uploads the protocol mesh. The upstream
+viewport GPU crates can evaluate the same plan in a compute shader.
+
+- [ ] Carry `TessPlan` through the display request instead of only the
+      CPU-evaluated mesh.
+- [ ] Upload/evaluate the plan through `solidcraft-viewport-gpu`'s compute path
+      while retaining the CPU fallback and protocol-mesh path.
+- [ ] Preserve edge, face-group and picking provenance in the GPU path.
+- [ ] Measure CPU evaluation versus GPU plan evaluation on large Parts and compare
+      first-frame latency and memory.
+
+## Graph definitions, instances and flattening (planned)
+
+See [Graph definitions, instances and flattening](../docs/graph-definition-instance-plan.md).
+
+- [ ] Formalize `GraphDefinition` and `GraphInstance` in the document model:
+      typed interface ports, parameters, definition reference and output mapping.
+- [ ] Unify `group` and `linkedpart` into the same graph-instance semantics.
+- [ ] Add a canonical `DocumentStore` keyed by definition path/id so opening the
+      same `.nodecraft` from multiple graphs edits one session.
+- [ ] Replace special-case linked expansion with one recursive flattener:
+      instance-prefixed ids, cycle/missing-file errors, interface binding.
+- [ ] Make the flattener cache key include the root + all reachable definition
+      revisions/content hashes.
+- [ ] Move cache ownership to one `EvaluationRuntime` with logical per-document
+      partitions; keep tabs/source/undo outside the runtime.
+- [ ] Add graph-instance inspector actions: open definition, expose parameter,
+      inline/externalize, replace/localize.
+- [ ] Add breadcrumb navigation and definition-open shared by groups and linked
+      files.
+- [ ] Regression tests: inline vs external graph equivalence, definition edit
+      invalidation, parameter hashes, cycle/missing files, canonical edit dedupe,
+      and placement-only instance changes.
+- [ ] Implement iterator graph nodes:
+      `Input`/`Output`/`Iteration Index` interface nodes, instance iteration
+      count, ordered sequence outputs, outside aggregation, and concurrent
+      prefixed flattening. Plan: [Iterator nodes](../docs/node/iterator.md).
 
 ## Feature edge ghost editing (in progress)
 
@@ -817,7 +1248,7 @@ CacheKey = hash(
       current working `nodecraft_blend` path for now.
 
 - [ ] **On every SolidCore pin bump, retest the G2-fillet top-face shell.**
-      Reproduction at current pin `9b559c4c0727b2c626622d86e00e7d4c63f52400`:
+      Reproduction at current pin `c314b6d26ca756184ef2bdd1742f5056854d3d07`:
       solid cylinder → G2 fillet (edge `edge:1`, centre `[-20, 0, -20]`, length
       `12.5`) → Shell (`face:2`, thickness `3`, inward). The shell currently
       fails with `Shell: solidcore-ops shell: the result is not a closed solid`
@@ -882,18 +1313,29 @@ CacheKey = hash(
       NodeCraft conversion bug.
 - [ ] Do not compensate for that density with LOD alone; fix the display plan
       first, then use LOD for distance/screen-size reduction.
+- [ ] Add view-dependent retessellation: pass view/screen tolerance into the
+      display plan, cache by tolerance/angle/view bucket, and re-plan on zoom
+      thresholds. LOD alone cannot add detail; see
+      [Mesher backend](../docs/mesher-backend.md#view-dependent-retessellation-not-implemented).
 - [ ] Add the upstream commit/date to the pin review so a change in tessellator
       behaviour is visible when updating SolidCore.
-- [ ] Wire `solidcore_tess::simplify::levels` into the display path for LOD
-      tiers, keyed by full-mesh key plus screen-size targets.
+- [x] Wire `solidcore_tess::simplify::levels` into the display path for LOD
+      tiers. Initial selection uses camera distance / model radius; full-mesh
+      key plus screen-size targets remain the refinement.
 - [ ] Keep simplified levels display-only: they carry positions, triangles and a
       maximum surface error, but no `tri_face`, face groups, edge polylines or
       seam/smooth flags.
-- [ ] Keep picking, selection, edge rendering and export on the full
+- [x] Keep picking, selection, edge rendering and export on the full
       tessellation until upstream preserves face provenance through
       simplification, or simplify per face group.
-- [ ] Add LOD regression coverage: each level must report finite error, stay
-      within its deviation budget, and never be used for exact output.
+- [x] Add initial LOD regression coverage: large meshes produce coarser levels
+      with finite error, and only the display object path consumes them.
 - [ ] Delete the legacy `nodecraft-mesh` display path only after the STEP,
       primitive and sketch/spline mesh-only paths are measured against the
       parity harness.
+- [ ] Try `Frame::turned_depth` from the camera's f64 view-projection for
+      close-zoom depth precision. Supply it only when reversed depth is active,
+      and leave it `None` when the scene projection is composed with a preview
+      transform unless the turned depth is derived from that same matrix. Verify
+      whether it fixes the broken/zi-fighting perspective presentation when
+      zoomed in; it will not change texture interpolation or LOD.

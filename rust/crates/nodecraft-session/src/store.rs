@@ -23,11 +23,27 @@ pub fn document_hash(document: &GraphDocument) -> Result<ContentHash, SessionErr
 }
 
 /// Reads, canonicalizes and validates a `.nodecraft` document.
+fn canonicalize_all(document: &mut GraphDocument) {
+    for node in &mut document.root.nodes {
+        canonicalize_node(node);
+    }
+    for definition in &mut document.definitions {
+        for node in &mut definition.nodes {
+            canonicalize_node(node);
+        }
+    }
+}
+
 pub fn load(path: &Path) -> Result<GraphDocument, String> {
     let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let mut document: GraphDocument = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
-    for node in &mut document.nodes { canonicalize_node(node); }
-    document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
+    crate::groups::migrate_legacy_group_nodes(&mut document)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    canonicalize_all(&mut document);
+    document
+        .validate_definitions()
+        .and_then(|()| document.node_hashes())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(document)
 }
 
@@ -35,8 +51,11 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
 /// rename stays on one filesystem.
 pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> {
     let mut document = document.clone();
-    for node in &mut document.nodes { canonicalize_node(node); }
-    document.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
+    canonicalize_all(&mut document);
+    document
+        .validate_definitions()
+        .and_then(|()| document.node_hashes())
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let value = serde_json::to_value(&document).map_err(|error| error.to_string())?;
     save_value_atomic(path, &value)
 }
@@ -46,8 +65,8 @@ pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &
     let mut canonical = document.clone();
     for node in &mut canonical.nodes { canonicalize_node(node); }
     canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
-    value["nodes"] = serde_json::to_value(&canonical.nodes).map_err(|error| error.to_string())?;
-    value["connections"] = serde_json::to_value(&canonical.connections).map_err(|error| error.to_string())?;
+    value["root"] = serde_json::to_value(&canonical.root).map_err(|error| error.to_string())?;
+    value["definitions"] = serde_json::to_value(&canonical.definitions).map_err(|error| error.to_string())?;
     value["schemaVersion"] = serde_json::json!(canonical.schema_version);
     save_value_atomic(path, value)
 }
@@ -356,12 +375,18 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 10.0, y: 20.0 },
                 GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
             ],
-            connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
-            interface: GraphInterface::default(),
+                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -377,6 +402,143 @@ mod tests {
         assert_eq!(loaded.nodes[1].values["space"], "world");
         assert_eq!(loaded.connections.len(), 1);
         assert_eq!(document_hash(&loaded).unwrap(), document_hash(&original).unwrap());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn external_graph_reference_round_trips_and_flattens() {
+        let dir = test_dir();
+        let external_path = dir.join("external.nodecraft");
+        let external = GraphDocument {
+            schema_version: 1,
+            id: "external".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
+                    GraphNode { expressions: Default::default(), id: "in".into(), node_type: "groupinput".into(), values: json!({"ports":["shape"]}), suppressed: false, x: -120.0, y: 0.0 },
+                    GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
+                    GraphNode { expressions: Default::default(), id: "out".into(), node_type: "groupoutput".into(), values: json!({"ports":["shape"]}), suppressed: false, x: 120.0, y: 0.0 },
+                ],
+                connections: vec![
+                    GraphConnection { from: "in".into(), to: "box".into(), input: "shape".into(), out: "shape".into() },
+                    GraphConnection { from: "box".into(), to: "out".into(), input: "shape".into(), out: "shape".into() },
+                ],
+                interface: GraphInterface { inputs: vec!["shape".into()], outputs: vec!["shape".into()] },
+            },
+            definitions: Vec::new(),
+        };
+        save_atomic(&external_path, &external).expect("save external");
+        let mut root = GraphDocument::new("external-root");
+        root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "g".into(),
+            node_type: "graph".into(),
+            values: json!({
+                "name": "External",
+                "inputs": ["shape"],
+                "outputs": ["shape"],
+                "external": {"path": external_path.to_string_lossy(), "definition": "root"}
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        let root_path = dir.join("root.nodecraft");
+        save_atomic(&root_path, &root).expect("save root");
+        let loaded = load(&root_path).expect("load root");
+        assert_eq!(
+            crate::groups::GraphReference::from_node(&loaded.nodes[0]),
+            Some(crate::groups::GraphReference::External {
+                path: external_path.to_string_lossy().into_owned(),
+                definition: "root".into()
+            })
+        );
+        let flat = crate::groups::flatten_inline_graphs(&loaded).expect("flatten external");
+        assert!(flat.nodes.iter().any(|node| node.id == "g::box"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn load_migrates_legacy_group_payloads() {
+        let dir = test_dir();
+        let path = dir.join("legacy.nodecraft");
+        let legacy = json!({
+            "schemaVersion": 1,
+            "id": "legacy",
+            "root": {
+            "id": "root",
+            "name": "Root",
+            "kind": "graph",
+            "nodes": [{
+                "id": "g",
+                "type": "group",
+                "values": {
+                    "name": "Rounded",
+                    "nodes": [
+                        {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
+                        {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
+                        {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
+                    ],
+                    "connections": [
+                        {"from":"in","to":"box","in":"shape","out":"shape"},
+                        {"from":"box","to":"out","in":"shape","out":"shape"}
+                    ],
+                    "inputs": [{"port":"shape","node":"in"}],
+                    "outputs": [{"port":"shape","node":"out"}]
+                },
+                "suppressed": false,
+                "x": 0.0,
+                "y": 0.0
+            }],
+            "connections": []
+            },
+            "definitions": []
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).expect("write");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.root.nodes[0].node_type, "graph");
+        assert!(loaded.definition("g").is_some());
+        let flat = crate::groups::flatten_inline_graphs(&loaded).expect("flatten");
+        assert!(flat.nodes.iter().any(|node| node.id == "g::box"));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migrated_graph_definition_round_trips_and_flattens() {
+        let dir = test_dir();
+        let path = dir.join("graph.nodecraft");
+        let mut doc = GraphDocument::new("migrated");
+        doc.root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "g".into(),
+            node_type: "group".into(),
+            values: json!({
+                "name": "Rounded",
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections":[
+                    {"from":"in","to":"box","in":"shape","out":"shape"},
+                    {"from":"box","to":"out","in":"shape","out":"shape"}
+                ],
+                "inputs":[{"port":"shape","node":"in"}],
+                "outputs":[{"port":"shape","node":"out"}]
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        crate::groups::migrate_legacy_graph_nodes(&mut doc).expect("migrate");
+        save_atomic(&path, &doc).expect("save");
+        let loaded = load(&path).expect("load");
+        assert_eq!(loaded.root.nodes[0].node_type, "graph");
+        assert!(loaded.definition("g").is_some());
+        let flat = crate::groups::flatten_inline_graphs(&loaded).expect("flatten");
+        assert!(flat.nodes.iter().any(|node| node.id == "g::box"));
         std::fs::remove_dir_all(dir).ok();
     }
 

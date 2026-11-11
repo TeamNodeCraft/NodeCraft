@@ -6,7 +6,7 @@ use egui::{Color32, Pos2, Rect, Shape, Stroke, vec2};
 use solidcraft_geom::Ring;
 use solidcore_record::Vec3;
 use solidcraft_geom::prelude::*;
-use solidcraft_render::Camera;
+use solidcraft_viewport::Camera;
 
 /// World ↔ screen mapping for the current viewport frame.
 #[derive(Clone, Copy)]

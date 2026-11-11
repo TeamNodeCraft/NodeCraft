@@ -92,13 +92,17 @@ pub fn profile_request(request: &Request) -> WorkloadProfile {
     }
 
     // Kahn levels over the closure. The widest level is the theoretical
-    // upper bound on scheduler parallelism.
+    // upper bound on scheduler parallelism. Build successors once: serial
+    // chains are common in boolean circuits and rescanning every dependency
+    // list per popped node makes this quadratic.
     let mut indegree: HashMap<&str, usize> = closure.iter().map(|id| (*id, 0usize)).collect();
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
     for id in &closure {
         if let Some(inputs) = dependencies.get(id) {
             for input in inputs {
                 if closure.contains(input) {
                     *indegree.get_mut(id).expect("closure node") += 1;
+                    children.entry(*input).or_default().push(*id);
                 }
             }
         }
@@ -114,8 +118,8 @@ pub fn profile_request(request: &Request) -> WorkloadProfile {
         for _ in 0..width {
             let id = ready.pop_front().expect("ready");
             processed += 1;
-            for (to, inputs) in &dependencies {
-                if inputs.contains(&id) && closure.contains(to) {
+            if let Some(next) = children.get(id) {
+                for to in next {
                     let degree = indegree.get_mut(to).expect("closure node");
                     *degree -= 1;
                     if *degree == 0 {
@@ -157,6 +161,7 @@ pub fn profile_flat(nodes: &[Node], connections: &[Connection], targets: &[Strin
         progress: false,
         run_exporters: true,
         mesh_tolerance: None,
+        preview_detail: None,
         comparison_targets: None,
         bypass_cache: false,
     })
@@ -198,6 +203,21 @@ mod tests {
         assert!(profile.exact_units >= 5);
         assert_eq!(profile.mesh_bodies, 3);
         assert!(profile.exact_dispatch_is_worthwhile());
+    }
+
+    #[test]
+    fn long_serial_chain_profiles_linearly() {
+        let count = 5_000;
+        let nodes: Vec<Node> = (0..count)
+            .map(|index| node(&format!("n{index}"), if index == 0 { "solid" } else { "translate" }))
+            .collect();
+        let connections: Vec<Connection> = (1..count)
+            .map(|index| link(&format!("n{}", index - 1), &format!("n{index}")))
+            .collect();
+        let profile = profile_flat(&nodes, &connections, &[format!("n{}", count - 1)]);
+        assert_eq!(profile.node_count, count);
+        assert_eq!(profile.max_ready_width, 1);
+        assert!(!profile.exact_dispatch_is_worthwhile());
     }
 
     #[test]

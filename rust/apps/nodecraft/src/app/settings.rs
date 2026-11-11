@@ -105,8 +105,8 @@ pub(super) struct AppSettings {
     pub(super) feature_overlay: bool,
     #[serde(default)]
     pub(super) engine_threads: usize,
-    #[serde(default)]
-    pub(super) mesher_threads: usize,
+    #[serde(default, alias = "mesher_threads")]
+    pub(super) tessellation_threads: usize,
     #[serde(default = "default_workload_profiler")]
     pub(super) workload_profiler: bool,
     #[serde(default = "default_kernel_fixes")]
@@ -159,7 +159,7 @@ pub(super) fn save_app_settings(
     activity: ActivitySettings,
     feature_overlay: bool,
     engine_threads: usize,
-    mesher_threads: usize,
+    tessellation_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
     cable_routing: CableRouting,
@@ -178,7 +178,7 @@ pub(super) fn save_app_settings(
         activity,
         feature_overlay,
         engine_threads,
-        mesher_threads,
+        tessellation_threads,
         workload_profiler,
         kernel_fixes,
         cable_routing: cable_routing.setting_id().to_owned(),

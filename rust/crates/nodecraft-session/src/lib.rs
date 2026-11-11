@@ -17,7 +17,7 @@ pub mod node_descriptor;
 pub mod placement;
 mod runtime;
 pub mod store;
-pub use groups::expand_groups;
+pub use groups::{expand_groups, flatten_inline_graphs};
 pub use runtime::{GraphRuntime, RuntimeEvaluation};
 
 /// Resolve every `linkedpart` node into the flattened evaluation graph.
@@ -93,6 +93,29 @@ pub struct GraphInterface {
     pub outputs: Vec<String>,
 }
 
+/// One reusable graph inside a document. Root graphs and local subgraphs use
+/// the same representation; evaluation flattens them into one DAG.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GraphDefinition {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// `graph`, `iterator` or `fold`; execution constructs are added later.
+    #[serde(default = "default_graph_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub interface: GraphInterface,
+    #[serde(default)]
+    pub nodes: Vec<GraphNode>,
+    #[serde(default)]
+    pub connections: Vec<GraphConnection>,
+}
+
+fn default_graph_kind() -> String {
+    "graph".to_owned()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GraphDocument {
@@ -100,10 +123,37 @@ pub struct GraphDocument {
     pub schema_version: u32,
     #[serde(default)]
     pub id: String,
-    pub nodes: Vec<GraphNode>,
-    pub connections: Vec<GraphConnection>,
+    /// The document's root graph. Field access is forwarded here so existing
+    /// graph operations continue to operate on the root definition.
+    #[serde(default = "default_root_definition")]
+    pub root: GraphDefinition,
+    /// Additional reusable definitions stored in this document.
     #[serde(default)]
-    pub interface: GraphInterface,
+    pub definitions: Vec<GraphDefinition>,
+}
+
+fn default_root_definition() -> GraphDefinition {
+    GraphDefinition {
+        id: "root".to_owned(),
+        name: "Root".to_owned(),
+        kind: "graph".to_owned(),
+        interface: GraphInterface::default(),
+        nodes: Vec::new(),
+        connections: Vec::new(),
+    }
+}
+
+impl std::ops::Deref for GraphDocument {
+    type Target = GraphDefinition;
+    fn deref(&self) -> &Self::Target {
+        &self.root
+    }
+}
+
+impl std::ops::DerefMut for GraphDocument {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.root
+    }
 }
 
 fn default_schema_version() -> u32 { 1 }
@@ -111,7 +161,21 @@ fn default_schema_version() -> u32 { 1 }
 impl GraphDocument {
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
-        Self { schema_version: 1, id: id.into(), nodes: Vec::new(), connections: Vec::new(), interface: GraphInterface::default() }
+        Self {
+            schema_version: 1,
+            id: id.into(),
+            root: default_root_definition(),
+            definitions: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn definition(&self, id: &str) -> Option<&GraphDefinition> {
+        if self.root.id == id {
+            Some(&self.root)
+        } else {
+            self.definitions.iter().find(|definition| definition.id == id)
+        }
     }
 
     fn node_map(&self) -> Result<BTreeMap<&str, &GraphNode>, SessionError> {
@@ -122,6 +186,67 @@ impl GraphDocument {
             }
         }
         Ok(map)
+    }
+
+    /// Validate definition identity, interfaces and owned graph topology.
+    pub fn validate_definitions(&self) -> Result<(), SessionError> {
+        let mut ids = BTreeSet::new();
+        ids.insert(self.root.id.clone());
+        let mut names = BTreeSet::new();
+        let validate_interface = |kind: &str, ports: &[String]| -> Result<(), SessionError> {
+            let mut seen = BTreeSet::new();
+            for port in ports {
+                if port.trim().is_empty() {
+                    return Err(SessionError::InvalidInput(format!(
+                        "Graph definition {kind} has an empty port name."
+                    )));
+                }
+                if !seen.insert(port.as_str()) {
+                    return Err(SessionError::InvalidInput(format!(
+                        "Graph definition {kind} has duplicate port {port:?}."
+                    )));
+                }
+            }
+            Ok(())
+        };
+        validate_interface("root inputs", &self.root.interface.inputs)?;
+        validate_interface("root outputs", &self.root.interface.outputs)?;
+        for definition in &self.definitions {
+            if !ids.insert(definition.id.clone()) {
+                return Err(SessionError::InvalidInput(format!(
+                    "Duplicate graph definition id {}.",
+                    definition.id
+                )));
+            }
+            if !names.insert(definition.name.clone()) {
+                return Err(SessionError::InvalidInput(format!(
+                    "Duplicate graph definition name {:?}.",
+                    definition.name
+                )));
+            }
+            validate_interface("inputs", &definition.interface.inputs)?;
+            validate_interface("outputs", &definition.interface.outputs)?;
+            let mut node_ids = BTreeSet::new();
+            for node in &definition.nodes {
+                if !node_ids.insert(node.id.as_str()) {
+                    return Err(SessionError::InvalidInput(format!(
+                        "Duplicate node {} in graph definition {}.",
+                        node.id, definition.id
+                    )));
+                }
+            }
+            for connection in &definition.connections {
+                if !node_ids.contains(connection.from.as_str())
+                    || !node_ids.contains(connection.to.as_str())
+                {
+                    return Err(SessionError::InvalidInput(format!(
+                        "Graph definition {} has a connection to a missing node.",
+                        definition.id
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Content hash of every node, including its upstream input hashes.
@@ -154,7 +279,19 @@ impl GraphDocument {
             h.write(node.id.as_bytes());
             h.write(node.node_type.as_bytes());
             h.write(&[u8::from(node.suppressed)]);
-            canonical_json(&node.values, &mut h);
+            if node.node_type == "graph" {
+                // A graph card caches its definition name for display. Names are
+                // presentation only, so exclude them from the geometry hash.
+                let mut values = node.values.clone();
+                if let Some(object) = values.as_object_mut() {
+                    object.remove("name");
+                }
+                canonical_json(&values, &mut h);
+                let mut definition_stack = Vec::new();
+                self.hash_graph_reference(node, &mut h, &mut definition_stack)?;
+            } else {
+                canonical_json(&node.values, &mut h);
+            }
             let mut links = inputs.get(id).cloned().unwrap_or_default();
             links.sort_by(|a, b| (a.input.as_str(), a.from.as_str(), a.out.as_str()).cmp(&(b.input.as_str(), b.from.as_str(), b.out.as_str())));
             for link in links {
@@ -173,6 +310,79 @@ impl GraphDocument {
             return Err(SessionError::Cycle);
         }
         Ok(hashes)
+    }
+
+    fn hash_graph_reference(
+        &self,
+        node: &GraphNode,
+        out: &mut Hash128,
+        stack: &mut Vec<String>,
+    ) -> Result<(), SessionError> {
+        let Some(reference) = groups::GraphReference::from_node(node) else {
+            return Ok(());
+        };
+        match reference {
+            groups::GraphReference::Local(id) => {
+                out.write(b"local-definition");
+                self.hash_definition(&id, out, stack)
+            }
+            groups::GraphReference::External { path, definition } => {
+                out.write(b"external-definition");
+                out.write(path.as_bytes());
+                out.write(definition.as_bytes());
+                Ok(())
+            }
+        }
+    }
+
+    fn hash_definition(
+        &self,
+        id: &str,
+        out: &mut Hash128,
+        stack: &mut Vec<String>,
+    ) -> Result<(), SessionError> {
+        if stack.iter().any(|candidate| candidate == id) {
+            return Err(SessionError::InvalidInput(format!(
+                "Graph definition cycle through {id}."
+            )));
+        }
+        let definition = self.definition(id).ok_or_else(|| {
+            SessionError::InvalidInput(format!("Missing graph definition {id}."))
+        })?;
+        stack.push(id.to_owned());
+        out.write(b"definition-v1");
+        out.write(definition.id.as_bytes());
+        out.write(definition.kind.as_bytes());
+        for port in &definition.interface.inputs {
+            out.write(b"in:"); out.write(port.as_bytes());
+        }
+        for port in &definition.interface.outputs {
+            out.write(b"out:"); out.write(port.as_bytes());
+        }
+        let mut nodes: Vec<&GraphNode> = definition.nodes.iter().collect();
+        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        for node in nodes {
+            out.write(node.id.as_bytes());
+            out.write(node.node_type.as_bytes());
+            out.write(&[u8::from(node.suppressed)]);
+            canonical_json(&node.values, out);
+            if node.node_type == "graph" {
+                self.hash_graph_reference(node, out, stack)?;
+            }
+        }
+        let mut connections: Vec<&GraphConnection> = definition.connections.iter().collect();
+        connections.sort_by(|a, b| {
+            (a.from.as_str(), a.to.as_str(), a.input.as_str(), a.out.as_str())
+                .cmp(&(b.from.as_str(), b.to.as_str(), b.input.as_str(), b.out.as_str()))
+        });
+        for connection in connections {
+            out.write(connection.from.as_bytes());
+            out.write(connection.to.as_bytes());
+            out.write(connection.input.as_bytes());
+            out.write(connection.out.as_bytes());
+        }
+        stack.pop();
+        Ok(())
     }
 
     /// Nodes whose evaluation content changed, including all downstream nodes.
@@ -230,6 +440,10 @@ pub enum Command {
     RemoveValue { node: String, field: String },
     SetExpressions { node: String, values: BTreeMap<String, String> },
     SetNodeType { node: String, #[serde(rename = "nodeType")] node_type: String },
+    AddDefinition { definition: GraphDefinition },
+    RemoveDefinition { id: String },
+    SetDefinition { definition: GraphDefinition },
+    SetRootDefinition { definition: GraphDefinition },
     SetPosition { node: String, x: f64, y: f64 },
     SetSuppressed { node: String, suppressed: bool },
     Connect { from: String, to: String, #[serde(default)] input: String, #[serde(default)] out: String },
@@ -248,6 +462,7 @@ pub struct Change {
 
 #[derive(Clone, Debug)]
 struct HistoryEntry {
+    scope: String,
     forward: Vec<Command>,
     inverse_groups: Vec<Vec<Command>>,
     dirty_nodes: Vec<String>,
@@ -302,6 +517,18 @@ impl Session {
         coalesce_key: Option<&str>,
         coalesce_window: Duration,
     ) -> Result<Change, SessionError> {
+        self.apply_commands_scoped(commands, "root", coalesce_key, coalesce_window)
+    }
+
+    /// Apply a transaction tagged with its originating view. Entries only merge
+    /// and undo within the same scope.
+    pub fn apply_commands_scoped(
+        &mut self,
+        commands: &[Command],
+        scope: &str,
+        coalesce_key: Option<&str>,
+        coalesce_window: Duration,
+    ) -> Result<Change, SessionError> {
         let now = Instant::now();
         let mut effects = ApplyEffects::default();
         let mut inverse_groups: Vec<Vec<Command>> = Vec::new();
@@ -331,7 +558,11 @@ impl Session {
         let key = coalesce_key.map(str::to_string);
         let merge = key.as_ref().is_some_and(|key| {
             coalesce_window > Duration::ZERO
-                && self.undo.last().is_some_and(|entry| entry.coalesce_key.as_ref() == Some(key) && now.duration_since(entry.coalesced_at) <= coalesce_window)
+                && self.undo.last().is_some_and(|entry| {
+                    entry.scope == scope
+                        && entry.coalesce_key.as_ref() == Some(key)
+                        && now.duration_since(entry.coalesced_at) <= coalesce_window
+                })
         });
         let mut cumulative_dirty = dirty_nodes.clone();
         if merge {
@@ -344,12 +575,157 @@ impl Session {
             entry.coalesced_at = now;
             cumulative_dirty = entry.dirty_nodes.clone();
         } else {
-            self.undo.push(HistoryEntry { forward: commands.to_vec(), inverse_groups, dirty_nodes: dirty_nodes.clone(), coalesce_key: key, coalesced_at: now });
+            self.undo.push(HistoryEntry { scope: scope.to_owned(), forward: commands.to_vec(), inverse_groups, dirty_nodes: dirty_nodes.clone(), coalesce_key: key, coalesced_at: now });
             if self.undo.len() > self.undo_limit { self.undo.remove(0); }
         }
         self.redo.clear();
         self.revision += 1;
         Ok(Change { revision: self.revision, dirty_nodes: cumulative_dirty, changed: true })
+    }
+
+    /// Apply node commands to a definition body as one parent-document edit.
+    ///
+    /// This is the session-side primitive for definition-backed graph views:
+    /// commands use the body's node ids, while the parent history sees one
+    /// atomic `SetDefinition`.
+    pub fn apply_definition_commands(
+        &mut self,
+        definition_id: &str,
+        commands: &[Command],
+    ) -> Result<Change, SessionError> {
+        self.apply_definition_commands_scoped(
+            definition_id,
+            &format!("definition:{definition_id}"),
+            commands,
+        )
+    }
+
+    /// Apply definition-body commands under an explicit view/history scope.
+    pub fn apply_definition_commands_scoped(
+        &mut self,
+        definition_id: &str,
+        scope: &str,
+        commands: &[Command],
+    ) -> Result<Change, SessionError> {
+        let definition = self
+            .present
+            .definition(definition_id)
+            .cloned()
+            .ok_or_else(|| {
+                SessionError::InvalidInput(format!("Missing graph definition {definition_id}."))
+            })?;
+        let original_definitions = self.present.definitions.clone();
+        // A view may have been built without the parent definition table (for
+        // example a stale projection). If a batch tries to add a definition id
+        // or name that already exists, allocate a fresh identity and rewrite the
+        // graph-node references in the same batch before applying it.
+        let mut commands = commands.to_vec();
+        let mut used_ids: BTreeSet<String> = original_definitions
+            .iter()
+            .map(|definition| definition.id.clone())
+            .chain(std::iter::once(self.present.root.id.clone()))
+            .collect();
+        let mut used_names: BTreeSet<String> = original_definitions
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+        let mut remap = BTreeMap::new();
+        for command in &mut commands {
+            let Command::AddDefinition { definition } = command else {
+                continue;
+            };
+            if used_ids.contains(&definition.id) {
+                let old_id = definition.id.clone();
+                let base_id = old_id.clone();
+                let mut suffix = 2;
+                let mut new_id = format!("{base_id}{suffix}");
+                while used_ids.contains(&new_id) {
+                    suffix += 1;
+                    new_id = format!("{base_id}{suffix}");
+                }
+                let base_name = definition.name.clone();
+                let mut name_suffix = 2;
+                let mut new_name = format!("{base_name} {name_suffix}");
+                while used_names.contains(&new_name) {
+                    name_suffix += 1;
+                    new_name = format!("{base_name} {name_suffix}");
+                }
+                definition.id = new_id.clone();
+                definition.name = new_name;
+                remap.insert(old_id, new_id);
+            }
+            used_ids.insert(definition.id.clone());
+            used_names.insert(definition.name.clone());
+        }
+        if !remap.is_empty() {
+            for command in &mut commands {
+                match command {
+                    Command::AddNode { node } if node.node_type == "graph" => {
+                        if let Some(Value::String(id)) = node.values.get_mut("definition")
+                            && let Some(new_id) = remap.get(id)
+                        {
+                            *id = new_id.clone();
+                        }
+                    }
+                    Command::SetValue { field, value, .. } if field == "definition" => {
+                        if let Value::String(id) = value
+                            && let Some(new_id) = remap.get(id)
+                        {
+                            *id = new_id.clone();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut view = GraphDocument::new(format!("{definition_id}::view"));
+        view.root = definition.clone();
+        // Definition bodies can create/import nested definitions. Keep the
+        // parent's definition table visible and mirror changes back below.
+        view.definitions = original_definitions.clone();
+        let mut body = Session::new(view);
+        let change = body.apply_commands(&commands)?;
+        if !change.changed {
+            return Ok(change);
+        }
+        let mut updated = body.document().root.clone();
+        updated.id = definition.id;
+        updated.name = definition.name;
+        updated.kind = definition.kind;
+        let mut parent_commands = vec![Command::SetDefinition { definition: updated }];
+        let original_by_id: BTreeMap<&str, &GraphDefinition> = original_definitions
+            .iter()
+            .map(|definition| (definition.id.as_str(), definition))
+            .collect();
+        let body_definitions = body.document().definitions.clone();
+        let body_ids: BTreeSet<&str> = body_definitions
+            .iter()
+            .map(|definition| definition.id.as_str())
+            .collect();
+        for definition in &body_definitions {
+            if definition.id == definition_id {
+                continue;
+            }
+            match original_by_id.get(definition.id.as_str()) {
+                Some(original) if *original != definition => {
+                    parent_commands.push(Command::SetDefinition {
+                        definition: definition.clone(),
+                    });
+                }
+                None => parent_commands.push(Command::AddDefinition {
+                    definition: definition.clone(),
+                }),
+                _ => {}
+            }
+        }
+        for definition in &original_definitions {
+            if !body_ids.contains(definition.id.as_str()) {
+                parent_commands.push(Command::RemoveDefinition {
+                    id: definition.id.clone(),
+                });
+            }
+        }
+        self.apply_commands_scoped(&parent_commands, scope, None, Duration::ZERO)
     }
 
     /// Apply engine-derived model updates (resolved selection references) without
@@ -401,6 +777,76 @@ impl Session {
         Ok(Some(Change { revision: self.revision, dirty_nodes, changed: true }))
     }
 
+    /// True when the next undo entry belongs to the root document rather than a
+    /// definition graph view. Root-tab history must not consume graph-view edits.
+    #[must_use]
+    pub fn has_root_undo(&self) -> bool {
+        self.undo.last().is_some_and(|entry| entry.scope == "root")
+    }
+
+    #[must_use]
+    pub fn has_root_redo(&self) -> bool {
+        self.redo.last().is_some_and(|entry| entry.scope == "root")
+    }
+
+    #[must_use]
+    pub fn has_scope_undo(&self, scope: &str) -> bool {
+        self.undo.last().is_some_and(|entry| entry.scope == scope)
+    }
+
+    #[must_use]
+    pub fn has_scope_redo(&self, scope: &str) -> bool {
+        self.redo.last().is_some_and(|entry| entry.scope == scope)
+    }
+
+    pub fn undo_scope(&mut self, scope: &str) -> Result<Option<Change>, SessionError> {
+        if !self.has_scope_undo(scope) {
+            return Ok(None);
+        }
+        self.undo()
+    }
+
+    pub fn redo_scope(&mut self, scope: &str) -> Result<Option<Change>, SessionError> {
+        if !self.has_scope_redo(scope) {
+            return Ok(None);
+        }
+        self.redo()
+    }
+
+    /// True when the next undo entry is an edit of this definition body.
+    #[must_use]
+    pub fn has_definition_undo(&self, definition_id: &str) -> bool {
+        let scope = format!("definition:{definition_id}");
+        self.undo.last().is_some_and(|entry| entry.scope == scope)
+    }
+
+    #[must_use]
+    pub fn has_definition_redo(&self, definition_id: &str) -> bool {
+        let scope = format!("definition:{definition_id}");
+        self.redo.last().is_some_and(|entry| entry.scope == scope)
+    }
+
+    /// Undo only when the next entry is an edit of this definition body.
+    pub fn undo_definition(
+        &mut self,
+        definition_id: &str,
+    ) -> Result<Option<Change>, SessionError> {
+        if !self.has_definition_undo(definition_id) {
+            return Ok(None);
+        }
+        self.undo()
+    }
+
+    pub fn redo_definition(
+        &mut self,
+        definition_id: &str,
+    ) -> Result<Option<Change>, SessionError> {
+        if !self.has_definition_redo(definition_id) {
+            return Ok(None);
+        }
+        self.redo()
+    }
+
     pub fn redo(&mut self) -> Result<Option<Change>, SessionError> {
         let Some(entry) = self.redo.pop() else { return Ok(None); };
         let mut effects = ApplyEffects::default();
@@ -423,7 +869,17 @@ fn find_node_mut<'a>(document: &'a mut GraphDocument, id: &str) -> Result<&'a mu
 
 impl Command {
     fn is_structural(&self) -> bool {
-        matches!(self, Command::AddNode { .. } | Command::RemoveNode { .. } | Command::Connect { .. } | Command::Disconnect { .. })
+        matches!(
+            self,
+            Command::AddNode { .. }
+                | Command::RemoveNode { .. }
+                | Command::Connect { .. }
+                | Command::Disconnect { .. }
+                | Command::AddDefinition { .. }
+                | Command::RemoveDefinition { .. }
+                | Command::SetDefinition { .. }
+                | Command::SetRootDefinition { .. }
+        )
     }
 }
 
@@ -536,6 +992,59 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
             effects.seeds.insert(to.clone());
             effects.changed = true;
         }
+        Command::AddDefinition { definition } => {
+            if document
+                .definitions
+                .iter()
+                .any(|candidate| candidate.id == definition.id)
+            {
+                return Err(SessionError::InvalidInput(format!(
+                    "Duplicate graph definition {}.",
+                    definition.id
+                )));
+            }
+            inverse.push(Command::RemoveDefinition {
+                id: definition.id.clone(),
+            });
+            document.definitions.push(definition.clone());
+            effects.changed = true;
+        }
+        Command::RemoveDefinition { id } => {
+            let Some(index) = document
+                .definitions
+                .iter()
+                .position(|candidate| &candidate.id == id)
+            else {
+                return Err(SessionError::InvalidInput(format!(
+                    "Missing graph definition {id}."
+                )));
+            };
+            let definition = document.definitions.remove(index);
+            inverse.push(Command::AddDefinition { definition });
+            effects.changed = true;
+        }
+        Command::SetRootDefinition { definition } => {
+            let previous = document.root.clone();
+            inverse.push(Command::SetRootDefinition { definition: previous });
+            document.root = definition.clone();
+            effects.changed = true;
+        }
+        Command::SetDefinition { definition } => {
+            let Some(index) = document
+                .definitions
+                .iter()
+                .position(|candidate| candidate.id == definition.id)
+            else {
+                return Err(SessionError::InvalidInput(format!(
+                    "Missing graph definition {}.",
+                    definition.id
+                )));
+            };
+            let previous = document.definitions[index].clone();
+            inverse.push(Command::SetDefinition { definition: previous });
+            document.definitions[index] = definition.clone();
+            effects.changed = true;
+        }
         Command::AddNode { node } => {
             let mut node = node.clone();
             defaults::canonicalize_node(&mut node);
@@ -548,6 +1057,11 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
         }
         Command::RemoveNode { id } => {
             let Some(index) = document.nodes.iter().position(|node| &node.id == id) else { return Err(SessionError::MissingNode(id.clone())); };
+            if groups::is_graph_interface_node(&document.nodes[index]) {
+                return Err(SessionError::InvalidInput(
+                    "Graph Input/Output nodes cannot be deleted.".into(),
+                ));
+            }
             let incident: Vec<GraphConnection> = document.connections.iter().filter(|link| &link.from == id || &link.to == id).cloned().collect();
             for link in &incident {
                 if &link.to != id { effects.seeds.insert(link.to.clone()); }
@@ -635,16 +1149,22 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 node("a", "primitive", serde_json::json!({"primitiveType": "box", "length": 10}), 0.0),
                 node("b", "translate", serde_json::json!({"x": 5}), 200.0),
                 node("c", "boolean", serde_json::json!({"mode": "union"}), 400.0),
             ],
-            connections: vec![
+                connections: vec![
                 GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() },
                 GraphConnection { from: "b".into(), to: "c".into(), input: "a".into(), out: "shape".into() },
             ],
-            interface: GraphInterface::default(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -738,7 +1258,19 @@ mod transaction_tests {
     }
 
     fn document() -> GraphDocument {
-        GraphDocument { schema_version: 1, id: "root".into(), nodes: vec![node("a"), node("b")], connections: vec![], interface: GraphInterface::default() }
+        GraphDocument {
+            schema_version: 1,
+            id: "root".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![node("a"), node("b")],
+                connections: vec![],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
+        }
     }
 
     #[test]
@@ -753,6 +1285,378 @@ mod transaction_tests {
         assert_eq!(session.document(), &before);
         assert!(!session.has_undo());
         assert!(!session.has_redo());
+    }
+
+    #[test]
+    fn graph_document_round_trips_root_and_definitions() {
+        let mut document = GraphDocument::new("definitions");
+        document.nodes.push(GraphNode { expressions: Default::default(),
+            id: "root_box".into(),
+            node_type: "primitive".into(),
+            values: serde_json::json!({"primitiveType": "box"}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        document.definitions.push(crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(),
+                id: "feature_box".into(),
+                node_type: "primitive".into(),
+                values: serde_json::json!({"primitiveType": "box"}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+        });
+        let json = serde_json::to_string(&document).expect("serialize");
+        let reloaded: GraphDocument = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(reloaded.schema_version, 1);
+        assert_eq!(reloaded.root.nodes[0].id, "root_box");
+        assert_eq!(reloaded.definitions.len(), 1);
+        assert_eq!(reloaded.definition("feature").expect("definition").name, "Feature");
+        assert_eq!(reloaded.definition("root").expect("root").nodes[0].id, "root_box");
+    }
+
+    #[test]
+    fn definition_validation_rejects_duplicate_ids_and_names() {
+        let mut document = GraphDocument::new("validate");
+        let definition = crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
+        };
+        document.definitions.push(definition.clone());
+        document.definitions.push(definition);
+        assert!(document.validate_definitions().is_err());
+        let mut document = GraphDocument::new("validate");
+        let mut first = crate::GraphDefinition {
+            id: "one".into(),
+            name: "Same".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
+        };
+        let mut second = first.clone();
+        second.id = "two".into();
+        first.name = "Same".into();
+        document.definitions.push(first);
+        document.definitions.push(second);
+        assert!(document.validate_definitions().is_err());
+    }
+
+    #[test]
+    fn definition_commands_remap_colliding_nested_definition_ids() {
+        let mut document = GraphDocument::new("nested-collision");
+        document.definitions.push(crate::GraphDefinition {
+            id: "graph_definition2".into(), name: "Graph 2".into(), kind: "graph".into(),
+            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+        });
+        document.definitions.push(crate::GraphDefinition {
+            id: "outer".into(), name: "Outer".into(), kind: "graph".into(),
+            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+        });
+        let mut session = Session::new(document);
+        let colliding = crate::GraphDefinition {
+            id: "graph_definition2".into(), name: "Graph 2".into(), kind: "graph".into(),
+            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+        };
+        session.apply_definition_commands("outer", &[
+            Command::AddDefinition { definition: colliding },
+            Command::AddNode { node: GraphNode { expressions: Default::default(), id: "nested".into(), node_type: "graph".into(), values: serde_json::json!({"definition":"graph_definition2"}), suppressed: false, x: 0.0, y: 0.0 } },
+        ]).expect("nested collision");
+        let nested = &session.document().definition("outer").unwrap().nodes[0];
+        let id = nested.values["definition"].as_str().unwrap();
+        assert_ne!(id, "graph_definition2");
+        assert!(session.document().definition(id).is_some());
+        assert!(session.document().definition("graph_definition2").is_some());
+    }
+
+    #[test]
+    fn definition_commands_can_create_nested_definitions() {
+        let mut document = GraphDocument::new("nested-create");
+        document.definitions.push(crate::GraphDefinition {
+            id: "outer".into(), name: "Outer".into(), kind: "graph".into(),
+            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+        });
+        let mut session = Session::new(document);
+        let inner = crate::GraphDefinition {
+            id: "inner".into(), name: "Inner".into(), kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: serde_json::json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 }],
+            connections: Vec::new(),
+        };
+        session.apply_definition_commands(
+            "outer",
+            &[
+                Command::AddDefinition { definition: inner },
+                Command::AddNode { node: GraphNode { expressions: Default::default(), id: "nested".into(), node_type: "graph".into(), values: serde_json::json!({"definition":"inner"}), suppressed: false, x: 0.0, y: 0.0 } },
+            ],
+        ).expect("nested create");
+        assert!(session.document().definition("inner").is_some());
+        assert_eq!(session.document().definition("outer").unwrap().nodes[0].node_type, "graph");
+        session.undo().expect("undo").expect("change");
+        assert!(session.document().definition("inner").is_none());
+        assert!(session.document().definition("outer").unwrap().nodes.is_empty());
+    }
+
+    #[test]
+    fn definition_scoped_commands_are_atomic_and_undoable() {
+        let mut document = GraphDocument::new("definition-view");
+        document.definitions.push(crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(),
+                id: "box".into(),
+                node_type: "solid".into(),
+                values: serde_json::json!({"primitiveType":"box"}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+        });
+        let mut session = Session::new(document);
+        session
+            .apply_definition_commands(
+                "feature",
+                &[Command::SetValue {
+                    node: "box".into(),
+                    field: "length".into(),
+                    value: serde_json::json!(20.0),
+                }],
+            )
+            .expect("definition edit");
+        assert_eq!(session.document().definition("feature").unwrap().nodes[0].values["length"], 20.0);
+        session.undo().expect("undo").expect("change");
+        assert!(session.document().definition("feature").unwrap().nodes[0].values.get("length").is_none());
+    }
+
+    #[test]
+    fn definition_undo_does_not_consume_root_history() {
+        let mut document = GraphDocument::new("definition-history");
+        document.root.nodes.push(GraphNode { expressions: Default::default(),
+            id: "root-node".into(),
+            node_type: "solid".into(),
+            values: serde_json::json!({"primitiveType":"box"}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        document.definitions.push(crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(),
+                id: "box".into(),
+                node_type: "solid".into(),
+                values: serde_json::json!({"primitiveType":"box"}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+        });
+        let mut session = Session::new(document);
+        session
+            .apply_commands(&[Command::SetValue {
+                node: "root-node".into(),
+                field: "length".into(),
+                value: serde_json::json!(5.0),
+            }])
+            .expect("root edit");
+        session
+            .apply_definition_commands(
+                "feature",
+                &[Command::SetValue {
+                    node: "box".into(),
+                    field: "length".into(),
+                    value: serde_json::json!(9.0),
+                }],
+            )
+            .expect("definition edit");
+        assert!(!session.has_root_undo(), "definition edit blocks root undo first");
+        session.undo_definition("feature").expect("undo def").expect("change");
+        assert!(session.document().definition("feature").unwrap().nodes[0].values.get("length").is_none());
+        assert_eq!(session.document().nodes[0].values["length"], 5.0);
+        assert!(session.has_root_undo(), "root undo becomes available after the graph edit");
+        assert!(session.undo_definition("feature").expect("no-op").is_none());
+        session.undo().expect("root undo").expect("change");
+        assert!(session.document().nodes[0].values.get("length").is_none());
+    }
+
+    #[test]
+    fn add_and_remove_definition_are_undoable() {
+        let mut session = Session::new(GraphDocument::new("definitions-command"));
+        let definition = crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
+        };
+        session
+            .apply_commands(&[Command::AddDefinition { definition }])
+            .expect("add definition");
+        assert!(session.document().definition("feature").is_some());
+        session.undo().expect("undo").expect("change");
+        assert!(session.document().definition("feature").is_none());
+        session.redo().expect("redo").expect("change");
+        assert!(session.document().definition("feature").is_some());
+        session
+            .apply_commands(&[Command::RemoveDefinition { id: "feature".into() }])
+            .expect("remove definition");
+        assert!(session.document().definition("feature").is_none());
+    }
+
+    #[test]
+    fn scoped_history_keeps_tab_edits_separate() {
+        let mut document = GraphDocument::new("scoped-tabs");
+        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "a".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "b".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        let mut session = Session::new(document);
+        session.apply_commands_scoped(
+            &[Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(1.0) }],
+            "view:1",
+            None,
+            Duration::ZERO,
+        ).unwrap();
+        session.apply_commands_scoped(
+            &[Command::SetValue { node: "b".into(), field: "length".into(), value: serde_json::json!(2.0) }],
+            "view:2",
+            None,
+            Duration::ZERO,
+        ).unwrap();
+        assert!(session.undo_scope("view:1").unwrap().is_none(), "another tab's edit is on top");
+        assert!(session.undo_scope("view:2").unwrap().is_some());
+        assert!(session.undo_scope("view:1").unwrap().is_some());
+        assert!(session.document().nodes[0].values.get("length").is_none());
+    }
+
+    #[test]
+    fn interleaved_root_and_definition_history_is_scoped() {
+        let mut document = GraphDocument::new("interleaved");
+        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "root".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        document.definitions.push(crate::GraphDefinition {
+            id: "feature".into(), name: "Feature".into(), kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }],
+            connections: Vec::new(),
+        });
+        let mut session = Session::new(document);
+        session.apply_commands_scoped(
+            &[Command::SetValue { node: "root".into(), field: "rootEdit".into(), value: serde_json::json!(1) }],
+            "view:1", None, Duration::ZERO,
+        ).unwrap();
+        session.apply_definition_commands_scoped(
+            "feature", "definition:feature:view:2",
+            &[Command::SetValue { node: "box".into(), field: "defEdit".into(), value: serde_json::json!(2) }],
+        ).unwrap();
+        session.apply_commands_scoped(
+            &[Command::SetValue { node: "root".into(), field: "rootEdit2".into(), value: serde_json::json!(3) }],
+            "view:1", None, Duration::ZERO,
+        ).unwrap();
+        assert!(session.undo_scope("view:1").unwrap().is_some());
+        assert!(session.undo_scope("view:1").unwrap().is_none(), "definition edit is on top");
+        assert!(session.undo_scope("definition:feature:view:2").unwrap().is_some());
+        assert!(session.undo_scope("view:1").unwrap().is_some());
+    }
+
+    #[test]
+    fn coalescing_does_not_cross_view_scopes() {
+        let mut document = GraphDocument::new("scope-coalesce");
+        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "a".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        let mut session = Session::new(document);
+        let command = Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(1.0) };
+        session.apply_commands_scoped(&[command], "view:1", Some("edit"), Duration::from_secs(1)).unwrap();
+        let command = Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(2.0) };
+        session.apply_commands_scoped(&[command], "view:2", Some("edit"), Duration::from_secs(1)).unwrap();
+        assert!(session.undo_scope("view:2").unwrap().is_some());
+        assert_eq!(session.document().nodes[0].values["length"], 1.0);
+        assert!(session.undo_scope("view:1").unwrap().is_some());
+    }
+
+    #[test]
+    fn set_definition_updates_hash_and_undoes() {
+        let mut document = GraphDocument::new("definition-command");
+        document.root.nodes.push(GraphNode { expressions: Default::default(),
+            id: "g".into(),
+            node_type: "graph".into(),
+            values: serde_json::json!({"definition":"feature"}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        document.definitions.push(crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode { expressions: Default::default(),
+                id: "box".into(),
+                node_type: "solid".into(),
+                values: serde_json::json!({"primitiveType":"box"}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+        });
+        let mut session = Session::new(document.clone());
+        let before = session.document().node_hashes().unwrap()["g"];
+        let mut changed = document.definitions[0].clone();
+        changed.nodes[0].values = serde_json::json!({"primitiveType":"sphere"});
+        session
+            .apply_commands(&[Command::SetDefinition { definition: changed }])
+            .expect("set definition");
+        let after = session.document().node_hashes().unwrap()["g"];
+        assert_ne!(before, after);
+        session.undo().expect("undo").expect("change");
+        assert_eq!(session.document().node_hashes().unwrap()["g"], before);
+    }
+
+    #[test]
+    fn graph_node_hash_tracks_its_local_definition() {
+        let mut document = GraphDocument::new("definitions-hash");
+        document.root.nodes.push(GraphNode { expressions: Default::default(),
+            id: "g".into(),
+            node_type: "group".into(),
+            values: serde_json::json!({
+                "name": "Feature",
+                "nodes": [
+                    {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0}
+                ],
+                "connections": [],
+                "inputs": [],
+                "outputs": []
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        groups::migrate_legacy_graph_nodes(&mut document).expect("migrate");
+        let before = document.node_hashes().expect("hashes")["g"];
+        document.definitions[0].nodes[0].x = 500.0;
+        let moved = document.node_hashes().expect("moved hashes")["g"];
+        assert_eq!(before, moved, "definition layout must not dirty geometry");
+        document.definitions[0].name = "Renamed".into();
+        let renamed = document.node_hashes().expect("renamed hashes")["g"];
+        assert_eq!(moved, renamed, "definition names must not dirty geometry");
+        document.definitions[0].nodes[0].values = serde_json::json!({"primitiveType": "box", "length": 20.0});
+        let changed = document.node_hashes().expect("changed hashes")["g"];
+        assert_ne!(renamed, changed);
     }
 
     #[test]
@@ -868,7 +1772,11 @@ mod transaction_tests {
         let graph = GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![GraphNode { expressions: Default::default(),
                 id: "f".into(),
                 node_type: "chamfer".into(),
                 values: json!({"mode": "fillet", "length": 3}),
@@ -876,8 +1784,10 @@ mod transaction_tests {
                 x: 0.0,
                 y: 0.0,
             }],
-            connections: Vec::new(),
-            interface: GraphInterface::default(),
+                connections: Vec::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         let graph = Session::new(graph).document().clone();
         assert_eq!(graph.nodes[0].node_type, "fillet");
@@ -891,15 +1801,21 @@ mod transaction_tests {
         let mut graph = GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "c".into(), node_type: "chamfer".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "d".into(), node_type: "exporter".into(), values: json!({"fileName": "part.step"}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "e".into(), node_type: "spline".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
             ],
-            connections: Vec::new(),
-            interface: GraphInterface::default(),
+                connections: Vec::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         graph = Session::new(graph).document().clone();
         assert_eq!(graph.nodes[0].values["primitiveType"], "box");

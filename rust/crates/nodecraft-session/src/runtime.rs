@@ -6,13 +6,15 @@
 //! persistent engine cache.
 
 use crate::{Command, ContentHash, GraphDocument, GraphNode, Session, SessionError};
-use nodecraft_engine::{evaluate, EngineCache, EngineOutput, ProgressEvent};
+use nodecraft_engine::{EngineCache, EngineOutput, ProgressEvent};
 use nodecraft_protocol::{CacheState, Connection, Node, Request};
 use std::collections::BTreeMap;
 
 pub struct RuntimeEvaluation {
     pub output: EngineOutput,
     pub dirty_nodes: Vec<String>,
+    /// Display-service compatibility meshes for this evaluation.
+    pub meshes: BTreeMap<String, nodecraft_protocol::MeshPayload>,
 }
 
 pub struct GraphRuntime {
@@ -24,13 +26,14 @@ pub struct GraphRuntime {
     view_targets: Vec<String>,
     selected: Option<String>,
     export_targets: Vec<String>,
+    plans: nodecraft_display::PlanCache,
 }
 
 impl GraphRuntime {
     #[must_use]
     pub fn new(document: GraphDocument) -> Self {
         let hashes = document.node_hashes().unwrap_or_default();
-        Self { session: Session::new(document), cache: EngineCache::new(), hashes, revision: 1, request_id: 1, view_targets: Vec::new(), selected: None, export_targets: Vec::new() }
+        Self { session: Session::new(document), cache: EngineCache::new(), hashes, revision: 1, request_id: 1, view_targets: Vec::new(), selected: None, export_targets: Vec::new(), plans: nodecraft_display::PlanCache::new(1024) }
     }
 
     /// Viewer targets are runtime-only view state: they are not part of the graph,
@@ -154,15 +157,24 @@ impl GraphRuntime {
             progress: progress.is_some(),
             run_exporters: false,
             mesh_tolerance,
+            preview_detail: None,
             comparison_targets: None,
             bypass_cache: false,
         };
         self.request_id += 1;
-        let output = evaluate(request, std::mem::take(&mut self.cache), progress);
+        let output = nodecraft_engine::evaluate_exact(request, std::mem::take(&mut self.cache), progress);
+        let quality = nodecraft_display::DisplayQuality::Full(mesh_tolerance.unwrap_or(0.35));
+        let meshes = nodecraft_display::protocol_meshes_for_targets(
+            mesh_targets,
+            &output.exact_parts,
+            quality,
+            &mut self.plans,
+            true,
+        );
         self.cache = output.cache.clone();
         self.revision += 1;
         self.hashes = current_hashes;
-        Ok(RuntimeEvaluation { output, dirty_nodes: dirty })
+        Ok(RuntimeEvaluation { output, dirty_nodes: dirty, meshes })
     }
 }
 
@@ -242,12 +254,18 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: "root".into(),
-            nodes: vec![
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":5}), suppressed: false, x: 100.0, y: 0.0 },
             ],
-            connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
-            interface: GraphInterface::default(),
+                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -292,13 +310,22 @@ mod command_tests {
     use serde_json::json;
 
     fn document() -> GraphDocument {
-        GraphDocument { schema_version: 1, id: "root".into(), interface: GraphInterface::default(),
-            nodes: vec![
+        GraphDocument {
+            schema_version: 1,
+            id: "root".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":0}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "c".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
             ],
-            connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -346,7 +373,11 @@ mod command_tests {
         let linked = |id: &str, path: &std::path::Path| GraphDocument {
             schema_version: 1,
             id: id.into(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![GraphNode { expressions: Default::default(),
                 id: "link".into(),
                 node_type: "linkedpart".into(),
                 values: json!({"path": path.to_string_lossy()}),
@@ -354,8 +385,10 @@ mod command_tests {
                 x: 0.0,
                 y: 0.0,
             }],
-            connections: Vec::new(),
-            interface: GraphInterface::default(),
+                connections: Vec::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         crate::store::save_atomic(&a_path, &linked("a", &b_path)).unwrap();
         crate::store::save_atomic(&b_path, &linked("b", &a_path)).unwrap();
@@ -371,24 +404,39 @@ mod command_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bracket.nodecraft");
         let linked = GraphDocument {
-            schema_version: 1, id: "bracket".into(),
-            nodes: vec![GraphNode { expressions: Default::default(), id: "p".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 }],
-            connections: Vec::new(), interface: GraphInterface::default(),
+            schema_version: 1,
+            id: "bracket".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![GraphNode { expressions: Default::default(), id: "p".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 }],
+                connections: Vec::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         crate::store::save_atomic(&path, &linked).expect("save linked");
         let document = GraphDocument {
-            schema_version: 1, id: "root".into(),
-            nodes: vec![
+            schema_version: 1,
+            id: "root".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
                 GraphNode { expressions: Default::default(), id: "link".into(), node_type: "linkedpart".into(), values: json!({"path": path.to_string_lossy()}), suppressed: false, x: 0.0, y: 0.0 },
                 GraphNode { expressions: Default::default(), id: "t".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
             ],
-            connections: vec![GraphConnection { from: "link".into(), to: "t".into(), input: "shape".into(), out: "shape".into() }],
-            interface: GraphInterface::default(),
+                connections: vec![GraphConnection { from: "link".into(), to: "t".into(), input: "shape".into(), out: "shape".into() }],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         };
         let mut runtime = GraphRuntime::new(document);
         let result = runtime.evaluate(&["t".into()], None).expect("linked evaluation");
-        let mesh = &result.output.response.meshes.get("t").expect("mesh").mesh;
-        assert!(!mesh.faces.is_empty());
+        assert!(result.output.response.node_errors.is_empty(), "{:?}", result.output.response.node_errors);
+        assert!(result.output.exact_parts.contains_key("t"), "linked evaluation did not expose its exact Part");
         std::fs::remove_dir_all(dir).ok();
     }
 

@@ -8,7 +8,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nodecraft_engine::{evaluate, EngineCache};
+use nodecraft_engine::{evaluate_exact, EngineCache};
 use nodecraft_protocol::Request;
 
 fn main() {
@@ -92,14 +92,21 @@ fn run(input: &PathBuf) -> (serde_json::Value, Option<MeshData>) {
             )
         }
     };
-    let output = evaluate(request, EngineCache::new(), None);
+    let output = evaluate_exact(request.clone(), EngineCache::new(), None);
+    let mut plans = nodecraft_display::PlanCache::new(16);
+    let (meshes, _) = nodecraft_display::protocol_meshes(
+        &request,
+        &output.exact_parts,
+        nodecraft_display::DisplayQuality::Full(0.35),
+        &mut plans,
+    );
     let error = output
         .response
         .node_errors
         .get("n1")
         .cloned()
         .filter(|error| !error.trim().is_empty());
-    let mesh = output.response.meshes.get("n1").map(|payload| &payload.mesh);
+    let mesh = meshes.get("n1").map(|payload| &payload.mesh);
     if let Some(error) = error {
         return (
             serde_json::json!({

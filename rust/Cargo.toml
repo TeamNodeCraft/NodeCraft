@@ -2,10 +2,12 @@
 members = [
   "apps/nodecraft",
   "crates/nodecraft-protocol",
+  "crates/nodecraft-exact",
   "crates/nodecraft-node-contract",
   "crates/nodecraft-kernel",
   "crates/nodecraft-worker",
   "crates/nodecraft-engine",
+  "crates/nodecraft-display",
   "crates/nodecraft-mesh",
   "crates/nodecraft-layers",
   "crates/nodecraft-sweep",
@@ -43,12 +45,11 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-step-import = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-step-brep = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-step-export = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
+solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore-step = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+step-export = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }

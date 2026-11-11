@@ -1,6 +1,6 @@
 //! wgpu viewport glue around SolidCraft's GPU renderer.
 //!
-//! The renderer, scene format and pipelines belong to `solidcraft-gpu`; this module only
+//! The renderer, scene format and pipelines belong to `solidcraft-viewport-gpu`; this module only
 //! converts a NodeCraft display mesh into a `GpuScene`, owns the `SceneSlot`, and implements
 //! the `egui_wgpu` paint callback.
 
@@ -14,11 +14,11 @@ use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
 use solidcore_record::Vec3;
 
 use crate::viewport::{PreviewScope, ViewSettings};
-use solidcraft_gpu::depth_format;
-use solidcraft_gpu::view::{gpu_view_proj, reversed_depth};
-use solidcraft_gpu::view::{Frame, GpuScene, GpuTarget, Palette, PaletteIndex, Renderer, SceneSlot};
-use solidcraft_render::surface::OpaqueSurface;
-use solidcraft_render::Camera;
+use solidcraft_viewport_gpu::depth_format;
+use solidcraft_viewport_gpu::view::{gpu_view_proj, reversed_depth};
+use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, MovingLayer, Palette, PaletteIndex, Renderer, SceneSlot};
+use solidcraft_viewport::surface::OpaqueSurface;
+use solidcraft_viewport::Camera;
 
 use crate::adapter::DisplayMesh;
 use crate::viewport_grid::grid_step;
@@ -327,12 +327,45 @@ fn fs(in: VsOut) -> FragOut {
 "#;
 
 
+/// Unlit ghost shader. Ghosts are an overlay, not material: keep the authored
+/// colour and opacity, with no lighting, roughness or metallic response.
+pub(crate) const GHOST_SHADER: &str = r#"
+struct U {
+    view_proj: mat4x4<f32>,
+    back: vec4<f32>,
+    eye: vec4<f32>,
+    params: vec4<f32>,
+    extra_model: mat4x4<f32>,
+};
+@group(0) @binding(0) var<uniform> u: U;
+
+struct GhostIn {
+    @location(2) colour: vec3<f32>,
+    @location(3) alpha: f32,
+};
+
+fn encode(c: vec3<f32>) -> vec3<f32> {
+    return select(c * 12.92, 1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), c > vec3<f32>(0.0031308));
+}
+
+@fragment
+fn fs(in: GhostIn) -> @location(0) vec4<f32> {
+    return vec4<f32>(encode(in.colour), clamp(u.params.x * in.alpha, 0.0, 1.0));
+}
+"#;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct ObjectVertex {
+pub(crate) struct ObjectVertex {
     position: [f32; 3],
     normal: [f32; 3],
     colour: [f32; 3],
+}
+
+/// CPU-side object geometry prepared away from the UI thread.
+pub(crate) struct PreparedObject {
+    pub(crate) vertices: Vec<ObjectVertex>,
+    pub(crate) indices: Vec<u32>,
 }
 
 #[repr(C)]
@@ -343,14 +376,23 @@ pub(crate) struct ObjectUniforms {
     eye: [f32; 4],
     // x = object alpha, yzw reserved.
     params: [f32; 4],
+    /// Interactive placement applied after the per-instance model matrix.
+    extra_model: [[f32; 4]; 4],
 }
 
-const OBJECT_SHADER: &str = r#"
+impl ObjectUniforms {
+    pub(crate) fn with_extra(&self, extra_model: [[f32; 4]; 4]) -> Self {
+        Self { extra_model, ..*self }
+    }
+}
+
+pub(crate) const OBJECT_SHADER: &str = r#"
 struct U {
     view_proj: mat4x4<f32>,
     back: vec4<f32>,
     eye: vec4<f32>,
     params: vec4<f32>,
+    extra_model: mat4x4<f32>,
 };
 @group(0) @binding(0) var<uniform> u: U;
 
@@ -381,8 +423,8 @@ struct Out {
 
 @vertex
 fn vs(in: In) -> Out {
-    let model = mat4x4<f32>(in.model_0, in.model_1, in.model_2, in.model_3);
-    let normal_matrix = mat4x4<f32>(in.normal_0, in.normal_1, in.normal_2, in.normal_3);
+    let model = u.extra_model * mat4x4<f32>(in.model_0, in.model_1, in.model_2, in.model_3);
+    let normal_matrix = u.extra_model * mat4x4<f32>(in.normal_0, in.normal_1, in.normal_2, in.normal_3);
     let world = model * vec4<f32>(in.position, 1.0);
     var out: Out;
     out.position = u.view_proj * world;
@@ -572,6 +614,54 @@ fn chunk_object_mesh_with_limit(
     chunks
 }
 
+pub(crate) fn prepare_object(display: &DisplayMesh, view: &ViewSettings) -> PreparedObject {
+    let mesh: &CraftMesh = &display.mesh;
+    // The app draws the solid material itself (see ObjectRenderer) so it can use
+    // the Swift viewer's light rig and tone mapping. The SolidCraft scene keeps
+    // only the edges; the blurred backdrop keeps a PBR copy for defocused colour.
+    let ignore_look = view.ignore_look_colors;
+    let uniform = if view.face_colours {
+        None
+    } else if ignore_look || display.face_colors.is_empty() {
+        Some([0.17, 0.18, 0.195])
+    } else {
+        let first = display.face_colors[0];
+        display.face_colors.iter().all(|colour| *colour == first).then_some(first)
+    };
+    if let Some((vertices, indices)) = uniform.and_then(|colour| smoothed_object_mesh(mesh, colour)) {
+        return PreparedObject { vertices, indices };
+    }
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        let [a, b, c] = triangle.map(|index| index as usize);
+        let (Some(pa), Some(pb), Some(pc)) =
+            (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+        else {
+            continue;
+        };
+        let fallback = (*pb - *pa).cross(*pc - *pa);
+        let fallback = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z);
+        let colour = if view.face_colours {
+            face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
+        } else if ignore_look {
+            [0.17, 0.18, 0.195]
+        } else {
+            display
+                .face_colors
+                .get(triangle_index)
+                .copied()
+                .unwrap_or([0.17, 0.18, 0.195])
+        };
+        for (index, point) in [(a, pa), (b, pb), (c, pc)] {
+            let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
+            indices.push(vertices.len() as u32);
+            vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
+        }
+    }
+    PreparedObject { vertices, indices }
+}
+
 struct GpuMeshAsset {
     key: u64,
     vertices: wgpu::Buffer,
@@ -611,7 +701,7 @@ impl GpuDrawItem {
 /// 3x3 with an identity translation, so it transforms directions, not points.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct GpuInstance {
+pub(crate) struct GpuInstance {
     model: [[f32; 4]; 4],
     normal: [[f32; 4]; 4],
     alpha: f32,
@@ -619,7 +709,7 @@ struct GpuInstance {
 }
 
 impl GpuInstance {
-    fn from_model(model: [[f32; 4]; 4], alpha: f32) -> Self {
+    pub(crate) fn from_model(model: [[f32; 4]; 4], alpha: f32) -> Self {
         Self { model, normal: normal_matrix(model), alpha, _padding: [0.0; 3] }
     }
 }
@@ -639,7 +729,7 @@ const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 128, shader_location: 11 },
 ];
 
-fn object_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+pub(crate) fn object_instance_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<GpuInstance>() as u64,
         step_mode: wgpu::VertexStepMode::Instance,
@@ -825,6 +915,10 @@ impl ObjectRenderer {
             label: Some("viewport-object"),
             source: wgpu::ShaderSource::Wgsl(OBJECT_SHADER.into()),
         });
+        let ghost_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("viewport-object-ghost"),
+            source: wgpu::ShaderSource::Wgsl(GHOST_SHADER.into()),
+        });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewport-object-uniforms"),
             size: std::mem::size_of::<ObjectUniforms>() as u64,
@@ -946,7 +1040,7 @@ impl ObjectRenderer {
                 buffers: &[Some(object_vertex_layout()), Some(object_instance_layout())],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &module,
+                module: &ghost_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -1146,7 +1240,7 @@ impl ObjectRenderer {
         }
     }
 
-    fn paint(&self, pass: &mut wgpu::RenderPass<'static>, transparent: bool) {
+    fn paint(&self, pass: &mut wgpu::RenderPass<'static>, transparent: bool, draw_opaque: bool) {
         let Some(instances) = self.instances.as_ref() else { return };
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, instances.slice(..));
@@ -1168,10 +1262,12 @@ impl ObjectRenderer {
             }
             return;
         }
-        pass.set_pipeline(&self.pipeline);
-        for (index, draw) in self.draws.iter().enumerate() {
-            if !draw.ghost {
-                emit(draw, pass, index);
+        if draw_opaque {
+            pass.set_pipeline(&self.pipeline);
+            for (index, draw) in self.draws.iter().enumerate() {
+                if !draw.ghost {
+                    emit(draw, pass, index);
+                }
             }
         }
         // Ghost layer: blended, depth-test-disabled, after the opaque scene.
@@ -1183,22 +1279,9 @@ impl ObjectRenderer {
             }
         }
     }
-
-    fn paint_ghost(&self, pass: &mut wgpu::RenderPass<'static>) {
-        let Some(instances) = self.instances.as_ref() else { return };
-        pass.set_pipeline(&self.ghost_pipeline);
-        pass.set_bind_group(0, &self.ghost_bind_group, &[]);
-        pass.set_vertex_buffer(1, instances.slice(..));
-        for (index, draw) in self.draws.iter().enumerate() {
-            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { continue };
-            pass.set_vertex_buffer(0, asset.vertices.slice(..));
-            pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(draw.index_start..draw.index_start + draw.index_count, 0, index as u32..index as u32 + 1);
-        }
-    }
 }
 
-fn identity_matrix() -> [[f32; 4]; 4] {
+pub(crate) fn identity_matrix() -> [[f32; 4]; 4] {
     [
         [1.0, 0.0, 0.0, 0.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -1794,12 +1877,6 @@ impl SceneTarget {
 
 /// Display-only drag preview state: the world transform plus which display
 /// bodies it applies to.
-struct GhostObject(Arc<Mutex<ObjectRenderer>>);
-
-impl Clone for GhostObject {
-    fn clone(&self) -> Self { Self(self.0.clone()) }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 struct PreviewState {
     transform: [[f32; 4]; 4],
@@ -1824,6 +1901,10 @@ pub struct GpuViewport {
     device_type: String,
     slot: SceneSlot,
     key: u64,
+    ghost_edge_slot: SceneSlot,
+    ghost_edge_key: u64,
+    ghost_edge_matrix: Option<[[f32; 4]; 4]>,
+    ghost_edge_present: bool,
     backdrop: Arc<Mutex<BackdropRenderer>>,
     backdrop_id: egui::TextureId,
     grid_extent: f64,
@@ -1837,8 +1918,11 @@ pub struct GpuViewport {
     #[allow(dead_code)] // Kept for future resource creation after GPU init.
     device: wgpu::Device,
     object: Arc<Mutex<ObjectRenderer>>,
-    ghost_object: GhostObject,
-    ghost_alpha: f32,
+    /// GPU-evaluated plan mesh; falls back to the CPU object above.
+    plan: Arc<Mutex<crate::gpu_plan::PlanState>>,
+    /// Keeps the background plan-evaluation shader compile alive.
+    #[cfg(not(target_arch = "wasm32"))]
+    _tess_later: Option<solidcraft_viewport_gpu::view::TessLater>,
     scene: Arc<Mutex<Option<SceneTarget>>>,
     view: ViewSettings,
     chrome_visible: bool,
@@ -1852,6 +1936,30 @@ pub struct GpuViewport {
     /// Cached triangle ranges for a partial-body preview. The scan runs once per
     /// scope, not once per drag frame.
     preview_ranges: Option<(PreviewScope, Option<Vec<(u32, u32)>>)>,
+}
+
+const GHOST_EDGE_WIDTH: f32 = 2.0;
+
+pub(crate) fn ghost_edge_scene(
+    edges: &[crate::adapter::DisplayEdge],
+    rgba: [u8; 4],
+    width: f32,
+) -> (GpuScene, usize) {
+    let mut scene = GpuScene::with_palette(Palette::with_stable(vec![rgba]));
+    let colour = PaletteIndex(0);
+    let mut segments = 0;
+    for edge in edges {
+        for pair in edge.points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let d = b - a;
+            if d.dot(d) <= 1.0e-20 {
+                continue;
+            }
+            scene.line(a.to_f32(), b.to_f32(), colour, width, true);
+            segments += 1;
+        }
+    }
+    (scene, segments)
 }
 
 impl GpuViewport {
@@ -1985,20 +2093,36 @@ impl GpuViewport {
             reversed_depth,
         )));
         rs.renderer.write().callback_resources.insert(object.clone());
-        let ghost_object = GhostObject(Arc::new(Mutex::new(ObjectRenderer::install(
+        #[cfg(not(target_arch = "wasm32"))]
+        let tess_later = Some(solidcraft_viewport_gpu::view::TessLater::start(
+            &rs.adapter,
+            &rs.device,
+            &rs.queue,
+            solidcraft_viewport_gpu::SHADER,
+            false,
+        ));
+        #[cfg(not(target_arch = "wasm32"))]
+        let tess_ready = tess_later.as_ref().map(|later| later.ready());
+        #[cfg(target_arch = "wasm32")]
+        let tess_ready = None;
+        let plan = Arc::new(Mutex::new(crate::gpu_plan::PlanState::new(
             &rs.device,
             rs.target_format,
             msaa_samples(),
             depth_format(&rs.device, true),
             reversed_depth,
-        ))));
-        rs.renderer.write().callback_resources.insert(ghost_object.clone());
+            tess_ready,
+        )));
         Some(Self {
             adapter: adapter_info.name,
             backend: format!("{:?}", adapter_info.backend),
             device_type: format!("{:?}", adapter_info.device_type),
             slot: Arc::new(Mutex::new(None)),
             key: 0,
+            ghost_edge_slot: Arc::new(Mutex::new(None)),
+            ghost_edge_key: 1 << 60,
+            ghost_edge_matrix: None,
+            ghost_edge_present: false,
             backdrop,
             backdrop_id,
             grid_extent: 0.0,
@@ -2014,8 +2138,9 @@ impl GpuViewport {
             },
             device: rs.device.clone(),
             object,
-            ghost_object,
-            ghost_alpha: 1.0,
+            plan,
+            #[cfg(not(target_arch = "wasm32"))]
+            _tess_later: tess_later,
             scene,
             view: ViewSettings::default(),
             chrome_visible: true,
@@ -2025,6 +2150,43 @@ impl GpuViewport {
             preview: None,
             preview_ranges: None,
         })
+    }
+
+    pub fn plan_ready(&self) -> bool {
+        self.plan.lock().ok().is_some_and(|plan| plan.tess_ready())
+    }
+
+    pub fn plan_debug(&self) -> Option<crate::gpu_plan::PlanDebug> {
+        self.plan.lock().ok().map(|plan| plan.debug_counts())
+    }
+
+    pub fn set_plans(
+        &mut self,
+        plans: Vec<nodecraft_display::PlanInstance>,
+        enabled: bool,
+        colour: Option<[f32; 3]>,
+    ) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_plans(plans, enabled, colour);
+        }
+    }
+
+    pub fn set_ghost_plans(
+        &mut self,
+        plans: Vec<nodecraft_display::PlanInstance>,
+        alpha: f32,
+        colour: Option<[f32; 3]>,
+        enabled: bool,
+    ) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_ghost_plans(plans, alpha, colour, enabled);
+        }
+    }
+
+    pub fn set_ghost_matrix(&mut self, matrix: Option<[[f32; 4]; 4]>) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_ghost_matrix(matrix);
+        }
     }
 
     pub fn bounds(&self) -> &Aabb3 {
@@ -2048,12 +2210,26 @@ impl GpuViewport {
             || self.view.triangles != view.triangles
             || self.view.normals != view.normals;
         self.view = view;
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_triangles(view.triangles);
+            plan.set_translucent(view.translucent);
+        }
         if rebuild {
             self.set_mesh(display);
         }
     }
 
     pub fn set_mesh(&mut self, display: Option<&DisplayMesh>) {
+        let prepared = display.map(|display| prepare_object(display, &self.view));
+        self.set_prepared_mesh(display, prepared);
+    }
+
+    /// Apply display geometry whose CPU mesh conversion already ran on a worker.
+    pub(crate) fn set_prepared_mesh(
+        &mut self,
+        display: Option<&DisplayMesh>,
+        prepared: Option<PreparedObject>,
+    ) {
         // A full display mesh is authoritative geometry: it already sits at the
         // edited placement, so any drag preview is retired here.
         self.preview = None;
@@ -2071,60 +2247,9 @@ impl GpuViewport {
             |display| display.mesh.bounds(),
         );
         self.bounds = self.display_bounds;
-        let mut object_vertices = Vec::new();
-        let mut object_indices = Vec::new();
-        if let Some(display) = display {
-            let mesh: &CraftMesh = &display.mesh;
-            // The app draws the solid material itself (see ObjectRenderer) so it can use
-            // the Swift viewer's light rig and tone mapping. The SolidCraft scene keeps
-            // only the edges; the blurred backdrop keeps a PBR copy for defocused colour.
-            //
-            // A uniform colour (the normal case) keeps the indexed display mesh: the
-            // old per-triangle expansion tripled the vertex count and cost ~0.7 s on
-            // a 3.3M-triangle forest. Per-face colour modes still expand, because a
-            // shared position may need a different colour per triangle.
-            let ignore_look = self.view.ignore_look_colors;
-            let uniform = if self.view.face_colours {
-                None
-            } else if ignore_look || display.face_colors.is_empty() {
-                Some([0.17, 0.18, 0.195])
-            } else {
-                let first = display.face_colors[0];
-                display.face_colors.iter().all(|colour| *colour == first).then_some(first)
-            };
-            let indexed = uniform.and_then(|colour| smoothed_object_mesh(mesh, colour));
-            if let Some((vertices, indices)) = indexed {
-                object_vertices = vertices;
-                object_indices = indices;
-            } else {
-                for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
-                    let [a, b, c] = triangle.map(|index| index as usize);
-                    let (Some(pa), Some(pb), Some(pc)) =
-                        (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
-                    else {
-                        continue;
-                    };
-                    let fallback = (*pb - *pa).cross(*pc - *pa);
-                    let fallback = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z);
-                    let colour = if self.view.face_colours {
-                        face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
-                    } else if ignore_look {
-                        [0.17, 0.18, 0.195]
-                    } else {
-                        display
-                            .face_colors
-                            .get(triangle_index)
-                            .copied()
-                            .unwrap_or([0.17, 0.18, 0.195])
-                    };
-                    for (index, point) in [(a, pa), (b, pb), (c, pc)] {
-                        let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
-                        object_indices.push(object_vertices.len() as u32);
-                        object_vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
-                    }
-                }
-            }
-        }
+        let (object_vertices, object_indices) = prepared
+            .map(|prepared| (prepared.vertices, prepared.indices))
+            .unwrap_or_default();
         if let Ok(mut renderer) = self.object.lock() {
             renderer.set_mesh(object_vertices, object_indices);
         }
@@ -2140,32 +2265,60 @@ impl GpuViewport {
         }
     }
 
-    /// Upload the standalone edit ghost mesh. This is deliberately a second
-    /// object renderer: the branch never becomes part of the breakpoint scene.
-    pub fn set_ghost_mesh(&mut self, display: Option<&DisplayMesh>, color: [u8; 3]) {
-        let color = color.map(|channel| f32::from(channel) / 255.0);
-        if let Ok(mut ghost) = self.ghost_object.0.lock() {
-            let geometry = display.and_then(|display| {
-                smoothed_object_mesh(&display.mesh, color)
-                    .or_else(|| flat_object_mesh(&display.mesh, color))
-            });
-            let (vertices, indices) = geometry.unwrap_or_default();
-            ghost.set_mesh(vertices, indices);
-            ghost.set_ghost_alpha(self.ghost_alpha);
+    /// Replace only the displayed object geometry with a coarser LOD. Edges and
+    /// the backdrop scene stay on the full display mesh, as does picking.
+    pub fn set_lod_mesh(&mut self, mesh: &CraftMesh) {
+        let colour = [0.17, 0.18, 0.195];
+        let geometry = smoothed_object_mesh(mesh, colour)
+            .or_else(|| flat_object_mesh(mesh, colour))
+            .unwrap_or_default();
+        if let Ok(mut renderer) = self.object.lock() {
+            renderer.set_mesh(geometry.0, geometry.1);
         }
     }
 
-    pub fn set_ghost_transform(&mut self, transform: Option<[[f32; 4]; 4]>, alpha: f32) {
-        self.ghost_alpha = alpha;
-        if let Ok(mut ghost) = self.ghost_object.0.lock() {
-            ghost.set_ghost_alpha(alpha);
-            ghost.set_transform(transform, None, alpha);
+    pub fn clear_plan_transient(&mut self) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.clear_transient();
         }
+    }
+
+    pub fn clear_plan_document(&mut self) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.clear_document();
+        }
+    }
+
+    pub fn set_ghost_edges(&mut self, edges: &[crate::adapter::DisplayEdge]) {
+        let theme = crate::theme::get().ghost_edge;
+        let (scene, n) = ghost_edge_scene(edges, theme, GHOST_EDGE_WIDTH);
+        if let Ok(mut slot) = self.ghost_edge_slot.lock() {
+            *slot = (n > 0).then_some(scene);
+        }
+        self.ghost_edge_present = n > 0;
+        self.ghost_edge_key = self.ghost_edge_key.wrapping_add(1);
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            eprintln!("[ghost-edges] rebuild {n} segments");
+        }
+    }
+
+    pub fn set_ghost_edge_matrix(&mut self, matrix: Option<[[f32; 4]; 4]>) {
+        self.ghost_edge_matrix = matrix;
+    }
+
+    pub fn clear_ghost_edges(&mut self) {
+        if let Ok(mut slot) = self.ghost_edge_slot.lock() {
+            *slot = None;
+        }
+        self.ghost_edge_matrix = None;
+        self.ghost_edge_present = false;
+        self.ghost_edge_key = self.ghost_edge_key.wrapping_add(1);
     }
 
     pub fn clear_ghost(&mut self) {
-        self.set_ghost_mesh(None, [97, 148, 199]);
-        self.set_ghost_transform(None, 1.0);
+        self.clear_ghost_edges();
+        self.set_ghost_plans(Vec::new(), 0.45, None, false);
+        self.set_ghost_matrix(None);
     }
 
     /// Preview a transform edit without touching the merged mesh or the scene
@@ -2232,6 +2385,13 @@ impl GpuViewport {
             ),
             None => base_bounds,
         };
+        let plan_preview = match &self.preview {
+            Some(preview) if matches!(preview.scope, PreviewScope::All) => Some(preview.transform),
+            _ => None,
+        };
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_preview_transform(plan_preview);
+        }
         if scoped {
             let (transform, scope) = match &self.preview {
                 Some(preview) => (Some(preview.transform), preview.scope.clone()),
@@ -2469,6 +2629,10 @@ impl GpuViewport {
         backdrop_crop: [f32; 4],
         backdrop_blur_scale: [f32; 4],
     ) -> GpuCallback {
+        let bounds = solidcraft_viewport::vec::Bounds {
+            min: bounds.min,
+            max: bounds.max,
+        };
         let aspect = f64::from(width) / f64::from(height.max(1.0));
         let half_height = camera.half_height();
         let (grid_minor, grid_major, grid_fine_weight) =
@@ -2482,7 +2646,7 @@ impl GpuViewport {
             grid_extent,
             grid_major,
         );
-        let clip_far = camera.clip_bounds(bounds).1;
+        let clip_far = camera.clip_bounds(&bounds).1;
         let far_reach = crate::viewport_grid::adaptive_grid_far_reach(
             [camera.eye().x, camera.eye().y, camera.eye().z],
             [back_vec.x, back_vec.y, back_vec.z],
@@ -2494,7 +2658,7 @@ impl GpuViewport {
         // Keep the model's normal near/far planes. Expanding them for the grid
         // destroys depth precision and makes large perspective models flicker.
         let view_proj = shift_view_proj(
-            camera.view_proj_bounds(aspect, bounds).to_f32(),
+            camera.view_proj_bounds(aspect, &bounds).to_f32(),
             lens_shift,
         );
         // A whole-mesh preview transforms the scene projection instead of
@@ -2564,7 +2728,7 @@ impl GpuViewport {
             },
             axis_y: {
                 let mut colour = colour(theme.axis_y, 1.0);
-                colour[3] = camera.clip_bounds(bounds).1 as f32;
+                colour[3] = camera.clip_bounds(&bounds).1 as f32;
                 colour
             },
             options: [
@@ -2590,21 +2754,29 @@ impl GpuViewport {
                 self.view.roughness,
                 self.view.metallic,
             ],
+            extra_model: identity_matrix(),
         };
         GpuCallback {
             object,
-            ghost_alpha: self.ghost_alpha,
             background: self.background,
             view: self.view,
             chrome_visible: self.chrome_visible,
             frame: Frame {
             product: false,
             preview_bounds: None,
-            moving: None,
+            moving: self
+                .ghost_edge_matrix
+                .filter(|_| self.ghost_edge_present)
+                .map(|transform| MovingLayer {
+                    key: self.ghost_edge_key,
+                    slot: self.ghost_edge_slot.clone(),
+                    transform,
+                }),
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),
             key: self.key,
+            turned_depth: None,
             slot: self.slot.clone(),
             sketch_key: 0,
             sketch_slot: Arc::new(Mutex::new(None)),
@@ -2625,7 +2797,7 @@ impl GpuViewport {
             outline: false,
             eye: [eye[0], eye[1], eye[2], if camera.fov > 0.0 { 1.0 } else { 0.0 }],
             ao_radius: 0.0,
-            ao_samples: solidcraft_gpu::view::AO_SAMPLES,
+            ao_samples: solidcraft_viewport_gpu::view::AO_SAMPLES,
             ssaa: 1.0,
             hover_tint: [0.0; 3],
             selection_tint: [0.0; 3],
@@ -2637,6 +2809,7 @@ impl GpuViewport {
             backdrop_crop,
             target_format: self.target_format,
             scene: self.scene.clone(),
+            plan: self.plan.clone(),
             grid,
             axis,
         }
@@ -2666,7 +2839,6 @@ fn crop_view_proj(vp: [[f32; 4]; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
 /// One viewport draw as an egui paint callback.
 pub struct GpuCallback {
     pub object: ObjectUniforms,
-    pub ghost_alpha: f32,
     pub background: [u8; 4],
     pub view: ViewSettings,
     #[allow(dead_code)] // Reserved for GPU chrome rendering.
@@ -2677,6 +2849,7 @@ pub struct GpuCallback {
     pub backdrop_crop: [f32; 4],
     pub target_format: wgpu::TextureFormat,
     pub scene: Arc<Mutex<Option<SceneTarget>>>,
+    pub plan: Arc<Mutex<crate::gpu_plan::PlanState>>,
     pub grid: GridUniforms,
     pub axis: AxisUniforms,
 }
@@ -2704,13 +2877,14 @@ impl CallbackTrait for GpuCallback {
                 object.prepare(device, queue, &self.object);
             }
         }
-        if let Some(ghost) = resources.get::<GhostObject>() {
-            if let Ok(mut ghost) = ghost.0.lock() {
-                let mut uniforms = self.object;
-                uniforms.params[0] = self.ghost_alpha;
-                ghost.prepare(device, queue, &uniforms);
-            }
-        }
+        let plan_active = self
+            .plan
+            .lock()
+            .map(|mut plan| {
+                plan.prepare(device, queue, encoder, &self.object);
+                plan.is_available()
+            })
+            .unwrap_or(false);
         {
             let Some(renderer) = resources.get_mut::<Renderer>() else {
                 return Vec::new();
@@ -2773,13 +2947,17 @@ impl CallbackTrait for GpuCallback {
                     pass.set_pipeline(&clear.pipeline);
                     pass.set_bind_group(0, &clear.bind_group, &[]);
                     pass.draw(0..3, 0..1);
-                    if let Ok(object) = object.lock() {
-                        object.paint(&mut pass, self.view.translucent);
-                    }
-                    if let Some(ghost) = resources.get::<GhostObject>() {
-                        if let Ok(ghost) = ghost.0.lock() {
-                            ghost.paint_ghost(&mut pass);
+                    if plan_active {
+                        if let Ok(plan) = self.plan.lock() {
+                            plan.paint(&mut pass);
                         }
+                    }
+                    if let Ok(object) = object.lock() {
+                        object.paint(
+                            &mut pass,
+                            self.view.translucent && !plan_active,
+                            !plan_active,
+                        );
                     }
                     renderer.paint(
                         &self.frame,
@@ -3086,4 +3264,31 @@ mod tests {
         }
         assert_eq!(cursor, total * 3);
     }
+    fn ghost_edge(points: Vec<solidcore_record::Vec3>) -> crate::adapter::DisplayEdge {
+        crate::adapter::DisplayEdge {
+            id: "edge:0".into(),
+            midpoint: [0.0, 0.0, 0.0],
+            normals: Vec::new(),
+            points,
+        }
+    }
+
+    #[test]
+    fn ghost_edge_scene_counts_non_degenerate_segments() {
+        let edge = ghost_edge(vec![
+            solidcore_record::Vec3::new(0.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(1.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(1.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(1.0, 1.0, 0.0),
+        ]);
+        let (_, segments) = ghost_edge_scene(&[edge], [255, 255, 255, 80], 1.6);
+        assert_eq!(segments, 2);
+    }
+
+    #[test]
+    fn ghost_edge_scene_is_empty_for_no_edges() {
+        let (_, segments) = ghost_edge_scene(&[], [255, 255, 255, 80], 1.6);
+        assert_eq!(segments, 0);
+    }
+
 }

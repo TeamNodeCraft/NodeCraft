@@ -75,6 +75,9 @@ pub(super) struct ToolItem {
     pub(super) label: &'static str,
     pub(super) node_type: &'static str,
     pub(super) primitive: Option<&'static str>,
+    /// A split item's secondary menu. The primary click adds this item; the
+    /// chevron opens the listed variants.
+    pub(super) submenu: Option<&'static [ToolItem]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,48 +141,56 @@ impl ToolSection {
 
     fn groups(self) -> &'static [ToolGroup] {
         const SKETCH: &[ToolItem] = &[
-            ToolItem { label: "Sketch", node_type: "sketch", primitive: None },
-            ToolItem { label: "Spline", node_type: "spline", primitive: None },
+            ToolItem { label: "Sketch", node_type: "sketch", primitive: None , submenu: None },
+            ToolItem { label: "Spline", node_type: "spline", primitive: None , submenu: None },
         ];
         const SOLIDS: &[ToolItem] = &[
-            ToolItem { label: "Box", node_type: "solid", primitive: Some("box") },
-            ToolItem { label: "Sphere", node_type: "solid", primitive: Some("sphere") },
-            ToolItem { label: "Cylinder", node_type: "solid", primitive: Some("cylinder") },
-            ToolItem { label: "Cone", node_type: "solid", primitive: Some("cone") },
-            ToolItem { label: "Torus", node_type: "solid", primitive: Some("torus") },
-            ToolItem { label: "Pyramid", node_type: "solid", primitive: Some("pyramid") },
-            ToolItem { label: "Wedge", node_type: "solid", primitive: Some("wedge") },
-            ToolItem { label: "Partial Sphere", node_type: "solid", primitive: Some("partialSphere") },
-            ToolItem { label: "Partial Torus", node_type: "solid", primitive: Some("partialTorus") },
+            ToolItem { label: "Box", node_type: "solid", primitive: Some("box") , submenu: None },
+            ToolItem { label: "Sphere", node_type: "solid", primitive: Some("sphere") , submenu: None },
+            ToolItem { label: "Cylinder", node_type: "solid", primitive: Some("cylinder") , submenu: None },
+            ToolItem { label: "Cone", node_type: "solid", primitive: Some("cone") , submenu: None },
+            ToolItem { label: "Torus", node_type: "solid", primitive: Some("torus") , submenu: None },
+            ToolItem { label: "Pyramid", node_type: "solid", primitive: Some("pyramid") , submenu: None },
+            ToolItem { label: "Wedge", node_type: "solid", primitive: Some("wedge") , submenu: None },
+            ToolItem { label: "Partial Sphere", node_type: "solid", primitive: Some("partialSphere") , submenu: None },
+            ToolItem { label: "Partial Torus", node_type: "solid", primitive: Some("partialTorus") , submenu: None },
         ];
         const FEATURES: &[ToolItem] = &[
-            ToolItem { label: "Extrude", node_type: "extrude", primitive: None },
-            ToolItem { label: "Loft", node_type: "loft", primitive: None },
-            ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None },
+            ToolItem { label: "Extrude", node_type: "extrude", primitive: None , submenu: None },
+            ToolItem { label: "Loft", node_type: "loft", primitive: None , submenu: None },
+            ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None , submenu: None },
         ];
         const MODIFY: &[ToolItem] = &[
-            ToolItem { label: "Transform", node_type: "translate", primitive: None },
-            ToolItem { label: "Mirror", node_type: "mirror", primitive: None },
-            ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None },
-            ToolItem { label: "Fillet", node_type: "fillet", primitive: None },
-            ToolItem { label: "Shell", node_type: "shell", primitive: None },
-            ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None },
+            ToolItem { label: "Transform", node_type: "translate", primitive: None , submenu: None },
+            ToolItem { label: "Mirror", node_type: "mirror", primitive: None , submenu: None },
+            ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None , submenu: None },
+            ToolItem { label: "Fillet", node_type: "fillet", primitive: None , submenu: None },
+            ToolItem { label: "Shell", node_type: "shell", primitive: None , submenu: None },
+            ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None , submenu: None },
         ];
-        const BOOLEAN: &[ToolItem] = &[ToolItem { label: "Boolean", node_type: "boolean", primitive: None }];
-        const PATTERN: &[ToolItem] = &[ToolItem { label: "Scatter", node_type: "scatter", primitive: None }];
+        const BOOLEAN: &[ToolItem] = &[ToolItem { label: "Boolean", node_type: "boolean", primitive: None , submenu: None }];
+        const PATTERN: &[ToolItem] = &[ToolItem { label: "Scatter", node_type: "scatter", primitive: None , submenu: None }];
         const ORGANISE: &[ToolItem] = &[
-            ToolItem { label: "Combine to Part", node_type: "combine", primitive: None },
-            ToolItem { label: "Group", node_type: "group", primitive: None },
-            ToolItem { label: "Look", node_type: "look", primitive: None },
+            ToolItem { label: "Combine to Part", node_type: "combine", primitive: None , submenu: None },
+            ToolItem { label: "Graph", node_type: "graph", primitive: None , submenu: None },
+            ToolItem { label: "Look", node_type: "look", primitive: None , submenu: None },
         ];
         const IO: &[ToolItem] = &[
-            ToolItem { label: "Import STEP", node_type: "stepimporter", primitive: None },
-            ToolItem { label: "Linked Part", node_type: "linkedpart", primitive: None },
-            ToolItem { label: "Export STEP", node_type: "exporter", primitive: None },
+            ToolItem { label: "Import STEP", node_type: "stepimporter", primitive: None , submenu: None },
+            ToolItem { label: "Linked Part", node_type: "linkedpart", primitive: None , submenu: None },
+            ToolItem { label: "Export STEP", node_type: "exporter", primitive: None , submenu: None },
         ];
+        // One default Solid entry; the primitive variants live behind its
+        // split-menu chevron so the flyout stays compact.
+        const SOLID: &[ToolItem] = &[ToolItem {
+            label: "Solid",
+            node_type: "solid",
+            primitive: Some("box"),
+            submenu: Some(SOLIDS),
+        }];
         const CREATE: &[ToolGroup] = &[
             ToolGroup { heading: Some("Sketch"), tools: SKETCH },
-            ToolGroup { heading: Some("Solid"), tools: SOLIDS },
+            ToolGroup { heading: None, tools: SOLID },
             ToolGroup { heading: Some("Features"), tools: FEATURES },
         ];
         const MODIFY_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: MODIFY }];
@@ -221,11 +232,13 @@ impl NodeCraftApp {
     pub(super) fn open_tool_menu(&mut self, section: ToolSection, select_first: bool) {
         self.tool_dock_focus = Some(ToolDockFocus::Menu { section });
         self.tool_menu_index = select_first.then_some(0);
+        self.tool_solid_submenu_open = false;
     }
 
     pub(super) fn close_tool_dock(&mut self) {
         self.tool_dock_focus = None;
         self.tool_menu_index = None;
+        self.tool_solid_submenu_open = false;
         self.tool_search_result_index = None;
         self.tool_dock_keyboard_active = false;
     }
@@ -524,12 +537,17 @@ impl NodeCraftApp {
                             for section in ToolSection::ALL {
                                 for group in section.groups() {
                                     for tool in group.tools {
-                                        let wildcard = nodecraft_search::wildcard_matches(&pattern, tool.label)
-                                            || nodecraft_search::wildcard_matches(&pattern, tool.node_type);
-                                        let distance = nodecraft_search::best_levenshtein(&needle, tool.label)
-                                            .min(nodecraft_search::best_levenshtein(&needle, tool.node_type));
-                                        if wildcard || distance <= threshold {
-                                            found.push((if wildcard { 0 } else { distance }, section, *tool));
+                                        let variants = std::iter::once(tool).chain(
+                                            tool.submenu.unwrap_or(&[]).iter(),
+                                        );
+                                        for candidate in variants {
+                                            let wildcard = nodecraft_search::wildcard_matches(&pattern, candidate.label)
+                                                || nodecraft_search::wildcard_matches(&pattern, candidate.node_type);
+                                            let distance = nodecraft_search::best_levenshtein(&needle, candidate.label)
+                                                .min(nodecraft_search::best_levenshtein(&needle, candidate.node_type));
+                                            if wildcard || distance <= threshold {
+                                                found.push((if wildcard { 0 } else { distance }, section, *candidate));
+                                            }
                                         }
                                     }
                                 }
@@ -716,6 +734,10 @@ impl NodeCraftApp {
         if self.tool_dock_keyboard_active
             && ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft))
         {
+            if self.tool_solid_submenu_open {
+                self.tool_solid_submenu_open = false;
+                return;
+            }
             self.focus_tool_root(Self::tool_section_index(section));
             self.tool_menu_rect = None;
             return;
@@ -744,6 +766,15 @@ impl NodeCraftApp {
                     Some(index) => index.saturating_sub(1),
                     None => items.len() - 1,
                 });
+            }
+            if self.tool_dock_keyboard_active
+                && ctx.input(|input| input.key_pressed(egui::Key::ArrowRight))
+                && self
+                    .tool_menu_index
+                    .and_then(|index| items.get(index))
+                    .is_some_and(|tool| tool.submenu.is_some())
+            {
+                self.tool_solid_submenu_open = true;
             }
         }
         let heading_count = groups.iter().filter(|group| group.heading.is_some()).count();
@@ -789,6 +820,8 @@ impl NodeCraftApp {
             None
         };
         let mut chosen = keyboard_choice;
+        let mut solid_split_rect = None;
+        let mut solid_submenu: Option<&'static [ToolItem]> = None;
         let menu_response = egui::Area::new(egui::Id::new("node-tool-dock-menu"))
             .order(egui::Order::Foreground)
             .fixed_pos(menu_pos)
@@ -843,14 +876,29 @@ impl NodeCraftApp {
                                 egui::Vec2::new(row_width, 28.0),
                                 egui::Sense::click(),
                             );
-                            if response.hovered() || selected {
+                            let split = tool.submenu.is_some();
+                            let chevron_width = 22.0;
+                            let chevron_rect = egui::Rect::from_min_max(
+                                egui::Pos2::new(rect.right() - chevron_width, rect.top()),
+                                rect.max,
+                            );
+                            let chevron = split.then(|| {
+                                ui.interact(
+                                    chevron_rect,
+                                    egui::Id::new(("tool-split-chevron", section.label(), item_index)),
+                                    egui::Sense::click(),
+                                )
+                            });
+                            let row_hovered = response.hovered()
+                                || chevron.as_ref().is_some_and(|response| response.hovered());
+                            if row_hovered || selected {
                                 let fill = if selected {
                                     theme.with_alpha(theme.accent, 170)
                                 } else {
                                     theme.with_alpha(theme.control, 190)
                                 };
                                 ui_shape::fill(&ui.painter(), rect, fill);
-                                if response.hovered() {
+                                if row_hovered {
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                 }
                             }
@@ -874,24 +922,124 @@ impl NodeCraftApp {
                                 label_font.clone(),
                                 theme.color(theme.text),
                             );
+                            if split {
+                                let separator_x = rect.right() - chevron_width;
+                                ui.painter().line_segment(
+                                    [
+                                        egui::Pos2::new(separator_x, rect.top() + 5.0),
+                                        egui::Pos2::new(separator_x, rect.bottom() - 5.0),
+                                    ],
+                                    egui::Stroke::new(1.0, theme.with_alpha(theme.border, 170)),
+                                );
+                                ui.painter().text(
+                                    egui::Pos2::new(
+                                        rect.right() - chevron_width * 0.5,
+                                        rect.center().y,
+                                    ),
+                                    egui::Align2::CENTER_CENTER,
+                                    "›",
+                                    egui::FontId::proportional(18.0),
+                                    theme.color(theme.text),
+                                );
+                                solid_split_rect = Some(rect);
+                                solid_submenu = tool.submenu;
+                            }
                             let response = response.on_hover_text(match tool.primitive {
                                 Some(primitive) => format!("Add {} ({primitive})", tool.label),
                                 None => format!("Add {}", tool.label),
                             });
-                                if response.clicked() {
-                                    chosen = Some(*tool);
-                                }
+                            if chevron
+                                .as_ref()
+                                .is_some_and(|response| response.clicked())
+                            {
+                                self.tool_solid_submenu_open = !self.tool_solid_submenu_open;
+                                solid_submenu = tool.submenu;
+                                solid_split_rect = Some(rect);
+                            } else if response.clicked() {
+                                chosen = Some(*tool);
+                            }
                                 item_index += 1;
                             }
                         }
                     });
             });
-        self.tool_menu_rect = Some(menu_response.response.rect);
+        // The Solid split item's chevron opens the primitive list beside the
+        // main flyout. It is a second Area so it can line up with the split row
+        // and extend the click-away/blocking region.
+        let mut solid_submenu_rect = None;
+        if self.tool_solid_submenu_open
+            && let (Some(anchor), Some(tools)) = (solid_split_rect, solid_submenu)
+        {
+            let submenu_font = egui::FontId::proportional(13.0);
+            let longest = tools
+                .iter()
+                .map(|tool| label_width(tool.label))
+                .fold(0.0_f32, f32::max);
+            let submenu_width = (longest + 20.0).clamp(140.0, 264.0);
+            let submenu_height = 32.0 + tools.len() as f32 * 28.0;
+            let x = menu_response.response.rect.right() + 4.0;
+            let y = anchor.top().clamp(
+                workspace.top() + 12.0,
+                (workspace.bottom() - 12.0 - submenu_height).max(workspace.top() + 12.0),
+            );
+            let submenu = egui::Area::new(egui::Id::new("node-tool-dock-solid-menu"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(egui::Pos2::new(x, y))
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(theme.color(theme.popup))
+                        .stroke(egui::Stroke::new(1.0, theme.color(theme.border_strong)))
+                        .corner_radius(egui::CornerRadius::same(12))
+                        .inner_margin(egui::Margin::same(8))
+                        .show(ui, |ui| {
+                            ui.set_width(submenu_width);
+                            ui.label(
+                                egui::RichText::new("SOLID")
+                                    .size(10.0)
+                                    .color(theme.color(theme.muted)),
+                            );
+                            ui.add_space(3.0);
+                            for tool in tools {
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::Vec2::new(submenu_width, 28.0),
+                                    egui::Sense::click(),
+                                );
+                                if response.hovered() {
+                                    ui_shape::fill(
+                                        &ui.painter(),
+                                        rect,
+                                        theme.with_alpha(theme.control, 190),
+                                    );
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                }
+                                ui.painter().text(
+                                    egui::Pos2::new(rect.min.x + 10.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    tool.label,
+                                    submenu_font.clone(),
+                                    theme.color(theme.text),
+                                );
+                                let response = response.on_hover_text(match tool.primitive {
+                                    Some(primitive) => format!("Add {} ({primitive})", tool.label),
+                                    None => format!("Add {}", tool.label),
+                                });
+                                if response.clicked() {
+                                    chosen = Some(*tool);
+                                }
+                            }
+                        });
+                });
+            solid_submenu_rect = Some(submenu.response.rect);
+        }
+        let menu_rect = solid_submenu_rect.map_or(menu_response.response.rect, |submenu| {
+            menu_response.response.rect.union(submenu)
+        });
+        self.tool_menu_rect = Some(menu_rect);
         let clicked_outside_menu = !category_clicked
             && ctx.input(|input| input.pointer.any_click())
             && ctx
                 .pointer_latest_pos()
-                .is_none_or(|pointer| !menu_response.response.rect.contains(pointer));
+                .is_none_or(|pointer| !menu_rect.contains(pointer));
         if clicked_outside_menu {
             self.close_tool_dock();
             self.tool_add_source = None;
@@ -903,4 +1051,31 @@ impl NodeCraftApp {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_menu_has_a_split_solid_with_hidden_primitives() {
+        let groups = ToolSection::Create.groups();
+        let top_level: Vec<&str> = groups
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .map(|tool| tool.label)
+            .collect();
+        assert_eq!(top_level, vec!["Sketch", "Spline", "Solid", "Extrude", "Loft", "Surface Loft"]);
+        let solid = groups
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .find(|tool| tool.label == "Solid")
+            .expect("Solid split item");
+        assert_eq!(solid.node_type, "solid");
+        assert_eq!(solid.primitive, Some("box"));
+        let variants = solid.submenu.expect("solid variants");
+        assert!(variants.iter().any(|tool| tool.label == "Sphere"));
+        assert!(variants.iter().any(|tool| tool.label == "Partial Torus"));
+        assert!(top_level.iter().all(|label| *label != "Sphere"));
+    }
 }

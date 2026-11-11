@@ -13,6 +13,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if !self.bypass_cache && cache_is_fresh && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.note_brep_hit();
             self.cache_hits += 1;
+            self.brep_cache_hits += 1;
             self.breps.insert(node.id.clone(), brep.clone());
             return Ok(brep);
         }
@@ -67,19 +68,39 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         None
     }
 
-    /// Exact B-rep for a Boolean operand, memoized per evaluation pass.    /// Exact B-rep for a Boolean operand, memoized per evaluation pass. Without
+    /// Exact B-rep for a Boolean operand, memoized per evaluation pass. Without
     /// this every fuse reconstructs its entire upstream B-rep tree.
+    #[cfg(test)]
     pub(crate) fn operand_breps(&mut self, start: &str) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
         let node = self.request.nodes.iter().find(|item| item.id == start).cloned().ok_or("Boolean operand node missing")?;
+        if node.node_type == "combine" {
+            // Combine-to-Part is concatenation. Collect the connected operands
+            // directly instead of materializing an intermediate Part and copying
+            // every body through `realized_solids` before the Boolean.
+            let mut inputs = Vec::new();
+            for link in self
+                .request
+                .connections
+                .iter()
+                .filter(|link| link.to == start && link.input == "shape")
+            {
+                inputs.extend(self.operand_breps(&link.from)?);
+            }
+            if inputs.is_empty() {
+                return Err("Combine exact operand has no inputs".into());
+            }
+            return Ok(inputs);
+        }
         if node.node_type == "mirror" {
-            // SolidCore's mirrored analytic B-rep is topologically valid but a Boolean
-            // difference against a transformed cylinder currently removes no material.
-            // Build the Boolean operand from the exact mirrored display tessellation
-            // instead, so both reflected sides are cut. This is still a closed B-rep.
-            let mesh = self.evaluate(start).ok_or("Mirror display mesh unavailable")?;
-            let points: Vec<[f64; 3]> = mesh.vertices.iter().map(|v| [v[0] as f64, v[1] as f64, v[2] as f64]).collect();
-            let triangles: Vec<[u32; 3]> = mesh.faces.clone();
-            Ok(vec![nodecraft_solidcore::brep_from_triangles(&points, &triangles)?])
+            let link = self
+                .request
+                .connections
+                .iter()
+                .find(|link| link.to == node.id && link.input == "shape")
+                .ok_or("Mirror has no shape input")?;
+            let mut brep = copy_brep(self.breps.get(&link.from).ok_or("Mirror source has no exact B-rep")?.as_ref())?;
+            crate::mirror_brep(&mut brep, &node.values)?;
+            Ok(vec![brep])
         } else if node.node_type == "translate" {
             let link = self.request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
             let mut inputs = self.operand_breps(&link.from)?;
@@ -94,6 +115,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn operand_brep(&mut self, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
         let started = Instant::now();
         let result = self.operand_brep_inner(start);
@@ -102,6 +124,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         result
     }
 
+    #[cfg(test)]
     pub(crate) fn operand_brep_inner(&mut self, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
         if let Some(brep) = self.breps.get(start).cloned() {
             self.emit_progress(start, ProgressPhase::BrepStart);
@@ -115,6 +138,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if !self.bypass_cache && node_cache_is_fresh(&node) && let Some(brep) = self.cache.brep(&cache_key) {
             self.cache.note_brep_hit();
             self.cache_hits += 1;
+            self.brep_cache_hits += 1;
             self.breps.insert(start.to_string(), brep.clone());
             self.emit_progress(start, ProgressPhase::BrepStart);
             let out = snapshot_brep(&brep)?;
@@ -198,9 +222,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         result
     }
 
-    /// Warm exact primitive and translate B-reps through the dependency
-    /// scheduler. Translate tasks consume their dependency's typed result; all
-    /// other node types remain on the lazy evaluator path for now.
+    /// Warm independent primitive/import/loft B-reps and their cheap transforms
+    /// through the dependency scheduler. Heavy feature nodes (Boolean, fillet,
+    /// chamfer, shell, extrude) stay on the exact Part path: its batched Boolean
+    /// path is substantially faster than the generic ops path used here, and
+    /// duplicating their validation was the dominant cost on blend-heavy graphs.
     pub(crate) fn prewarm_primitives(&mut self) {
         use crate::scheduler::ScheduledTask;
         // Only warm the target closure. A request carries the whole document;
@@ -209,45 +235,89 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let scope: std::collections::HashSet<String> =
             evaluation_order_for_targets(self.request).into_iter().collect();
         let profile = crate::workload::profile_request(self.request);
-        if crate::workload_profiler_enabled() && !profile.exact_dispatch_is_worthwhile() {
+        if !profile.exact_dispatch_is_worthwhile() {
             return;
         }
         let mut tasks = Vec::new();
         let mut keys = std::collections::BTreeMap::new();
-        let mut warmable = std::collections::BTreeSet::new();
-        for node in self.request.nodes.iter() {
-            if (node.node_type == "solid" || node.node_type == "primitive") && !node.suppressed && scope.contains(&node.id) {
-                warmable.insert(node.id.clone());
-            }
+        let by_id: std::collections::HashMap<&str, &Node> = self
+            .request
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        let mut inputs: std::collections::HashMap<&str, Vec<(&str, &str)>> =
+            std::collections::HashMap::new();
+        let mut children: std::collections::HashMap<&str, Vec<&str>> =
+            std::collections::HashMap::new();
+        for link in &self.request.connections {
+            inputs
+                .entry(link.to.as_str())
+                .or_default()
+                .push((link.input.as_str(), link.from.as_str()));
+            children
+                .entry(link.from.as_str())
+                .or_default()
+                .push(link.to.as_str());
         }
-        // Include translate chains whose source is already warmable.
-        loop {
-            let mut grew = false;
-            for node in self.request.nodes.iter() {
-                if node.suppressed || warmable.contains(&node.id) || !scope.contains(&node.id) {
-                    continue;
-                }
+        let mut warmable = std::collections::BTreeSet::new();
+        let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        fn ready(
+            node: &Node,
+            inputs: &std::collections::HashMap<&str, Vec<(&str, &str)>>,
+            warmable: &std::collections::BTreeSet<String>,
+        ) -> bool {
+            inputs.get(node.id.as_str()).is_some_and(|inputs| {
                 let connected = |input: &str| {
-                    self.request.connections.iter()
-                        .find(|link| link.to == node.id && link.input == input)
-                        .map(|link| warmable.contains(&link.from))
-                        .unwrap_or(false)
+                    inputs.iter().any(|(candidate, from)| {
+                        *candidate == input && warmable.contains(*from)
+                    })
                 };
-                let ready = match node.node_type.as_str() {
-                    "translate" | "mirror" | "fillet" | "chamfer" | "shell" => connected("shape"),
+                match node.node_type.as_str() {
+                    "fillet" | "chamfer" | "shell" => connected("shape"),
                     "boolean" | "fuse" => connected("a") && connected("b"),
                     "extrude" => connected("profile") || connected("shape"),
-                    "stepimporter" => node.values.get("path").and_then(serde_json::Value::as_str).is_some_and(|path| !path.is_empty()),
+                    "stepimporter" => node
+                        .values
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|path| !path.is_empty()),
                     "loft" | "surfaceloft" => true,
                     _ => false,
-                };
-                if ready {
-                    warmable.insert(node.id.clone());
-                    grew = true;
                 }
-            }
-            if !grew { break; }
+            })
         }
+        for node in self.request.nodes.iter() {
+            if node.suppressed || !scope.contains(&node.id) {
+                continue;
+            }
+            let start = (node.node_type == "solid" || node.node_type == "primitive")
+                || (node.node_type == "stepimporter"
+                    && node
+                        .values
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|path| !path.is_empty()))
+                || matches!(node.node_type.as_str(), "loft" | "surfaceloft");
+            if start {
+                warmable.insert(node.id.clone());
+                queue.push_back(node.id.as_str());
+            }
+        }
+        while let Some(id) = queue.pop_front() {
+            for child in children.get(id).cloned().unwrap_or_default() {
+                if !scope.contains(child) || warmable.contains(child) {
+                    continue;
+                }
+                let Some(node) = by_id.get(child) else { continue };
+                if node.suppressed || !ready(node, &inputs, &warmable) {
+                    continue;
+                }
+                warmable.insert(child.to_owned());
+                queue.push_back(child);
+            }
+        }
+        drop(by_id);
         let mut loft_inputs: std::collections::BTreeMap<String, (crate::SketchOutput, crate::SketchOutput, bool)> =
             std::collections::BTreeMap::new();
         let mut surface_inputs: std::collections::BTreeMap<String, (Vec<crate::SketchOutput>, bool)> =
@@ -281,6 +351,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         for node in self.request.nodes.iter() {
             if !warmable.contains(&node.id) || !node_cache_is_fresh(node) { continue; }
+            // Heavy feature nodes are evaluated by the exact Part path, which
+            // uses the batched Boolean implementation and avoids duplicate
+            // ops-layer validation. Only warm work that is independent and cheap.
+            if matches!(node.node_type.as_str(), "boolean" | "fuse" | "fillet" | "chamfer" | "shell" | "extrude") {
+                continue;
+            }
             let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
             let cache_key = (node.id.clone(), node_key);
             if self.breps.contains_key(&node.id)
@@ -301,119 +377,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                                 .map(std::sync::Arc::new)
                         },
                     ));
-                }
-                "translate" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").cloned() else { continue };
-                    let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-                    let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "translate source did not prewarm".to_owned())?;
-                        Ok(Box::new(move |kernel| {
-                            let mut brep = copy_brep(&source)?;
-                            apply_brep_placement_with_kernel(kernel, &mut brep, offset, rotation)?;
-                            Ok(std::sync::Arc::new(brep))
-                        }))
-                    }));
-                }
-                "mirror" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").cloned() else { continue };
-                    let values = node.values.clone();
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "mirror source did not prewarm".to_owned())?;
-                        let values = values.clone();
-                        Ok(Box::new(move |kernel| {
-                            let mut brep = copy_brep(&source)?;
-                            mirror_brep_with_kernel(kernel, &mut brep, &values)?;
-                            Ok(std::sync::Arc::new(brep))
-                        }))
-                    }));
-                }
-                "boolean" | "fuse" => {
-                    let (Some(a), Some(b)) = (
-                        self.request.connections.iter().find(|link| link.to == node.id && link.input == "a").cloned(),
-                        self.request.connections.iter().find(|link| link.to == node.id && link.input == "b").cloned(),
-                    ) else { continue };
-                    let (op, reverse) = match boolean_mode(&node.values) { Ok((op, reverse)) => (ops_boolean(op), reverse), Err(_) => continue };
-                    let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
-                    tasks.push(ScheduledTask::new(id, vec![a.clone(), b.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let a = deps.get(&a).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean A did not prewarm".to_owned())?;
-                        let b = deps.get(&b).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "boolean B did not prewarm".to_owned())?;
-                        Ok(Box::new(move |kernel| {
-                            let result = nodecraft_layers::boolean_breps_ops(kernel, &a, &b, op)?
-                                .unwrap_or_else(nodecraft_solidcore::solidcore::topology::Brep::new);
-                            Ok(std::sync::Arc::new(result))
-                        }))
-                    }));
-                }
-                "extrude" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).cloned() else { continue };
-                    let reference = node.values.get("faces").and_then(serde_json::Value::as_array).and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
-                    let Some(face_index) = face_reference_index(reference) else { continue };
-                    let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "extrude source did not prewarm".to_owned())?;
-                        Ok(Box::new(move |kernel| {
-                            let face = source.faces().ids().nth(face_index).ok_or_else(|| format!("Extrude face {face_index} does not exist"))?;
-                            let brep = nodecraft_extrude::extrude_planar_face_exact(kernel, &source, face, amount).map_err(|error| error.to_string())?;
-                            Ok(std::sync::Arc::new(brep))
-                        }))
-                    }));
-                }
-                "fillet" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").cloned() else { continue };
-                    let mut values = node.values.clone();
-                    values["mode"] = serde_json::json!("fillet");
-                    if node.values.get("edges").and_then(serde_json::Value::as_array).is_none_or(|items| items.is_empty()) { continue; }
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "fillet source did not prewarm".to_owned())?;
-                        let values = values.clone();
-                        Ok(Box::new(move |kernel| {
-                            nodecraft_blend::fillet_brep_exact_with_kernel(kernel, &source, &values)
-                                .map(std::sync::Arc::new)
-                        }))
-                    }));
-                }
-                "chamfer" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").cloned() else { continue };
-                    let mut values = node.values.clone();
-                    values["mode"] = serde_json::json!("chamfer");
-                    if node.values.get("edges").and_then(serde_json::Value::as_array).is_none_or(|items| items.is_empty()) { continue; }
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "chamfer source did not prewarm".to_owned())?;
-                        let values = values.clone();
-                        Ok(Box::new(move |kernel| {
-                            nodecraft_blend::chamfer_brep_exact_with_kernel(kernel, &source, &values)
-                                .map(std::sync::Arc::new)
-                        }))
-                    }));
-                }
-                "shell" => {
-                    let Some(link) = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").cloned() else { continue };
-                    let thickness = node.values.get("thickness").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
-                    let inward = node.values.get("direction").and_then(serde_json::Value::as_str).unwrap_or("inward") == "inward";
-                    let signed = if inward { -thickness } else { thickness };
-                    let face_values = node.values.get("faces").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
-                    let source = link.from.clone();
-                    tasks.push(ScheduledTask::new(id, vec![source.clone()], fnv_seed(&node.id), move |deps: &WarmDeps| {
-                        let source = deps.get(&source).and_then(|result| result.as_ref().ok()).cloned().ok_or_else(|| "shell source did not prewarm".to_owned())?;
-                        let mut openings = Vec::new();
-                        for face in &face_values {
-                            let Some(reference) = face.get("id").and_then(serde_json::Value::as_str) else { continue };
-                            let Some((body, index)) = face_reference_body_and_index(reference) else { continue };
-                            if body.unwrap_or(0) != 0 { continue; }
-                            openings.push(index);
-                        }
-                        Ok(Box::new(move |kernel| {
-                            let mut brep = copy_brep(&source)?;
-                            nodecraft_layers::shell_record_faces(kernel, &mut brep, &openings, signed)
-                                .map(std::sync::Arc::new)
-                        }))
-                    }));
                 }
                 "loft" => {
                     let Some((bottom, top, ruled)) = loft_inputs.remove(&node.id) else { continue };
@@ -439,11 +402,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         if tasks.is_empty() { return; }
         let pool = crate::kernel_pool::shared_pool();
-        let max_in_flight = if crate::workload_profiler_enabled() {
-            profile.recommended_exact_in_flight(pool.workers())
-        } else {
-            usize::MAX
-        };
+        let max_in_flight = profile.recommended_exact_in_flight(pool.workers());
         let Ok(results) = crate::scheduler::run_levels_with_limit(
             pool,
             tasks,
@@ -453,6 +412,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         for (id, result) in results {
             let Ok(brep) = result else { continue };
             self.breps.insert(id.clone(), brep.clone());
+            self.prewarmed.insert(id.clone());
             if let Some(cache_key) = keys.remove(&id) {
                 self.cache.insert_brep(cache_key, brep);
             }
@@ -479,7 +439,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 continue;
             };
             let source = link.from.clone();
-            let _ = self.evaluate(&source);
             let value = if let Some(shape) = self.breps.get(&source) {
                 Some(NodeOutput::Shape(shape.clone()))
             } else if let Some(part) = self.parts.get(&source) {
@@ -531,6 +490,19 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if !self.bypass_cache && cache_is_fresh && let Some(part) = self.cache.part(&cache_key) {
             self.cache.note_part_hit();
             self.cache_hits += 1;
+            self.part_cache_hits += 1;
+            self.parts.insert(start.to_owned(), part.clone());
+            return Ok(part);
+        }
+        if self.prewarmed.contains(start)
+            && let Some(brep) = self.breps.get(start).cloned()
+        {
+            let node_source = crate::node_content_seed(
+                &self.request,
+                &node.id,
+                &mut std::collections::HashSet::new(),
+            );
+            let part = Arc::new(Part::from_arc(brep).tagged(node_source));
             self.parts.insert(start.to_owned(), part.clone());
             return Ok(part);
         }
@@ -548,29 +520,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let source = self.evaluate_part(&link.from)?;
                     let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
                     let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-                    let mut bodies = source.bodies.clone();
-                    for body in &mut bodies { body.transforms.push(BodyTransform::Place { offset, rotation }); }
-                    let mut sketches = source.sketches.clone();
-                    for sketch in &mut sketches { sketch.transforms.push(BodyTransform::Place { offset, rotation }); }
-                    Ok(Part { bodies, sketches })
+                    Ok(source.as_ref().translated(offset, rotation))
                 }
                 "mirror" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Part mirror has no input")?;
                     let source = self.evaluate_part(&link.from)?;
-                    let (plane, offset) = mirror_plane(&node.values);
-                    let mut mirrored = source.bodies.clone();
-                    for body in &mut mirrored { body.transforms.push(BodyTransform::Mirror { plane, offset }); }
-                    let mut mirrored_sketches = source.sketches.clone();
-                    for sketch in &mut mirrored_sketches { sketch.transforms.push(BodyTransform::Mirror { plane, offset }); }
-                    if mirror_combine(&node.values) {
-                        let mut bodies = source.bodies.clone();
-                        bodies.extend(mirrored);
-                        let mut sketches = source.sketches.clone();
-                        sketches.extend(mirrored_sketches);
-                        Ok(Part { bodies, sketches })
-                    } else {
-                        Ok(Part { bodies: mirrored, sketches: mirrored_sketches })
-                    }
+                    Ok(source.mirrored(&node.values))
                 }
                 "combine" => {
                     let mut bodies = Vec::new();
@@ -613,23 +568,24 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             }
                             let a_parts = a_part.realized_solids()?;
                             let b_parts = b_part.realized_solids()?;
-                            // N-ary list Boolean: one kernel operation instead of
-                            // chaining hundreds of pairwise merges through
-                            // intermediate topology.
-                            let mut boolean_kernel = nodecraft_solidcore::kernel::kernel();
-                            let breps = nodecraft_bool::boolean_lists_batched(
-                                &mut boolean_kernel,
-                                &a_parts,
-                                &b_parts,
-                                op.clone(),
-                            )?;
-                            if breps.is_empty() {
-                                return Err("Boolean produced no solids".into());
-                            }
+                            // N-ary list Boolean on the persistent kernel pool.
+                            let breps = crate::node_task::execute_exact(
+                                crate::node_task::ExactNodeTask::BooleanLists {
+                                    op: op.clone(),
+                                    a: a_parts,
+                                    b: b_parts,
+                                },
+                                &node.id,
+                                fnv_seed(&node.id),
+                            )?
+                            .into_shapes()
+                            .ok_or_else(|| "Boolean task returned no shapes".to_owned())?;
                             Ok(Part {
                                 bodies: breps.into_iter().map(|brep| BodyInstance {
-                                    body: Arc::new(brep),
+                                    body: brep,
                                     transforms: Vec::new(),
+                                    source: None,
+                                    source_body: 0,
                                 }).collect(),
                                 sketches: Vec::new(),
                             })
@@ -644,11 +600,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let color = parse_look_color(&node.values)?;
                     let mut bodies = Vec::with_capacity(source.bodies.len());
                     for body in &source.bodies {
-                        let mut brep = copy_brep(body.body.as_ref())?;
-                        apply_look_color(&mut brep, color)?;
+                        let brep = crate::node_task::execute_exact(
+                            crate::node_task::ExactNodeTask::Look {
+                                brep: std::sync::Arc::clone(&body.body),
+                                colour: color,
+                            },
+                            &node.id,
+                            fnv_seed(&node.id),
+                        )?
+                        .into_shape()
+                        .ok_or_else(|| "Look task returned no shape".to_owned())?;
                         bodies.push(BodyInstance {
-                            body: Arc::new(brep),
+                            body: brep,
                             transforms: body.transforms.clone(),
+                            source: body.source,
+                            source_body: body.source_body,
                         });
                     }
                     Ok(Part { bodies, sketches: source.sketches.clone() })
@@ -666,7 +632,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             .sketch_output_for(&link.from)
                             .ok_or("Extrude sketch source did not evaluate")?;
                         let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                        return Ok(Part::from_brep(sketch_extrude_brep(&output, amount)?));
+                        let brep = crate::node_task::execute_exact(
+                            crate::node_task::ExactNodeTask::ExtrudeSketch { output: std::sync::Arc::new(output), amount },
+                            &node.id,
+                            fnv_seed(&node.id),
+                        )?
+                        .into_brep()
+                        .ok_or_else(|| "sketch extrude task returned no shape".to_owned())?;
+                        return Ok(Part::from_brep(brep));
                     }
                     let source = self.evaluate_part(&link.from)?;
                     let faces = node.values.get("faces").and_then(serde_json::Value::as_array);
@@ -675,26 +648,39 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     }
                     let reference = faces.and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
                     let index: usize = face_reference_index(reference).ok_or("Extrude needs a selected face reference (face:N).")?;
-                    let source_solids = source.realized_solids()?;
-                    let profile = source_solids.first().ok_or("Extrude source Part is empty")?;
-                    let face = profile.faces().ids().nth(index).ok_or_else(|| format!("Extrude face {index} does not exist"))?;
+                    let mut solids = source.realized_solids()?;
+                    if solids.len() != 1 {
+                        return Err(format!("Extrude requires exactly one solid body, got {}", solids.len()));
+                    }
+                    let profile = solids.pop().ok_or("Extrude source Part is empty")?;
                     let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                    let mut kernel = nodecraft_solidcore::kernel::kernel();
-                    let tool = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, profile, face, amount)
-                        .map_err(|error| format!("extrude: {error}"))?;
+                    let tool = crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::Extrude {
+                            brep: copy_brep(&profile)?,
+                            face_index: index,
+                            amount,
+                        },
+                        &node.id,
+                        fnv_seed(&node.id),
+                    )?
+                    .into_brep()
+                    .ok_or_else(|| "extrude task returned no shape".to_owned())?;
                     let operation = node.values.get("operation").and_then(serde_json::Value::as_str).unwrap_or("new");
                     if operation == "new" {
                         return Ok(Part::from_brep(tool));
                     }
-                    let mut base = source_solids.into_iter().next().ok_or("Extrude source Part is empty")?;
-                    for brep in source.realized_solids()?.into_iter().skip(1) {
-                        base = crate::boolean_breps_ops(&base, &brep, nodecraft_bool::BooleanOp::Union)?;
-                    }
-                    let result = match operation {
-                        "remove" => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Difference)?,
-                        "intersect" => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Intersection)?,
-                        _ => crate::boolean_breps_ops(&base, &tool, nodecraft_bool::BooleanOp::Union)?,
-                    };
+                    let result = crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::ExtrudeFeature {
+                            brep: profile,
+                            face_index: index,
+                            amount,
+                            operation: operation.to_owned(),
+                        },
+                        &node.id,
+                        fnv_seed(&node.id),
+                    )?
+                    .into_brep()
+                    .ok_or_else(|| "Extrude feature task returned no shape".to_owned())?;
                     Ok(Part::from_brep(result))
                 }
                 "sketch" => {
@@ -715,7 +701,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 "loft" => {
                     let bottom = input_source(self.request, node.id.as_str(), "bottom").ok_or("Loft has no bottom section")?.from.clone();
                     let top = input_source(self.request, node.id.as_str(), "top").ok_or("Loft has no top section")?.from.clone();
-                    let mut kernel = nodecraft_solidcore::kernel::kernel();
                     let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
                     let bottom_output = self.sketch_output_for(&bottom);
                     let top_output = self.sketch_output_for(&top);
@@ -728,7 +713,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         .into_brep()
                         .ok_or_else(|| "Loft task returned no shape".to_owned())?
                     } else {
-                        loft_exact(self.request, &mut kernel, &bottom, &top, ruled, true)?
+                        let bottom_brep = crate::exact_operand_brep(self.request, &bottom)?;
+                        let top_brep = crate::exact_operand_brep(self.request, &top)?;
+                        crate::node_task::execute_exact(
+                            crate::node_task::ExactNodeTask::FaceLoft {
+                                bottom: bottom_brep,
+                                top: top_brep,
+                                ruled,
+                                cap_ends: true,
+                            },
+                            &node.id,
+                            fnv_seed(&node.id),
+                        )?
+                        .into_brep()
+                        .ok_or_else(|| "Face loft task returned no shape".to_owned())?
                     };
                     Ok(Part::from_brep(brep))
                 }
@@ -761,12 +759,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
                         .is_some_and(|edges| !edges.is_empty());
                     if !has_edges { return Ok((*source_part).clone()); }
-                    let source = source_part.realized_solids()?.into_iter().next().ok_or("Chamfer source Part is empty")?;
+                    let mut solids = source_part.realized_solids()?;
+                    if solids.len() != 1 {
+                        return Err(format!("Chamfer requires exactly one solid body, got {}", solids.len()));
+                    }
+                    let source = solids.pop().ok_or("Chamfer source Part is empty")?;
                     let mut values = node.values.clone();
                     values["mode"] = serde_json::json!("chamfer");
-                    nodecraft_blend::chamfer_brep_exact(&source, &values)
-                        .map(Part::from_brep)
-                        .map_err(|error| format!("Edge chamfer: {error}"))
+                    crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::Chamfer { brep: source, values },
+                        &node.id,
+                        fnv_seed(&node.id),
+                    )?
+                    .into_brep()
+                    .ok_or_else(|| "chamfer task returned no shape".to_owned())
+                    .map(Part::from_brep)
                 }
                 "fillet" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Fillet has no shape input")?;
@@ -774,12 +781,21 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let has_edges = node.values.get("edges").and_then(serde_json::Value::as_array)
                         .is_some_and(|edges| !edges.is_empty());
                     if !has_edges { return Ok((*source_part).clone()); }
-                    let source = source_part.realized_solids()?.into_iter().next().ok_or("Fillet source Part is empty")?;
+                    let mut solids = source_part.realized_solids()?;
+                    if solids.len() != 1 {
+                        return Err(format!("Fillet requires exactly one solid body, got {}", solids.len()));
+                    }
+                    let source = solids.pop().ok_or("Fillet source Part is empty")?;
                     let mut values = node.values.clone();
                     values["mode"] = serde_json::json!("fillet");
-                    nodecraft_blend::fillet_brep_exact(&source, &values)
-                        .map(Part::from_brep)
-                        .map_err(|error| format!("Edge fillet: {error}"))
+                    crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::Fillet { brep: source, values },
+                        &node.id,
+                        fnv_seed(&node.id),
+                    )?
+                    .into_brep()
+                    .ok_or_else(|| "fillet task returned no shape".to_owned())
+                    .map(Part::from_brep)
                 }
                 "offsetfaces" => {
                     let link = self.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("Offset Faces has no shape input")?;
@@ -801,18 +817,17 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             faces.push(face_index);
                         }
                         if faces.is_empty() {
-                            bodies.push(BodyInstance { body: Arc::new(brep), transforms: Vec::new() });
+                            bodies.push(BodyInstance { body: Arc::new(brep), transforms: Vec::new(), source: None, source_body: 0 });
                             continue;
                         }
-                        let mut brep = brep;
-                        let mut offset_kernel = nodecraft_solidcore::kernel::kernel();
-                        let offset = nodecraft_layers::offset_faces_record_faces(
-                            &mut offset_kernel,
-                            &mut brep,
-                            &faces,
-                            distance,
-                        ).map_err(|error| format!("Offset Faces: {error}"))?;
-                        bodies.push(BodyInstance { body: Arc::new(offset), transforms: Vec::new() });
+                        let offset = crate::node_task::execute_exact(
+                            crate::node_task::ExactNodeTask::OffsetFaces { brep, faces, distance },
+                            &node.id,
+                            fnv_seed(&node.id),
+                        )?
+                        .into_shape()
+                        .ok_or_else(|| "Offset Faces task returned no shape".to_owned())?;
+                        bodies.push(BodyInstance { body: offset, transforms: Vec::new(), source: None, source_body: 0 });
                     }
                     Ok(Part { bodies, ..Part::empty() })
                 }
@@ -854,15 +869,18 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                             }
                             openings.push(*face_index);
                         }
-                        let mut brep = brep;
-                        let mut shell_kernel = nodecraft_solidcore::kernel::kernel();
-                        let shelled = nodecraft_layers::shell_record_faces(
-                            &mut shell_kernel,
-                            &mut brep,
-                            &openings,
-                            signed,
-                        ).map_err(|error| format!("Shell: {error}"))?;
-                        bodies.push(BodyInstance { body: Arc::new(shelled), transforms: Vec::new() });
+                        let shelled = crate::node_task::execute_exact(
+                            crate::node_task::ExactNodeTask::Shell {
+                                brep,
+                                signed_thickness: signed,
+                                openings,
+                            },
+                            &node.id,
+                            fnv_seed(&node.id),
+                        )?
+                        .into_brep()
+                        .ok_or_else(|| "Shell task returned no shape".to_owned())?;
+                        bodies.push(BodyInstance { body: Arc::new(shelled), transforms: Vec::new(), source: None, source_body: 0 });
                     }
                     Ok(Part { bodies, ..Part::empty() })
                 }
@@ -926,14 +944,36 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         self.step_diagnostics.insert(node.id.clone(), import.diagnostics.clone());
                         if default_quality { self.cache.insert_import(key, Arc::new(import)); }
                     }
-                    Ok(Part::from_brep(nodecraft_mesh::import_step_brep(path)?))
+                    let brep = crate::node_task::execute_exact(
+                        crate::node_task::ExactNodeTask::ImportStep { path: path.to_owned() },
+                        &node.id,
+                        fnv_seed(&node.id),
+                    )?
+                    .into_brep()
+                    .ok_or_else(|| "STEP import task returned no shape".to_owned())?;
+                    Ok(Part::from_brep(brep))
                 }
                 other => Err(format!("exact Part evaluation does not support {other:?}")),
             }
         })();
         self.part_visiting.pop();
         if let Ok(part) = &result {
-            let part = Arc::new(part.clone());
+            let mut part = part.clone();
+            // Newly generated bodies inherit this node's content key; bodies
+            // passed through from an upstream node keep their producing key so
+            // instances share plans across transforms/scatters.
+            let node_source = crate::node_content_seed(
+                &self.request,
+                &node.id,
+                &mut std::collections::HashSet::new(),
+            );
+            for (index, body) in part.bodies.iter_mut().enumerate() {
+                if body.source.is_none() {
+                    body.source = Some(node_source);
+                    body.source_body = index as u32;
+                }
+            }
+            let part = Arc::new(part);
             self.parts.insert(start.to_owned(), part.clone());
             self.cache.insert_part(cache_key, part.clone());
             result.map(|_| part)

@@ -19,27 +19,10 @@ pub struct PreMerge {
     pub b: (String, Mesh),
 }
 
+#[derive(Clone)]
 pub struct Evaluation {
     pub target: String,
-    /// False for the exact-only pre-pass; true once display meshes/timing are final.
-    pub display_complete: bool,
-    pub mesh: Option<Mesh>,
-    /// Display mesh for the node being edited, used by branch-scoped transform
-    /// previews when the breakpoint result is geometrically merged.
-    #[allow(dead_code)] // engine-bridge regression coverage; the app uses PreviewWorker
-    pub edit_preview: Option<Mesh>,
-    /// Node whose transform input produced `edit_preview`.
-    #[allow(dead_code)]
-    pub edit_preview_target: Option<String>,
-    /// Boolean operands for a pre-merge drag display.
-    #[allow(dead_code)]
-    pub pre_merge: Option<PreMerge>,
-    /// Before/after pair when the selected feature can be compared.
-    pub comparison: Option<(Mesh, Mesh)>,
-    /// Input body ghosted under a selected feature's result.
-    pub ghost: Option<Mesh>,
-    /// Exact before/after difference bodies from the kernel.
-    pub difference: Option<(Mesh, Mesh)>,
+    /// False for the exact-only pre-pass; true for a final exact result (for example an exporter).
     pub difference_error: Option<String>,
     /// The ghost came from the display-surface fallback, not the exact Boolean.
     pub difference_approximate: bool,
@@ -48,10 +31,14 @@ pub struct Evaluation {
     pub elapsed_ms: f64,
     /// B-rep evaluation time for the viewed target, excluding tessellation.
     pub kernel_ms: f64,
-    /// Display tessellation time for the viewed target.
-    pub mesh_ms: f64,
     pub cache_hits: u32,
     pub cache_misses: u32,
+    pub brep_hits: u32,
+    pub part_hits: u32,
+    /// Exact Part/BRep handles from the exact pass; empty after a display pass.
+    pub exact_parts: std::collections::BTreeMap<String, nodecraft_exact::ExactPart>,
+    /// Exact feature difference from the exact pass.
+    pub exact_comparison: Option<nodecraft_engine::ExactComparison>,
 }
 
 /// Split the evaluation total into kernel and display work.
@@ -129,7 +116,7 @@ pub fn evaluate_with_linked_progress_comparison(
         return (None, cache);
     };
     let started = Instant::now();
-    let expanded = match nodecraft_session::expand_groups(document)
+    let expanded = match nodecraft_session::flatten_inline_graphs(document)
         .and_then(|grouped| nodecraft_session::expand_linked_parts_with(&grouped, linked_documents))
     {
         Ok(expanded) => expanded,
@@ -137,23 +124,18 @@ pub fn evaluate_with_linked_progress_comparison(
             return (
                 Some(Evaluation {
                     target,
-                    display_complete: true,
-                    mesh: None,
-                    edit_preview: None,
-                    edit_preview_target: None,
-                    pre_merge: None,
-                    comparison: None,
-                    ghost: None,
-                    difference: None,
                     difference_error: None,
                     difference_approximate: false,
                     node_errors: Default::default(),
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                     kernel_ms: 0.0,
-                    mesh_ms: 0.0,
                     cache_hits: 0,
                     cache_misses: 0,
+                    brep_hits: 0,
+                    part_hits: 0,
+                    exact_parts: Default::default(),
+                    exact_comparison: None,
                 }),
                 cache,
             );
@@ -230,6 +212,41 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
         edit_preview,
         false,
         bypass_cache,
+        None,
+    )
+}
+
+/// Display evaluation with a provisional preview detail. Used for coarse-first
+/// display; the exact pass remains full quality.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_flat_with_progress_comparison_dirty_preview(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+    edit_preview: Option<&str>,
+    bypass_cache: bool,
+    preview_detail: Option<u8>,
+) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_with_progress_comparison_dirty_mode(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        dirty_nodes,
+        ghost_input,
+        validation_targets,
+        edit_preview,
+        false,
+        bypass_cache,
+        preview_detail,
     )
 }
 
@@ -262,6 +279,7 @@ pub fn evaluate_flat_exact(
         edit_preview,
         true,
         bypass_cache,
+        None,
     )
 }
 
@@ -278,6 +296,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     edit_preview: Option<&str>,
     exact_only: bool,
     bypass_cache: bool,
+    preview_detail: Option<u8>,
 ) -> (Option<Evaluation>, EngineCache) {
     let started = Instant::now();
     let hashes = document.node_hashes().unwrap_or_default();
@@ -385,71 +404,112 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
         progress: progress.is_some(),
         run_exporters,
         mesh_tolerance: None,
+        preview_detail,
         comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
         bypass_cache,
     };
-    let output = if exact_only {
-        nodecraft_engine::evaluate_exact(request, cache, progress)
-    } else {
-        nodecraft_engine::evaluate(request, cache, progress)
-    };
+    let output = nodecraft_engine::evaluate_exact(request, cache, progress);
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    // The engine records the viewed node's full time and its exact B-rep pass;
-    // their difference is display tessellation. Everything else in the total is
-    // the kernel work for the target's upstream nodes.
-    let (kernel_ms, mesh_ms) = timing_breakdown(
+    let cache_stats = output.response.cache_stats;
+    let exact_parts = output.exact_parts;
+    let exact_comparison = output.exact_comparison;
+    let (kernel_ms, _) = timing_breakdown(
         elapsed_ms,
         output.response.timings.get(&target).copied().unwrap_or(0.0),
         output.response.brep_timings.get(&target).copied().unwrap_or(0.0),
     );
-    let cache_stats = output.response.cache_stats;
     let error = output.response.node_errors.get(&target).cloned();
-    let mesh = output.response.meshes.get(&target).map(|payload| payload.mesh.clone());
+    let mut display_cache = nodecraft_display::PlanCache::new(1024);
+    let quality = nodecraft_display::DisplayQuality::Full(0.35);
+    let mut plans = Vec::new();
+    let mut feature_plans = Vec::new();
+    let mut tessellation_diagnostics = Vec::new();
+    let mut display_ms = 0.0;
+    let mesh = if exact_only {
+        None
+    } else {
+        let started = Instant::now();
+        let result = exact_parts.get(&target).and_then(|part| {
+            nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
+        });
+        display_ms = started.elapsed().as_secs_f64() * 1000.0;
+        result.map(|mut display| {
+            for plan in &mut display.plans { plan.target.clone_from(&target); }
+            plans = display.plans;
+            feature_plans = display.feature_plans;
+            tessellation_diagnostics.extend(display.stats.iter().flat_map(|stats| stats.diagnostics.iter().cloned()));
+            display.mesh
+        })
+    };
+    let edit_preview_mesh = if exact_only { None } else {
+        edit_preview.and_then(|id| exact_parts.get(id)).and_then(|part| {
+            nodecraft_display::mesh_part(part, quality, &mut display_cache).ok().map(|display| display.mesh)
+        })
+    };
     let edit_preview_target = edit_preview.map(str::to_owned);
-    let edit_preview = edit_preview_target
-        .as_deref()
-        .and_then(|id| output.response.meshes.get(id))
-        .map(|payload| payload.mesh.clone());
-    let pre_merge = pre_merge.and_then(|(a, b)| {
-        let a_mesh = output.response.meshes.get(&a)?.mesh.clone();
-        let b_mesh = output.response.meshes.get(&b)?.mesh.clone();
-        Some(PreMerge { a: (a, a_mesh), b: (b, b_mesh) })
-    });
-    let comparison = comparison.and_then(|(before, after)| {
-        let before = output.response.meshes.get(before)?.mesh.clone();
-        let after = output.response.meshes.get(after)?.mesh.clone();
-        Some((before, after))
-    });
-    let ghost = ghost_input.and_then(|id| {
-        output
-            .response
-            .meshes
-            .get(id)
-            .map(|payload| payload.mesh.clone())
-    });
+    let (ghost_mesh, ghost_plans) = if exact_only { (None, Vec::new()) } else {
+        ghost_input
+            .and_then(|id| exact_parts.get(id))
+            .and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())
+            .map(|display| (Some(display.mesh), display.plans))
+            .unwrap_or((None, Vec::new()))
+    };
+    let comparison = if exact_only { None } else {
+        comparison.and_then(|(before, after)| {
+            let before = exact_parts.get(before).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            let after = exact_parts.get(after).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            Some((before, after))
+        })
+    };
+    let mut difference_plans = None;
+    let difference = if exact_only { None } else {
+        exact_comparison.as_ref().and_then(|comparison| {
+            let added = comparison
+                .added
+                .as_ref()
+                .and_then(|brep| nodecraft_display::brep_display(brep, quality, &mut display_cache).ok());
+            let removed = comparison
+                .removed
+                .as_ref()
+                .and_then(|brep| nodecraft_display::brep_display(brep, quality, &mut display_cache).ok());
+            difference_plans = Some((
+                added.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
+                removed.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
+            ));
+            Some((
+                added.map(|display| display.mesh).unwrap_or_default(),
+                removed.map(|display| display.mesh).unwrap_or_default(),
+            ))
+        })
+    };
+    let difference_error = exact_comparison.as_ref().and_then(|comparison| comparison.error.clone());
+    let pre_merge = if exact_only { None } else {
+        pre_merge.and_then(|(a, b)| {
+            let a_mesh = exact_parts.get(&a).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            let b_mesh = exact_parts.get(&b).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            Some(PreMerge { a: (a, a_mesh), b: (b, b_mesh) })
+        })
+    };
+    let exact_parts = if exact_only { exact_parts } else { Default::default() };
+    let exact_comparison = if exact_only { exact_comparison } else { None };
     (
         Some(Evaluation {
             target,
-            display_complete: !exact_only,
             // An errored node bypasses to its input, so the mesh can still be
             // valid even though the node reports its own error.
-            mesh,
-            edit_preview,
-            edit_preview_target,
-            pre_merge,
-            comparison,
-            ghost,
-            difference: output.response.comparison.as_ref().map(|payload| (payload.added.clone(), payload.removed.clone())),
-            difference_error: output.response.comparison.as_ref().and_then(|payload| payload.error.clone()),
-            difference_approximate: output.response.comparison.as_ref().is_some_and(|payload| payload.approximate),
+            difference_error,
+            difference_approximate: false,
             node_errors: output.response.node_errors,
             error,
             elapsed_ms,
             kernel_ms,
-            mesh_ms,
             cache_hits: cache_stats.as_ref().map_or(0, |stats| stats.hits),
             cache_misses: cache_stats.as_ref().map_or(0, |stats| stats.misses),
+            brep_hits: cache_stats.as_ref().map_or(0, |stats| stats.brep_hits),
+            part_hits: cache_stats.as_ref().map_or(0, |stats| stats.part_hits),
+            exact_parts,
+            exact_comparison,
         }),
         cache,
     )
@@ -458,308 +518,18 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use nodecraft_session::GraphDocument;
 
     fn node(id: &str) -> nodecraft_session::GraphNode {
-        nodecraft_session::GraphNode { expressions: Default::default(),
+        nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: id.into(),
             node_type: "primitive".into(),
-            values: json!({}),
+            values: serde_json::json!({"primitiveType": "box"}),
             suppressed: false,
             x: 0.0,
             y: 0.0,
         }
-    }
-
-    /// Each hash map gets its own random seed, so any hash-order dependence in
-    /// meshing shows up across repeated evaluations in one process.
-    #[test]
-    fn timing_breakdown_separates_kernel_and_meshing() {
-        let (kernel, mesh) = timing_breakdown(180.0, 70.0, 20.0);
-        assert!((kernel - 130.0).abs() < 1e-9);
-        assert!((mesh - 50.0).abs() < 1e-9);
-        assert!(((kernel + mesh) - 180.0).abs() < 1e-9);
-        // A cached exact part has no B-rep time; the node time is all mesh.
-        assert_eq!(timing_breakdown(20.0, 20.0, 0.0), (0.0, 20.0));
-        assert_eq!(timing_breakdown(10.0, 0.0, 0.0), (10.0, 0.0));
-    }
-
-    #[test]
-    fn ghost_input_mesh_is_returned_with_the_target() {
-        let mut document = GraphDocument::new("ghost-preview");
-        let mut target = node("target");
-        target.values = json!({"primitiveType": "box"});
-        let mut ghost = node("ghost");
-        ghost.values = json!({"primitiveType": "sphere"});
-        document.nodes = vec![target, ghost];
-        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "target".to_owned(),
-            EngineCache::new(),
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            Some("ghost"),
-            &[],
-            None,
-            false,
-        );
-        let evaluation = evaluation.expect("evaluation");
-        assert!(evaluation.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
-        let ghost = evaluation.ghost.expect("ghost input mesh");
-        assert!(!ghost.faces.is_empty(), "ghost input has no display mesh");
-        assert_ne!(evaluation.mesh.unwrap().faces.len(), ghost.faces.len());
-    }
-
-    #[test]
-    fn bypass_cache_forces_a_full_rebuild() {
-        let mut document = GraphDocument::new("bypass-cache");
-        let mut target = node("target");
-        target.values = json!({"primitiveType": "box"});
-        document.nodes = vec![target];
-        let (first, cache) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "target".to_owned(),
-            EngineCache::new(),
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &[],
-            None,
-            false,
-        );
-        assert!(first.is_some());
-        let (second, _) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "target".to_owned(),
-            cache,
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &[],
-            None,
-            true,
-        );
-        let second = second.expect("bypass evaluation");
-        assert!(second.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
-        assert_eq!(second.cache_hits, 0, "bypass still read a cache entry");
-    }
-
-    #[test]
-    fn exact_prepass_fills_the_cache_before_display() {
-        let mut document = GraphDocument::new("two-phase");
-        let mut target = node("target");
-        target.values = json!({"primitiveType": "box"});
-        document.nodes = vec![target];
-        let (exact, cache) = evaluate_flat_exact(
-            &document,
-            "target".to_owned(),
-            EngineCache::new(),
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &[],
-            None,
-            false,
-        );
-        let exact = exact.expect("exact evaluation");
-        assert!(!exact.display_complete);
-        assert!(exact.mesh.is_none(), "exact pre-pass produced a display mesh");
-        let (display, _) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "target".to_owned(),
-            cache,
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &[],
-            None,
-            false,
-        );
-        let display = display.expect("display evaluation");
-        assert!(display.display_complete);
-        assert!(display.mesh.as_ref().is_some_and(|mesh| !mesh.faces.is_empty()));
-    }
-
-    #[test]
-    fn edit_preview_mesh_is_returned_for_a_merged_breakpoint() {
-        let document: GraphDocument = serde_json::from_value(json!({
-            "id": "edit-preview",
-            "name": "edit-preview",
-            "nodes": [
-                {"id": "box", "type": "solid", "values": {"primitiveType": "box", "width": 30.0}, "suppressed": false, "x": 0.0, "y": 0.0},
-                {"id": "move", "type": "translate", "values": {"x": -24.0}, "suppressed": false, "x": 0.0, "y": 0.0},
-                {"id": "sphere", "type": "solid", "values": {"primitiveType": "sphere"}, "suppressed": false, "x": 0.0, "y": 0.0},
-                {"id": "boolean", "type": "boolean", "values": {"mode": "union"}, "suppressed": false, "x": 0.0, "y": 0.0},
-                {"id": "fillet", "type": "fillet", "values": {}, "suppressed": false, "x": 0.0, "y": 0.0},
-                {"id": "look", "type": "look", "values": {}, "suppressed": false, "x": 0.0, "y": 0.0}
-            ],
-            "connections": [
-                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
-                {"from": "move", "to": "boolean", "in": "a", "out": "shape"},
-                {"from": "sphere", "to": "boolean", "in": "b", "out": "shape"},
-                {"from": "boolean", "to": "fillet", "in": "shape", "out": "shape"},
-                {"from": "fillet", "to": "look", "in": "shape", "out": "shape"}
-            ]
-        })).expect("document");
-        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "look".to_owned(),
-            EngineCache::new(),
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &[],
-            Some("box"),
-            false,
-        );
-        let evaluation = evaluation.expect("evaluation");
-        let preview = evaluation.edit_preview.expect("edit preview mesh");
-        assert!(!preview.faces.is_empty(), "edit preview mesh is empty");
-    }
-
-    #[test]
-    fn validation_targets_report_their_node_errors() {
-        let mut document = GraphDocument::new("validation-errors");
-        let mut target = node("target");
-        target.values = json!({"primitiveType": "box"});
-        let mut broken = node("broken");
-        broken.node_type = "shell".into();
-        broken.values = json!({"thickness": 2.0});
-        document.nodes = vec![target, broken];
-        let (evaluation, _) = evaluate_flat_with_progress_comparison_dirty(
-            &document,
-            "target".to_owned(),
-            EngineCache::new(),
-            None,
-            None,
-            false,
-            &HashSet::new(),
-            None,
-            &["broken".to_owned()],
-            None,
-            false,
-        );
-        let evaluation = evaluation.expect("evaluation");
-        assert!(evaluation.error.is_none(), "{:?}", evaluation.error);
-        assert!(
-            evaluation.node_errors.contains_key("broken"),
-            "validation node error missing: {:?}",
-            evaluation.node_errors
-        );
-    }
-
-    #[test]
-    fn repeated_evaluation_produces_an_identical_mesh() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../samples/spline-showcase.nodecraft");
-        let document: GraphDocument =
-            serde_json::from_str(&std::fs::read_to_string(path).expect("sample")).expect("document");
-        let mesh = || {
-            let (evaluation, _) = evaluate(&document, EngineCache::new(), None);
-            evaluation.and_then(|evaluation| evaluation.mesh).expect("mesh")
-        };
-        let first = mesh();
-        for _ in 0..8 {
-            let next = mesh();
-            assert_eq!(next.vertices, first.vertices);
-            assert_eq!(next.faces, first.faces);
-        }
-    }
-
-    #[test]
-    fn boolean_evaluation_returns_the_pre_merge_bodies() {
-        let mut document = GraphDocument::new("boolean-pre-merge");
-        let mut a = node("a");
-        a.values = json!({"primitiveType": "box"});
-        let mut b = node("b");
-        b.values = json!({"primitiveType": "sphere"});
-        let mut boolean = node("boolean");
-        boolean.node_type = "boolean".into();
-        boolean.values = json!({"mode": "union"});
-        document.nodes = vec![a, b, boolean];
-        document.connections = vec![
-            nodecraft_session::GraphConnection { from: "a".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
-            nodecraft_session::GraphConnection { from: "b".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
-        ];
-        let (evaluation, _) = evaluate(&document, EngineCache::new(), None);
-        let evaluation = evaluation.expect("evaluation");
-        let pre_merge = evaluation.pre_merge.expect("pre-merge bodies");
-        assert_eq!(pre_merge.a.0, "a");
-        assert_eq!(pre_merge.b.0, "b");
-        assert!(!pre_merge.a.1.faces.is_empty());
-        assert!(!pre_merge.b.1.faces.is_empty());
-    }
-
-    #[test]
-    fn linked_part_can_use_an_unsaved_open_document() {
-        let linked_path = std::env::temp_dir().join(format!(
-            "nodecraft-linked-memory-{}-{}.nodecraft",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |time| time.as_nanos())
-        ));
-        let mut linked = GraphDocument::new("part");
-        let mut box_node = node("box");
-        box_node.values = json!({"primitiveType": "box", "length": 10, "width": 10, "height": 10});
-        linked.nodes.push(box_node);
-        let mut host = GraphDocument::new("host");
-        host.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
-            id: "link".into(),
-            node_type: "linkedpart".into(),
-            values: json!({ "path": linked_path.to_string_lossy() }),
-            suppressed: false,
-            x: 0.0,
-            y: 0.0,
-        });
-        let mut open = std::collections::BTreeMap::new();
-        open.insert(linked_path, linked);
-        let (evaluation, _) = evaluate_with_linked(&host, EngineCache::new(), Some("link"), &open);
-        let evaluation = evaluation.expect("evaluation");
-        assert!(evaluation.error.is_none(), "{:?}", evaluation.error);
-        assert!(evaluation.mesh.is_some_and(|mesh| !mesh.faces.is_empty()));
-    }
-
-    #[test]
-    fn linked_part_expands_through_the_app_bridge() {
-        let dir = std::env::temp_dir().join(format!(
-            "nodecraft-linked-bridge-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |time| time.as_nanos())
-        ));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let linked_path = dir.join("part.nodecraft");
-        let mut linked = GraphDocument::new("part");
-        linked.nodes.push(node("box"));
-        nodecraft_session::store::save_atomic(&linked_path, &linked).expect("linked save");
-
-        let mut host = GraphDocument::new("host");
-        host.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
-            id: "link".into(),
-            node_type: "linkedpart".into(),
-            values: json!({ "path": linked_path.to_string_lossy() }),
-            suppressed: false,
-            x: 0.0,
-            y: 0.0,
-        });
-        let (evaluation, _) = evaluate(&host, EngineCache::new(), Some("link"));
-        let evaluation = evaluation.expect("evaluation");
-        assert!(evaluation.error.is_none(), "{:?}", evaluation.error);
-        assert!(evaluation.mesh.is_some_and(|mesh| !mesh.faces.is_empty()));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -772,8 +542,6 @@ mod tests {
         assert_eq!(target_for(&document, Some("a")).as_deref(), Some("a"));
         assert_eq!(target_for(&document, None).as_deref(), Some("b"));
 
-        // The last node may be an upstream branch. The unnamed target must be
-        // the terminal sink, not whichever node happens to be last in the array.
         let mut branching = GraphDocument::new("branching-target");
         branching.nodes = vec![node("a"), node("b"), node("c")];
         branching.connections = vec![

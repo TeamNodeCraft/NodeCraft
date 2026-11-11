@@ -4,7 +4,7 @@
 //!
 //! Optionally set `NODECRAFT_PROFILE_GRAPH=/path/to/file.nodecraft`.
 
-use nodecraft_engine::{EngineCache, evaluate};
+use nodecraft_engine::{EngineCache, evaluate_exact};
 use nodecraft_protocol::{CacheState, Connection, Node, Request};
 use std::path::PathBuf;
 
@@ -41,6 +41,7 @@ fn request(nodes: Vec<Node>, connections: Vec<Connection>, target: &str, revisio
         progress: false,
         run_exporters: false,
         mesh_tolerance: None,
+        preview_detail: None,
         comparison_targets: None,
         bypass_cache: false,
     }
@@ -52,8 +53,8 @@ fn transform_redraw_breaks_down_into_brep_and_mesh() {
     let path = graph_path();
     let text = std::fs::read_to_string(&path).expect("graph file");
     let raw: serde_json::Value = serde_json::from_str(&text).expect("valid graph");
-    let raw_nodes = raw["nodes"].as_array().expect("nodes");
-    let raw_connections = raw["connections"].as_array().expect("connections");
+    let raw_nodes = raw["root"]["nodes"].as_array().expect("nodes");
+    let raw_connections = raw["root"]["connections"].as_array().expect("connections");
 
     let target = raw_nodes
         .iter()
@@ -100,7 +101,7 @@ fn transform_redraw_breaks_down_into_brep_and_mesh() {
             .collect()
     };
 
-    let first = evaluate(request(build(0), connections.clone(), &target, 1), EngineCache::new(), None);
+    let first = evaluate_exact(request(build(0), connections.clone(), &target, 1), EngineCache::new(), None);
     let print = |label: &str, output: &nodecraft_engine::EngineOutput| {
         let response = &output.response;
         let target_ms = response.timings.get(&target).copied().unwrap_or(0.0);
@@ -121,6 +122,6 @@ fn transform_redraw_breaks_down_into_brep_and_mesh() {
     print("warm", &first);
     let cache = first.cache;
 
-    let second = evaluate(request(build(1), connections, &target, 2), cache, None);
+    let second = evaluate_exact(request(build(1), connections, &target, 2), cache, None);
     print("transform", &second);
 }

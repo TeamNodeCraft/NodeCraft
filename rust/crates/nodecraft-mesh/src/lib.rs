@@ -5,14 +5,9 @@
 //! viewport's shading-normal split and STEP assembly import.
 
 use std::cell::Cell;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use nodecraft_protocol::Mesh;
-use solidcore::Brep;
-use solidcore::kernel::Kernel;
-use solidcore::math::{Point2, Point3, Vec3};
-use solidcore::nurbs::knots::Side;
-use solidcore::topology::face::p2 as fp2;
 
 pub mod step_import;
 
@@ -39,71 +34,6 @@ pub fn display_tolerance() -> f64 {
 
 /// Normal viewport max sag.
 pub const DEFAULT_DISPLAY_TOLERANCE: f64 = 0.35;
-
-pub(crate) fn orient_mesh_to_senses(kernel: &Kernel, brep: &Brep, mesh: &mut Mesh, senses: &[bool]) {
-    let faces = brep.face_list();
-    if faces.len() != senses.len() {
-        return;
-    }
-    for (index, (&face_id, &same_sense)) in faces.iter().zip(senses).enumerate() {
-        let Ok(domain) = fp2::uv_domain(brep, face_id) else {
-            continue;
-        };
-        let Ok(Some(surface)) = fp2::surface(brep, face_id) else {
-            continue;
-        };
-        let u = (domain.u_interval().min() + domain.u_interval().max()) * 0.5;
-        let v = (domain.v_interval().min() + domain.v_interval().max()) * 0.5;
-        let Ok(normal) = surface.evaluate_normal(kernel, Point2::new(u, v), Side::Left, Side::Left)
-        else {
-            continue;
-        };
-        let Ok(normal) = normal.unitize() else {
-            continue;
-        };
-        let desired = if same_sense {
-            normal
-        } else {
-            Vec3::new(-normal.x, -normal.y, -normal.z)
-        };
-        let group = format!("face:{index}");
-        let mut sum = Vec3::new(0.0, 0.0, 0.0);
-        for (triangle, triangle_group) in mesh.faces.iter().zip(mesh.face_groups.iter()) {
-            if triangle_group != &group {
-                continue;
-            }
-            let pa = point_from_vertex(mesh.vertices[triangle[0] as usize]);
-            let pb = point_from_vertex(mesh.vertices[triangle[1] as usize]);
-            let pc = point_from_vertex(mesh.vertices[triangle[2] as usize]);
-            let u = Vec3::new(pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
-            let v = Vec3::new(pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
-            sum = sum + u.cross(v);
-        }
-        if sum.dot(desired) < 0.0 {
-            flip_face_group(mesh, index);
-        }
-    }
-}
-
-/// Reverses the triangles and normals of one `face:{index}` display group.
-fn flip_face_group(mesh: &mut Mesh, face_index: usize) {
-    let group = format!("face:{face_index}");
-    let Mesh { faces, face_groups, normals, .. } = mesh;
-    let mut vertices: BTreeSet<u32> = BTreeSet::new();
-    for (triangle, triangle_group) in faces.iter_mut().zip(face_groups.iter()) {
-        if triangle_group != &group {
-            continue;
-        }
-        triangle.swap(1, 2);
-        vertices.extend(triangle.iter().copied());
-    }
-    for vertex in vertices {
-        if let Some(normal) = normals.get_mut(vertex as usize) {
-            *normal = [-normal[0], -normal[1], -normal[2]];
-        }
-    }
-}
-
 
 pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
     if mesh.faces.is_empty() {
@@ -250,10 +180,6 @@ fn shading_triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> Option<[f32
     (length > 1.0e-12).then(|| [normal[0] / length, normal[1] / length, normal[2] / length])
 }
 
-
-fn point_from_vertex(vertex: [f32; 3]) -> Point3 {
-    Point3::new(vertex[0] as f64, vertex[1] as f64, vertex[2] as f64)
-}
 
 #[cfg(test)]
 mod tests {

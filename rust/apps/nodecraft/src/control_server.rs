@@ -18,11 +18,16 @@ pub enum Command {
     EnsureVisible,
     SelectNode(String),
     EditNode(String),
+    SetValue { node: String, field: String, value: serde_json::Value },
     BeginSelection { node: String, field: String },
     ViewNode(String),
     Home,
     Orbit { dx: f64, dy: f64 },
+    Zoom(f64),
+    Triangles(bool),
+    Translucent(bool),
     Capture(String),
+    ActivateTab(usize),
     State,
 }
 
@@ -140,6 +145,19 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
                 return;
             }
         },
+        "/set" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
+            Some(Command::SetValue {
+                node: value.get("node")?.as_str()?.to_owned(),
+                field: value.get("field")?.as_str()?.to_owned(),
+                value: value.get("value")?.clone(),
+            })
+        }) {
+            Some(command) => command,
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {node, field, value}\"}");
+                return;
+            }
+        },
         "/view" => match serde_json::from_str::<serde_json::Value>(&body)
             .ok()
             .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
@@ -159,6 +177,21 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
                 let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"dx\\\": ..., \\\"dy\\\": ...}\"}");
                 return;
             }
+        },
+        "/zoom" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("factor").and_then(serde_json::Value::as_f64)) {
+            Some(factor) => Command::Zoom(factor),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\"factor\": 1.0}\"}");
+                return;
+            }
+        },
+        "/triangles" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool)) {
+            Some(enabled) => Command::Triangles(enabled),
+            None => { let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}"); return; }
+        },
+        "/translucent" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool)) {
+            Some(enabled) => Command::Translucent(enabled),
+            None => { let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}"); return; }
         },
         "/capture" => match serde_json::from_str::<serde_json::Value>(&body)
             .ok()
@@ -184,6 +217,16 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         "/fit-graph" => Command::FitGraph,
         "/zoom-out" => Command::ZoomOut,
         "/ensure-visible" => Command::EnsureVisible,
+        "/activate-tab" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("index").and_then(serde_json::Value::as_u64))
+        {
+            Some(index) => Command::ActivateTab(index as usize),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"index\\\": ...}\"}");
+                return;
+            }
+        },
         "/state" => Command::State,
         _ => {
             let _ = respond(&mut stream, 404, "{\"ok\":false,\"error\":\"unknown endpoint\"}");

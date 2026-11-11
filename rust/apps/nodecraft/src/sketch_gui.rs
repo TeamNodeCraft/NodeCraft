@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use egui::{Pos2, Rect, Stroke, Vec2 as EVec2};
 use solidcore_record::{Vec2, Vec3};
 use solidcraft_geom::prelude::*;
-use solidcraft_render::Camera;
+use solidcraft_viewport::Camera;
 use nodecraft_engine::sketch::{solve, ConstraintKind, CurveKind, Sketch, SolveReport};
 use nodecraft_dock::{DockItem, DockMetrics, paint_background};
 use crate::hover::HoverMap;

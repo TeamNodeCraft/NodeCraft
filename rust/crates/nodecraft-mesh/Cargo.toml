@@ -11,6 +11,8 @@ nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 nodecraft-step = { path = "../nodecraft-step" }
 step-assemblies = { path = "../step-assemblies" }
-step-import = { workspace = true }
-step-brep = { workspace = true }
+solidcore-step = { workspace = true }
+solidcore-convert = { workspace = true }
+solidcore-ops = { workspace = true }
+solidcore-record = { workspace = true }
 serde_json = "1"

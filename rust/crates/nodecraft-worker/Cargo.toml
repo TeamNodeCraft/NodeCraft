@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
+nodecraft-display = { path = "../nodecraft-display" }
 nodecraft-session = { path = "../nodecraft-session", default-features = false }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 serde_json.workspace = true

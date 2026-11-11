@@ -11,8 +11,20 @@ use nodecraft_protocol::Mesh as NodeMesh;
 use solidcraft_geom::prelude::*;
 
 /// A display mesh plus its edge polylines, ready for the SolidCraft CPU rasterizer.
+impl DisplayMesh {
+    /// The mesh to draw for a display LOD index. Index 0 is the full mesh.
+    #[must_use]
+    pub fn render_mesh(&self, lod: usize) -> &CraftMesh {
+        self.lods
+            .get(lod.saturating_sub(1))
+            .map_or(&self.mesh, |lod| &lod.mesh)
+    }
+}
+
 pub struct DisplayMesh {
     pub mesh: Arc<CraftMesh>,
+    /// Display-only simplification levels, coarse after the full mesh.
+    pub lods: Vec<DisplayLod>,
     /// Face-group ids indexed by `mesh.tri_face`.
     pub face_ids: Vec<String>,
     /// Optional per-triangle sRGB colour, parallel to `mesh.triangles`.
@@ -27,6 +39,17 @@ pub struct DisplayMesh {
     pub center: Vec3,
 }
 
+
+#[derive(Clone, Debug)]
+pub struct DisplayLod {
+    pub mesh: Arc<CraftMesh>,
+    /// Maximum deviation from the full mesh, retained for diagnostics.
+    #[allow(dead_code)]
+    pub error: f64,
+    /// Triangle count of this level, retained for diagnostics.
+    #[allow(dead_code)]
+    pub triangles: usize,
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct ComparisonMesh {
@@ -45,6 +68,75 @@ pub struct DisplayEdge {
     pub midpoint: [f64; 3],
     /// Adjacent triangle normals for depth-lifting each polyline point.
     pub normals: Vec<[f32; 3]>,
+}
+
+#[must_use]
+pub fn generate_lods(source: &NodeMesh) -> Vec<DisplayLod> {
+    // Small primitives such as a sphere are still worth a coarse level: it
+    // gives zooming in a visible full-detail transition instead of a fixed mesh.
+    const MIN_TRIANGLES: usize = 500;
+    let full = source.faces.len();
+    if full < MIN_TRIANGLES || !source.face_colors.is_empty() {
+        return Vec::new();
+    }
+    let targets: Vec<usize> = [full / 2, full / 4, full / 8]
+        .into_iter()
+        .filter(|target| *target >= 100)
+        .collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    nodecraft_layers::simplify_mesh(source, &targets)
+        .into_iter()
+        .filter_map(|level| {
+            let triangles = level.triangles.len();
+            if triangles == 0 || triangles >= full {
+                return None;
+            }
+            let mut mesh = NodeMesh {
+                vertices: level.positions,
+                faces: level.triangles,
+                normals: Vec::new(),
+                vertices_data: None,
+                normals_data: None,
+                face_groups: Vec::new(),
+                face_colors: Vec::new(),
+                brep_edges: Vec::new(),
+                lightweight: true,
+                feature_preview: None,
+                feature_preview_operation: None,
+            };
+            mesh = nodecraft_mesh::split_shading_normals(&mesh);
+            let positions: Vec<Vec3> = mesh
+                .vertices
+                .iter()
+                .map(|p| Vec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])))
+                .collect();
+            let normals: Vec<Vec3> = mesh
+                .normals
+                .iter()
+                .map(|n| Vec3::new(f64::from(n[0]), f64::from(n[1]), f64::from(n[2])))
+                .collect();
+            let mut tri_face = vec![0; mesh.faces.len()];
+            tri_face.iter_mut().for_each(|face| *face = 0);
+            Some(DisplayLod {
+                mesh: Arc::new(CraftMesh {
+                    positions,
+                    normals,
+                    triangles: mesh.faces,
+                    tri_face,
+                    edges: Vec::new(),
+                    display_only_edges: false,
+                    seams: Vec::new(),
+                    smooth_edges: Vec::new(),
+                    sharp_edges: Vec::new(),
+                    edge_faces: Vec::new(),
+                }),
+                error: level.error,
+                triangles,
+            })
+        })
+        .collect()
 }
 
 /// Convert a NodeCraft display mesh.
@@ -230,6 +322,7 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     let radius = (bounds.diagonal() * 0.5).max(1.0);
     DisplayMesh {
         mesh: Arc::new(mesh),
+        lods: Vec::new(),
         face_ids,
         face_colors: if source.face_colors.len() == source.faces.len() {
             source.face_colors.clone()
@@ -433,5 +526,63 @@ mod tests {
             solidcore_record::Vec3::new(10.0, 0.0, 0.0),
         ]]);
         assert!(display.radius > 0.0);
+    }
+
+    #[test]
+    fn small_display_meshes_can_generate_a_coarse_lod() {
+        let n = 20u32;
+        let mut vertices = Vec::new();
+        for y in 0..=n {
+            for x in 0..=n {
+                vertices.push([x as f32, y as f32, 0.0]);
+            }
+        }
+        let width = n + 1;
+        let mut faces = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                let a = y * width + x;
+                faces.push([a, a + 1, a + width + 1]);
+                faces.push([a, a + width + 1, a + width]);
+            }
+        }
+        let source = NodeMesh { vertices, faces, ..NodeMesh::default() };
+        assert!(!generate_lods(&source).is_empty(), "~800 triangles should have a coarse LOD");
+    }
+
+    #[test]
+    fn large_display_meshes_get_coarse_lods() {
+        let n = 120u32;
+        let mut vertices = Vec::new();
+        for y in 0..=n {
+            for x in 0..=n {
+                vertices.push([x as f32, y as f32, ((x + y) % 3) as f32 * 0.1]);
+            }
+        }
+        let width = n + 1;
+        let mut faces = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                let a = y * width + x;
+                let b = a + 1;
+                let c = a + width;
+                let d = c + 1;
+                faces.push([a, b, d]);
+                faces.push([a, d, c]);
+            }
+        }
+        let source = NodeMesh {
+            vertices,
+            faces,
+            ..NodeMesh::default()
+        };
+        let mut display = display_mesh(&source);
+        display.lods = generate_lods(&source);
+        assert!(!display.lods.is_empty(), "large display should have LOD levels");
+        assert!(
+            display.render_mesh(1).triangles.len() < display.mesh.triangles.len(),
+            "first LOD should be coarser than the full mesh"
+        );
+        assert!(display.lods.iter().all(|lod| lod.error.is_finite()));
     }
 }

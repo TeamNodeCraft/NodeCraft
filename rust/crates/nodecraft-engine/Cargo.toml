@@ -10,11 +10,14 @@ path = "src/lib.rs"
 
 [dependencies]
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-exact = { path = "../nodecraft-exact" }
 nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 nodecraft-layers = { path = "../nodecraft-layers" }
+nodecraft-display = { path = "../nodecraft-display" }
 nodecraft-sweep = { path = "../nodecraft-sweep" }
 solidcore-convert = { workspace = true }
 solidcore-record = { workspace = true }
+solidcore-tess = { workspace = true }
 nodecraft-mesh = { path = "../nodecraft-mesh" }
 nodecraft-kernel = { path = "../nodecraft-kernel" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore" }
@@ -27,6 +30,6 @@ step-nurbs = { path = "../step-nurbs" }
 step-schema = { path = "../step-schema" }
 step-assemblies = { path = "../step-assemblies" }
 solidcraft-sketch.workspace = true
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
 serde_json.workspace = true
 base64 = "0.22"

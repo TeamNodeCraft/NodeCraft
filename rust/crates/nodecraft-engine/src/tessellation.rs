@@ -1,4 +1,4 @@
-//! Independent display-mesher workers.
+//! Independent display-tessellation workers.
 //!
 //! The exact evaluator hands a [`MeshRequest`] to these workers and receives a
 //! [`MeshAsset`] back. SolidCore kernels stay on the exact side; this module
@@ -59,12 +59,12 @@ impl Shared {
     }
 }
 
-pub struct MesherPool {
+pub struct TessellationPool {
     shared: Arc<Shared>,
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
-impl MesherPool {
+impl TessellationPool {
     #[must_use]
     pub fn new(threads: usize) -> Self {
         let shared = Arc::new(Shared {
@@ -77,7 +77,7 @@ impl MesherPool {
         for index in 0..threads.max(1) {
             let shared = Arc::clone(&shared);
             let worker = std::thread::Builder::new()
-                .name(format!("nodecraft-mesher-{index}"))
+                .name(format!("nodecraft-tessellation-{index}"))
                 .spawn(move || {
                     let mut kernel: Kernel = crate::nodecraft_solidcore_kernel();
                     let mut generation = 0;
@@ -91,7 +91,7 @@ impl MesherPool {
                             let _ = work.result.send(MeshResult {
                                 key: work.request.key,
                                 revision: work.request.revision,
-                                asset: Err("mesher request cancelled".into()),
+                                asset: Err("tessellation request cancelled".into()),
                             });
                             continue;
                         }
@@ -103,17 +103,36 @@ impl MesherPool {
                                 .brep
                                 .clone_standing_for_self()
                                 .map_err(|error| format!("display copy: {error}"))?;
-                            nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, tolerance)
-                                .map(|display| display.mesh)
+                            let tessellated = match work.request.key.preview_detail {
+                                Some(detail) => nodecraft_layers::tessellate_kernel_preview(
+                                    &mut kernel,
+                                    &mut brep,
+                                    detail,
+                                ),
+                                None => nodecraft_layers::tessellate_kernel(
+                                    &mut kernel,
+                                    &mut brep,
+                                    tolerance,
+                                ),
+                            };
+                            tessellated
+                                .map(|display| {
+                                    let stats = display.stats.clone();
+                                    let edge_ids = display.plan_edge_ids.clone();
+                                    (display.plan, display.mesh, stats, edge_ids)
+                                })
                         }));
                         let asset = match outcome {
-                            Ok(Ok(mesh)) => {
+                            Ok(Ok((plan, mesh, stats, edge_ids))) => {
                                 if work.revision.token.is_cancelled() {
-                                    Err("mesher request cancelled".into())
+                                    Err("tessellation request cancelled".into())
                                 } else {
                                     Ok(MeshAsset {
                                         instances: vec![MeshInstance {
                                             mesh: Arc::new(mesh),
+                                            plan: Some(plan),
+                                            plan_edge_ids: edge_ids,
+                                            stats: Some(stats),
                                             transforms: work.request.body.transforms,
                                         }],
                                     })
@@ -122,7 +141,7 @@ impl MesherPool {
                             Ok(Err(error)) => Err(error),
                             Err(_) => {
                                 kernel = crate::nodecraft_solidcore_kernel();
-                                Err("mesher worker panicked".into())
+                                Err("tessellation worker panicked".into())
                             }
                         };
                         let _ = work.result.send(MeshResult {
@@ -132,7 +151,7 @@ impl MesherPool {
                         });
                     }
                 })
-                .expect("spawn mesher worker");
+                .expect("spawn tessellation worker");
             workers.push(worker);
         }
         Self { shared, workers }
@@ -157,9 +176,9 @@ impl MesherPool {
         if !self.shared.push(Work { request, revision, result }) {
             let (tx, rx) = channel();
             let _ = tx.send(MeshResult {
-                key: MeshKey::new("shutdown", "", 0.0),
+                key: MeshKey::new("shutdown", "", 0.0, None),
                 revision: 0,
-                asset: Err("mesher pool is shut down".into()),
+                asset: Err("tessellation pool is shut down".into()),
             });
             return rx;
         }
@@ -167,7 +186,7 @@ impl MesherPool {
     }
 }
 
-impl Drop for MesherPool {
+impl Drop for TessellationPool {
     fn drop(&mut self) {
         self.shared.shutdown.store(true, Ordering::Release);
         self.shared.ready.notify_all();
@@ -177,34 +196,40 @@ impl Drop for MesherPool {
     }
 }
 
-static MESHER: std::sync::OnceLock<MesherPool> = std::sync::OnceLock::new();
+static TESSELLATION: std::sync::OnceLock<TessellationPool> = std::sync::OnceLock::new();
 static REQUESTED_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn configure_mesher_threads(threads: usize) {
+/// Worker count of the initialized display tessellation, if it has started.
+#[must_use]
+pub fn tessellation_worker_count() -> Option<usize> {
+    TESSELLATION.get().map(TessellationPool::workers)
+}
+
+pub fn configure_tessellation_threads(threads: usize) {
     REQUESTED_THREADS.store(threads, Ordering::Relaxed);
 }
 
 #[must_use]
-pub fn shared_mesher() -> &'static MesherPool {
-    MESHER.get_or_init(|| {
+pub fn shared_tessellation() -> &'static TessellationPool {
+    TESSELLATION.get_or_init(|| {
         let requested = REQUESTED_THREADS.load(Ordering::Relaxed);
         let threads = if requested == 0 {
             std::thread::available_parallelism().map_or(1, |count| count.get())
         } else {
             requested
         };
-        MesherPool::new(threads)
+        TessellationPool::new(threads)
     })
 }
 
 #[must_use]
-pub fn mesher_initialized() -> bool {
-    MESHER.get().is_some()
+pub fn tessellation_initialized() -> bool {
+    TESSELLATION.get().is_some()
 }
 
-/// Reset the shared display-mesher kernels after an explicit rebuild.
-pub fn reset_mesher_caches() {
-    if let Some(pool) = MESHER.get() {
+/// Reset the shared display-tessellation kernels after an explicit rebuild.
+pub fn reset_tessellation_caches() {
+    if let Some(pool) = TESSELLATION.get() {
         pool.reset_caches();
     }
 }

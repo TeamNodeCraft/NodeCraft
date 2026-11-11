@@ -1,22 +1,28 @@
 {
   "schemaVersion": 1,
   "id": "step-import",
-  "nodes": [
-    {
-      "id": "n1",
-      "type": "stepimporter",
-      "values": {
-        "heal": true,
-        "path": "./samples/rust-export.step"
-      },
-      "suppressed": false,
-      "x": 2400,
-      "y": 2200
-    }
-  ],
-  "connections": [],
-  "interface": {
-    "inputs": [],
-    "outputs": []
-  }
+  "root": {
+    "id": "root",
+    "name": "Root",
+    "kind": "graph",
+    "interface": {
+      "inputs": [],
+      "outputs": []
+    },
+    "nodes": [
+      {
+        "id": "n1",
+        "type": "stepimporter",
+        "values": {
+          "heal": true,
+          "path": "./samples/rust-export.step"
+        },
+        "suppressed": false,
+        "x": 2400,
+        "y": 2200
+      }
+    ],
+    "connections": []
+  },
+  "definitions": []
 }

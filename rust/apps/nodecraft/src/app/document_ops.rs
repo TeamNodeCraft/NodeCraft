@@ -7,6 +7,8 @@ pub(super) struct NodeClipboard {
     pub(super) nodes: Vec<GraphNode>,
     #[serde(default)]
     pub(super) connections: Vec<GraphConnection>,
+    #[serde(default)]
+    pub(super) definitions: Vec<nodecraft_session::GraphDefinition>,
 }
 
 pub(super) const PASTE_OFFSET: f64 = 32.0;
@@ -28,11 +30,19 @@ pub(super) fn clipboard_action(events: &[egui::Event]) -> Option<ClipboardAction
 }
 
 pub(super) fn delete_selection_commands(
+    document: Option<&GraphDocument>,
     nodes: &HashSet<String>,
     cables: &HashSet<ConnectionKey>,
 ) -> Vec<Command> {
+    let graph_interfaces: HashSet<&str> = document
+        .into_iter()
+        .flat_map(|document| document.nodes.iter())
+        .filter(|node| nodecraft_session::groups::is_graph_interface_node(node))
+        .map(|node| node.id.as_str())
+        .collect();
     let mut commands: Vec<Command> = nodes
         .iter()
+        .filter(|id| !graph_interfaces.contains(id.as_str()))
         .cloned()
         .map(|id| Command::RemoveNode { id })
         .collect();
@@ -73,6 +83,7 @@ pub(super) fn parse_node_clipboard(text: &str) -> Result<NodeClipboard, String> 
         return Ok(NodeClipboard {
             nodes: serde_json::from_value(value).map_err(|error| error.to_string())?,
             connections: Vec::new(),
+            definitions: Vec::new(),
         });
     }
     if value.get("nodes").is_some() {
@@ -82,6 +93,7 @@ pub(super) fn parse_node_clipboard(text: &str) -> Result<NodeClipboard, String> 
         return Ok(NodeClipboard {
             nodes: vec![serde_json::from_value(value).map_err(|error| error.to_string())?],
             connections: Vec::new(),
+            definitions: Vec::new(),
         });
     }
     Err("expected node object, node array, or { nodes: [...] }".to_owned())
@@ -108,7 +120,148 @@ pub(super) fn clipboard_payload(document: &GraphDocument, selected: &HashSet<&st
         })
         .cloned()
         .collect();
-    Some(NodeClipboard { nodes, connections })
+    let mut definitions = Vec::new();
+    let mut queued: std::collections::BTreeSet<String> = nodes
+        .iter()
+        .filter_map(|node| match nodecraft_session::groups::GraphReference::from_node(node) {
+            Some(nodecraft_session::groups::GraphReference::Local(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    while let Some(id) = queued.pop_first() {
+        let Some(definition) = document.definition(&id).cloned() else {
+            continue;
+        };
+        for node in &definition.nodes {
+            if let Some(nodecraft_session::groups::GraphReference::Local(child)) =
+                nodecraft_session::groups::GraphReference::from_node(node)
+                && !definitions
+                    .iter()
+                    .any(|definition: &nodecraft_session::GraphDefinition| definition.id == child)
+            {
+                queued.insert(child);
+            }
+        }
+        definitions.push(definition);
+    }
+    Some(NodeClipboard {
+        nodes,
+        connections,
+        definitions,
+    })
+}
+
+fn unique_definition_name(base: &str, names: &std::collections::BTreeSet<String>) -> String {
+    if !names.contains(base) {
+        return base.to_owned();
+    }
+    let mut suffix = 2;
+    loop {
+        let candidate = format!("{base} {suffix}");
+        if !names.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn stub_graph_definition(
+    id: &str,
+    node: &GraphNode,
+) -> nodecraft_session::GraphDefinition {
+    let ports = |key: &str| -> Vec<String> {
+        node.values
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|ports| {
+                ports
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let inputs = ports("inputs");
+    let outputs = ports("outputs");
+    let marker = |id: &str, node_type: &str, ports: &[String]| GraphNode {
+        expressions: Default::default(),
+        id: id.into(),
+        node_type: node_type.into(),
+        values: serde_json::json!({ "ports": ports }),
+        suppressed: false,
+        x: 0.0,
+        y: 0.0,
+    };
+    let mut nodes = Vec::new();
+    if !inputs.is_empty() {
+        nodes.push(marker("in", "groupinput", &inputs));
+    }
+    if !outputs.is_empty() {
+        nodes.push(marker("out", "groupoutput", &outputs));
+    }
+    let connections = inputs
+        .iter()
+        .filter(|port| outputs.contains(port))
+        .map(|port| GraphConnection {
+            from: "in".into(),
+            to: "out".into(),
+            input: port.clone(),
+            out: port.clone(),
+        })
+        .collect();
+    nodecraft_session::GraphDefinition {
+        id: id.to_owned(),
+        name: node
+            .values
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(id)
+            .to_owned(),
+        kind: "graph".into(),
+        interface: nodecraft_session::GraphInterface {
+            inputs,
+            outputs,
+        },
+        nodes,
+        connections,
+    }
+}
+
+fn order_definitions(definitions: Vec<nodecraft_session::GraphDefinition>) -> Vec<nodecraft_session::GraphDefinition> {
+    let mut by_id: std::collections::HashMap<String, nodecraft_session::GraphDefinition> = definitions
+        .into_iter()
+        .map(|definition| (definition.id.clone(), definition))
+        .collect();
+    fn visit(
+        id: &str,
+        by_id: &mut std::collections::HashMap<String, nodecraft_session::GraphDefinition>,
+        seen: &mut std::collections::HashSet<String>,
+        out: &mut Vec<nodecraft_session::GraphDefinition>,
+    ) {
+        if !seen.insert(id.to_owned()) {
+            return;
+        }
+        let Some(definition) = by_id.remove(id) else {
+            return;
+        };
+        for node in &definition.nodes {
+            if let Some(nodecraft_session::groups::GraphReference::Local(child)) =
+                nodecraft_session::groups::GraphReference::from_node(node)
+            {
+                visit(&child, by_id, seen, out);
+            }
+        }
+        out.push(definition);
+    }
+    let mut ids: Vec<String> = by_id.keys().cloned().collect();
+    ids.sort();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for id in ids {
+        visit(&id, &mut by_id, &mut seen, &mut out);
+    }
+    out
 }
 
 pub(super) fn paste_plan(
@@ -116,29 +269,121 @@ pub(super) fn paste_plan(
     payload: NodeClipboard,
     origin: Option<egui::Pos2>,
 ) -> (Vec<Command>, HashSet<String>, Option<String>) {
-    let min_x = payload.nodes.iter().map(|node| node.x).fold(f64::INFINITY, f64::min);
-    let min_y = payload.nodes.iter().map(|node| node.y).fold(f64::INFINITY, f64::min);
+    let NodeClipboard {
+        nodes,
+        connections,
+        definitions,
+    } = payload;
+    let min_x = nodes.iter().map(|node| node.x).fold(f64::INFINITY, f64::min);
+    let min_y = nodes.iter().map(|node| node.y).fold(f64::INFINITY, f64::min);
     let (origin_x, origin_y) = origin
         .map(|position| (f64::from(position.x), f64::from(position.y)))
         .unwrap_or((min_x + PASTE_OFFSET, min_y + PASTE_OFFSET));
     let mut used: HashSet<String> = document.nodes.iter().map(|node| node.id.clone()).collect();
     let mut ids = std::collections::HashMap::new();
-    for node in &payload.nodes {
+    for node in &nodes {
         ids.insert(node.id.clone(), unique_node_id(&node.id, &mut used));
     }
-    let mut commands = Vec::new();
-    for node in &payload.nodes {
+
+    let mut definitions = definitions;
+    // A hand-written clipboard may contain a graph node without its definition
+    // table. Keep the paste useful by synthesizing the cached interface as a
+    // passthrough definition instead of failing graph validation.
+    let referenced: BTreeSet<String> = nodes
+        .iter()
+        .filter_map(|node| match nodecraft_session::groups::GraphReference::from_node(node) {
+            Some(nodecraft_session::groups::GraphReference::Local(id)) => Some(id),
+            _ => None,
+        })
+        .collect();
+    for id in referenced {
+        if document.definition(&id).is_some()
+            || definitions.iter().any(|definition| definition.id == id)
+        {
+            continue;
+        }
+        if let Some(node) = nodes.iter().find(|node| {
+            matches!(
+                nodecraft_session::groups::GraphReference::from_node(node),
+                Some(nodecraft_session::groups::GraphReference::Local(ref reference)) if reference == &id
+            )
+        }) {
+            definitions.push(stub_graph_definition(&id, node));
+        }
+    }
+
+    let mut used_definition_ids: BTreeSet<String> = document
+        .definitions
+        .iter()
+        .map(|definition| definition.id.clone())
+        .chain(std::iter::once(document.root.id.clone()))
+        .collect();
+    let mut used_definition_names: BTreeSet<String> = document
+        .definitions
+        .iter()
+        .map(|definition| definition.name.clone())
+        .collect();
+    let mut definition_ids = std::collections::HashMap::new();
+    let mut definition_names = std::collections::HashMap::new();
+    for definition in &definitions {
+        let id = unique_graph_definition_id(&definition.id, &used_definition_ids);
+        used_definition_ids.insert(id.clone());
+        let name = unique_definition_name(&definition.name, &used_definition_names);
+        used_definition_names.insert(name.clone());
+        definition_names.insert(id.clone(), name.clone());
+        definition_ids.insert(definition.id.clone(), id);
+    }
+    for definition in &mut definitions {
+        let new_id = definition_ids
+            .get(&definition.id)
+            .cloned()
+            .unwrap_or_else(|| definition.id.clone());
+        definition.id = new_id.clone();
+        definition.name = definition_names
+            .get(&new_id)
+            .cloned()
+            .unwrap_or_else(|| definition.name.clone());
+        for node in &mut definition.nodes {
+            if let Some(nodecraft_session::groups::GraphReference::Local(id)) =
+                nodecraft_session::groups::GraphReference::from_node(node)
+                && let Some(mapped) = definition_ids.get(&id)
+            {
+                node.values["definition"] = serde_json::Value::String(mapped.clone());
+                if let Some(name) = definition_names.get(mapped) {
+                    node.values["name"] = serde_json::Value::String(name.clone());
+                }
+            }
+        }
+    }
+
+    let definitions = order_definitions(definitions);
+    let mut commands: Vec<Command> = definitions
+        .into_iter()
+        .map(|definition| Command::AddDefinition { definition })
+        .collect();
+    for node in &nodes {
         let id = ids.get(&node.id).cloned().unwrap_or_else(|| node.id.clone());
+        let mut node = node.clone();
+        if let Some(nodecraft_session::groups::GraphReference::Local(reference)) =
+            nodecraft_session::groups::GraphReference::from_node(&node)
+            && let Some(mapped) = definition_ids.get(&reference)
+        {
+            node.values["definition"] = serde_json::Value::String(mapped.clone());
+            if let Some(name) = definition_names.get(mapped) {
+                node.values["name"] = serde_json::Value::String(name.clone());
+            }
+        }
         commands.push(Command::AddNode {
-            node: GraphNode { expressions: Default::default(),
+            node: GraphNode {
+                expressions: Default::default(),
                 id,
                 x: origin_x + (node.x - min_x),
                 y: origin_y + (node.y - min_y),
-                ..node.clone()
+                ..node
             },
         });
     }
-    for link in payload.connections {
+    for link in connections {
         let to = ids.get(&link.to).cloned().unwrap_or_else(|| link.to.clone());
         let from = ids
             .get(&link.from)
@@ -159,7 +404,7 @@ pub(super) fn paste_plan(
         });
     }
     let selected: HashSet<String> = ids.values().cloned().collect();
-    let pasted_last = payload.nodes.last().and_then(|node| ids.get(&node.id)).cloned();
+    let pasted_last = nodes.last().and_then(|node| ids.get(&node.id)).cloned();
     (commands, selected, pasted_last)
 }
 
@@ -273,12 +518,22 @@ pub(super) fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet
 
 
 pub(super) fn target_closure(document: &GraphDocument, target: &str) -> HashSet<String> {
+    // Large boolean chains are thousands of nodes deep. Building the reverse
+    // adjacency once keeps closure discovery linear instead of rescanning every
+    // connection for every visited node.
+    let mut inputs: std::collections::HashMap<&str, Vec<&str>> =
+        std::collections::HashMap::new();
+    for link in &document.connections {
+        inputs.entry(link.to.as_str()).or_default().push(link.from.as_str());
+    }
     let mut closure = HashSet::new();
-    let mut stack = vec![target.to_owned()];
+    let mut stack = vec![target];
     while let Some(id) = stack.pop() {
-        if !closure.insert(id.clone()) { continue; }
-        for link in document.connections.iter().filter(|link| link.to == id) {
-            stack.push(link.from.clone());
+        if !closure.insert(id.to_owned()) {
+            continue;
+        }
+        if let Some(upstream) = inputs.get(id) {
+            stack.extend(upstream.iter().copied());
         }
     }
     closure
@@ -295,14 +550,16 @@ pub(super) fn initial_viewer_target(document: &GraphDocument) -> Option<String> 
     {
         return Some(output.clone());
     }
+    let consumers: HashSet<&str> = document
+        .connections
+        .iter()
+        .map(|link| link.from.as_str())
+        .collect();
     document
         .nodes
         .iter()
         .rev()
-        .find(|node| {
-            node.node_type != "exporter"
-                && !document.connections.iter().any(|link| link.from == node.id)
-        })
+        .find(|node| node.node_type != "exporter" && !consumers.contains(node.id.as_str()))
         .or_else(|| document.nodes.last())
         .map(|node| node.id.clone())
 }

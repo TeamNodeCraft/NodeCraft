@@ -3,7 +3,7 @@
 //! Run manually:
 //! `cargo test -p nodecraft-engine --test transform_mesh_latency -- --ignored --nocapture`
 
-use nodecraft_engine::{evaluate, EngineCache};
+use nodecraft_engine::{EngineCache, evaluate_exact};
 use nodecraft_protocol::Request;
 use std::time::Instant;
 
@@ -86,13 +86,14 @@ fn transform_moves_emit_a_mesh() {
     let mut cache = EngineCache::new();
     let mut xs = [0.0; SOLIDS];
     // Warm all primitive/mirror/combine caches first.
-    let warm = evaluate(request(xs), cache, None);
+    let warm = evaluate_exact(request(xs), cache, None);
     cache = warm.cache;
+    let mut display_cache = nodecraft_display::PlanCache::new(256);
+    let warm_mesh = warm.exact_parts.get("result").and_then(|part| {
+        nodecraft_display::mesh_part(part, nodecraft_display::DisplayQuality::Full(0.35), &mut display_cache).ok()
+    });
     assert!(
-        warm.response
-            .meshes
-            .get("result")
-            .is_some_and(|payload| !payload.mesh.vertices.is_empty()),
+        warm_mesh.is_some_and(|display| !display.mesh.vertices.is_empty()),
         "warm evaluation produced no mesh"
     );
 
@@ -102,23 +103,20 @@ fn transform_moves_emit_a_mesh() {
         let index = step % SOLIDS;
         xs[index] += 5.0;
         let started = Instant::now();
-        let output = evaluate(request(xs), cache, None);
+        let output = evaluate_exact(request(xs), cache, None);
         cache = output.cache;
+        let mesh = output.exact_parts.get("result").and_then(|part| {
+            nodecraft_display::mesh_part(part, nodecraft_display::DisplayQuality::Full(0.35), &mut display_cache).ok()
+        }).expect("mesh result");
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        let mesh = output
-            .response
-            .meshes
-            .get("result")
-            .map(|payload| &payload.mesh)
-            .expect("mesh result");
-        assert!(!mesh.vertices.is_empty(), "step {step} produced no mesh");
+        assert!(!mesh.mesh.vertices.is_empty(), "step {step} produced no mesh");
         wall_ms.push(elapsed);
         engine_ms.push(output.response.evaluation_ms);
         println!(
             "transform step {step:02} x[{index}]={:>6.1} wall={elapsed:8.3} ms engine={:8.3} ms verts={}",
             xs[index],
             output.response.evaluation_ms,
-            mesh.vertices.len()
+            mesh.mesh.vertices.len()
         );
     }
 

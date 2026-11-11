@@ -10,7 +10,7 @@ publish = false
 default = ["gpu-viewport"]
 # The wgpu viewport is being ported from SolidCraft. It is kept optional until the
 # adapter lands so the first app shell can build without a GPU pipeline.
-gpu-viewport = ["dep:solidcraft-gpu"]
+gpu-viewport = ["dep:solidcraft-viewport-gpu"]
 
 [dependencies]
 egui = "0.36"
@@ -27,9 +27,12 @@ glyphon = "0.12"
 serde = { workspace = true }
 serde_json.workspace = true
 nodecraft-engine = { path = "../../crates/nodecraft-engine" }
+nodecraft-display = { path = "../../crates/nodecraft-display" }
 nodecraft-step = { path = "../../crates/nodecraft-step" }
 nodecraft-mesh = { path = "../../crates/nodecraft-mesh" }
+nodecraft-layers = { path = "../../crates/nodecraft-layers" }
 nodecraft-protocol = { path = "../../crates/nodecraft-protocol" }
+nodecraft-exact = { path = "../../crates/nodecraft-exact" }
 nodecraft-session = { path = "../../crates/nodecraft-session" }
 nodecraft-node-canvas = { path = "../../crates/nodecraft-node-canvas" }
 nodecraft-node-contract = { path = "../../crates/nodecraft-node-contract" }
@@ -40,9 +43,9 @@ nodecraft-color-picker = { path = "../../crates/nodecraft-color-picker" }
 nodecraft-worker = { path = "../../crates/nodecraft-worker" }
 # Upstream view math/geometry. Keep these as git dependencies so they can be
 # updated independently of the app; only our UI adapter lives in this repository.
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcraft-render = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400" }
-solidcraft-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "9b559c4c0727b2c626622d86e00e7d4c63f52400", optional = true }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 nodecraft-macos = { path = "../../crates/nodecraft-macos" }

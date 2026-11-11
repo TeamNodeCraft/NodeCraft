@@ -1,6 +1,6 @@
 //! The NodeCraft Edge-node parameter model (`chamfer` node in the graph).
 //!
-//! The app's Edge node stores these values (see `app.js` / `TYPES.chamfer` and the
+//! The app's Edge node stores these values (see `TYPES.chamfer` and the
 //! inspector additions):
 //!
 //! | JSON value | Meaning | Default |

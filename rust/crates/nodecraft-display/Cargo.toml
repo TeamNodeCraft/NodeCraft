@@ -1,0 +1,18 @@
+[package]
+name = "nodecraft-display"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Display-plan service: B-rep to TessPlan cache and derived display data"
+
+[dependencies]
+nodecraft-layers = { path = "../nodecraft-layers" }
+nodecraft-exact = { path = "../nodecraft-exact" }
+nodecraft-solidcore = { path = "../nodecraft-solidcore" }
+nodecraft-mesh = { path = "../nodecraft-mesh" }
+solidcore-tess = { workspace = true }
+nodecraft-protocol = { path = "../nodecraft-protocol" }
+base64 = "0.22"
+nodecraft-step = { path = "../nodecraft-step" }
+serde_json.workspace = true
+arc-swap = "1"

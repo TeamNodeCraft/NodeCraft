@@ -3,7 +3,7 @@
 //! Nesting is a UI/presentation concept. The engine always receives one flat
 //! graph. This cache keeps that flat graph until a source document changes.
 
-use crate::{expand_linked_parts_with, ContentHash, GraphDocument, SessionError};
+use crate::{expand_linked_parts_with, flatten_inline_graphs, ContentHash, GraphDocument, SessionError};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -53,7 +53,8 @@ impl FlatGraphCache {
             .as_ref()
             .is_none_or(|flat| flat.fingerprint != fingerprint)
         {
-            let flattened = expand_linked_parts_with(document, linked_documents)?;
+            let grouped = flatten_inline_graphs(document)?;
+            let flattened = expand_linked_parts_with(&grouped, linked_documents)?;
             self.current = Some(FlatGraph {
                 document: flattened,
                 fingerprint,
@@ -107,7 +108,11 @@ mod tests {
         GraphDocument {
             schema_version: 1,
             id: id.into(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![GraphNode { expressions: Default::default(),
                 id: "p".into(),
                 node_type: "primitive".into(),
                 values: json!({"primitiveType": "box", "length": value}),
@@ -115,8 +120,10 @@ mod tests {
                 x: 0.0,
                 y: 0.0,
             }],
-            connections: Vec::<GraphConnection>::new(),
-            interface: GraphInterface::default(),
+                connections: Vec::<GraphConnection>::new(),
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
         }
     }
 
@@ -135,4 +142,76 @@ mod tests {
         let third = cache.resolve(&root, &linked).expect("rebuild").fingerprint();
         assert_ne!(first, third);
     }
+
+    #[test]
+    fn definition_edits_invalidate_flat_graph_cache() {
+        let mut root = document("root", 1.0);
+        root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "g".into(),
+            node_type: "graph".into(),
+            values: json!({"definition": "feature", "name": "Feature", "inputs": [], "outputs": []}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        root.definitions.push(crate::GraphDefinition {
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
+                id: "box".into(),
+                node_type: "primitive".into(),
+                values: json!({"primitiveType": "box", "length": 1.0}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
+            connections: Vec::new(),
+        });
+        let linked = BTreeMap::new();
+        let mut cache = FlatGraphCache::new();
+        let first = cache.resolve(&root, &linked).expect("flatten").fingerprint();
+        root.definitions[0].nodes[0].values = json!({"primitiveType": "box", "length": 2.0});
+        let changed = cache.resolve(&root, &linked).expect("rebuild").fingerprint();
+        assert_ne!(first, changed);
+        root.definitions[0].name = "Renamed".into();
+        root.definitions[0].nodes[0].x = 100.0;
+        let presentation = cache.resolve(&root, &linked).expect("reuse").fingerprint();
+        assert_eq!(changed, presentation, "names and layout do not affect geometry");
+    }
+
+    #[test]
+    fn flat_graph_expands_inline_graphs_before_evaluation() {
+        let mut root = document("root", 1.0);
+        root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "g".into(),
+            node_type: "group".into(),
+            values: json!({
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"port":"shape"},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"box","type":"primitive","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"port":"shape"},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections": [
+                    {"from":"in","to":"box","in":"shape","out":"shape"},
+                    {"from":"box","to":"out","in":"shape","out":"shape"}
+                ],
+                "inputs": [{"port":"shape","node":"in"}],
+                "outputs": [{"port":"shape","node":"out"}]
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        let mut cache = FlatGraphCache::new();
+        let flat = cache.resolve(&root, &BTreeMap::new()).expect("flatten");
+        assert!(flat.document().nodes.iter().all(|node| node.node_type != "group"));
+        assert!(flat.document().nodes.iter().any(|node| node.id == "g"));
+        assert!(flat.document().nodes.iter().any(|node| node.id == "g::box"));
+    }
+
 }

@@ -14,17 +14,28 @@
 //! record-first migration.
 
 use nodecraft_protocol::Mesh;
-use solidcore::kernel::Kernel;
 use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
+use solidcore::kernel::Kernel;
 use solidcore::topology::Brep as KernelBrep;
 use solidcore::topology::FaceId;
 use solidcore_record::Vec3;
 use solidcore_record::brep::Brep as RecordBrep;
-use solidcore_tess::MeshTolerance;
+
+/// Re-export the plan types used by the app/GPU adapters so application code
+/// stays behind the NodeCraft layers boundary.
+pub mod tess {
+    pub use solidcore_tess::{FacePlan, TessPlan};
+}
 
 pub use solidcore_ops::BooleanOp;
+pub use solidcore_tess::MeshTolerance;
 
 fn check_body(body: &solidcore_ops::Body) -> Result<(), String> {
+    if !cfg!(any(test, debug_assertions))
+        && std::env::var_os("NODECRAFT_VALIDATE_RESULTS").is_none()
+    {
+        return Ok(());
+    }
     let report = body
         .check(solidcore_ops::CheckLevel::Geometry)
         .map_err(|error| format!("solidcore check: {error}"))?;
@@ -68,6 +79,9 @@ pub fn configure_session_fixes(fixes: &[&str]) -> Result<(), String> {
 /// is the rendering source of truth.
 #[derive(Debug)]
 pub struct TessDisplay {
+    /// The evaluated plan's source. Kept so a GPU can evaluate the same
+    /// triangulation instead of only consuming the CPU mesh.
+    pub plan: std::sync::Arc<solidcore_tess::TessPlan>,
     pub mesh: Mesh,
     /// Edge polylines in display space, in the record's edge order.
     pub edge_polylines: Vec<Vec<[f32; 3]>>,
@@ -75,6 +89,8 @@ pub struct TessDisplay {
     pub seam_edges: Vec<bool>,
     pub smooth_edges: Vec<bool>,
     pub stats: TessStats,
+    /// Display-edge id by record edge index, after the kernel-edge remap.
+    pub plan_edge_ids: Vec<Option<String>>,
 }
 
 /// One display-only simplification level.
@@ -84,6 +100,28 @@ pub struct TessLevel {
     pub triangles: Vec<[u32; 3]>,
     /// Maximum distance from the original surface, in mm.
     pub error: f64,
+}
+
+/// Build display LOD levels directly from a protocol mesh.
+#[must_use]
+pub fn simplify_mesh(mesh: &Mesh, targets: &[usize]) -> Vec<TessLevel> {
+    let positions: Vec<Vec3> = mesh
+        .vertices
+        .iter()
+        .map(|p| Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
+        .collect();
+    solidcore_tess::simplify::levels(&positions, &mesh.faces, targets)
+        .into_iter()
+        .map(|level| TessLevel {
+            positions: level
+                .positions
+                .iter()
+                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                .collect(),
+            triangles: level.triangles,
+            error: level.error,
+        })
+        .collect()
 }
 
 /// Build display LOD levels from a tessellation. These carry positions, triangles
@@ -112,7 +150,7 @@ pub fn simplify_display(display: &TessDisplay, targets: &[usize]) -> Vec<TessLev
 }
 
 /// The tessellation's planning report, reduced to what an application logs.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct TessStats {
     pub faces: usize,
     pub triangles: usize,
@@ -121,6 +159,14 @@ pub struct TessStats {
     pub delaunay_faces: usize,
     /// Faces the planner or the evaluator left out of the mesh, with the reason.
     pub unmeshed_faces: Vec<(usize, String)>,
+    pub lenient_faces: usize,
+    pub over_tolerance_faces: usize,
+    pub unsampled_edges: usize,
+    pub capped_edges: usize,
+    pub kept_strict_edges: usize,
+    pub averaged_poles: usize,
+    /// Human-readable planner defects, capped for display/logging.
+    pub diagnostics: Vec<String>,
 }
 
 /// Plan and evaluate a record's display mesh.
@@ -134,6 +180,7 @@ pub fn tessellate_record(
 ) -> Result<TessDisplay, String> {
     let (plan, stats) = solidcore_tess::plan(record, tolerance, size)
         .map_err(|error| format!("tessellation plan: {error}"))?;
+    let plan = std::sync::Arc::new(plan);
     let (tess, refused) = plan.evaluate();
     let mut unmeshed_faces: Vec<(usize, String)> = stats
         .unmeshed
@@ -152,9 +199,63 @@ pub fn tessellate_record(
         })
         .collect();
     let mesh = protocol_mesh(&tess, &edge_polylines);
+    let mut diagnostics = Vec::new();
+    for face in &stats.lenient {
+        diagnostics.push(format!("face {} lenient: {}", face.face, face.reason));
+    }
+    for face in &unmeshed_faces {
+        diagnostics.push(format!("face {} unmeshed: {}", face.0, face.1));
+    }
+    for edge in &stats.unsampled_edges {
+        diagnostics.push(format!("edge {} unsampled: {}", edge.edge, edge.reason));
+    }
+    for edge in &stats.edges_capped {
+        diagnostics.push(format!(
+            "edge {} capped {:?}: sag {:.3e}, excess {:.2}, tolerance {:.3e}{}",
+            edge.edge,
+            edge.cap,
+            edge.sag,
+            edge.excess,
+            edge.tol,
+            if edge.within { "" } else { " (outside tolerance)" }
+        ));
+    }
+    for edge in &stats.kept_strict {
+        diagnostics.push(format!("edge {} kept strict: {}", edge.edge, edge.reason));
+    }
+    let mut plan_edge_ids = vec![None; plan.edges.len()];
+    for edge in &mesh.brep_edges {
+        if let Some(index) = edge
+            .id
+            .strip_prefix("edge:")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            if let Some(slot) = plan_edge_ids.get_mut(index) {
+                *slot = Some(edge.id.clone());
+            }
+        }
+    }
+    for face in &stats.over_tolerance {
+        diagnostics.push(format!(
+            "face {} over tolerance: sag {:.3e}, tolerance {:.3e}, caps {:?}{}",
+            face.face,
+            face.sag,
+            face.tol,
+            face.caps,
+            if face.within { "" } else { " (outside tolerance)" }
+        ));
+    }
+    for pole in &stats.averaged_poles {
+        diagnostics.push(format!(
+            "face {} averaged pole at {:.3e},{:.3e},{:.3e}: {}",
+            pole.face, pole.point.x, pole.point.y, pole.point.z, pole.reason
+        ));
+    }
     Ok(TessDisplay {
+        plan,
         mesh,
         edge_polylines,
+        plan_edge_ids,
         seam_edges: tess.seams.clone(),
         smooth_edges: tess.smooth_edges.clone(),
         stats: TessStats {
@@ -164,6 +265,13 @@ pub fn tessellate_record(
             structured_faces: stats.structured,
             delaunay_faces: stats.delaunay,
             unmeshed_faces,
+            lenient_faces: stats.lenient.len(),
+            over_tolerance_faces: stats.over_tolerance.len(),
+            unsampled_edges: stats.unsampled_edges.len(),
+            capped_edges: stats.edges_capped.len(),
+            kept_strict_edges: stats.kept_strict.len(),
+            averaged_poles: stats.averaged_poles.len(),
+            diagnostics,
         },
     })
 }
@@ -448,13 +556,53 @@ pub fn tessellate_kernel(
     brep: &mut KernelBrep,
     tolerance: f64,
 ) -> Result<TessDisplay, String> {
+    let size = kernel_body_size(kernel, brep)?;
+    tessellate_kernel_with(
+        kernel,
+        brep,
+        MeshTolerance::display(tolerance.max(1.0e-5)),
+        size,
+    )
+}
+
+/// Tessellate a kernel B-rep at `solidcore_tess::preview` density (a provisional
+/// display plan). The preview is never finer than the normal display tolerance,
+/// so small bodies keep their normal quality instead of gaining triangles.
+pub fn tessellate_kernel_preview(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    detail: u8,
+) -> Result<TessDisplay, String> {
+    let size = kernel_body_size(kernel, brep)?;
+    let preview = solidcore_tess::preview::tolerance(size, usize::from(detail));
+    // The preview chord is based on body size, so for small bodies it can be
+    // finer than the normal display plan; never add triangles. Far previews also
+    // relax the facet angle, which is the dominant lever for curved bodies.
+    let angle = match detail {
+        0..=2 => Some(30.0_f64.to_radians()),
+        3..=4 => Some(25.0_f64.to_radians()),
+        5..=6 => Some(20.0_f64.to_radians()),
+        _ => Some(15.0_f64.to_radians()),
+    };
+    let display = MeshTolerance {
+        chord: preview.chord.max(1.0e-5),
+        angle,
+    };
+    tessellate_kernel_with(kernel, brep, display, size)
+}
+
+fn kernel_body_size(kernel: &mut Kernel, brep: &KernelBrep) -> Result<f64, String> {
+    // Display only needs a conservative extent for choosing density. The tight
+    // exact box evaluates every edge and face and can take tens of seconds on a
+    // large imported body; the approximate path falls back to vertices above
+    // the kernel's size thresholds and is never smaller than the body.
     let extent = calculate_bounding_box(
         kernel,
-        &*brep,
+        brep,
         BoundingBoxOptions {
-            approx: false,
-            tight: true,
-            expand_by_zone_tol_3d: false,
+            approx: true,
+            tight: false,
+            expand_by_zone_tol_3d: true,
         },
     )
     .map_err(|error| format!("kernel bounding box: {error}"))?;
@@ -462,19 +610,111 @@ pub fn tessellate_kernel(
     for axis in 0..3 {
         diagonal += (extent.max_at(axis) - extent.min_at(axis)).powi(2);
     }
-    let size = diagonal.sqrt().max(1.0);
+    Ok(diagonal.sqrt().max(1.0))
+}
+
+/// A display plan without evaluating it into a CPU mesh. GPU callers consume the
+/// plan; only edge polylines/ids are materialised for picking and overlays.
+#[derive(Clone, Debug)]
+pub struct TessPlanData {
+    pub plan: std::sync::Arc<solidcore_tess::TessPlan>,
+    pub plan_edge_ids: Vec<Option<String>>,
+    pub edge_polylines: Vec<Vec<[f32; 3]>>,
+    pub stats: TessStats,
+}
+
+/// Plan a kernel B-rep without evaluating it. `preview_detail` selects the
+/// provisional display density; `None` uses the normal display tolerance.
+pub fn plan_kernel(
+    kernel: &mut Kernel,
+    brep: &KernelBrep,
+    tolerance: f64,
+    preview_detail: Option<u8>,
+) -> Result<TessPlanData, String> {
+    let size = kernel_body_size(kernel, brep)?;
+    let display = match preview_detail {
+        None => MeshTolerance::display(tolerance.max(1.0e-5)),
+        Some(detail) => {
+            let preview = solidcore_tess::preview::tolerance(size, usize::from(detail));
+            let angle = match detail {
+                0..=2 => Some(30.0_f64.to_radians()),
+                3..=4 => Some(25.0_f64.to_radians()),
+                5..=6 => Some(20.0_f64.to_radians()),
+                _ => Some(15.0_f64.to_radians()),
+            };
+            MeshTolerance { chord: preview.chord.max(1.0e-5), angle }
+        }
+    };
+    let mut copy = brep
+        .clone_standing_for_self()
+        .map_err(|error| format!("display copy: {error}"))?;
+    let (record, order) = solidcore_convert::brep::to_record(kernel, &mut copy)
+        .map_err(|error| format!("kernel to record: {error}"))?;
+    let (plan, planned) = solidcore_tess::plan(&record, &display, size)
+        .map_err(|error| format!("tessellation plan: {error}"))?;
+    let plan = std::sync::Arc::new(plan);
+    let mut stats = TessStats {
+        faces: plan.faces.len(),
+        triangles: plan.faces.iter().map(|face| face.triangles.len()).sum(),
+        planar_faces: planned.planar,
+        structured_faces: planned.structured,
+        delaunay_faces: planned.delaunay,
+        lenient_faces: planned.lenient.len(),
+        over_tolerance_faces: planned.over_tolerance.len(),
+        unsampled_edges: planned.unsampled_edges.len(),
+        capped_edges: planned.edges_capped.len(),
+        kept_strict_edges: planned.kept_strict.len(),
+        averaged_poles: planned.averaged_poles.len(),
+        unmeshed_faces: planned.unmeshed.iter().map(|face| (face.face, face.reason.clone())).collect(),
+        ..TessStats::default()
+    };
+    for face in &planned.lenient {
+        stats.diagnostics.push(format!("face {} lenient: {}", face.face, face.reason));
+    }
+    for face in &planned.unmeshed {
+        stats.diagnostics.push(format!("face {} unmeshed: {}", face.face, face.reason));
+    }
+    let edge_list = copy.edge_list();
+    let edge_ordinals: std::collections::HashMap<_, _> = edge_list
+        .iter()
+        .enumerate()
+        .map(|(ordinal, edge)| (edge.clone(), ordinal))
+        .collect();
+    let mut plan_edge_ids = vec![None; plan.edges.len()];
+    for (index, kernel_edge) in order.edges.iter().enumerate() {
+        let Some(&ordinal) = edge_ordinals.get(kernel_edge) else { continue };
+        if let Some(slot) = plan_edge_ids.get_mut(index) {
+            *slot = Some(format!("edge:{ordinal}"));
+        }
+    }
+    let edge_polylines = plan
+        .edges
+        .iter()
+        .map(|polyline| polyline.iter().map(|point| [point.x as f32, point.y as f32, point.z as f32]).collect())
+        .collect();
+    Ok(TessPlanData { plan, plan_edge_ids, edge_polylines, stats })
+}
+
+fn tessellate_kernel_with(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    tolerance: MeshTolerance,
+    size: f64,
+) -> Result<TessDisplay, String> {
     let (record, order) = solidcore_convert::brep::to_record(kernel, brep)
         .map_err(|error| format!("kernel to record: {error}"))?;
-    let mut display = tessellate_record(
-        &record,
-        &MeshTolerance::display(tolerance.max(1.0e-5)),
-        size,
-    )?;
+    let mut display = tessellate_record(&record, &tolerance, size)?;
     // `protocol_mesh` keeps the record edge index in each display edge's id,
     // and skips empty polylines. Index into `order.edges` instead of zipping the
     // shorter display list against it; zipping shifted every id after the first
     // skipped edge, so saved ids named the wrong BRep edge.
     let edge_list = brep.edge_list();
+    let edge_ordinals: std::collections::HashMap<_, _> = edge_list
+        .iter()
+        .enumerate()
+        .map(|(ordinal, edge)| (edge.clone(), ordinal))
+        .collect();
+    let mut plan_edge_ids = vec![None; display.plan.edges.len()];
     for display_edge in &mut display.mesh.brep_edges {
         let Some(record_index) = display_edge
             .id
@@ -486,11 +726,61 @@ pub fn tessellate_kernel(
         let Some(kernel_edge) = order.edges.get(record_index) else {
             continue;
         };
-        if let Some(ordinal) = edge_list.iter().position(|edge| edge == kernel_edge) {
+        if let Some(&ordinal) = edge_ordinals.get(kernel_edge) {
             display_edge.id = format!("edge:{ordinal}");
+            if let Some(slot) = plan_edge_ids.get_mut(record_index) {
+                *slot = Some(display_edge.id.clone());
+            }
         }
     }
+    display.plan_edge_ids = plan_edge_ids;
     Ok(display)
+}
+
+/// Derive the display mesh from a cached plan without re-planning. `edge_ids`
+/// comes from the original [`TessDisplay::plan_edge_ids`] so edge selections
+/// keep their kernel ids after a plan-cache hit.
+#[must_use]
+pub fn evaluate_plan(plan: &std::sync::Arc<solidcore_tess::TessPlan>, edge_ids: &[Option<String>]) -> TessDisplay {
+    let (tess, refused) = plan.evaluate();
+    let edge_polylines: Vec<Vec<[f32; 3]>> = tess
+        .edges
+        .iter()
+        .map(|polyline| {
+            polyline
+                .iter()
+                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
+                .collect()
+        })
+        .collect();
+    let mut mesh = protocol_mesh(&tess, &edge_polylines);
+    for edge in &mut mesh.brep_edges {
+        if let Some(index) = edge
+            .id
+            .strip_prefix("edge:")
+            .and_then(|index| index.parse::<usize>().ok())
+        {
+            if let Some(Some(id)) = edge_ids.get(index) {
+                edge.id.clone_from(id);
+            }
+        }
+    }
+    let mut unmeshed = Vec::new();
+    unmeshed.extend(refused.into_iter().map(|face| (face.face, face.reason)));
+    TessDisplay {
+        plan: std::sync::Arc::clone(plan),
+        mesh,
+        edge_polylines,
+        plan_edge_ids: edge_ids.to_vec(),
+        seam_edges: tess.seams.clone(),
+        smooth_edges: tess.smooth_edges.clone(),
+        stats: TessStats {
+            faces: plan.faces.len(),
+            triangles: tess.triangles.len(),
+            unmeshed_faces: unmeshed,
+            ..TessStats::default()
+        },
+    }
 }
 
 #[cfg(test)]
@@ -499,6 +789,20 @@ mod tests {
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives as api;
     use solidcore::query::api_queries;
+
+    #[test]
+    fn cached_plan_evaluation_preserves_kernel_edge_ids() {
+        let mut kernel = Kernel::default();
+        let mut brep =
+            api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+                .expect("box");
+        let display = tessellate_kernel(&mut kernel, &mut brep, 0.1).expect("tessellate");
+        let evaluated = evaluate_plan(&display.plan, &display.plan_edge_ids);
+        let ids = |mesh: &nodecraft_protocol::Mesh| {
+            mesh.brep_edges.iter().map(|edge| edge.id.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&evaluated.mesh), ids(&display.mesh));
+    }
 
     #[test]
     fn display_edge_ids_name_the_kernel_edge_they_lie_on() {

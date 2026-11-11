@@ -1,10 +1,10 @@
 //! CPU viewport built on SolidCraft's camera, scene and rasterizer.
 //!
-//! The wgpu path from `solidcraft-gpu` will replace the rasterizer once the viewport
+//! The wgpu path from `solidcraft-viewport-gpu` will replace the rasterizer once the viewport
 //! adapter lands. Keeping the camera/scene/raster on SolidCraft types means the
 //! switch is local to this module.
 
-use solidcraft_render::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView};
+use solidcraft_viewport::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView};
 use nodecraft_protocol::Mesh as NodeMesh;
 
 use crate::adapter::{self, DisplayMesh};
@@ -14,6 +14,7 @@ use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
 use crate::gpu_viewport::GpuViewport;
 use solidcraft_geom::prelude::*;
+use solidcore_record::Vec3;
 
 /// The shared world origin used by both the XY construction grid and the
 /// Home/ISO framing. Keeping one constant makes the view centre and the grid
@@ -197,10 +198,87 @@ pub struct EdgePick {
     pub center: [f64; 3],
 }
 
+const ASYNC_DISPLAY_TRIANGLES: usize = 100_000;
+
+#[cfg(feature = "gpu-viewport")]
+type PreparedObject = crate::gpu_viewport::PreparedObject;
+#[cfg(not(feature = "gpu-viewport"))]
+type PreparedObject = ();
+
+struct DisplayPrep {
+    tx: std::sync::mpsc::Sender<(u64, NodeMesh, ViewSettings)>,
+    rx: std::sync::mpsc::Receiver<(u64, DisplayMesh, Option<PreparedObject>)>,
+}
+
+impl Default for DisplayPrep {
+    fn default() -> Self {
+        let (tx, requests) = std::sync::mpsc::channel::<(u64, NodeMesh, ViewSettings)>();
+        let (results, rx) = std::sync::mpsc::channel::<(u64, DisplayMesh, Option<PreparedObject>)>();
+        std::thread::Builder::new()
+            .name("nodecraft-display-prep".into())
+            .spawn(move || {
+                while let Ok((generation, mesh, view)) = requests.recv() {
+                    let mut display = adapter::display_mesh(&mesh);
+                    if view.ignore_look_colors {
+                        display.face_colors.clear();
+                    }
+                    #[cfg(feature = "gpu-viewport")]
+                    let prepared = Some(crate::gpu_viewport::prepare_object(&display, &view));
+                    #[cfg(not(feature = "gpu-viewport"))]
+                    let prepared = None;
+                    if results.send((generation, display, prepared)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self { tx, rx }
+    }
+}
+
+fn ghost_plan_colour() -> [f32; 3] {
+    let colour = crate::theme::get().ghost;
+    [
+        f32::from(colour[0]) / 255.0,
+        f32::from(colour[1]) / 255.0,
+        f32::from(colour[2]) / 255.0,
+    ]
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ViewSnapshot {
+    pub camera: Camera,
+    pub lens_shift: [f32; 2],
+    pub camera_fit: bool,
+    pub quality_detail: Option<u8>,
+    pub full: [f32; 2],
+    pub visible: [f32; 2],
+}
+
 pub struct Viewport {
     pub camera: Camera,
     chrome_visible: bool,
     display: Option<DisplayMesh>,
+    /// Index 0 is the full display mesh; >0 selects a coarser display LOD.
+    lod_index: usize,
+    /// Display plans from the current evaluation, kept for GPU tessellation.
+    pub(crate) plans: Vec<nodecraft_display::PlanInstance>,
+    /// Planner defects from the current display tessellation.
+    tessellation_diagnostics: Vec<String>,
+    /// Whether the camera has been fitted to a display mesh. Before that, the
+    /// target radius is unknown and the quality tier must stay at its initial
+    /// coarse value.
+    camera_fit: bool,
+    /// Background display-mesh preparation (normal splitting, edges).
+    display_prep: DisplayPrep,
+    display_generation: u64,
+    pending_display: bool,
+    display_prep_started: Option<std::time::Instant>,
+    fit_when_display_ready: bool,
+    /// Background LOD generation for the current source mesh.
+    lod_rx: Option<std::sync::mpsc::Receiver<(u64, Vec<adapter::DisplayLod>)>>,
+    lod_generation: u64,
+    lod_attempted: bool,
     /// Original protocol mesh for the current display, used to rebuild when a
     /// display-only option such as Ignore Look colours changes.
     source_mesh: Option<NodeMesh>,
@@ -219,6 +297,7 @@ pub struct Viewport {
     pub chrome_right_inset: f32,
     last_full: Option<egui::Rect>,
     last_visible: Option<egui::Rect>,
+    pending_view_restore: Option<ViewSnapshot>,
     /// Development-only camera diagnostics. Deliberately not serialized.
     show_view_matrix: bool,
     /// Opt-in GPU/frame diagnostics overlay. Off by default.
@@ -231,6 +310,8 @@ pub struct Viewport {
     /// Picking is disabled while the viewport still shows a different target than
     /// the selection session's input geometry.
     edge_picking_enabled: bool,
+    /// Last quality tier selected, used for threshold hysteresis.
+    quality_detail: Option<u8>,
     /// A click in a topology mode landed on empty space.
     selection_miss: bool,
     /// Rectangles owned by viewport chrome (compass, home, projection and display
@@ -260,7 +341,10 @@ pub struct Viewport {
     /// Branch B-rep edges for the transparent edit ghost, painted as a 2D
     /// overlay after the ghost faces.
     edit_ghost_edges: Vec<adapter::DisplayEdge>,
-    edit_ghost_branch: Option<NodeMesh>,
+    /// B-rep plans for the edit-input body, used for exact edge picking.
+    edit_ghost_plans: Vec<nodecraft_display::PlanInstance>,
+    /// Display plans for the feature-input ghost (comparison fallback).
+    feature_ghost_plans: Vec<nodecraft_display::PlanInstance>,
     /// Theme ghost colour last uploaded to the GPU ghost renderer.
     edit_ghost_color: [u8; 4],
     edit_ghost_alpha: f32,
@@ -317,6 +401,18 @@ impl Default for Viewport {
             camera: Camera::default(),
             chrome_visible: true,
             display: None,
+            plans: Vec::new(),
+            tessellation_diagnostics: Vec::new(),
+            camera_fit: false,
+            display_prep: DisplayPrep::default(),
+            display_generation: 0,
+            pending_display: false,
+            display_prep_started: None,
+            fit_when_display_ready: false,
+            lod_index: 0,
+            lod_rx: None,
+            lod_generation: 0,
+            lod_attempted: false,
             source_mesh: None,
             view: ViewSettings::default(),
             lens_shift: [0.0, 0.0],
@@ -327,6 +423,7 @@ impl Default for Viewport {
             chrome_right_inset: 0.0,
             last_full: None,
             last_visible: None,
+            pending_view_restore: None,
             show_view_matrix: false,
             show_gpu_info: false,
             frame_ms: 0.0,
@@ -334,6 +431,7 @@ impl Default for Viewport {
             face_picks: Vec::new(),
             edge_picks: Vec::new(),
             edge_picking_enabled: false,
+            quality_detail: None,
             selection_miss: false,
             chrome_blockers: Vec::new(),
             hovered_edge: None,
@@ -349,7 +447,8 @@ impl Default for Viewport {
             preview_alpha: 1.0,
             edit_ghost_transform: None,
             edit_ghost_edges: Vec::new(),
-            edit_ghost_branch: None,
+                    edit_ghost_plans: Vec::new(),
+            feature_ghost_plans: Vec::new(),
             edit_ghost_color: [0; 4],
             edit_ghost_alpha: 0.45,
             #[cfg(feature = "gpu-viewport")]
@@ -395,6 +494,141 @@ impl Viewport {
         self.dirty = true;
     }
 
+    /// Provisional display detail for the current camera: `None` means the full
+    /// plan, `Some(detail)` asks the tessellation worker for a bounded preview
+    /// plan. Small bodies clamp back to full quality in the worker.
+    #[must_use]
+    pub fn quality_detail(&mut self) -> Option<u8> {
+        let Some(display) = self.display.as_ref() else {
+            return Some(1);
+        };
+        if !self.camera_fit {
+            return Some(1);
+        }
+        let ratio = self.camera.distance / display.radius.max(1.0e-9);
+        let raw = if ratio < 0.75 {
+            8
+        } else if ratio < 1.25 {
+            6
+        } else if ratio < 2.5 {
+            4
+        } else if ratio < 4.0 {
+            2
+        } else {
+            1
+        };
+        let Some(current) = self.quality_detail else {
+            self.quality_detail = Some(raw);
+            return Some(raw);
+        };
+        if raw == current {
+            return Some(current);
+        }
+        // Hysteresis: require the camera to cross the tier boundary by 10%
+        // before switching, so a threshold cannot oscillate every frame.
+        const TIERS: [u8; 5] = [8, 6, 4, 2, 1];
+        const BOUNDS: [f64; 4] = [0.75, 1.25, 2.5, 4.0];
+        let Some(current_index) = TIERS.iter().position(|tier| *tier == current) else {
+            self.quality_detail = Some(raw);
+            return Some(raw);
+        };
+        let Some(raw_index) = TIERS.iter().position(|tier| *tier == raw) else {
+            return Some(current);
+        };
+        let accepted = if raw_index < current_index {
+            BOUNDS.get(current_index.saturating_sub(1)).is_some_and(|boundary| ratio < boundary * 0.9)
+        } else {
+            BOUNDS.get(current_index).is_some_and(|boundary| ratio > boundary * 1.1)
+        };
+        if accepted {
+            self.quality_detail = Some(raw);
+            Some(raw)
+        } else {
+            Some(current)
+        }
+    }
+
+    pub fn set_tessellation_diagnostics(&mut self, diagnostics: Vec<String>) {
+        self.tessellation_diagnostics = diagnostics;
+    }
+
+    pub fn plan_ready(&self) -> bool {
+        #[cfg(feature = "gpu-viewport")]
+        {
+            self.gpu.as_ref().is_some_and(|gpu| gpu.plan_ready())
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            true
+        }
+    }
+
+    pub fn plan_pending(&self) -> bool {
+        #[cfg(feature = "gpu-viewport")]
+        {
+            self.plan_ready()
+                && self
+                    .gpu
+                    .as_ref()
+                    .and_then(|gpu| gpu.plan_debug())
+                    .is_some_and(|debug| debug.pending)
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            false
+        }
+    }
+
+    pub fn view_plans_hash(&self) -> u64 {
+        crate::gpu_plan::plan_identity_hash(&self.plans)
+    }
+
+    pub fn plan_debug(&self) -> Option<crate::gpu_plan::PlanDebug> {
+        #[cfg(feature = "gpu-viewport")]
+        {
+            self.gpu.as_ref().and_then(|gpu| gpu.plan_debug())
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            None
+        }
+    }
+
+    pub fn set_plans(&mut self, plans: Vec<nodecraft_display::PlanInstance>) {
+        self.plans = plans;
+        self.refresh_plan_state();
+    }
+
+    /// Plan rendering needs a uniform body colour. Re-evaluate that after the
+    /// display mesh (and therefore its face colours) becomes available.
+    fn refresh_plan_state(&mut self) {
+        // The plan path carries per-vertex face colours itself; only the
+        // override modes need the CPU display colours.
+        let colour = self
+            .view
+            .ignore_look_colors
+            .then_some([0.17, 0.18, 0.195]);
+        let enabled = !self.plans.is_empty() && !self.view.face_colours;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_plans(self.plans.clone(), enabled, colour);
+        }
+    }
+
+    /// Drop every display resource owned by the current document: plans, GPU
+    /// plan chunks, meshes and ghosts. Session/tab changes must go through this
+    /// so a closed project cannot keep resident plan meshes.
+    pub fn clear_document_display(&mut self) {
+        self.set_plans(Vec::new());
+        self.set_mesh(None);
+        self.clear_edit_ghost();
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.clear_plan_document();
+            gpu.clear_ghost();
+        }
+    }
+
     pub fn set_mesh(&mut self, mesh: Option<&NodeMesh>) {
         self.update_mesh(mesh);
         self.fit();
@@ -418,6 +652,7 @@ impl Viewport {
         self.comparison_ghost = false;
         self.selected_edges.clear();
         self.hovered_edge = None;
+        self.reset_lods();
         self.display = Some(crate::adapter::display_mesh_with_difference(base, added, removed));
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
@@ -434,11 +669,19 @@ impl Viewport {
         self.selected_edges.clear();
         self.hovered_edge = None;
         let empty = NodeMesh::default();
+        self.reset_lods();
         self.display = Some(crate::adapter::display_mesh_with_difference(base, &empty, ghost));
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
             gpu.set_mesh(self.display.as_ref());
+            gpu.set_ghost_matrix(None);
+            gpu.set_ghost_plans(
+                self.feature_ghost_plans.clone(),
+                self.view.ghost_opacity,
+                Some(ghost_plan_colour()),
+                !self.feature_ghost_plans.is_empty(),
+            );
         }
         self.dirty = true;
     }
@@ -458,6 +701,7 @@ impl Viewport {
         // Replace the result body's edge set so no generated edge can be drawn or picked.
         display.edges = crate::adapter::display_mesh(selection_source).edges;
         display.selection_edges = None;
+        self.reset_lods();
         self.display = Some(display);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
@@ -475,22 +719,90 @@ impl Viewport {
         self.selected_edges.clear();
         self.hovered_edge = None;
         // A new display mesh is authoritative: it already sits at the edited
-        // placement, so the drag preview has done its job.
+        // placement, so the drag preview has done its job. Keep an edit ghost
+        // while its transform is still live; the main evaluation must not blank
+        // the ghost's faces between preview frames.
+        let keep_edit_ghost = self.edit_ghost_transform.is_some();
         self.preview_transform = None;
         self.preview_scope = PreviewScope::All;
         self.preview_alpha = 1.0;
-        self.edit_ghost_transform = None;
-        self.edit_ghost_edges.clear();
-        self.edit_ghost_branch = None;
-        self.edit_ghost_color = [0; 4];
+        if !keep_edit_ghost {
+            self.edit_ghost_transform = None;
+            self.edit_ghost_edges.clear();
+            self.edit_ghost_plans.clear();
+            #[cfg(feature = "gpu-viewport")]
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.clear_ghost_edges();
+            }
+            self.feature_ghost_plans.clear();
+            self.edit_ghost_color = [0; 4];
+        }
         self.source_mesh = mesh.cloned();
-        self.display = mesh.map(|mesh| self.display_mesh_for_view(mesh));
+        self.reset_lods();
+        if let Some(mesh) = mesh {
+            if mesh.faces.len() >= ASYNC_DISPLAY_TRIANGLES {
+                // Conversion and normal splitting run on the display-prep
+                // worker; the old display stays visible until the new one is
+                // ready.
+                self.pending_display = true;
+                self.display_prep_started = Some(std::time::Instant::now());
+                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                    eprintln!("[viewport] async display prep faces={}", mesh.faces.len());
+                }
+                let generation = self.display_generation;
+                let _ = self
+                    .display_prep
+                    .tx
+                    .send((generation, mesh.clone(), self.view));
+                self.dirty = true;
+                #[cfg(feature = "gpu-viewport")]
+                if let Some(gpu) = self.gpu.as_mut() {
+                    if !keep_edit_ghost {
+                        gpu.clear_ghost();
+                    }
+                }
+                return;
+            }
+            self.display = Some(self.display_mesh_for_view(mesh));
+        } else {
+            self.display = None;
+        }
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
             gpu.set_mesh(self.display.as_ref());
-            gpu.clear_ghost();
+            if !keep_edit_ghost {
+                gpu.clear_ghost();
+            }
         }
+    }
+
+    fn poll_display_prep(&mut self) {
+        let Some((generation, display, prepared)) = self.display_prep.rx.try_recv().ok() else {
+            return;
+        };
+        if generation != self.display_generation || !self.pending_display {
+            return;
+        }
+        self.pending_display = false;
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            eprintln!(
+                "[viewport] display prep done {}ms",
+                self.display_prep_started.take().map_or(0, |started| started.elapsed().as_millis())
+            );
+        }
+        self.display = Some(display);
+        self.refresh_plan_state();
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_view(self.view, self.display.as_ref());
+            gpu.set_prepared_mesh(self.display.as_ref(), prepared);
+        }
+        if self.fit_when_display_ready {
+            self.fit_when_display_ready = false;
+            self.fit();
+        }
+        self.dirty = true;
     }
 
     fn display_mesh_for_view(&self, mesh: &NodeMesh) -> DisplayMesh {
@@ -501,6 +813,100 @@ impl Viewport {
         display
     }
 
+    fn reset_lods(&mut self) {
+        self.lod_index = 0;
+        self.lod_rx = None;
+        self.lod_generation = self.lod_generation.wrapping_add(1);
+        self.lod_attempted = false;
+        self.display_generation = self.display_generation.wrapping_add(1);
+        self.pending_display = false;
+        self.fit_when_display_ready = false;
+    }
+
+    fn poll_lods(&mut self) {
+        let Some(receiver) = self.lod_rx.as_ref() else {
+            return;
+        };
+        let result = receiver.try_recv();
+        let Ok((generation, lods)) = result else {
+            return;
+        };
+        self.lod_rx = None;
+        self.lod_attempted = true;
+        if generation != self.lod_generation {
+            return;
+        }
+        if let Some(display) = self.display.as_mut() {
+            display.lods = lods;
+            self.dirty = true;
+        }
+    }
+
+    fn request_lods(&mut self) {
+        if self.lod_rx.is_some() || self.lod_attempted {
+            return;
+        }
+        let Some(source) = self.source_mesh.clone() else {
+            return;
+        };
+        self.lod_attempted = true;
+        let generation = self.lod_generation;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("nodecraft-display-lod".into())
+            .spawn(move || {
+                let lods = adapter::generate_lods(&source);
+                let _ = sender.send((generation, lods));
+            })
+            .ok();
+        self.lod_rx = Some(receiver);
+    }
+
+    fn update_display_lod(&mut self) {
+        self.poll_lods();
+        let lod = {
+            let Some(display) = self.display.as_ref() else {
+                self.lod_index = 0;
+                return;
+            };
+            if display.lods.is_empty()
+                || !display.face_colors.is_empty()
+                || self.view.face_colours
+                || self.view.triangles
+                || self.view.normals
+                || self.view.zebra
+            {
+                0
+            } else {
+                let ratio = self.camera.distance / display.radius.max(1.0e-9);
+                // Fit uses distance = 3 * radius, so keep the full mesh at fit
+                // and simplify only when zooming out beyond it.
+                match ratio {
+                    ratio if ratio < 3.2 => 0,
+                    ratio if ratio < 4.5 => 1,
+                    ratio if ratio < 7.0 => 2,
+                    _ => 3,
+                }
+                .min(display.lods.len())
+            }
+        };
+        // Generate levels lazily on the first zoom-out. The full mesh is shown
+        // until they arrive.
+        if lod > 0 && self.display.as_ref().is_some_and(|display| display.lods.is_empty()) {
+            self.request_lods();
+        }
+        if lod == self.lod_index {
+            return;
+        }
+        let Some(display) = self.display.as_ref() else { return };
+        self.lod_index = lod;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_lod_mesh(display.render_mesh(lod));
+        }
+        self.dirty = true;
+    }
+
     pub fn set_view(&mut self, view: ViewSettings) {
         if self.view == view {
             return;
@@ -509,6 +915,7 @@ impl Viewport {
         let look_bypass_changed = self.view.ignore_look_colors != view.ignore_look_colors;
         self.view = view;
         if look_bypass_changed && let Some(source) = self.source_mesh.clone() {
+            self.reset_lods();
             self.display = Some(self.display_mesh_for_view(&source));
             #[cfg(feature = "gpu-viewport")]
             if let Some(gpu) = self.gpu.as_mut() {
@@ -519,8 +926,25 @@ impl Viewport {
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(view, self.display.as_ref());
-            if ghost_changed && self.edit_ghost_transform.is_some() {
-                gpu.set_ghost_transform(self.edit_ghost_transform, view.ghost_opacity);
+            if ghost_changed {
+                self.edit_ghost_alpha = view.ghost_opacity;
+                // The GPU plan ghost carries its alpha on the instances, not in
+                // a uniform; rebuild its chunks when the slider moves.
+                if self.edit_ghost_transform.is_some() && !self.edit_ghost_plans.is_empty() {
+                    gpu.set_ghost_plans(
+                        self.edit_ghost_plans.clone(),
+                        view.ghost_opacity,
+                        Some(ghost_plan_colour()),
+                        true,
+                    );
+                } else if !self.feature_ghost_plans.is_empty() {
+                    gpu.set_ghost_plans(
+                        self.feature_ghost_plans.clone(),
+                        view.ghost_opacity,
+                        Some(ghost_plan_colour()),
+                        true,
+                    );
+                }
             }
             if ghost_changed && self.preview_transform.is_some() {
                 // A live ghost-transparency slider must update the current
@@ -536,6 +960,8 @@ impl Viewport {
         if ghost_changed {
             self.preview_alpha = view.ghost_opacity;
         }
+        // Face-colour and translucency modes switch the plan renderer off/on.
+        self.refresh_plan_state();
         self.dirty = true;
     }
 
@@ -599,12 +1025,15 @@ impl Viewport {
             self.selected_edges.clear();
             return;
         };
-        let available: std::collections::HashSet<&str> = self
-            .topology_edges(display)
-            .iter()
-            .chain(self.edit_ghost_edges.iter())
-            .map(|edge| edge.id.as_str())
-            .collect();
+        let available: std::collections::HashSet<&str> = if self.picking_input_ghost_only() {
+            self.edit_ghost_edges.iter().map(|edge| edge.id.as_str()).collect()
+        } else {
+            self.topology_edges(display)
+                .iter()
+                .chain(self.edit_ghost_edges.iter())
+                .map(|edge| edge.id.as_str())
+                .collect()
+        };
         self.selected_edges = ids
             .iter()
             .filter(|id| available.contains(id.as_str()))
@@ -617,10 +1046,15 @@ impl Viewport {
             self.selected_edges.clear();
             return;
         };
+        let source: &[crate::adapter::DisplayEdge] = if self.picking_input_ghost_only() {
+            &self.edit_ghost_edges
+        } else {
+            self.topology_edges(display)
+        };
         let selected: Vec<String> = centers
             .iter()
             .filter_map(|center| {
-                self.topology_edges(display)
+                source
                     .iter()
                     .min_by(|a, b| {
                         center_distance(&a.midpoint, center)
@@ -633,6 +1067,13 @@ impl Viewport {
         self.selected_edges = selected.into_iter().collect();
     }
 
+    /// While a feature's input body is shown as the edit ghost, topology
+    /// picking belongs to that body only. The downstream breakpoint remains
+    /// visible underneath, but its edges are not valid feature selections.
+    fn picking_input_ghost_only(&self) -> bool {
+        self.edit_ghost_transform.is_some() && !self.edit_ghost_edges.is_empty()
+    }
+
     fn topology_edges<'a>(&'a self, display: &'a DisplayMesh) -> &'a [crate::adapter::DisplayEdge] {
         display
             .selection_edges
@@ -640,7 +1081,39 @@ impl Viewport {
             .unwrap_or(display.edges.as_slice())
     }
 
+    /// Face ids in display-triangle order, derived from the display target's
+    /// `TessPlan` faces. This keeps face picking on the exact B-rep face ids
+    /// instead of relying on the display mesh's group strings.
+    fn plan_face_ids(&self) -> Option<Vec<String>> {
+        let display = self.display.as_ref()?;
+        let multiple = self.plans.len() > 1;
+        let mut ids = Vec::new();
+        for (body, instance) in self.plans.iter().enumerate() {
+            for face in &instance.plan.faces {
+                let triangles = face
+                    .triangles
+                    .iter()
+                    .filter(|triangle| {
+                        triangle
+                            .iter()
+                            .all(|index| (*index as usize) < face.uv.len())
+                    })
+                    .count();
+                let id = if multiple {
+                    format!("body:{body}:face:{}", face.face)
+                } else {
+                    format!("face:{}", face.face)
+                };
+                ids.extend(std::iter::repeat_n(id, triangles));
+            }
+        }
+        (ids.len() == display.mesh.triangles.len()).then_some(ids)
+    }
+
     pub fn edge_ids(&self) -> std::collections::HashSet<String> {
+        if self.picking_input_ghost_only() {
+            return self.edit_ghost_edges.iter().map(|edge| edge.id.clone()).collect();
+        }
         self.display
             .as_ref()
             .map(|display| {
@@ -653,6 +1126,10 @@ impl Viewport {
     }
 
     pub fn fit(&mut self) {
+        if self.pending_display {
+            self.fit_when_display_ready = true;
+            return;
+        }
         let Some(display) = &self.display else {
             self.camera = Camera::default();
             self.dirty = true;
@@ -666,6 +1143,7 @@ impl Viewport {
         self.camera.pitch = pitch;
         self.camera.distance = (display.radius * 3.0).max(1.0);
         self.lens_shift = [0.0, 0.0];
+        self.camera_fit = true;
         self.dirty = true;
     }
 
@@ -740,6 +1218,51 @@ impl Viewport {
         self.lens_shift
     }
 
+    #[must_use]
+    pub fn view_snapshot(&self) -> Option<ViewSnapshot> {
+        // Before the first frame after a restore, keep the original framing
+        // rects rather than the stale live rects.
+        if let Some(pending) = self.pending_view_restore {
+            return Some(pending);
+        }
+        let full = self.last_full?;
+        let visible = self.last_visible?;
+        Some(ViewSnapshot {
+            camera: self.camera,
+            lens_shift: self.lens_shift,
+            camera_fit: self.camera_fit,
+            quality_detail: self.quality_detail,
+            full: [full.width(), full.height()],
+            visible: [visible.width(), visible.height()],
+        })
+    }
+
+    pub fn restore_view(&mut self, snapshot: ViewSnapshot) {
+        self.camera = snapshot.camera;
+        self.lens_shift = snapshot.lens_shift;
+        self.camera_fit = snapshot.camera_fit;
+        self.quality_detail = snapshot.quality_detail;
+        self.pending_view_restore = Some(snapshot);
+        self.dirty = true;
+    }
+
+    fn apply_pending_view_restore(&mut self, full: egui::Rect, visible: egui::Rect) {
+        let Some(snapshot) = self.pending_view_restore.take() else { return };
+        let old_aspect = if snapshot.visible[1] > 1.0 {
+            snapshot.visible[0] / snapshot.visible[1]
+        } else {
+            1.0
+        };
+        let new_aspect = visible.width() / visible.height().max(1.0);
+        if new_aspect < old_aspect && new_aspect > 1.0e-6 {
+            self.camera.distance *= f64::from(old_aspect / new_aspect);
+            self.dirty = true;
+        }
+        if snapshot.lens_shift != [0.0, 0.0] {
+            self.lens_shift = lens_shift_for_visible(full, visible);
+        }
+    }
+
     pub fn set_show_view_matrix(&mut self, show: bool) {
         self.show_view_matrix = show;
     }
@@ -803,6 +1326,131 @@ impl Viewport {
     /// and the scene edge lines are rebuilt at the previewed placement.
     /// Show a standalone edit ghost over a dimmed breakpoint mesh. The branch is
     /// uploaded to its own object renderer, so it is never part of the scene.
+    pub fn set_edit_ghost_plans(&mut self, plans: Vec<nodecraft_display::PlanInstance>) {
+        self.edit_ghost_plans = plans;
+        self.apply_ghost_plan_edges();
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            let enabled = self.edit_ghost_transform.is_some() && !self.edit_ghost_plans.is_empty();
+            gpu.set_ghost_plans(
+                self.edit_ghost_plans.clone(),
+                self.edit_ghost_alpha,
+                Some(ghost_plan_colour()),
+                enabled,
+            );
+        }
+    }
+
+    /// Plan instances for the comparison fallback ghost, owned by the display
+    /// service and evaluated by the GPU mesher.
+    /// Whether the transform ghost has GPU plans ready to draw.
+    pub fn has_edit_ghost_plans(&self) -> bool {
+        !self.edit_ghost_plans.is_empty()
+    }
+
+    pub fn set_feature_ghost_plans(&mut self, plans: Vec<nodecraft_display::PlanInstance>) {
+        self.feature_ghost_plans = plans;
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_ghost_plans(
+                self.feature_ghost_plans.clone(),
+                self.view.ghost_opacity,
+                Some(ghost_plan_colour()),
+                !self.feature_ghost_plans.is_empty(),
+            );
+        }
+    }
+
+    /// Prefer the input body's B-rep plan edges over display-mesh edges for the
+    /// feature's pickable ghost. Plan edges are the exact body's edge polylines
+    /// and carry body-scoped ids, independent of the displayed result/LOD.
+    fn polyline_midpoint(points: &[Vec3]) -> Vec3 {
+        let length: f64 = points
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).len())
+            .sum();
+        if length <= 1.0e-18 {
+            return points.first().copied().unwrap_or(Vec3::ZERO);
+        }
+        let mut walked = 0.0;
+        for pair in points.windows(2) {
+            let segment = (pair[1] - pair[0]).len();
+            if walked + segment >= length * 0.5 {
+                let t = ((length * 0.5) - walked) / segment.max(1.0e-18);
+                return pair[0] + (pair[1] - pair[0]) * t;
+            }
+            walked += segment;
+        }
+        points.last().copied().unwrap_or(Vec3::ZERO)
+    }
+
+    fn apply_ghost_plan_edges(&mut self) {
+        if self.edit_ghost_plans.is_empty() {
+            return;
+        }
+        let multiple_bodies = self.edit_ghost_plans.len() > 1;
+        let mut edges = Vec::new();
+        for (body, instance) in self.edit_ghost_plans.iter().enumerate() {
+            let matrix = crate::gpu_plan::instance_matrix(&instance.transforms);
+            for (index, polyline) in instance.plan.edges.iter().enumerate() {
+                let points: Vec<Vec3> = polyline
+                    .iter()
+                    .map(|point| {
+                        let x = f64::from(matrix[0][0]) * point.x
+                            + f64::from(matrix[1][0]) * point.y
+                            + f64::from(matrix[2][0]) * point.z
+                            + f64::from(matrix[3][0]);
+                        let y = f64::from(matrix[0][1]) * point.x
+                            + f64::from(matrix[1][1]) * point.y
+                            + f64::from(matrix[2][1]) * point.z
+                            + f64::from(matrix[3][1]);
+                        let z = f64::from(matrix[0][2]) * point.x
+                            + f64::from(matrix[1][2]) * point.y
+                            + f64::from(matrix[2][2]) * point.z
+                            + f64::from(matrix[3][2]);
+                        Vec3::new(x, y, z)
+                    })
+                    .collect();
+                if points.len() < 2 {
+                    continue;
+                }
+                let midpoint = Self::polyline_midpoint(&points);
+                let id = instance
+                    .edge_ids
+                    .get(index)
+                    .and_then(Clone::clone)
+                    .map(|id| {
+                        if multiple_bodies {
+                            format!("body:{body}:{id}")
+                        } else {
+                            id
+                        }
+                    })
+                    .unwrap_or_else(|| {
+                        if multiple_bodies {
+                            format!("preview-edge:body:{body}:{index}")
+                        } else {
+                            format!("preview-edge:{index}")
+                        }
+                    });
+                edges.push(crate::adapter::DisplayEdge {
+                    id,
+                    points,
+                    midpoint: [midpoint.x, midpoint.y, midpoint.z],
+                    normals: Vec::new(),
+                });
+            }
+        }
+        if !edges.is_empty() {
+            self.edit_ghost_edges = edges;
+        }
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_ghost_edges(&self.edit_ghost_edges);
+            gpu.set_ghost_edge_matrix(self.edit_ghost_transform);
+        }
+    }
+
     pub fn set_edit_ghost(
         &mut self,
         base: &NodeMesh,
@@ -810,54 +1458,101 @@ impl Viewport {
         transform: [[f32; 4]; 4],
         alpha: f32,
     ) {
+        let started = std::time::Instant::now();
+        // With resident plans, the breakpoint is already on the GPU. Rebuilding
+        // the merged 1,000-body mesh on the UI thread just to dim it costs
+        // seconds; keep the plan chunks and only install the ghost overlay.
+        if !self.plans.is_empty() && self.gpu_active() {
+            self.comparison_ghost = false;
+            self.preview_transform = None;
+            self.preview_scope = PreviewScope::All;
+            self.preview_alpha = 1.0;
+            self.edit_ghost_transform = Some(transform);
+            if self.edit_ghost_plans.is_empty() {
+                self.edit_ghost_edges = self.display_mesh_for_view(branch).edges;
+            } else {
+                self.apply_ghost_plan_edges();
+            }
+            self.edit_ghost_alpha = alpha;
+            #[cfg(feature = "gpu-viewport")]
+            if let Some(gpu) = self.gpu.as_mut() {
+                let use_plan_ghost = !self.edit_ghost_plans.is_empty();
+                gpu.set_ghost_matrix(Some(transform));
+                gpu.set_ghost_plans(
+                    self.edit_ghost_plans.clone(),
+                    alpha,
+                    Some(ghost_plan_colour()),
+                    use_plan_ghost,
+                );
+                gpu.set_ghost_edges(&self.edit_ghost_edges);
+                gpu.set_ghost_edge_matrix(Some(transform));
+            }
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                eprintln!("[viewport] plan-base edit ghost {}ms", started.elapsed().as_millis());
+            }
+            self.dirty = true;
+            return;
+        }
         let base_source = base.clone();
         let base = self.display_mesh_for_view(base);
-        let branch_display = self.display_mesh_for_view(branch);
-        self.edit_ghost_branch = Some(branch.clone());
         self.comparison_ghost = false;
         self.preview_transform = None;
         self.preview_scope = PreviewScope::All;
         self.preview_alpha = 1.0;
+        self.reset_lods();
         self.display = Some(base);
         // Keep the dimmed breakpoint source so display-only options such as
         // Ignore Look colours can rebuild the base while ghost mode is active.
         self.source_mesh = Some(base_source);
         self.edit_ghost_transform = Some(transform);
-        self.edit_ghost_edges = branch_display.edges.clone();
+        // GPU plans carry the exact branch edges; only build a CPU branch
+        // display when plans have not arrived yet.
+        if self.edit_ghost_plans.is_empty() {
+            self.edit_ghost_edges = self.display_mesh_for_view(branch).edges;
+        } else {
+            self.apply_ghost_plan_edges();
+        }
         self.edit_ghost_alpha = alpha;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
             gpu.set_mesh(self.display.as_ref());
-            let ghost_color = crate::theme::get().ghost;
-            gpu.set_ghost_mesh(Some(&branch_display), [ghost_color[0], ghost_color[1], ghost_color[2]]);
-            gpu.set_ghost_transform(Some(transform), alpha);
+            let use_plan_ghost = !self.edit_ghost_plans.is_empty();
+            gpu.set_ghost_matrix(Some(transform));
+            gpu.set_ghost_plans(
+                self.edit_ghost_plans.clone(),
+                alpha,
+                Some(ghost_plan_colour()),
+                use_plan_ghost,
+            );
+            gpu.set_ghost_edges(&self.edit_ghost_edges);
+            gpu.set_ghost_edge_matrix(Some(transform));
+        }
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            eprintln!("[viewport] cpu edit ghost {}ms", started.elapsed().as_millis());
         }
         self.dirty = true;
     }
 
     pub fn update_ghost_transform(&mut self, transform: Option<[[f32; 4]; 4]>, alpha: f32) {
+        let was_enabled = self.edit_ghost_transform.is_some();
+        let alpha_changed = (self.edit_ghost_alpha - alpha).abs() > f32::EPSILON;
         self.edit_ghost_transform = transform;
         self.edit_ghost_alpha = alpha;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_ghost_transform(transform, alpha);
-        }
-        self.dirty = true;
-    }
-
-    pub fn set_ghost_mesh(&mut self, branch: &NodeMesh) {
-        self.edit_ghost_branch = Some(branch.clone());
-        self.edit_ghost_color = crate::theme::get().ghost;
-        #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            let display = adapter::display_mesh(branch);
-            self.edit_ghost_edges = display.edges.clone();
-            let ghost_color = crate::theme::get().ghost;
-            gpu.set_ghost_mesh(Some(&display), [ghost_color[0], ghost_color[1], ghost_color[2]]);
-            // Mesh uploads reset the object instance transforms. Preserve the
-            // current arm/placement so only the mesh geometry changes here.
-            gpu.set_ghost_transform(self.edit_ghost_transform, self.edit_ghost_alpha);
+            // Matrix changes are a uniform; only a set/alpha/enabled change
+            // requires rebuilding the ghost chunks.
+            gpu.set_ghost_matrix(transform);
+            gpu.set_ghost_edge_matrix(transform);
+            if alpha_changed || was_enabled != transform.is_some() {
+                gpu.set_ghost_plans(
+                    self.edit_ghost_plans.clone(),
+                    alpha,
+                    Some(ghost_plan_colour()),
+                    transform.is_some() && !self.edit_ghost_plans.is_empty(),
+                );
+            }
         }
         self.dirty = true;
     }
@@ -865,7 +1560,7 @@ impl Viewport {
     pub fn clear_edit_ghost(&mut self) {
         self.edit_ghost_transform = None;
         self.edit_ghost_edges.clear();
-        self.edit_ghost_branch = None;
+        self.edit_ghost_plans.clear();
         self.edit_ghost_color = [0; 4];
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
@@ -953,18 +1648,17 @@ impl Viewport {
         if self.edit_ghost_color == color {
             return;
         }
-        let Some(branch) = &self.edit_ghost_branch else {
-            self.edit_ghost_color = color;
-            return;
-        };
-        let display = adapter::display_mesh(branch);
         self.edit_ghost_color = color;
         #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_ghost_mesh(Some(&display), [color[0], color[1], color[2]]);
-            // A mesh upload resets instance transforms; reapply the edit
-            // placement so the ghost face stays where the edge overlay is.
-            gpu.set_ghost_transform(self.edit_ghost_transform, self.edit_ghost_alpha);
+        if let Some(gpu) = self.gpu.as_mut()
+            && self.edit_ghost_transform.is_some()
+        {
+            gpu.set_ghost_plans(
+                self.edit_ghost_plans.clone(),
+                self.edit_ghost_alpha,
+                Some(ghost_plan_colour()),
+                !self.edit_ghost_plans.is_empty(),
+            );
         }
         self.dirty = true;
     }
@@ -976,6 +1670,7 @@ impl Viewport {
         blockers: &[egui::Rect],
         backdrop_rect: egui::Rect,
     ) {
+        self.poll_display_prep();
         if self.show_gpu_info {
             self.tick_frame_stats(ui);
         }
@@ -989,6 +1684,7 @@ impl Viewport {
         );
         self.last_full = Some(rect);
         self.last_visible = Some(visible);
+        self.apply_pending_view_restore(rect, visible);
         self.chrome_blockers.clear();
 
         let modifiers = ui.ctx().input(|input| input.modifiers);
@@ -1058,6 +1754,11 @@ impl Viewport {
             self.trackpad_orbit = None;
         }
 
+        self.update_display_lod();
+        if self.plan_pending() {
+            // A staged plan swap needs another frame to prepare the next plan.
+            ui.ctx().request_repaint();
+        }
         self.sync_edit_ghost_theme();
         let size = [width.min(1400), height.min(1000)];
         if !self.gpu_active()
@@ -1110,9 +1811,13 @@ impl Viewport {
                 self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
                 self.draw_face_hover(ui, rect);
                 self.draw_comparison_overlay(ui, rect);
+                // The feature-input edge field is a quiet guide; selected edges
+                // are painted fully opaque afterwards.
+                if !self.gpu_active() {
+                    self.draw_edit_ghost_edges(ui, rect);
+                }
                 self.draw_edge_highlights(ui, rect);
                 self.draw_comparison_edges(ui, rect);
-                self.draw_edit_ghost_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
             self.draw_debug_overlays(ui, rect);
@@ -1196,22 +1901,24 @@ impl Viewport {
         let display = self.display.as_ref()?;
         let mut best = threshold * threshold;
         let mut nearest = None;
-        for edge in &display.edges {
-            // Preview treatment edges have no exact BRep id and cannot be used as
-            // feature selections.
-            if edge.id.starts_with("preview-edge:") {
-                continue;
-            }
-            let points: Vec<egui::Pos2> = edge
-                .points
-                .iter()
-                .filter_map(|point| self.project_to_viewport_body(*point, viewport, &edge.id))
-                .collect();
-            for pair in points.windows(2) {
-                let distance = distance_to_segment(pointer, pair[0], pair[1]);
-                if distance <= best {
-                    best = distance;
-                    nearest = Some((edge.id.clone(), edge.midpoint));
+        if !self.picking_input_ghost_only() {
+            for edge in &display.edges {
+                // Preview treatment edges have no exact BRep id and cannot be used as
+                // feature selections.
+                if edge.id.starts_with("preview-edge:") {
+                    continue;
+                }
+                let points: Vec<egui::Pos2> = edge
+                    .points
+                    .iter()
+                    .filter_map(|point| self.project_to_viewport_body(*point, viewport, &edge.id))
+                    .collect();
+                for pair in points.windows(2) {
+                    let distance = distance_to_segment(pointer, pair[0], pair[1]);
+                    if distance <= best {
+                        best = distance;
+                        nearest = Some((edge.id.clone(), edge.midpoint));
+                    }
                 }
             }
         }
@@ -1349,6 +2056,15 @@ impl Viewport {
         }
         #[cfg(not(feature = "gpu-viewport"))]
         lines.push("gpu viewport feature off".to_owned());
+        if !self.tessellation_diagnostics.is_empty() {
+            lines.push(format!(
+                "tessellation warnings: {}",
+                self.tessellation_diagnostics.len()
+            ));
+            for diagnostic in self.tessellation_diagnostics.iter().take(6) {
+                lines.push(format!("  {diagnostic}"));
+            }
+        }
         lines
     }
 
@@ -1471,7 +2187,9 @@ impl Viewport {
         if self.edit_ghost_edges.is_empty() { return; }
         let painter = ui.painter().with_clip_rect(viewport);
         let [r, g, b, a] = crate::theme::get().ghost_edge;
-        let colour = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+        // Edge selection is a quiet guide until an edge is picked; selected
+        // edges are drawn opaque by `draw_edge_highlights`.
+        let colour = egui::Color32::from_rgba_unmultiplied(r, g, b, a / 3);
         for edge in &self.edit_ghost_edges {
             let projected: Vec<egui::Pos2> = edge
                 .points
@@ -1534,8 +2252,10 @@ impl Viewport {
                 painter.line_segment([pair[0], pair[1]], egui::Stroke::new(width, colour));
             }
         };
+        let selected_colour =
+            egui::Color32::from_rgb(theme.accent[0], theme.accent[1], theme.accent[2]);
         for id in &self.selected_edges {
-            draw(id, theme.color(theme.accent), 3.0);
+            draw(id, selected_colour, 3.0);
         }
         if self.selection_mode == SelectionMode::Edge
             && let Some(id) = &self.hovered_edge
@@ -1577,7 +2297,9 @@ impl Viewport {
         let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
         let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
         let (origin, direction) = self.camera.ray(x, y, width, height);
-        let hovered = raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction);
+        let plan_ids = self.plan_face_ids();
+        let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
+        let hovered = raycast_face(&display.mesh, face_ids, origin, direction);
         if hovered != self.hovered_face {
             self.hovered_face = hovered.clone();
             ui.ctx().request_repaint();
@@ -1831,6 +2553,12 @@ impl Viewport {
     /// Toggle rows reserve this much for their checkmark; section headers and
     /// slider labels use the same inset so the popup has one alignment column.
     const SETTINGS_LABEL_INSET: f32 = 28.0;
+    /// Slider handle radius is derived from the allocated slider thickness
+    /// (`max(body text height, interact_size.y)`), so `add_sized` cannot shrink
+    /// it. Give these viewport sliders a smaller body text style and interaction
+    /// height while the slider is added, then restore the menu style.
+    const SETTINGS_SLIDER_HEIGHT: f32 = 18.0;
+    const SETTINGS_SLIDER_FONT_SIZE: f32 = 11.0;
 
     fn settings_section(ui: &mut egui::Ui, title: &str) {
         let theme = crate::theme::get();
@@ -1865,9 +2593,16 @@ impl Viewport {
                     ),
                 );
                 ui.spacing_mut().slider_width = 118.0;
+                let previous_style = (**ui.style()).clone();
+                ui.style_mut().text_styles.insert(
+                    egui::TextStyle::Body,
+                    egui::FontId::proportional(Self::SETTINGS_SLIDER_FONT_SIZE),
+                );
+                ui.spacing_mut().interact_size.y = Self::SETTINGS_SLIDER_HEIGHT;
                 changed = ui
                     .add(egui::Slider::new(value, range).show_value(false))
                     .changed();
+                *ui.style_mut() = previous_style;
             });
         });
         changed
@@ -1976,8 +2711,8 @@ impl Viewport {
             return;
         };
 
-        let scene = scene_for(display, &self.camera);
-        let canvas = solidcraft_render::render(&scene, &self.camera, width, height);
+        let scene = scene_for(display, &self.camera, self.lod_index);
+        let canvas = solidcraft_viewport::render(&scene, &self.camera, width, height);
         let image = egui::ColorImage::from_rgba_unmultiplied([canvas.w, canvas.h], &canvas.rgba);
         self.texture = Some(ctx.load_texture(
             "nodecraft-viewport",
@@ -2026,7 +2761,7 @@ fn add_grid(
     }
 }
 
-fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
+fn scene_for(display: &DisplayMesh, camera: &Camera, lod_index: usize) -> Scene {
     let mut scene = Scene::default();
     // Keep model depth precision; do not push the far plane out for the grid.
     scene.radius = display.radius;
@@ -2053,7 +2788,10 @@ fn scene_for(display: &DisplayMesh, camera: &Camera) -> Scene {
         camera.fov > 0.0,
         ortho_fade,
     );
-    scene.meshes.push(SceneMesh::solid(display.mesh.clone(), Rgb(151, 162, 176)));
+    scene.meshes.push(SceneMesh::solid(
+        std::sync::Arc::new(display.render_mesh(lod_index).clone()),
+        Rgb(151, 162, 176),
+    ));
     for edge in &display.mesh.edges {
         scene.lines.push(SceneLine {
             points: edge.clone(),
@@ -2260,6 +2998,174 @@ mod tests {
     }
 
     #[test]
+    fn clearing_a_document_evicts_plan_state() {
+        let mut viewport = Viewport::default();
+        viewport.plans = vec![nodecraft_display::PlanInstance {
+            target: "old-project".into(),
+            plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        }];
+        viewport.set_feature_ghost_plans(vec![nodecraft_display::PlanInstance {
+            target: "old-ghost".into(),
+            plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        }]);
+        viewport.clear_document_display();
+        assert!(viewport.plans.is_empty(), "closed project kept its plans");
+        assert!(viewport.feature_ghost_plans.is_empty(), "closed project kept ghost plans");
+        assert!(viewport.display.is_none(), "closed project kept its display mesh");
+    }
+
+    #[test]
+    fn face_picking_uses_plan_brep_face_ids() {
+        let mut face = nodecraft_layers::tess::FacePlan::default();
+        face.face = 7;
+        face.uv = vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]];
+        face.fixed = vec![
+            solidcore_record::Vec3::ZERO,
+            solidcore_record::Vec3::X,
+            solidcore_record::Vec3::Y,
+        ];
+        face.triangles = vec![[0, 1, 2]];
+        let mut plan = nodecraft_layers::tess::TessPlan::default();
+        plan.faces = vec![face];
+        let display = crate::adapter::DisplayMesh {
+            mesh: std::sync::Arc::new(solidcraft_geom::Mesh {
+                positions: vec![
+                    solidcore_record::Vec3::ZERO,
+                    solidcore_record::Vec3::X,
+                    solidcore_record::Vec3::Y,
+                ],
+                normals: vec![solidcore_record::Vec3::Z; 3],
+                triangles: vec![[0, 1, 2]],
+                tri_face: vec![0],
+                edges: Vec::new(),
+                display_only_edges: false,
+                seams: Vec::new(),
+                smooth_edges: Vec::new(),
+                sharp_edges: Vec::new(),
+                edge_faces: Vec::new(),
+            }),
+            lods: Vec::new(),
+            face_ids: vec!["display-only".into()],
+            face_colors: Vec::new(),
+            edges: Vec::new(),
+            comparison: None,
+            selection_edges: None,
+            radius: 1.0,
+            center: solidcore_record::Vec3::ZERO,
+        };
+        let mut viewport = Viewport::default();
+        viewport.display = Some(display);
+        viewport.plans = vec![nodecraft_display::PlanInstance {
+            target: "input".into(),
+            plan: std::sync::Arc::new(plan),
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        }];
+        assert_eq!(viewport.plan_face_ids().expect("ids"), vec!["face:7"]);
+    }
+
+    #[test]
+    fn edit_ghost_plan_edges_are_body_scoped_brep_edges() {
+        let mut first = nodecraft_layers::tess::TessPlan::default();
+        first.edges = vec![vec![
+            solidcore_record::Vec3::new(0.0, 0.0, 0.0),
+            solidcore_record::Vec3::new(1.0, 0.0, 0.0),
+        ]];
+        let mut second = nodecraft_layers::tess::TessPlan::default();
+        second.edges = vec![vec![
+            solidcore_record::Vec3::new(0.0, 1.0, 0.0),
+            solidcore_record::Vec3::new(1.0, 1.0, 0.0),
+        ]];
+        let plan = |plan| nodecraft_display::PlanInstance {
+            target: "input".into(),
+            plan: std::sync::Arc::new(plan),
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(vec![Some("edge:0".to_owned())]),
+        };
+        let mut viewport = Viewport::default();
+        viewport.set_edit_ghost_plans(vec![plan(first), plan(second)]);
+        assert_eq!(viewport.edit_ghost_edges.len(), 2);
+        assert_eq!(viewport.edit_ghost_edges[0].id, "body:0:edge:0");
+        assert_eq!(viewport.edit_ghost_edges[1].id, "body:1:edge:0");
+    }
+
+    #[test]
+    fn feature_edge_picking_ignores_the_downstream_display_edges() {
+        let display = crate::adapter::DisplayMesh {
+            mesh: std::sync::Arc::new(solidcraft_geom::Mesh::default()),
+            lods: Vec::new(),
+            face_ids: Vec::new(),
+            face_colors: Vec::new(),
+            edges: vec![crate::adapter::DisplayEdge {
+                id: "edge:downstream".into(),
+                points: vec![
+                    solidcore_record::Vec3::ZERO,
+                    solidcore_record::Vec3::X,
+                ],
+                midpoint: [0.5, 0.0, 0.0],
+                normals: Vec::new(),
+            }],
+            comparison: None,
+            selection_edges: None,
+            radius: 1.0,
+            center: solidcore_record::Vec3::ZERO,
+        };
+        let mut viewport = Viewport::default();
+        viewport.display = Some(display);
+        viewport.edit_ghost_transform = Some([
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ]);
+        viewport.edit_ghost_edges = vec![crate::adapter::DisplayEdge {
+            id: "body:0:edge:0".into(),
+            points: vec![
+                solidcore_record::Vec3::ZERO,
+                solidcore_record::Vec3::Y,
+            ],
+            midpoint: [0.0, 0.5, 0.0],
+            normals: Vec::new(),
+        }];
+        let ids = viewport.edge_ids();
+        assert_eq!(ids.len(), 1);
+        assert!(ids.contains("body:0:edge:0"));
+        assert!(!ids.contains("edge:downstream"));
+    }
+
+    #[test]
+    fn quality_detail_uses_threshold_hysteresis() {
+        let display = crate::adapter::DisplayMesh {
+            mesh: std::sync::Arc::new(solidcraft_geom::Mesh::default()),
+            lods: Vec::new(),
+            face_ids: Vec::new(),
+            face_colors: Vec::new(),
+            edges: Vec::new(),
+            comparison: None,
+            selection_edges: None,
+            radius: 10.0,
+            center: solidcore_record::Vec3::ZERO,
+        };
+        let mut viewport = Viewport::default();
+        viewport.display = Some(display);
+        viewport.camera_fit = true;
+        viewport.camera.distance = 45.0; // ratio 4.5 -> tier 1
+        assert_eq!(viewport.quality_detail(), Some(1));
+        viewport.camera.distance = 39.0; // ratio 3.9 is inside the deadband
+        assert_eq!(viewport.quality_detail(), Some(1));
+        viewport.camera.distance = 35.0; // ratio 3.5 crosses the 4.0 boundary
+        assert_eq!(viewport.quality_detail(), Some(2));
+    }
+
+    #[test]
     fn preview_scope_only_moves_overlays_of_affected_bodies() {
         let mut viewport = Viewport::default();
         viewport.set_mesh(Some(&NodeMesh::default()));
@@ -2288,4 +3194,62 @@ mod tests {
         assert!((affected - moved).length() < 1.0e-3, "{affected:?} {moved:?}");
         assert!((stationary - plain).length() < 1.0e-3, "{stationary:?} {plain:?}");
     }
+    fn view_snapshot(dist: f64, visible: [f32; 2], lens: [f32; 2]) -> ViewSnapshot {
+        ViewSnapshot {
+            camera: Camera { distance: dist, ..Camera::default() },
+            lens_shift: lens,
+            camera_fit: true,
+            quality_detail: Some(2),
+            full: visible,
+            visible,
+        }
+    }
+
+    #[test]
+    fn view_snapshot_keeps_the_pending_restore_rects() {
+        let mut viewport = Viewport::default();
+        let snapshot = view_snapshot(10.0, [800.0, 400.0], [0.0, 0.0]);
+        viewport.restore_view(snapshot);
+        let saved = viewport.view_snapshot().expect("snapshot");
+        assert_eq!(saved.visible, [800.0, 400.0]);
+    }
+
+    #[test]
+    fn restoring_at_the_same_size_keeps_the_camera() {
+        let mut viewport = Viewport::default();
+        viewport.restore_view(view_snapshot(10.0, [800.0, 600.0], [0.0, 0.0]));
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        viewport.apply_pending_view_restore(full, full);
+        assert_eq!(viewport.camera.distance, 10.0);
+        assert_eq!(viewport.quality_detail, Some(2));
+    }
+
+    #[test]
+    fn restoring_narrower_zooms_out_by_the_aspect_ratio() {
+        let mut viewport = Viewport::default();
+        viewport.restore_view(view_snapshot(10.0, [800.0, 400.0], [0.0, 0.0]));
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 600.0));
+        viewport.apply_pending_view_restore(full, full);
+        assert!((viewport.camera.distance - 20.0).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn restoring_wider_keeps_the_distance() {
+        let mut viewport = Viewport::default();
+        viewport.restore_view(view_snapshot(10.0, [600.0, 600.0], [0.0, 0.0]));
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 600.0));
+        viewport.apply_pending_view_restore(full, full);
+        assert_eq!(viewport.camera.distance, 10.0);
+    }
+
+    #[test]
+    fn restoring_lens_shift_recentres_on_the_new_visible_rect() {
+        let mut viewport = Viewport::default();
+        viewport.restore_view(view_snapshot(10.0, [800.0, 600.0], [0.25, -0.1]));
+        let full = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1000.0, 700.0));
+        let visible = egui::Rect::from_min_max(egui::pos2(200.0, 0.0), egui::pos2(1000.0, 700.0));
+        viewport.apply_pending_view_restore(full, visible);
+        assert_eq!(viewport.lens_shift, lens_shift_for_visible(full, visible));
+    }
+
 }

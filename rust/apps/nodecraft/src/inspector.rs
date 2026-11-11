@@ -28,6 +28,20 @@ pub struct Output {
     pub toggle_sketch_edit: bool,
     pub choose_linked_part: bool,
     pub open_linked_part: bool,
+    /// Open a graph instance's definition.
+    pub open_definition: bool,
+    /// Rename the referenced local graph definition.
+    pub graph_name: Option<String>,
+    /// Resize the referenced local graph definition's interface.
+    pub definition_ports: Option<(usize, usize)>,
+    /// Resize the current document's root graph interface from a marker.
+    pub root_interface_ports: Option<(Option<usize>, Option<usize>)>,
+    /// Clone the referenced local definition for this instance.
+    pub make_unique: bool,
+    /// Import an external definition into the current document.
+    pub make_local: bool,
+    /// Resize the body input/output ports of an inline graph.
+    pub graph_ports: Option<(usize, usize)>,
 }
 
 /// Paint the inspector reset control at an exact header rect. This is separate
@@ -700,10 +714,11 @@ pub fn node_title(node: &GraphNode) -> String {
         "surfaceloft" => "Surface Loft".to_owned(),
         "exporter" => "Export STEP".to_owned(),
         "translate" => "Transform".to_owned(),
-        "group" => "Group".to_owned(),
+        "group" => "Graph".to_owned(),
+        "graph" => "Graph".to_owned(),
         "offsetfaces" => "Offset Faces".to_owned(),
-        "groupinput" => "Group Input".to_owned(),
-        "groupoutput" => "Group Output".to_owned(),
+        "groupinput" => "Graph Input".to_owned(),
+        "groupoutput" => "Graph Output".to_owned(),
         "boolean" => "Boolean".to_owned(),
         "combine" => "Combine to Part".to_owned(),
         "fuse" => "Fuse".to_owned(),
@@ -731,7 +746,8 @@ pub fn node_badge(node: &GraphNode) -> String {
     match node.node_type.as_str() {
         "stepimporter" => "Import",
         "exporter" | "linkedpart" => "Output",
-        "group" => "Subpatch",
+        "group" => "Graph",
+        "graph" => "Graph",
         "offsetfaces" => "Feature",
         "groupinput" | "groupoutput" => "Interface",
         "translate" => "Transform",
@@ -765,9 +781,10 @@ fn section_title(node: &GraphNode) -> &'static str {
         "shell" => "SHELL",
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
-        "group" => "SUBPATCH",
+        "group" => "GRAPH",
+        "graph" => "GRAPH",
         "offsetfaces" => "OFFSET",
-        "groupinput" | "groupoutput" => "GROUP INTERFACE",
+        "groupinput" | "groupoutput" => "GRAPH INTERFACE",
         _ => "VALUES",
     }
 }
@@ -797,17 +814,278 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
         "scatter" => "Repeats a shape across a seeded area.".to_owned(),
         "group" => {
-            let count = node.values.get("nodes").and_then(Value::as_array).map_or(0, Vec::len);
+            let count = node
+                .values
+                .get("nodes")
+                .and_then(Value::as_array)
+                .map_or(0, |nodes| {
+                    nodes
+                        .iter()
+                        .filter(|node| {
+                            !matches!(
+                                node.get("type").and_then(Value::as_str),
+                                Some("groupinput" | "groupoutput")
+                            )
+                        })
+                        .count()
+                });
             let inputs = node.values.get("inputs").and_then(Value::as_array).map_or(0, Vec::len);
             let outputs = node.values.get("outputs").and_then(Value::as_array).map_or(0, Vec::len);
             format!(
-                "Subpatch with {count} child node(s), {inputs} input(s) and {outputs} output(s). \
+                "Graph with {count} child node(s), {inputs} input port(s) and {outputs} output port(s). \
                  It is flattened into the parent graph during evaluation."
             )
         }
         _ => return None,
     };
     Some(text)
+}
+
+fn graph_port_count(node: &GraphNode, field: &str) -> usize {
+    node.values
+        .get(field)
+        .and_then(|value| value.as_array())
+        .map_or(0, Vec::len)
+}
+
+fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+    let mut name = node
+        .values
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("Graph")
+        .to_owned();
+    let definition = match node.values.get("definition").and_then(Value::as_str) {
+        Some(id) => format!("Local · {id}"),
+        None => node
+            .values
+            .get("external")
+            .and_then(|external| external.get("path"))
+            .and_then(Value::as_str)
+            .map(|path| format!("External · {path}"))
+            .unwrap_or_else(|| "Unresolved".to_owned()),
+    };
+    let inputs = node.values.get("inputs").and_then(Value::as_array).map_or(0, Vec::len);
+    let outputs = node.values.get("outputs").and_then(Value::as_array).map_or(0, Vec::len);
+    let is_local = node.values.get("definition").and_then(Value::as_str).is_some();
+    field_row(ui, "Name", |ui, control_width| {
+        if ui
+            .add_sized(
+                [control_width, FIELD_ROW_HEIGHT],
+                egui::TextEdit::singleline(&mut name).hint_text("Graph name"),
+            )
+            .changed()
+        {
+            output.graph_name = Some(name.clone());
+        }
+    });
+    field_row(ui, "Definition", |ui, _| {
+        ui.label(definition);
+    });
+    if is_local || node.values.get("external").is_some() {
+        let mut input_count = inputs as f64;
+        let mut output_count = outputs as f64;
+        let mut changed = false;
+        field_row(ui, "Num inputs", |ui, _| {
+            let (edited, _) = draw_number(
+                ui,
+                &mut input_count,
+                1.0,
+                Some(0.0),
+                Some(nodecraft_session::groups::MAX_GRAPH_PORTS as f64),
+                nodecraft_node_contract::NumberKind::Unitless,
+                egui::Id::new(("graph-definition-inputs", &node.id)),
+                None,
+            );
+            changed |= edited;
+        });
+        field_row(ui, "Num outputs", |ui, _| {
+            let (edited, _) = draw_number(
+                ui,
+                &mut output_count,
+                1.0,
+                Some(0.0),
+                Some(nodecraft_session::groups::MAX_GRAPH_PORTS as f64),
+                nodecraft_node_contract::NumberKind::Unitless,
+                egui::Id::new(("graph-definition-outputs", &node.id)),
+                None,
+            );
+            changed |= edited;
+        });
+        if changed {
+            output.definition_ports = Some((
+                input_count.round() as usize,
+                output_count.round() as usize,
+            ));
+        }
+    } else {
+        field_row(ui, "Inputs", |ui, _| {
+            ui.label(inputs.to_string());
+        });
+        field_row(ui, "Outputs", |ui, _| {
+            ui.label(outputs.to_string());
+        });
+    }
+    ui.add_space(6.0);
+    if ui_shape::button(
+        ui,
+        "Open graph",
+        ui.available_width(),
+        30.0,
+        crate::theme::get().with_alpha(crate::theme::get().control, 220),
+        egui::Stroke::new(1.0, crate::theme::get().with_alpha(crate::theme::get().border, 210)),
+        crate::theme::get().color(crate::theme::get().text),
+    )
+    .clicked()
+    {
+        output.open_definition = true;
+    }
+    if !is_local
+        && ui_shape::button(
+            ui,
+            "Make local",
+            ui.available_width(),
+            30.0,
+            crate::theme::get().with_alpha(crate::theme::get().control, 220),
+            egui::Stroke::new(1.0, crate::theme::get().with_alpha(crate::theme::get().border, 210)),
+            crate::theme::get().color(crate::theme::get().text),
+        )
+        .clicked()
+    {
+        output.make_local = true;
+    }
+    if is_local
+        && ui_shape::button(
+            ui,
+            "Make unique",
+            ui.available_width(),
+            30.0,
+            crate::theme::get().with_alpha(crate::theme::get().control, 220),
+            egui::Stroke::new(1.0, crate::theme::get().with_alpha(crate::theme::get().border, 210)),
+            crate::theme::get().color(crate::theme::get().text),
+        )
+        .clicked()
+    {
+        output.make_unique = true;
+    }
+}
+
+fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_ports: bool) {
+    let mut name = node
+        .values
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    field_row(ui, "Name", |ui, control_width| {
+        if ui
+            .add_sized(
+                [control_width, FIELD_ROW_HEIGHT],
+                egui::TextEdit::singleline(&mut name).hint_text("Graph name"),
+            )
+            .changed()
+        {
+            output.changes.push(Change {
+                field: "name".to_owned(),
+                value: Value::String(name.clone()),
+            });
+        }
+    });
+    let inputs = graph_port_count(node, "inputs");
+    let outputs = graph_port_count(node, "outputs");
+    if !editable_ports {
+        field_row(ui, "Num inputs", |ui, _| {
+            ui.label(inputs.to_string());
+        });
+        field_row(ui, "Num outputs", |ui, _| {
+            ui.label(outputs.to_string());
+        });
+        return;
+    }
+    let mut input_value = inputs as f64;
+    let mut output_value = outputs as f64;
+    let mut changed = false;
+    field_row(ui, "Num inputs", |ui, _| {
+        let (edited, _) = draw_number(
+            ui,
+            &mut input_value,
+            1.0,
+            Some(0.0),
+            Some(nodecraft_session::groups::MAX_GRAPH_PORTS as f64),
+            nodecraft_node_contract::NumberKind::Unitless,
+            egui::Id::new(("graph-input-ports", &node.id)),
+            None,
+        );
+        changed |= edited;
+    });
+    field_row(ui, "Num outputs", |ui, _| {
+        let (edited, _) = draw_number(
+            ui,
+            &mut output_value,
+            1.0,
+            Some(0.0),
+            Some(nodecraft_session::groups::MAX_GRAPH_PORTS as f64),
+            nodecraft_node_contract::NumberKind::Unitless,
+            egui::Id::new(("graph-output-ports", &node.id)),
+            None,
+        );
+        changed |= edited;
+    });
+    if changed {
+        output.graph_ports = Some((
+            input_value.round() as usize,
+            output_value.round() as usize,
+        ));
+    }
+}
+
+fn marker_ports(node: &GraphNode) -> Vec<String> {
+    if let Some(ports) = node.values.get("ports").and_then(Value::as_array) {
+        return ports.iter().filter_map(|port| port.as_str().map(str::to_owned)).collect();
+    }
+    node.values
+        .get("port")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .into_iter()
+        .collect()
+}
+
+fn marker_interface_fields(
+    ui: &mut Ui,
+    node: &GraphNode,
+    output: &mut Output,
+    editable: bool,
+) {
+    let ports = marker_ports(node);
+    if !editable {
+        field_row(ui, "Ports", |ui, _| {
+            let text = if ports.is_empty() { "None".to_owned() } else { ports.join(", ") };
+            ui.label(text);
+        });
+        return;
+    }
+    let is_input = node.node_type == "groupinput";
+    let label = if is_input { "Num inputs" } else { "Num outputs" };
+    let mut count = ports.len() as f64;
+    let mut changed = false;
+    field_row(ui, label, |ui, _| {
+        let (edited, _) = draw_number(
+            ui,
+            &mut count,
+            1.0,
+            Some(0.0),
+            Some(nodecraft_session::groups::MAX_GRAPH_PORTS as f64),
+            nodecraft_node_contract::NumberKind::Unitless,
+            egui::Id::new(("root-interface-ports", &node.id)),
+            None,
+        );
+        changed |= edited;
+    });
+    if changed {
+        let count = Some(count.round() as usize);
+        output.root_interface_ports = Some(if is_input { (count, None) } else { (None, count) });
+    }
 }
 
 fn section_label(ui: &mut Ui, text: &str) {
@@ -997,6 +1275,15 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
 
 fn action_buttons(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let theme = crate::theme::get();
+    if nodecraft_session::groups::is_graph_interface_node(node) {
+        ui.add_space(10.0);
+        ui.label(
+            egui::RichText::new("Graph interface nodes are structural and cannot be deleted.")
+                .size(11.0)
+                .color(theme.with_alpha(theme.muted, 220)),
+        );
+        return;
+    }
     ui.add_space(12.0);
     let suppress_label = if node.suppressed { "Unsuppress node" } else { "Suppress node" };
     let width = ui.available_width();
@@ -1044,6 +1331,8 @@ pub fn show(
     sections: &[String],
     active_selection: Option<&str>,
     sketch_editing: bool,
+    editable_ports: bool,
+    editable_root_ports: bool,
 ) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
@@ -1065,6 +1354,15 @@ pub fn show(
     } else if node.node_type == "exporter" {
         section_label(ui, section_title(node));
         export_fields(ui, node, &mut output);
+    } else if node.node_type == "group" {
+        section_label(ui, section_title(node));
+        graph_fields(ui, node, &mut output, editable_ports);
+    } else if node.node_type == "graph" {
+        section_label(ui, section_title(node));
+        graph_instance_fields(ui, node, &mut output);
+    } else if matches!(node.node_type.as_str(), "groupinput" | "groupoutput") {
+        section_label(ui, section_title(node));
+        marker_interface_fields(ui, node, &mut output, editable_root_ports);
     } else {
         let specs = known_specs(node);
         section_label(ui, section_title(node));
