@@ -49,36 +49,42 @@ pub(crate) fn primitive_brep_with_kernel(
     use nodecraft_solidcore::solidcore::math::Point3;
     use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
     let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
-    let number = |key: &str, default: f64| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
+    // `primitiveType` selects the dynamic field set; every dimension below comes
+    // from the contract. `sphereNoPole` is a legacy engine-only kind with no
+    // contract field set, so it keeps its historical radius fallback.
+    let number = |key: &str| {
+        nodecraft_node_contract::resolve_number("primitive", &node.values, key)
+            .ok_or_else(|| format!("primitive {kind:?} has no contract field {key:?}"))
+    };
     match kind {
         "box" => {
-            let (length, width, height) = (number("length", 40.0), number("width", 40.0), number("height", 40.0));
+            let (length, width, height) = (number("length")?, number("width")?, number("height")?);
             api::create_box(kernel, Point3::new(-length / 2.0, -width / 2.0, -height / 2.0), length, width, height).map_err(|error| error.to_string())
         }
         "cylinder" => {
-            let (radius, height) = (number("radius", 20.0), number("height", 40.0));
+            let (radius, height) = (number("radius")?, number("height")?);
             api::create_cylinder(kernel, Point3::new(0.0, 0.0, -height / 2.0), radius, height).map_err(|error| error.to_string())
         }
         "cone" => {
-            let (base, top, height) = (number("bottomRadius", 20.0), number("topRadius", 0.0), number("height", 40.0));
+            let (base, top, height) = (number("bottomRadius")?, number("topRadius")?, number("height")?);
             api::create_cone(kernel, Point3::new(0.0, 0.0, -height / 2.0), base, top, height).map_err(|error| error.to_string())
         }
-        "sphere" => api::create_sphere(kernel, Point3::new(0.0, 0.0, 0.0), number("radius", 20.0)).map_err(|error| error.to_string()),
-        "sphereNoPole" => api::create_sphere_no_pole(kernel, Point3::new(0.0, 0.0, 0.0), number("radius", 20.0)).map_err(|error| error.to_string()),
+        "sphere" => api::create_sphere(kernel, Point3::new(0.0, 0.0, 0.0), number("radius")?).map_err(|error| error.to_string()),
+        "sphereNoPole" => api::create_sphere_no_pole(kernel, Point3::new(0.0, 0.0, 0.0), number("radius").unwrap_or(20.0)).map_err(|error| error.to_string()),
         "partialSphere" => api::create_partial_sphere(
             kernel,
             Point3::new(0.0, 0.0, 0.0),
-            number("radius", 20.0),
-            number("startAngle", 0.0),
-            number("endAngle", 90.0),
+            number("radius")?,
+            number("startAngle")?,
+            number("endAngle")?,
         )
         .map_err(|error| error.to_string()),
         "wedge" => {
             let body = nodecraft_wedge::wedge_body(
-                number("length", 40.0),
-                number("width", 30.0),
-                number("height", 25.0),
-                number("topLength", 0.0),
+                number("length")?,
+                number("width")?,
+                number("height")?,
+                number("topLength")?,
             )?;
             nodecraft_layers::body_to_kernel(kernel, &body)
                 .map_err(|error| format!("Wedge: {error}"))
@@ -86,15 +92,15 @@ pub(crate) fn primitive_brep_with_kernel(
         "partialTorus" => api::create_partial_torus(
             kernel,
             Point3::new(0.0, 0.0, 0.0),
-            number("majorRadius", 15.0),
-            number("minorRadius", 5.0),
-            number("startAngle", 0.0),
-            number("endAngle", 90.0),
+            number("majorRadius")?,
+            number("minorRadius")?,
+            number("startAngle")?,
+            number("endAngle")?,
         )
         .map_err(|error| error.to_string()),
-        "torus" => api::create_torus(kernel, Point3::new(0.0, 0.0, 0.0), number("majorRadius", 15.0), number("minorRadius", 5.0)).map_err(|error| error.to_string()),
+        "torus" => api::create_torus(kernel, Point3::new(0.0, 0.0, 0.0), number("majorRadius")?, number("minorRadius")?).map_err(|error| error.to_string()),
         "pyramid" => {
-            let (length, height) = (number("length", 40.0), number("height", 30.0));
+            let (length, height) = (number("length")?, number("height")?);
             api::create_pyramid(kernel, Point3::new(0.0, 0.0, -height / 2.0), length, height).map_err(|error| error.to_string())
         }
         other => Err(format!("primitive {other:?} has no exact closed-solid BRep")),

@@ -19,6 +19,53 @@ fn display_mesh_for_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) 
     nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05).map(|display| display.mesh)
 }
 
+/// Write an evaluated exact Part as one STEP body per Part body.
+///
+/// Realising the Part bakes each placement into its body; the body's imported
+/// name and colour travel to the written Solid. This is the export route for a
+/// Part whose node exposes several bodies (for example a Circular Pattern)
+/// where the single-operand exact path does not apply.
+fn export_part_bodies(
+    part: &Part,
+    path: &str,
+    options: &nodecraft_step::StepExportOptions,
+) -> Result<(), String> {
+    let solids = part.realized_bodies()?;
+    if solids.is_empty() {
+        return Err("Part has no solids".into());
+    }
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("model")
+        .to_string();
+    let mut bodies = Vec::with_capacity(solids.len());
+    for (index, solid) in solids.iter().enumerate() {
+        let instance = part.bodies.get(index);
+        let name = instance
+            .and_then(|body| body.name.clone())
+            .unwrap_or_else(|| {
+                if solids.len() == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}_{}", index + 1)
+                }
+            });
+        bodies.push(nodecraft_step::ExportBody {
+            name,
+            color: instance.and_then(|body| body.color),
+            placement: None,
+            sheet: false,
+            brep: nodecraft_step::record_of_brep(solid.brep())?,
+        });
+    }
+    let mut options = options.clone();
+    if options.product_name.trim().is_empty() {
+        options.product_name = stem;
+    }
+    nodecraft_step::write_step_with_options(path, &bodies, &options)
+}
+
 impl<'req, 'prog> Eval<'req, 'prog> {
     /// Cache a display mesh only when the node itself has no recorded error.
     /// Bypassed meshes from failed nodes must never become healthy cache hits.
@@ -69,9 +116,18 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         self.cache_misses += 1;
         self.emit_progress(node_id, ProgressPhase::Start);
         let part_started = Instant::now();
+        let kernel_before = crate::kernel_pool::kernel_run_nanos();
         let result = self
             .evaluate_part(node_id)
             .and_then(|part| {
+                let wall = part_started.elapsed().as_secs_f64() * 1000.0;
+                let kernel = (crate::kernel_pool::kernel_run_nanos() - kernel_before) as f64 / 1.0e6;
+                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                    eprintln!(
+                        "[pool] part eval {node_id} wall_ms={wall:.2} kernel_ms={kernel:.2} ratio={:.2}",
+                        if wall > 0.0 { kernel / wall } else { 0.0 }
+                    );
+                }
                 self.brep_timings.insert(node_id.into(), part_started.elapsed().as_secs_f64() * 1000.0);
                 self.part_display_mesh(node_id, &part)
             });
@@ -86,7 +142,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             }
             Err(error) => {
                 self.cache.insert_failure(cache_key.clone(), error.clone());
-                self.errors.insert(node_id.into(), error);
+                self.record_error(node_id, error);
                 if let Some(source) = bypass_source(&node, &self.request.connections)
                     && let Some(mesh) = self.evaluate(&source)
                 {
@@ -100,6 +156,13 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 self.emit_progress(node_id, ProgressPhase::Complete);
                 None
             }
+        }
+    }
+
+    /// Record a node error unless the run has been cancelled.
+    fn record_error(&mut self, node_id: &str, error: String) {
+        if !crate::kernel_pool::current_revision_token().is_cancelled() {
+            self.errors.insert(node_id.to_owned(), error);
         }
     }
 
@@ -121,8 +184,19 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         self.cache_misses += 1;
         let started = Instant::now();
+        let kernel_before = crate::kernel_pool::kernel_run_nanos();
         self.emit_progress(node_id, ProgressPhase::Start);
-        match self.evaluate_part(node_id) {
+        let part = self.evaluate_part(node_id);
+        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            let wall = started.elapsed().as_secs_f64() * 1000.0;
+            let kernel = (crate::kernel_pool::kernel_run_nanos() - kernel_before) as f64 / 1.0e6;
+            eprintln!(
+                "[pool] eval {node_id} request={} wall_ms={wall:.2} kernel_ms={kernel:.2} ratio={:.2}",
+                self.request.request_id,
+                if wall > 0.0 { kernel / wall } else { 0.0 }
+            );
+        }
+        match part {
             Ok(_) => {
                 self.order.push(node_id.into());
                 self.brep_timings.insert(
@@ -163,19 +237,31 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 .unwrap_or_default();
             let preview_detail = self.request.preview_detail;
             let key = crate::display::MeshKey::new(node_id, content_hash.clone(), tolerance, preview_detail);
+            // The plan cache key is the body's provenance (its producing node's
+            // content seed), not the target's cache key: two boolean nodes that
+            // differ only by mode (e.g. subtract vs subtract-reverse) have no
+            // cache key but produce different geometry, and must not share a
+            // display plan. Bodies with the same source still share a plan.
+            let plan_key = |index: usize| {
+                let body = &part.bodies[index];
+                nodecraft_exact::BodyKey::new(
+                    body.source.unwrap_or_else(|| fnv_seed(&content_hash)),
+                    body.source.map_or(index as u32, |_| body.source_body),
+                )
+            };
             let mut outputs = BTreeMap::new();
             let mut pending = Vec::new();
             // Placement-only edits reuse each body's local tessellation. Only
             // the transform is reapplied; the B-rep is not tessellated again.
             for (index, body) in part.bodies.iter().enumerate() {
-                let transforms = body_transforms(body.body.as_ref(), part, index);
-                let body_key = nodecraft_exact::BodyKey::new(fnv_seed(&content_hash), index as u32);
+                let transforms = body_transforms(body.body.brep(), part, index);
+                let body_key = plan_key(index);
                 if !self.bypass_cache
                     && let Some(cached) = self.display_plans.get(body_key, display_quality(tolerance, preview_detail))
                 {
                     let display = nodecraft_layers::evaluate_plan(&cached.plan, &cached.edge_ids);
                     let mut mesh = display.mesh;
-                    apply_brep_face_colors(body.body.as_ref(), &mut mesh);
+                    apply_brep_face_colors(body.body.brep(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
                         mesh: std::sync::Arc::new(mesh),
                         plan: Some(cached.plan),
@@ -184,7 +270,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                         transforms: transforms.iter().map(crate::display::DisplayTransform::from).collect(),
                     });
                 } else {
-                    pending.push((index, body.body.clone(), transforms));
+                    pending.push((index, body.body.shared(), transforms));
                 }
             }
             if !pending.is_empty() {
@@ -234,7 +320,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let stats = instance.stats.clone();
                     let plan_for_cache = plan.clone().unwrap_or_default();
                     self.display_plans.insert(
-                        nodecraft_exact::BodyKey::new(fnv_seed(&content_hash), index as u32),
+                        plan_key(index),
                         display_quality(tolerance, preview_detail),
                         plan_for_cache,
                         instance.plan_edge_ids.clone(),
@@ -301,8 +387,15 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         }
         let node = node(self.request, node_id)?.clone();
         if node.suppressed {
-            return suppression_source(&node, &self.request.connections)
+            // Keep the pass-through mesh addressable by the suppressed node's
+            // own id; display payloads, picking and validation all look it up
+            // by that id.
+            let mesh = suppression_source(&node, &self.request.connections)
                 .and_then(|source| self.evaluate(&source));
+            if let Some(mesh) = &mesh {
+                self.objects.insert(node_id.into(), mesh.clone());
+            }
+            return mesh;
         }
         self.visiting.push(node_id.into());
         let started = Instant::now();
@@ -406,9 +499,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     .get("primitiveType")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or(&node.node_type);
-                let _number = |key: &str, default: f64| {
-                    node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default)
-                };
                 match kind {
                     // Closed primitives have exact B-reps, so their display
                     // mesh goes through the same upstream tessellator as every
@@ -434,30 +524,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     self.visiting.pop();
                     return mesh;
                 }
-                let mut current = link.from.clone();
-                let mut offset = [0.0f64; 3];
-                let mut rotation = [0.0f64; 3];
-                let mut primitive = None;
-                loop {
-                    let Some(item) = self.request.nodes.iter().find(|item| item.id == current) else { break };
-                    if item.node_type == "translate" {
-                        offset[0] += item.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        offset[1] += item.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        offset[2] += item.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        for (slot, key) in ["rx", "ry", "rz"].iter().enumerate() {
-                            rotation[slot] = item.values.get(*key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-                        }
-                        let Some(next) = self.request.connections.iter().find(|candidate| candidate.to == current && candidate.input == "shape") else { break };
-                        current = next.from.clone();
-                    } else {
-                        primitive = Some(item);
-                        break;
-                    }
-                }
-                let number = |key: &str, default: f64| {
-                    primitive.and_then(|item| item.values.get(key)).and_then(serde_json::Value::as_f64).unwrap_or(default)
-                };
-                let kind = primitive.and_then(|item| item.values.get("primitiveType")).and_then(serde_json::Value::as_str).unwrap_or("");
                 let directory = node.values.get("directory").and_then(serde_json::Value::as_str).unwrap_or("");
                 let root = std::env::var("NODECRAFT_PROJECT_ROOT").unwrap_or_else(|_| ".".into());
                 let project_folder = self.request.project_directory.as_deref().filter(|value| !value.trim().is_empty()).map(std::path::PathBuf::from);
@@ -474,150 +540,68 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let result = if let Err(error) = std::fs::create_dir_all(&output) {
                     Err(format!("{}: {error}", output.display()))
                 } else {
-                    let exact_part = if node.values.get("format").and_then(serde_json::Value::as_str) != Some("faceted") {
-
-                        self.evaluate_part(&link.from).ok().and_then(|part| part.realized_solids().ok())
-                    } else {
-                        None
-                    };
-                    if let Some(breps) = exact_part.as_ref()
-                        && let Ok(()) = nodecraft_step::write_breps_exact(path_text, breps)
-                        && nodecraft_step::import_solids(path_text).is_ok()
-                        && let Ok(()) = apply_export_metadata(&node, path_text)
-                    {
-                        Ok(())
-                    } else if cacheable_exact_operand(self.request, &link.from)
-                        && node.values.get("format").and_then(serde_json::Value::as_str) != Some("faceted")
-                        && let Some(brep) = self.cached_exact_brep(&link.from)
-                    {
-                        let mut brep = brep;
-                        let mut heal_kernel = nodecraft_solidcore::kernel::kernel();
-                        if nodecraft_solidcore::solidcore::heal::heal_data::p1::api_heal_brep(
-                            &mut heal_kernel,
-                            Some(&mut brep),
-                        )
-                        .is_err()
-                        {
-                            // Keep the evaluated body if the healer cannot run.
-                        }
-                        let exact = nodecraft_step::write_brep_exact(path_text, &brep);
-                        let validated = exact.is_ok()
-                            && nodecraft_mesh::import_step_brep(path_text).is_ok();
-                        if validated {
-                            apply_export_metadata(&node, path_text)
-                        } else if let Some(mesh) = &mesh {
-                            // Some curved Boolean/skin B-reps do not yet round-trip
-                            // through the STEP writer. Keep the file usable by
-                            // falling back to the evaluated display mesh.
-                            write_faceted_from_mesh(path_text, mesh)
-                                .and_then(|_| apply_export_metadata(&node, path_text))
-                        } else {
-                            exact.and_then(|_| apply_export_metadata(&node, path_text))
-                        }
-                    } else {
-                        let imported_chain = resolve_part_chain(self.request, &link.from)
-                        .filter(|(source, _, _)| source.node_type == "stepimporter");
-                    let written = if let Some((_, offset, rotation)) = imported_chain {
-                        let _ = (offset, rotation);
-                        export_imported_step(self.request, &link.from, path_text).and_then(|_| {
-                            if node.values.get("format").and_then(serde_json::Value::as_str) == Some("faceted") {
-                                match nodecraft_step::read_planar_body(path_text) {
-                                    Ok(body) => nodecraft_step::write_faceted_brep(path_text, &body)?,
-                                    Err(error) => match &mesh {
-                                        Some(mesh) => write_faceted_from_mesh(path_text, mesh)?,
-                                        None => return Err(error),
+                    match crate::step_options(&node) {
+                        Err(error) => Err(error),
+                        Ok(options) => {
+                            let format = node.values.get("format").and_then(serde_json::Value::as_str);
+                            let source_kind = self
+                                .request
+                                .nodes
+                                .iter()
+                                .find(|item| item.id == link.from)
+                                .map(|item| item.node_type.as_str());
+                            let imported = crate::resolve_part_chain(self.request, &link.from)
+                                .filter(|(source, _, _)| source.node_type == "stepimporter");
+                            if format == Some("faceted") {
+                                match &mesh {
+                                    Some(mesh) => crate::write_faceted_from_mesh(path_text, mesh, &options),
+                                    None => Err("Export input was not evaluated.".into()),
+                                }
+                            } else if source_kind == Some("combine") {
+                                crate::export_combine_assembly(self, &link.from, &node, path_text)
+                            } else if imported.is_some() {
+                                crate::export_imported_step(self.request, &link.from, &node, path_text)
+                            } else {
+                                match crate::exact_operand_breps(self, &link.from) {
+                                    Ok(breps) if !breps.is_empty() => {
+                                        let written = nodecraft_step::write_breps_exact_with_options(path_text, &breps, &options);
+                                        match written {
+                                            Ok(()) => Ok(()),
+                                            Err(error) => match &mesh {
+                                                Some(mesh) => crate::write_faceted_from_mesh(path_text, mesh, &options),
+                                                None => Err(error),
+                                            },
+                                        }
+                                    }
+                                    Ok(_) => match &mesh {
+                                        Some(mesh) => crate::write_faceted_from_mesh(path_text, mesh, &options),
+                                        None => Err("Export input produced no solids.".into()),
+                                    },
+                                    Err(error) => {
+                                        // The node does not expose a single exact operand (a
+                                        // Circular Pattern is the common case), but its Part is
+                                        // already evaluated and carries every body with its own
+                                        // placement and metadata. Export that Part instead of
+                                        // collapsing the result to a faceted display mesh.
+                                        let part_export = self
+                                            .parts
+                                            .get(&link.from)
+                                            .cloned()
+                                            .ok_or_else(|| error.clone())
+                                            .and_then(|part| {
+                                                export_part_bodies(&part, path_text, &options)
+                                            });
+                                        match part_export {
+                                            Ok(()) => Ok(()),
+                                            Err(part_error) => match &mesh {
+                                                Some(mesh) => crate::write_faceted_from_mesh(path_text, mesh, &options),
+                                                None => Err(part_error),
+                                            },
+                                        }
                                     },
                                 }
                             }
-                            apply_export_metadata(&node, path_text)
-                        })
-                    } else if matches!(primitive.map(|item| item.node_type.as_str()), Some("solid" | "primitive")) {
-                        match kind {
-                            "box" => nodecraft_step::write_box(path_text, number("length", 40.0), number("width", 40.0), number("height", 40.0)),
-                            "cylinder" => nodecraft_step::write_cylinder(path_text, number("radius", 20.0), number("height", 40.0)),
-                            "cone" => nodecraft_step::write_cone(path_text, number("bottomRadius", 20.0), number("topRadius", 0.0), number("height", 40.0)),
-                            "sphere" => nodecraft_step::write_sphere(path_text, number("radius", 20.0)),
-                            "torus" => nodecraft_step::write_torus(path_text, number("majorRadius", 15.0), number("minorRadius", 5.0)),
-                            "wedge" => nodecraft_step::write_wedge(path_text, number("length", 40.0), number("width", 30.0), number("height", 25.0), number("topLength", 0.0)),
-                            "pyramid" => nodecraft_step::write_pyramid(path_text, number("length", 40.0), number("height", 30.0)),
-                            other => Err(format!("Rust STEP export does not support primitive {other:?}.")),
-                        }.and_then(|_| {
-                            nodecraft_step::transform_step_file(path_text, rotation, offset)?;
-                            let unit = node.values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase();
-                            let target = match unit.as_str() {
-                                "cm" | "centimetre" | "centimeter" => Some(nodecraft_step::LengthUnit::Centimetre),
-                                "m" | "metre" | "meter" => Some(nodecraft_step::LengthUnit::Metre),
-                                "um" | "micrometre" | "micrometer" => Some(nodecraft_step::LengthUnit::Micrometre),
-                                "in" | "inch" => Some(nodecraft_step::LengthUnit::Inch),
-                                _ => None,
-                            };
-                            if let Some(target) = target { nodecraft_step::convert_step_units(path_text, nodecraft_step::LengthUnit::Millimetre, target)?; }
-                            if node.values.get("format").and_then(serde_json::Value::as_str) == Some("faceted") {
-                                match nodecraft_step::read_planar_body(path_text) {
-                                    Ok(body) => nodecraft_step::write_faceted_brep(path_text, &body)?,
-                                    Err(error) => match &mesh {
-                                        Some(mesh) => write_faceted_from_mesh(path_text, mesh)?,
-                                        None => return Err(error),
-                                    },
-                                }
-                            }
-                            let name = node.values.get("fileName").and_then(serde_json::Value::as_str).unwrap_or("solid");
-                            let author = node.values.get("author").and_then(serde_json::Value::as_str).unwrap_or("");
-                            let organization = node.values.get("organization").and_then(serde_json::Value::as_str).unwrap_or("NodeCraft");
-                            nodecraft_step::set_header(path_text, name, author, organization)?;
-                            if let Some(schema) = node.values.get("schema").and_then(serde_json::Value::as_str) {
-                                nodecraft_step::set_schema(path_text, schema)?;
-                            }
-                            if let Some(name) = node.values.get("productName").and_then(serde_json::Value::as_str) {
-                                nodecraft_step::set_product_name(path_text, name)?;
-                            }
-                            if let Some(layer) = node.values.get("layer").and_then(serde_json::Value::as_str) {
-                                nodecraft_step::set_layer(path_text, layer)?;
-                            }
-                            if let Some(color) = node.values.get("color").and_then(serde_json::Value::as_str) {
-                                let hex = color.trim_start_matches('#');
-                                if hex.len() == 6 {
-                                    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|error| error.to_string())? as f64 / 255.0;
-                                    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|error| error.to_string())? as f64 / 255.0;
-                                    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|error| error.to_string())? as f64 / 255.0;
-                                    nodecraft_step::set_color(path_text, r, g, b)?;
-                                } else { return Err("color must be #RRGGBB".into()); }
-                            }
-                            Ok(())
-                        })
-                    } else if (exports_boolean_chain(self.request, &link.from)
-                        || self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("boolean")
-                        || self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("fuse"))
-                        && node.values.get("format").and_then(serde_json::Value::as_str) == Some("faceted")
-                    {
-                        match &mesh {
-                            Some(mesh) => write_faceted_from_mesh(path_text, mesh).and_then(|_| apply_export_metadata(&node, path_text)),
-                            None => Err("Boolean input was not evaluated.".into()),
                         }
-                    } else if exports_boolean_chain(self.request, &link.from) {
-                        export_boolean_chain(self.request, &link.from, path_text).and_then(|_| apply_export_metadata(&node, path_text))
-                    } else if self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("boolean") || self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("fuse") {
-                        export_boolean_exact(self.request, &link.from, path_text).and_then(|_| apply_export_metadata(&node, path_text))
-                    } else if resolve_extrude_chain(self.request, &link.from).is_some() {
-                        export_extrude_chain(self.request, &link.from, path_text).and_then(|_| apply_export_metadata(&node, path_text))
-                    } else if self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("extrude") {
-                        export_extrude_exact(self.request, &link.from, path_text).and_then(|_| apply_export_metadata(&node, path_text))
-                    } else if self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("combine") {
-                        export_combine_assembly(self.request, &link.from, path_text)
-                            .or_else(|_| export_combine_exact(self.request, &link.from, path_text))
-                            .and_then(|_| apply_export_metadata(&node, path_text))
-                    } else if self.request.nodes.iter().find(|item| item.id == link.from).map(|item| item.node_type.as_str()) == Some("mirror") {
-                        match exact_operand_brep(self.request, &link.from) {
-                            Ok(brep) => nodecraft_step::write_brep_exact(path_text, &brep)
-                                .and_then(|_| apply_export_metadata(&node, path_text)),
-                            Err(error) => Err(error),
-                        }
-                    } else if let Some(source_mesh) = &mesh {
-                        nodecraft_step::write_mesh_planar(path_text, &source_mesh.vertices, &source_mesh.faces)
-                    } else {
-                        Err("Export input was not evaluated.".into())
-                    };
-                        written
                     }
                 };
                 if let Err(error) = result { self.errors.insert(node_id.into(), stepio_error(path_text, error)); }
@@ -647,9 +631,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 }
                 let (op, reverse) = boolean_mode(&node.values)?;
                 let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
-                let a_breps = self.operand_breps(&a)?;
-                let b_breps = self.operand_breps(&b)?;
-                let result = crate::node_task::execute_exact(
+                let a_breps: Vec<nodecraft_ops::SolidBody> = self.operand_breps(&a)?.into_iter().map(nodecraft_ops::SolidBody::new).collect();
+                let b_breps: Vec<nodecraft_ops::SolidBody> = self.operand_breps(&b)?.into_iter().map(nodecraft_ops::SolidBody::new).collect();
+                let result = crate::node_task::execute_exact_warned(
                     crate::node_task::ExactNodeTask::Boolean {
                         op,
                         a: a_breps,
@@ -657,76 +641,40 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     },
                     node_id,
                     fnv_seed(node_id),
-                )?
-                .into_shape()
-                .ok_or("boolean task returned no shape")?;
+                )?;
+                if !result.warnings.is_empty() {
+                    self.warnings.entry(node_id.to_owned()).or_default().extend(result.warnings);
+                }
+                let result = match result.output {
+                    crate::node_task::NodeOutput::Shape(shape) => shape.shared(),
+                    // Nothing left: the node keeps its amber warning and draws nothing.
+                    crate::node_task::NodeOutput::Empty => return Ok(Mesh::default()),
+                    _ => return Err("boolean task returned no shape".into()),
+                };
                 self.breps.insert(node_id.into(), result.clone());
                 if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
                     self.cache.insert_brep((node_id.to_string(), cache), result.clone());
                 }
                 display_mesh_for_brep(&result)
             })(),
-            "extrude" => (|| -> Result<Mesh, String> {
-                let link = self.request.connections.iter().find(|link| link.to == node_id && (link.input == "profile" || link.input == "shape")).ok_or("Extrude has no profile input.")?;
-                let operation = node.values.get("operation").and_then(serde_json::Value::as_str).unwrap_or("join");
-                let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                let source_is_sketch = self
-                    .request
-                    .nodes
-                    .iter()
-                    .find(|item| item.id == link.from)
-                    .is_some_and(|item| item.node_type == "sketch" || item.node_type == "spline");
-                if source_is_sketch {
-                    let output = self
-                        .sketch_output_for(&link.from)
-                        .ok_or("Extrude sketch source did not evaluate")?;
-                    let result = Arc::new(crate::node_task::execute_exact(
-                        crate::node_task::ExactNodeTask::ExtrudeSketch { output: std::sync::Arc::new(output), amount },
-                        node_id,
-                        fnv_seed(node_id),
-                    )?.into_brep().ok_or_else(|| "sketch extrude task returned no shape".to_owned())?);
+            "extrude" | "loft" | "surfaceloft" => (|| -> Result<Mesh, String> {
+                // These nodes have exactly one implementation: the exact Part
+                // path. Keeping a second, node-type-driven display evaluator
+                // here made a translated sketch extrude disagree with the
+                // exported solid. Display only tessellates the Part, then
+                // publishes its body for the legacy B-rep consumers below.
+                let part = self.evaluate_part(node_id)?;
+                let mesh = self.part_display_mesh(node_id, &part)
+                    .map_err(|error| format!("{} display mesh: {error}", node.node_type))?;
+                let mut solids = part.realized_solids()?;
+                if solids.len() == 1 {
+                    let result = Arc::new(solids.pop().expect("one solid"));
                     self.breps.insert(node_id.into(), result.clone());
                     if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
-                        self.cache.insert_brep((node_id.to_string(), cache), result.clone());
+                        self.cache.insert_brep((node_id.to_string(), cache), result);
                     }
-                    return display_mesh_for_brep(&result);
                 }
-                // Resolve the whole upstream chain through the B-rep cache. The source
-                // may be a translate (or Boolean), not just a STEP importer.
-                let brep = self.operand_brep(&link.from)?;
-                let faces = node.values.get("faces").and_then(serde_json::Value::as_array);
-                if faces.is_none_or(|items| items.is_empty()) {
-                    // A face is optional until the user picks one. Keep the node clean:
-                    // pass the upstream body through and let FACE selection populate it.
-                    return self.evaluate(&link.from).ok_or_else(|| "Extrude source did not evaluate".into());
-                }
-                let reference = node.values.get("faces").and_then(serde_json::Value::as_array).and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
-                let index: usize = face_reference_index(reference).ok_or("Extrude needs a selected face reference (face:N).")?;
-                let _ = brep.faces().ids().nth(index).ok_or_else(|| format!("Extrude face {index} does not exist"))?;
-                let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-                let tool = crate::node_task::execute_exact(
-                    crate::node_task::ExactNodeTask::Extrude { brep: copy_brep(&brep)?, face_index: index, amount },
-                    node_id,
-                    fnv_seed(node_id),
-                )?
-                .into_brep()
-                .ok_or_else(|| "extrude task returned no shape".to_owned())?;
-                let preview = display_mesh_for_brep(&tool).ok();
-                let result = match operation {
-                    "new" => tool,
-                    "remove" => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Difference)?,
-                    "intersect" => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Intersection)?,
-                    _ => crate::boolean_breps_ops(&brep, &tool, nodecraft_bool::BooleanOp::Union)?,
-                };
-                let result = Arc::new(result);
-                self.breps.insert(node_id.into(), result.clone());
-                if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
-                    self.cache.insert_brep((node_id.to_string(), cache), result.clone());
-                }
-                let mut display = display_mesh_for_brep(&result)?;
-                display.feature_preview = preview.filter(|mesh| !mesh.vertices.is_empty()).map(Box::new);
-                display.feature_preview_operation = Some(operation.to_string());
-                Ok(display)
+                Ok(mesh)
             })(),
             "groupinput" => Ok(Mesh::default()),
             "groupoutput" => source(self.request, node_id)
@@ -739,6 +687,14 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let part = self.evaluate_part(node_id)?;
                 self.part_display_mesh(node_id, &part)
                     .map_err(|error| format!("Scatter display mesh: {error}"))
+            })(),
+            "circularpattern" => (|| -> Result<Mesh, String> {
+                // Circular Pattern is the same exact Part generator shape as
+                // Scatter: instances come from the Part path, never a separate
+                // mesh-only placement.
+                let part = self.evaluate_part(node_id)?;
+                self.part_display_mesh(node_id, &part)
+                    .map_err(|error| format!("Circular Pattern display mesh: {error}"))
             })(),
             "combine" => {
                 let mut meshes = Vec::new();
@@ -778,7 +734,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     return None;
                 };
                 match self.evaluate(&link.from) {
-                    Some(mesh) => self.kernel.translate(&mesh, &node.values),
+                    Some(mesh) => {
+                        let (offset, rotation) = crate::translate_placement(&node.values);
+                        Ok(crate::mesh_placement(&mesh, offset, rotation))
+                    }
                     None => Err("Transform input was not evaluated.".into()),
                 }
             }
@@ -808,66 +767,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let display = spline_display_mesh(&sketch);
                 self.sketches.insert(node_id.into(), Arc::new(SketchOutput::new(sketch)));
                 Ok(display)
-            })(),
-            "loft" => (|| -> Result<Mesh, String> {
-                let bottom = input_source(self.request, node_id, "bottom").ok_or("Loft has no bottom section")?.from.clone();
-                let top = input_source(self.request, node_id, "top").ok_or("Loft has no top section")?.from.clone();
-                let _ = self.evaluate(&bottom);
-                let _ = self.evaluate(&top);
-                let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
-                let bottom_output = self.sketch_output_for(&bottom);
-                let top_output = self.sketch_output_for(&top);
-                let result = if let (Some(bottom_output), Some(top_output)) = (bottom_output, top_output) {
-                    crate::node_task::execute_exact(
-                        crate::node_task::ExactNodeTask::LoftSketch { bottom: bottom_output, top: top_output, ruled },
-                        node_id,
-                        fnv_seed(node_id),
-                    )?
-                    .into_shape()
-                    .ok_or_else(|| "Loft task returned no shape".to_owned())?
-                } else {
-                    let mut oracle = nodecraft_solidcore::kernel::kernel();
-                    Arc::new(loft_exact(self.request, &mut oracle, &bottom, &top, ruled, true)?)
-                };
-                self.breps.insert(node_id.into(), result.clone());
-                if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
-                    self.cache.insert_brep((node_id.to_string(), cache), result.clone());
-                }
-                display_mesh_for_brep(&result)
-                    .map_err(|error| format!("Loft display mesh: {error}"))
-            })(),
-            "surfaceloft" => (|| -> Result<Mesh, String> {
-                let section_ids: Vec<String> = self.request.connections.iter()
-                    .filter(|link| link.to == node_id && link.input == "sections")
-                    .map(|link| link.from.clone())
-                    .collect();
-                if section_ids.len() < 2 {
-                    return Err("Surface Loft needs at least two section connections".into());
-                }
-                let mut sections = Vec::with_capacity(section_ids.len());
-                for section_id in &section_ids {
-                    if !self.request.connections.iter().any(|link| &link.from == section_id && link.to == node_id) {
-                        return Err(format!("Surface Loft section {section_id} is not connected"));
-                    }
-                    let _ = self.evaluate(section_id);
-                    let output = self.sketch_output_for(section_id)
-                        .ok_or_else(|| format!("Surface Loft section {section_id} must be a sketch or spline curve"))?;
-                    sections.push(output);
-                }
-                let ruled = node.values.get("ruled").and_then(serde_json::Value::as_f64).unwrap_or(0.0) >= 0.5;
-                let result = crate::node_task::execute_exact(
-                    crate::node_task::ExactNodeTask::SurfaceLoft { sections, ruled },
-                    node_id,
-                    fnv_seed(node_id),
-                )?
-                .into_shape()
-                .ok_or_else(|| "Surface Loft task returned no shape".to_owned())?;
-                self.breps.insert(node_id.into(), result.clone());
-                if let Some(cache) = node.cache.as_ref().and_then(|cache| cache.key.clone()) {
-                    self.cache.insert_brep((node_id.to_string(), cache), result.clone());
-                }
-                display_mesh_for_brep(&result)
-                    .map_err(|error| format!("Surface Loft display mesh: {error}"))
             })(),
             "time" => {
                 // Time is a scalar source consumed by the app; it produces no geometry.

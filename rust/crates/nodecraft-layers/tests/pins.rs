@@ -11,9 +11,6 @@ fn revs(text: &str) -> Vec<String> {
         .filter(|line| {
             let line = line.trim_start();
             line.starts_with("solidcore")
-                || line.starts_with("step-import")
-                || line.starts_with("step-brep")
-                || line.starts_with("step-export")
         })
         .filter_map(|line| {
             let rest = line.split("rev = \"").nth(1)?;
@@ -73,4 +70,47 @@ fn member_manifests_do_not_repeat_the_solidcore_pin() {
         "member manifests must use `workspace = true` for SolidCore deps:\n{}",
         offenders.join("\n")
     );
+}
+
+/// The cadmpeg crates are pinned to exactly the versions SolidCraft pins, with the
+/// same open-format features. They are bumped together with the SolidCraft pin.
+#[test]
+fn cadmpeg_pins_match_the_solidcraft_pin() {
+    let rust = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let workspace = std::fs::read_to_string(rust.join("Cargo.toml")).expect("workspace manifest");
+    for name in ["cadmpeg-core", "cadmpeg-ir", "cadmpeg-registry"] {
+        let line = workspace
+            .lines()
+            .find(|line| line.trim_start().starts_with(&format!("{name} =")))
+            .unwrap_or_else(|| panic!("{name} is missing from the workspace dependencies"));
+        assert!(
+            line.contains("\"=0.6.7\""),
+            "{name} must be pinned exactly to 0.6.7: {line}"
+        );
+    }
+    let registry = workspace
+        .lines()
+        .find(|line| line.trim_start().starts_with("cadmpeg-registry ="))
+        .expect("cadmpeg-registry line");
+    for feature in ["default-features = false", "\"fcstd\"", "\"rhino\"", "\"step\""] {
+        assert!(registry.contains(feature), "cadmpeg-registry must state {feature}: {registry}");
+    }
+    let lock = std::fs::read_to_string(rust.join("Cargo.lock")).expect("lockfile");
+    for name in ["cadmpeg-core", "cadmpeg-ir", "cadmpeg-registry"] {
+        let mut found = false;
+        let mut version = None;
+        for line in lock.lines() {
+            if line == format!("name = \"{name}\"") {
+                found = true;
+            } else if found && version.is_none() && line.starts_with("version = ") {
+                version = Some(line.trim().to_owned());
+            }
+        }
+        assert!(found, "Cargo.lock has no {name}");
+        assert_eq!(
+            version.as_deref(),
+            Some("version = \"0.6.7\""),
+            "{name} in Cargo.lock must resolve to 0.6.7"
+        );
+    }
 }

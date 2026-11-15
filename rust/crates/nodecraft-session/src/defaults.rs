@@ -2,6 +2,11 @@
 //!
 //! The editor must not mutate graph values while rendering. Missing structural
 //! defaults are applied once when the session accepts a document or command node.
+//!
+//! Contract field defaults (mirror combine/plane, scatter count/spans, primitive
+//! dimensions, and so on) are deliberately not written here: the contract
+//! resolver supplies them at read time, so old documents keep their content
+//! hashes and evaluate exactly as the inspector displays them.
 
 use crate::{GraphDocument, GraphNode};
 use serde_json::json;

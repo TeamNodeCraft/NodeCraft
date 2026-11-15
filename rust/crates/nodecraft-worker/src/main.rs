@@ -265,6 +265,7 @@ fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut node
         exact_comparison: _,
         diagnostics: engine_diagnostics,
         tessellation_diagnostics: _,
+        proof_generation: _,
     } = output;
     let quality = request.preview_detail.map_or(
         nodecraft_display::DisplayQuality::Full(0.35),
@@ -293,6 +294,11 @@ fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut node
 }
 
 fn main() {
+    if let Err(error) = nodecraft_engine::thread_pools::init_rayon_pool() {
+        eprintln!("{error}");
+    }
+    let kernel_fixes = std::env::var("NODECRAFT_KERNEL_FIXES").map_or(true, |value| value != "0");
+    nodecraft_engine::configure_solidcore_fixes(kernel_fixes);
     if std::env::args().skip(1).any(|argument| argument == "layout" || argument == "--layout") {
         layout::GraphLayout::run();
         return;
@@ -307,18 +313,22 @@ fn main() {
     });
     let engine_out = out_tx.clone();
     let (request_tx, request_rx) = mpsc::channel::<Incoming>();
-    let engine = std::thread::spawn(move || {
-        let mut cache = EngineCache::new();
-        let mut plans = nodecraft_display::PlanCache::new(16384);
-        let mut sessions: HashMap<String, GraphRuntime> = HashMap::new();
-        while let Ok(message) = request_rx.recv() {
-            match message {
-                Incoming::Evaluation(request) => handle_evaluation(request, &mut cache, &mut plans, &engine_out),
-                Incoming::Session(envelope) => handle_session(envelope, &mut sessions, &engine_out),
-                Incoming::Document(document) => handle_document(document, &engine_out),
+    let engine = std::thread::Builder::new()
+        .name("nodecraft-engine".into())
+        .stack_size(nodecraft_kernel_profile::KERNEL_THREAD_STACK)
+        .spawn(move || {
+            let mut cache = EngineCache::new();
+            let mut plans = nodecraft_display::PlanCache::new(16384);
+            let mut sessions: HashMap<String, GraphRuntime> = HashMap::new();
+            while let Ok(message) = request_rx.recv() {
+                match message {
+                    Incoming::Evaluation(request) => handle_evaluation(request, &mut cache, &mut plans, &engine_out),
+                    Incoming::Session(envelope) => handle_session(envelope, &mut sessions, &engine_out),
+                    Incoming::Document(document) => handle_document(document, &engine_out),
+                }
             }
-        }
-    });
+        })
+        .expect("spawn the engine thread");
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };

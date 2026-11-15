@@ -25,6 +25,8 @@ pub enum BlendError {
     },
     /// solidcore returned an error while reading the B-rep or its display mesh.
     Kernel(String),
+    /// The run's revision token was cancelled; no result and no node error.
+    Cancelled,
 }
 
 impl BlendError {
@@ -73,6 +75,7 @@ impl fmt::Display for BlendError {
         match self {
             Self::InvalidInput(message) => write!(f, "invalid input: {message}"),
             Self::Kernel(message) => write!(f, "solidcore: {message}"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::Unsupported {
                 feature,
                 reason,

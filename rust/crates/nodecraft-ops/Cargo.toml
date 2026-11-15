@@ -1,0 +1,18 @@
+[package]
+name = "nodecraft-ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+solidcore = { workspace = true }
+solidcore-ops = { workspace = true }
+solidcore-convert = { workspace = true }
+solidcore-record = { workspace = true }
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
+
+[dev-dependencies]
+nodecraft-bool = { path = "../nodecraft-bool" }
+nodecraft-layers = { path = "../nodecraft-layers" }
+# The proof-count tests read ops' per-call kernel profile (session::profiled).
+solidcore-ops = { workspace = true, features = ["profile"] }

@@ -27,6 +27,7 @@ pub struct Evaluation {
     /// The ghost came from the display-surface fallback, not the exact Boolean.
     pub difference_approximate: bool,
     pub node_errors: std::collections::BTreeMap<String, String>,
+    pub node_warnings: std::collections::BTreeMap<String, Vec<String>>,
     pub error: Option<String>,
     pub elapsed_ms: f64,
     /// B-rep evaluation time for the viewed target, excluding tessellation.
@@ -39,6 +40,9 @@ pub struct Evaluation {
     pub exact_parts: std::collections::BTreeMap<String, nodecraft_exact::ExactPart>,
     /// Exact feature difference from the exact pass.
     pub exact_comparison: Option<nodecraft_engine::ExactComparison>,
+    /// The background proof queue's generation for this evaluation. A refusal report that
+    /// carries this generation belongs to the result on screen.
+    pub proof_generation: u64,
 }
 
 /// Split the evaluation total into kernel and display work.
@@ -127,6 +131,7 @@ pub fn evaluate_with_linked_progress_comparison(
                     difference_error: None,
                     difference_approximate: false,
                     node_errors: Default::default(),
+                    node_warnings: Default::default(),
                     error: Some(error.to_string()),
                     elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
                     kernel_ms: 0.0,
@@ -136,6 +141,7 @@ pub fn evaluate_with_linked_progress_comparison(
                     part_hits: 0,
                     exact_parts: Default::default(),
                     exact_comparison: None,
+                    proof_generation: 0,
                 }),
                 cache,
             );
@@ -380,7 +386,9 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
                 values: node.values.clone(),
                 suppressed: node.suppressed,
                 cache: Some(CacheState {
-                    key: hashes.get(&node.id).map(|hash| hash.to_hex()),
+                    key: hashes.get(&node.id).map(|hash| {
+                        format!("{}@{}", hash.to_hex(), nodecraft_kernel_profile::profile_generation())
+                    }),
                     state: Some(if dirty_nodes.contains(&node.id) {
                         "dirty".into()
                     } else {
@@ -501,6 +509,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             difference_error,
             difference_approximate: false,
             node_errors: output.response.node_errors,
+            node_warnings: output.response.node_warnings,
             error,
             elapsed_ms,
             kernel_ms,
@@ -510,6 +519,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             part_hits: cache_stats.as_ref().map_or(0, |stats| stats.part_hits),
             exact_parts,
             exact_comparison,
+            proof_generation: output.proof_generation,
         }),
         cache,
     )
@@ -559,5 +569,56 @@ mod tests {
             },
         ];
         assert_eq!(target_for(&branching, None).as_deref(), Some("b"));
+    }
+
+    /// The display boundary looks the viewed target's exact Part up by id. A
+    /// suppressed breakpoint must therefore carry its source's Part under its
+    /// own id, or the viewport renders an empty exact snapshot.
+    #[test]
+    fn a_suppressed_breakpoint_keeps_its_passthrough_part() {
+        let mut document = GraphDocument::new("suppressed-breakpoint");
+        let mut source = node("a");
+        source.values = serde_json::json!({
+            "primitiveType": "box", "length": 10, "width": 10, "height": 10
+        });
+        let mut suppressed = node("t");
+        suppressed.node_type = "translate".into();
+        suppressed.suppressed = true;
+        suppressed.values = serde_json::json!({"x": 25.0});
+        document.nodes = vec![source, suppressed];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "a".into(),
+            to: "t".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        let (evaluation, _) = evaluate_flat_exact(
+            &document,
+            "t".into(),
+            EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+            None,
+            false,
+        );
+        let evaluation = evaluation.expect("evaluation");
+        assert_eq!(evaluation.target, "t");
+        let part = evaluation
+            .exact_parts
+            .get("t")
+            .expect("suppressed target has a Part under its own id");
+        assert!(!part.bodies.is_empty());
+        assert_eq!(
+            part.bodies.iter().map(|body| body.key).collect::<Vec<_>>(),
+            evaluation.exact_parts["a"]
+                .bodies
+                .iter()
+                .map(|body| body.key)
+                .collect::<Vec<_>>(),
+        );
     }
 }

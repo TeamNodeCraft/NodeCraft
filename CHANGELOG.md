@@ -148,6 +148,135 @@
 
 ### Workspace and graph-model integration
 
+- Attributed post-update failures to the SolidCraft pin (not the fix profile),
+  reused one bool wrapper kernel, and marked the slow G2 comparison test ignored.
+
+
+- Prewarm now warms dirty leaves, and Look applies colour to all bodies in one
+  kernel job.
+
+
+- Prewarmed exact nodes now enter the persistent Part cache, so clean leaves hit
+  across revisions; forest edit misses drop from 74 to 37.
+
+
+- Evaluation logs request ids and dirty-node sets; forest edit diagnostics show
+  37 dirty nodes but 72 exact evaluations.
+
+
+- Fixed plan_part and tessellation timing spans; control-server edit runs show
+  serial evaluation dominating (fillet edit: 13.5 s kernel time).
+
+
+- Timeline spans now cover the display-service evaluate path, plan_part and
+  tessellation jobs; forest load shows ~0.98 kernel/eval ratio per node.
+
+
+- CLI benchmark binaries configure the shared rayon pool; kernel queue depth and
+  display-eval wall/kernel timing are logged under the timeline flag.
+
+
+- Added a named, half-core rayon global pool for SolidCore tessellation and
+  kernel-pool wait/run timing logs.
+
+
+- Added deterministic place-rotation tests covering the glam Euler-order port.
+
+
+- Plan placement maths, crop projection and test cameras now use `glam`
+  (`DMat4`/`Mat4`) with an equivalence test.
+
+
+- Box-ghost perspective pick test passes after applying reversed-depth
+  conversion and correcting the expected edge ids.
+
+
+- Added a perspective box-ghost pick test; it currently fails (a back edge is
+  picked at the front corner) and is ignored rather than weakened.
+
+
+- Added a test face-draw hook to the GPU pick pass and headless tests for both
+  ribbon triangles, face occlusion and on-surface edge bias.
+
+
+- Pick uniforms are decoupled from object uniforms, and headless tests cover
+  nearest-edge selection and repeated ring-slot reuse.
+
+
+- Drop stale ghost-key pick requests and cancel CPU-fallen-back clicks so a
+  queued commit can never wedge GPU hover picking.
+
+
+- Reset GPU pick map status per mapping, make slot finishing non-destructive,
+  add ring/merge/should_take tests and commit-only pick dumps.
+
+
+- Extracted the GPU pick readback ring into a testable state machine, added
+  merge/ring tests, grid file dumps and pick edge logging.
+
+
+- Pick readback now distinguishes map success/failure, services slots
+  unconditionally and prints a formatted 32x32 pick grid under the timeline
+  flag.
+
+
+- Added opt-in GPU/CPU pick comparison logging and a multi-body ghost guard for
+  fillet edge selection; the guard no longer repaints or logs per frame.
+- GPU picking now uses a three-slot non-blocking readback ring inside egui's
+  render encoder.
+
+
+- Wired the GPU pick result through `resolve_pick` and made the raw pick table
+  private to prevent direct index bugs.
+
+
+- GPU pick index 0 resolves to no edge, and a second pending click falls back
+  to the CPU picker instead of being silently dropped.
+
+
+- Fixed GPU pick edge-index mapping, ribbon corner triangles, click lifecycle
+  and repaint gating; hover now re-picks on camera/ghost changes.
+
+
+- Added the GPU ghost edge-pick renderer: face depth prepass, screen-space edge
+  ribbons, readback and viewport hover/click hookup with CPU fallback.
+
+
+- Pick requests now carry continuous cursor coordinates and physical radius;
+  stale commits are a distinct outcome so clicks can fall back immediately.
+
+
+- Shared ghost pick segments through `Arc` and added pick frame/request/result
+  data with stale-result validation.
+
+
+- Pin plan transform ordering with a Place-then-Mirror instance-matrix test.
+
+
+- Moved plan placement maths into an ungated module so ghost instance
+  transforms are correct without the GPU feature.
+
+
+- Fixed the GPU pick feature-gate regression, hardened pick helper tests and
+  restored a clean `--no-default-features` build.
+
+
+- Added POD ghost pick segments and pure GPU-pick helpers for crop projection,
+  nearest-id selection and padded readback.
+
+
+- Build stable ghost-edge pick data (segments, ids and centres) alongside the
+  ghost GPU scene for the upcoming ID pass.
+
+
+- Preview-only ghost-edge ids are also excluded when restoring a saved edge
+  selection, not just from hover/click picking.
+
+
+- Preview-only ghost edges are excluded from picking, Combine surfaces a partial
+  error and blocks export, and document shortcuts defer to focused text fields.
+
+
 - File actions and their shortcuts now share one application command manager
   and dispatcher (New, Open, Save, Save As, Close Tab).
 

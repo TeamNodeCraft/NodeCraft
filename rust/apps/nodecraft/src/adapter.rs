@@ -21,12 +21,16 @@ impl DisplayMesh {
     }
 }
 
+#[derive(Clone)]
 pub struct DisplayMesh {
     pub mesh: Arc<CraftMesh>,
     /// Display-only simplification levels, coarse after the full mesh.
     pub lods: Vec<DisplayLod>,
     /// Face-group ids indexed by `mesh.tri_face`.
     pub face_ids: Vec<String>,
+    /// True when `mesh.normals` are the evaluated surface normals (already
+    /// split per B-rep face), not normals rebuilt for display.
+    pub exact_normals: bool,
     /// Optional per-triangle sRGB colour, parallel to `mesh.triangles`.
     pub face_colors: Vec<[f32; 3]>,
     /// Pickable B-rep edges in world coordinates, with body-scoped ids.
@@ -97,6 +101,7 @@ pub fn generate_lods(source: &NodeMesh) -> Vec<DisplayLod> {
                 vertices: level.positions,
                 faces: level.triangles,
                 normals: Vec::new(),
+                exact_normals: false,
                 vertices_data: None,
                 normals_data: None,
                 face_groups: Vec::new(),
@@ -146,10 +151,13 @@ pub fn generate_lods(source: &NodeMesh) -> Vec<DisplayLod> {
 #[must_use]
 pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     let raw = source.clone();
-    // Shading needs crease-split normals; the protocol mesh stays welded for
-    // topology, measurement and export.
-    let split = nodecraft_mesh::split_shading_normals(&raw);
-    let source = &split;
+    // A B-rep plan's evaluated normals are already split per face and per
+    // incident triangle at a pole. Rebuilding them with the crease rule would
+    // average a cone apex's limit normals toward the axis. Only meshes that do
+    // not carry exact normals (imported/faceted bodies, LODs) need the split.
+    let use_exact = raw.exact_normals && raw.normals.len() == raw.vertices.len();
+    let split = (!use_exact).then(|| nodecraft_mesh::split_shading_normals(&raw));
+    let source = split.as_ref().unwrap_or(&raw);
     let positions: Vec<Vec3> = source
         .vertices
         .iter()
@@ -324,6 +332,7 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         mesh: Arc::new(mesh),
         lods: Vec::new(),
         face_ids,
+        exact_normals: use_exact,
         face_colors: if source.face_colors.len() == source.faces.len() {
             source.face_colors.clone()
         } else {
@@ -584,5 +593,195 @@ mod tests {
             "first LOD should be coarser than the full mesh"
         );
         assert!(display.lods.iter().all(|lod| lod.error.is_finite()));
+    }
+
+    fn exact_display(brep: nodecraft_solidcore::solidcore::topology::Brep) -> (DisplayMesh, NodeMesh) {
+        let part = nodecraft_display::ExactPart::singleton(
+            nodecraft_display::BodyKey::new(1, 0),
+            Arc::new(brep),
+        );
+        let mut cache = nodecraft_display::PlanCache::new(4);
+        let tessellated = nodecraft_display::mesh_part(
+            &part,
+            nodecraft_display::DisplayQuality::Full(0.1),
+            &mut cache,
+        )
+        .expect("mesh part");
+        assert!(
+            tessellated.mesh.exact_normals,
+            "plan evaluation must mark its evaluated normals exact"
+        );
+        let evaluated = nodecraft_layers::evaluate_plan(
+            &tessellated.plans[0].plan,
+            tessellated.plans[0].edge_ids.as_ref(),
+        );
+        assert!(
+            evaluated.mesh.exact_normals,
+            "re-evaluating the plan must keep the exact-normal flag"
+        );
+        (display_mesh(&tessellated.mesh), evaluated.mesh)
+    }
+
+    /// Compare every triangle corner with the untouched plan evaluation. A
+    /// crease split changes normals (and can reindex vertices), so this is the
+    /// direct check that the CPU display path kept the evaluated values.
+    fn assert_corner_normals_match_evaluated(display: &DisplayMesh, evaluated: &NodeMesh) {
+        assert_eq!(display.mesh.triangles.len(), evaluated.faces.len());
+        assert_eq!(display.mesh.tri_face.len(), evaluated.face_groups.len());
+        for (tri_face, group) in display.mesh.tri_face.iter().zip(&evaluated.face_groups) {
+            assert_eq!(
+                display.face_ids.get(*tri_face as usize).map(String::as_str),
+                Some(group.as_str()),
+                "kept exact normals must not change the triangle's face id"
+            );
+        }
+        for (triangle, evaluated_face) in display.mesh.triangles.iter().zip(&evaluated.faces) {
+            for corner in 0..3 {
+                let actual_index = triangle[corner] as usize;
+                let expected_index = evaluated_face[corner] as usize;
+                let actual_position = display.mesh.positions[actual_index];
+                let expected_position = evaluated.vertices[expected_index];
+                for axis in 0..3 {
+                    let expected = f64::from(expected_position[axis]);
+                    let actual = [actual_position.x, actual_position.y, actual_position.z][axis];
+                    assert!(
+                        (actual - expected).abs() < 1.0e-5,
+                        "triangle corner position changed: {actual} != {expected}"
+                    );
+                }
+                let actual_normal = display.mesh.normals[actual_index];
+                let expected_normal = evaluated.normals[expected_index];
+                for axis in 0..3 {
+                    let expected = f64::from(expected_normal[axis]);
+                    let actual = [actual_normal.x, actual_normal.y, actual_normal.z][axis];
+                    assert!(
+                        (actual - expected).abs() < 1.0e-6,
+                        "triangle corner normal changed: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cone_apex_keeps_the_evaluated_per_triangle_normals() {
+        use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
+        const BASE: f64 = 10.0;
+        const HEIGHT: f64 = 20.0;
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = api::create_cone(
+            &mut kernel,
+            Point3::new(0.0, 0.0, -HEIGHT / 2.0),
+            BASE,
+            0.0,
+            HEIGHT,
+        )
+        .expect("cone");
+        let (display, evaluated) = exact_display(brep);
+        assert_corner_normals_match_evaluated(&display, &evaluated);
+
+        // Every apex copy must keep an evaluated side normal: with a radial
+        // component (not collapsed onto the axis) and perpendicular to the
+        // cone's generator at that radial direction. A crease split averages
+        // these copies toward the axis, which produces the bright band.
+        let apex_z = HEIGHT / 2.0;
+        let mut apex_copies = 0;
+        for triangle in &display.mesh.triangles {
+            for corner in 0..3 {
+                let apex = display.mesh.positions[triangle[corner] as usize];
+                let radius = (apex.x * apex.x + apex.y * apex.y).sqrt();
+                if (apex.z - apex_z).abs() > 1.0e-3 || radius > 1.0e-3 {
+                    continue;
+                }
+                let normal = display.mesh.normals[triangle[corner] as usize];
+                let radial = (normal.x * normal.x + normal.y * normal.y).sqrt();
+                assert!(
+                    radial > 0.5 && normal.z < 0.7,
+                    "apex normal {normal:?} collapsed toward the cone axis"
+                );
+                // The cone side runs from the apex to `BASE` at the opposite
+                // end, at the normal's own azimuth. The exact limit normal is
+                // perpendicular to it.
+                let side = [
+                    BASE * normal.x / radial,
+                    BASE * normal.y / radial,
+                    -HEIGHT,
+                ];
+                let length = (side[0] * side[0] + side[1] * side[1] + side[2] * side[2]).sqrt();
+                let along_side =
+                    (normal.x * side[0] + normal.y * side[1] + normal.z * side[2]) / length;
+                assert!(
+                    along_side.abs() < 1.0e-2,
+                    "apex normal {normal:?} is tilted toward the axis (dot side {along_side})"
+                );
+                assert!(
+                    normal.x * side[0] + normal.y * side[1] > 0.1,
+                    "apex normal {normal:?} does not point outward"
+                );
+                apex_copies += 1;
+            }
+        }
+        assert!(
+            apex_copies >= 8,
+            "expected one evaluated normal per apex triangle copy, found {apex_copies}"
+        );
+    }
+
+    #[test]
+    fn sphere_pole_keeps_the_evaluated_normals() {
+        use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
+        const RADIUS: f64 = 10.0;
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), RADIUS)
+            .expect("sphere");
+        let (display, evaluated) = exact_display(brep);
+        assert_corner_normals_match_evaluated(&display, &evaluated);
+
+        let mut pole_copies = 0;
+        let pole_z = RADIUS;
+        for triangle in &display.mesh.triangles {
+            for corner in 0..3 {
+                let point = display.mesh.positions[triangle[corner] as usize];
+                if (point.z - pole_z).abs() > 1.0e-3 {
+                    continue;
+                }
+                let normal = display.mesh.normals[triangle[corner] as usize];
+                assert!(
+                    normal.z > 0.999,
+                    "sphere pole normal {normal:?} is not the evaluated outward normal"
+                );
+                pole_copies += 1;
+            }
+        }
+        assert!(pole_copies > 0, "sphere must have pole triangles");
+    }
+
+    #[test]
+    fn mesh_without_exact_normals_still_gets_split_normals() {
+        // Two faces meeting at a right angle. The source normals are not the
+        // face normals; without the exact flag the display path must rebuild
+        // them from triangle geometry as it always has.
+        let source = NodeMesh {
+            vertices: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            normals: vec![[0.0, 0.0, 1.0]; 4],
+            faces: vec![[0, 1, 2], [0, 1, 3]],
+            face_groups: vec!["face:0".into(), "face:1".into()],
+            ..NodeMesh::default()
+        };
+        assert!(!source.exact_normals);
+        let display = display_mesh(&source);
+        let normal_of = |triangle: usize| {
+            display.mesh.normals[display.mesh.triangles[triangle][0] as usize]
+        };
+        assert!(normal_of(0).z > 0.999, "flat face keeps its +Z normal");
+        assert!(
+            normal_of(1).y < -0.999,
+            "the crease still splits the second face onto its own normal"
+        );
     }
 }

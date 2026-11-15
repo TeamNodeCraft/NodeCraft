@@ -9,7 +9,7 @@
 //! | `chamferType` | `"equal"`, `"two-distance"`, `"distance-angle"` (chamfer only) | `"equal"` |
 //! | `continuity` | `""` (circular/G1), `"G2"`, `"G3"` (fillet only) | `""` |
 //! | `length` | chamfer distance 1, or fillet radius | `2` |
-//! | `distance2` | second chamfer distance (two-distance) | `length` |
+//! | `distance2` | second chamfer distance (two-distance) | `2` |
 //! | `angle` | chamfer angle in degrees (distance-angle) | `45` |
 //! | `cornerTurn` | `"mitre"` or `"swept"` for the corners between circular fillets | `"mitre"` |
 //!
@@ -168,12 +168,18 @@ pub struct EdgeTreatment {
     pub continuity: Continuity,
     /// Chamfer distance 1 or fillet radius (node `length`), in model units.
     pub length: f64,
-    /// Second chamfer distance (node `distance2`), defaulting to [`Self::length`].
+    /// Second chamfer distance (node `distance2`). Node parsing fills the
+    /// contract default (`2`) when the key is missing; manually constructed
+    /// treatments without a value still fall back to [`Self::length`].
     pub distance2: Option<f64>,
     /// Chamfer angle in degrees (node `angle`), defaulting to `45`.
     pub angle: Option<f64>,
     /// How circular fillets meet at a sharp side edge (node `cornerTurn`).
     pub corner_turn: CornerTurn,
+    /// Chamfer corner closure (node `chamferCorner`): mitre or facet.
+    pub chamfer_facet: bool,
+    /// Swap the two chamfer distances (node `flip`).
+    pub flip: bool,
 }
 
 impl Default for EdgeTreatment {
@@ -186,6 +192,8 @@ impl Default for EdgeTreatment {
             distance2: None,
             angle: None,
             corner_turn: CornerTurn::Mitre,
+            chamfer_facet: false,
+            flip: false,
         }
     }
 }
@@ -195,6 +203,40 @@ impl EdgeTreatment {
     ///
     /// Missing fields use the app defaults; malformed fields are errors (never a
     /// silent fallback), because a wrong unit would place a wrong cut.
+    /// The ops blend this treatment asks for, and its size; `None` for G3.
+    #[must_use]
+    pub fn to_ops_blend(&self) -> Option<(nodecraft_ops::OpsBlend, f64)> {
+        use nodecraft_ops::{ChamferCorner, OpsBlend, Second};
+        let kind = match self.mode {
+            EdgeMode::Fillet => match self.continuity {
+                Continuity::Circular => OpsBlend::Round(match self.corner_turn {
+                    CornerTurn::Mitre => nodecraft_ops::CornerTurn::Mitre,
+                    CornerTurn::Swept => nodecraft_ops::CornerTurn::Swept,
+                }),
+                Continuity::G2 => OpsBlend::Curvature,
+                Continuity::G3 => return None,
+            },
+            EdgeMode::Chamfer => match self.chamfer_type {
+                ChamferType::Equal => OpsBlend::Chamfer(if self.chamfer_facet {
+                    ChamferCorner::Facet
+                } else {
+                    ChamferCorner::Mitre
+                }),
+                ChamferType::TwoDistance => OpsBlend::ChamferSides {
+                    second: Second::Distance(self.distance2.unwrap_or(self.length)),
+                    up: [0.0, 0.0, 1.0],
+                    flip: self.flip,
+                },
+                ChamferType::DistanceAngle => OpsBlend::ChamferSides {
+                    second: Second::Angle(self.angle.unwrap_or(45.0).to_radians()),
+                    up: [0.0, 0.0, 1.0],
+                    flip: self.flip,
+                },
+            },
+        };
+        Some((kind, self.length))
+    }
+
     pub fn from_node_values(values: &Value) -> Result<Self, BlendError> {
         if !values.is_object() {
             return Err(BlendError::InvalidInput(
@@ -205,21 +247,64 @@ impl EdgeTreatment {
             Some(text) => EdgeMode::parse(&text)?,
             None => EdgeMode::Chamfer,
         };
+        // Both edge kinds share the field table; `mode` only selects which
+        // dynamic contract field set owns a legacy key.
+        let node_type = match mode {
+            EdgeMode::Fillet => "fillet",
+            EdgeMode::Chamfer => "chamfer",
+        };
         let chamfer_type = match string_field(values, "chamferType")? {
             Some(text) => ChamferType::parse(&text)?,
-            None => ChamferType::Equal,
+            None => ChamferType::parse(
+                nodecraft_node_contract::resolve_choice("chamfer", values, "chamferType")
+                    .expect("chamferType is a contract field")
+                    .as_ref(),
+            )?,
         };
         let continuity = match string_field(values, "continuity")? {
             Some(text) => Continuity::parse(&text)?,
-            None => Continuity::Circular,
+            None => Continuity::parse(
+                nodecraft_node_contract::resolve_choice("fillet", values, "continuity")
+                    .expect("continuity is a contract field")
+                    .as_ref(),
+            )?,
         };
         let corner_turn = match string_field(values, "cornerTurn")? {
             Some(text) => CornerTurn::parse(&text)?,
-            None => CornerTurn::Mitre,
+            None => CornerTurn::parse(
+                nodecraft_node_contract::resolve_choice("fillet", values, "cornerTurn")
+                    .expect("cornerTurn is a contract field")
+                    .as_ref(),
+            )?,
         };
-        let length = number_field(values, "length")?.unwrap_or(2.0);
-        let distance2 = number_field(values, "distance2")?;
-        let angle = number_field(values, "angle")?;
+        let length = match number_field(values, "length")? {
+            Some(value) => value,
+            None => nodecraft_node_contract::resolve_number(node_type, values, "length")
+                .expect("length is a contract field"),
+        };
+        // The contract default for distance2 is 2, independent of `length`.
+        let distance2 = match number_field(values, "distance2")? {
+            Some(value) => Some(value),
+            None => Some(
+                nodecraft_node_contract::resolve_number("chamfer", values, "distance2")
+                    .expect("distance2 is a contract field"),
+            ),
+        };
+        let angle = match number_field(values, "angle")? {
+            Some(value) => Some(value),
+            None => Some(
+                nodecraft_node_contract::resolve_number("chamfer", values, "angle")
+                    .expect("angle is a contract field"),
+            ),
+        };
+        let chamfer_facet = match string_field(values, "chamferCorner")? {
+            Some(text) => text.eq_ignore_ascii_case("facet"),
+            None => nodecraft_node_contract::resolve_choice("chamfer", values, "chamferCorner")
+                .expect("chamferCorner is a contract field")
+                .eq_ignore_ascii_case("facet"),
+        };
+        let flip = nodecraft_node_contract::resolve_bool("chamfer", values, "flip")
+            .expect("flip is a contract field");
         Ok(Self {
             mode,
             chamfer_type,
@@ -228,6 +313,8 @@ impl EdgeTreatment {
             distance2,
             angle,
             corner_turn,
+            chamfer_facet,
+            flip,
         })
     }
 
@@ -372,5 +459,32 @@ mod tests {
             "cornerTurn": "rounded"
         }));
         assert!(unknown.is_err(), "unknown turn is refused");
+    }
+
+    #[test]
+    fn missing_chamfer_distance2_uses_the_contract_default() {
+        let missing = EdgeTreatment::from_node_values(&serde_json::json!({
+            "mode": "chamfer",
+            "chamferType": "two-distance",
+            "length": 5.0
+        }))
+        .expect("valid chamfer node");
+        assert_eq!(
+            missing.chamfer_distances().expect("distances"),
+            (5.0, 2.0),
+            "distance2 defaults to 2, not length"
+        );
+
+        let explicit = EdgeTreatment::from_node_values(&serde_json::json!({
+            "mode": "chamfer",
+            "chamferType": "two-distance",
+            "length": 5.0,
+            "distance2": 2.0
+        }))
+        .expect("valid explicit chamfer");
+        assert_eq!(
+            missing.chamfer_distances().expect("distances"),
+            explicit.chamfer_distances().expect("distances")
+        );
     }
 }

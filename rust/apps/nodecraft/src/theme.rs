@@ -34,6 +34,8 @@ pub struct Theme {
     pub node_activity: [u8; 4],
     #[serde(default = "default_node_error")]
     pub node_error: [u8; 4],
+    #[serde(default = "default_node_warning")]
+    pub node_warning: [u8; 4],
     #[serde(default = "default_port_input")]
     pub port_input: [u8; 4],
     pub card: [u8; 4],
@@ -87,6 +89,10 @@ fn default_dock_border() -> [u8; 4] {
 
 fn default_node_activity() -> [u8; 4] {
     [10, 132, 255, 255]
+}
+
+fn default_node_warning() -> [u8; 4] {
+    [255, 191, 79, 255]
 }
 
 fn default_node_error() -> [u8; 4] {
@@ -370,6 +376,7 @@ impl Theme {
             "highlight" => self.highlight = value,
             "node_activity" => self.node_activity = value,
             "node_error" => self.node_error = value,
+            "node_warning" => self.node_warning = value,
             "port_input" => self.port_input = value,
             "card" => self.card = value,
             "card_border" => self.card_border = value,
@@ -1170,14 +1177,15 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("muted", "Muted text", "Secondary labels and hints", theme.muted),
                 color("accent", "Accent", "Primary selection and action colour", theme.accent),
                 color("highlight", "Highlight", "Secondary highlight and hover wash", theme.highlight),
-                color("node_activity", "Node activity", "Node processing glow colour", theme.node_activity),
-                color("node_error", "Node error", "Failed-node glow colour", theme.node_error),
             ],
         },
         ThemeGroup {
             title: "Node editor",
             description: "Cards, cables and node-canvas-specific surfaces.",
             entries: vec![
+                color("node_activity", "Node activity", "Glow on a node while it computes", theme.node_activity),
+                color("node_warning", "Node warning", "Glow on a node that finished with a warning", theme.node_warning),
+                color("node_error", "Node error", "Glow on a node that failed", theme.node_error),
                 color("card", "Card", "Node body background", theme.card),
                 color("card_border", "Card border", "Node outline", theme.card_border),
                 color("cable", "Cable", "Cable core colour", theme.cable),
@@ -1295,6 +1303,17 @@ mod palette_tests {
                 "{file} keys missing from settings palette: {remaining:?}"
             );
         }
+    }
+
+    #[test]
+    fn node_warning_defaults_and_sets() {
+        let mut json = serde_json::to_value(Theme::default()).expect("theme json");
+        json.as_object_mut().unwrap().remove("node_warning");
+        let theme: Theme = serde_json::from_value(json).expect("theme without node_warning");
+        assert_eq!(theme.node_warning, [255, 191, 79, 255]);
+        let mut theme = Theme::default();
+        theme.set_color("node_warning", [10, 20, 30, 255]);
+        assert_eq!(theme.node_warning, [10, 20, 30, 255]);
     }
 
     #[test]

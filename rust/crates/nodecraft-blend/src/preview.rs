@@ -35,7 +35,6 @@
 use std::collections::HashMap;
 
 use nodecraft_protocol::{BrepEdge, Mesh};
-use nodecraft_step::PlanarBody;
 use solidcore::kernel::Kernel;
 use solidcore::math::Point2;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
@@ -875,11 +874,7 @@ fn cap_planar_loops(
             })
             .min_by(|left, right| areas[*left].total_cmp(&areas[*right]));
     }
-    let mut planar = PlanarBody {
-        points: points.to_vec(),
-        faces: vec![],
-        holes: vec![],
-    };
+    let mut caps = Vec::new();
     for root in 0..loops.len() {
         if parent[root].is_some() {
             continue;
@@ -898,22 +893,40 @@ fn cap_planar_loops(
             .filter(|(child, _)| parent[*child] == Some(root))
             .map(|(_, hole)| hole.clone())
             .collect();
-        planar.push_face(outer, holes);
-    }
-    let indices = planar
-        .triangulate_earcut()
-        .map_err(|error| BlendError::unsupported("edge treatment", error))?;
-    let mut caps = Vec::with_capacity(indices.len());
-    for [a, b, c] in indices {
-        let mut facet = [planar.points[a], planar.points[b], planar.points[c]];
-        let facet_normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
-        if dot(facet_normal, normal) < 0.0 {
-            facet.swap(1, 2);
+        // Earcut the outer loop and its holes directly in the cap plane. This is the
+        // shared polygon-with-holes path; it keeps the cap watertight against the
+        // boundary loops.
+        let mut flat = Vec::new();
+        let mut hole_starts = Vec::new();
+        let mut global = Vec::new();
+        for (loop_index, loop_indices) in std::iter::once(&outer).chain(holes.iter()).enumerate() {
+            if loop_index > 0 {
+                hole_starts.push(global.len());
+            }
+            for &index in loop_indices {
+                let point = points[index];
+                flat.push(dot(point, u));
+                flat.push(dot(point, v));
+                global.push(index);
+            }
         }
-        caps.push(Tri {
-            points: facet,
-            group: group.to_string(),
-        });
+        let indices = earcutr::earcut(&flat, &hole_starts, 2)
+            .map_err(|_| BlendError::unsupported("edge treatment", "cap earcut failed"))?;
+        for triangle in indices.chunks_exact(3) {
+            let mut facet = [
+                points[global[triangle[0]]],
+                points[global[triangle[1]]],
+                points[global[triangle[2]]],
+            ];
+            let facet_normal = cross(sub(facet[1], facet[0]), sub(facet[2], facet[0]));
+            if dot(facet_normal, normal) < 0.0 {
+                facet.swap(1, 2);
+            }
+            caps.push(Tri {
+                points: facet,
+                group: group.to_string(),
+            });
+        }
     }
     Ok(caps)
 }
@@ -974,11 +987,11 @@ pub fn chamfer_brep_exact(
     chamfer_brep_exact_with_kernel(&mut kernel, brep, values)
 }
 
-pub fn chamfer_brep_exact_with_kernel(
+pub fn chamfer_brep_exact_with_kernel_warned(
     kernel: &mut Kernel,
     brep: &solidcore::topology::Brep,
     values: &serde_json::Value,
-) -> Result<solidcore::topology::Brep, String> {
+) -> Result<crate::ops_blend::Blended, String> {
     use solidcore::geom::axis2_placement::Axis2Placement;
     use solidcore::math::{Point3, Vec3};
     use solidcore::primitive::api_primitives as api;
@@ -995,92 +1008,68 @@ pub fn chamfer_brep_exact_with_kernel(
     if selections.is_empty() {
         return Err("an edge treatment needs at least one selected edge".into());
     }
-    let selections = if values
-        .get("tangentChain")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true)
+    let selections = if nodecraft_node_contract::resolve_bool("fillet", values, "tangentChain")
+        .expect("tangentChain is a contract field")
     {
         crate::edge::tangent_chain(kernel, brep, &selections, 0.5_f64.to_radians())
             .unwrap_or(selections)
     } else {
         selections
     };
-    // The legacy plane-cut implementation only supports planar faces. Try the
-    // kernel's curved-capable chamfer session first for equal-distance chamfers;
-    // the planar path remains as the exact fallback for bodies it handles.
-    if treatment.chamfer_type == crate::treatment::ChamferType::Equal
-        && let Ok(result) = chamfer_equal_ops(kernel, brep, &selections, treatment.length)
     {
-        return Ok(result);
+        use nodecraft_ops::{ChamferCorner, Second};
+        let edges: Vec<_> = selections.iter().map(|selection| selection.edge).collect();
+        let (kind, size) = match treatment.chamfer_type {
+            crate::treatment::ChamferType::Equal => (
+                nodecraft_ops::OpsBlend::Chamfer(if treatment.chamfer_facet {
+                    ChamferCorner::Facet
+                } else {
+                    ChamferCorner::Mitre
+                }),
+                treatment.length,
+            ),
+            crate::treatment::ChamferType::TwoDistance => (
+                nodecraft_ops::OpsBlend::ChamferSides {
+                    second: Second::Distance(treatment.distance2.unwrap_or(treatment.length)),
+                    up: [0.0, 0.0, 1.0],
+                    flip: treatment.flip,
+                },
+                treatment.length,
+            ),
+            crate::treatment::ChamferType::DistanceAngle => (
+                nodecraft_ops::OpsBlend::ChamferSides {
+                    second: Second::Angle(treatment.angle.unwrap_or(45.0).to_radians()),
+                    up: [0.0, 0.0, 1.0],
+                    flip: treatment.flip,
+                },
+                treatment.length,
+            ),
+        };
+        let result = nodecraft_ops::OpsSession::new(kernel)
+            .blend(brep, &edges, size, kind)
+            .map_err(|error| error.to_string())?;
+        crate::exact::validate_result(kernel, &result.brep)?;
+        return Ok(crate::ops_blend::Blended { brep: result.brep, warnings: result.warnings });
     }
-    let interior = brep_center(&*kernel, brep)
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    let (min, max) = brep_vertex_bounds(brep)?;
-    let diagonal = length(sub(max, min)).max(1.0);
-    // Conservative body-scale bound. This catches nonsensical distances before the
-    // kernel is asked to cut with a tool larger than the whole body.
-    let (distance_a, distance_b) = treatment
-        .chamfer_distances()
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    if distance_a > diagonal || distance_b > diagonal {
-        return Err(format!(
-            "chamfer distance {:.4}/{:.4} exceeds the body diagonal {:.4}; reduce the distance",
-            distance_a, distance_b, diagonal
-        ));
-    }
-    let extent = diagonal * 4.0 + 100.0;
-    let mut result = brep
-        .clone_standing_for_self()
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    for selection in &selections {
-        let frame = edge_frame(&*kernel, brep, selection, interior)
-            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-        let planes = treatment_planes(&frame, selection, &treatment)
-            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-        for plane in planes {
-            let plane = plane.orient_towards(interior);
-            let normal = normalize(plane.normal).ok_or("chamfer plane has no normal")?;
-            let helper = if normal[2].abs() < 0.9 {
-                Vec3::new(0.0, 0.0, 1.0)
-            } else {
-                Vec3::new(1.0, 0.0, 0.0)
-            };
-            let normal = Vec3::new(normal[0], normal[1], normal[2]);
-            let x_axis = normal
-                .cross(helper)
-                .unitize()
-                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            let y_axis = normal
-                .cross(x_axis)
-                .unitize()
-                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            let mut tool = api::create_box(
-                kernel,
-                Point3::new(-extent, -extent, 0.0),
-                2.0 * extent,
-                2.0 * extent,
-                extent,
-            )
-            .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            let placement = Axis2Placement::new(
-                Point3::new(plane.point[0], plane.point[1], plane.point[2]),
-                x_axis,
-                y_axis,
-            );
-            solidcore::topology::brep::p5::transform(kernel, &mut tool, &placement, None, true)
-                .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-            result = nodecraft_bool::boolean_breps_with_kernel(
-                kernel,
-                nodecraft_bool::BooleanOp::Difference,
-                result,
-                tool,
-            )?;
-        }
-    }
-    if result.face_list().is_empty() || result.vertex_list().is_empty() {
-        return Err("chamfer removed the whole body; reduce the chamfer distance".into());
-    }
-    Ok(result)
+}
+
+
+/// Chamfer without returning warnings.
+pub fn chamfer_brep_exact_with_kernel(
+    kernel: &mut Kernel,
+    brep: &solidcore::topology::Brep,
+    values: &serde_json::Value,
+) -> Result<solidcore::topology::Brep, String> {
+    chamfer_brep_exact_with_kernel_warned(kernel, brep, values).map(|blended| blended.brep)
+}
+
+/// [`chamfer_brep_exact`] with warnings.
+pub fn chamfer_brep_exact_warned(
+    brep: &solidcore::topology::Brep,
+    values: &serde_json::Value,
+) -> Result<crate::ops_blend::Blended, String> {
+    let mut kernel = nodecraft_solidcore::kernel::kernel();
+    chamfer_brep_exact_with_kernel_warned(&mut kernel, brep, values)
 }
 
 fn brep_vertex_bounds(brep: &solidcore::topology::Brep) -> Result<([f64; 3], [f64; 3]), String> {
@@ -1285,50 +1274,6 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
 /// no record-order/index translation between the reference the viewer highlights
 /// and the edge the kernel cuts. The planar tool-cut path remains the fallback
 /// for chamfer types the session does not cover.
-fn chamfer_equal_ops(
-    kernel: &mut Kernel,
-    brep: &solidcore::topology::Brep,
-    selections: &[crate::EdgeSelection],
-    distance: f64,
-) -> Result<solidcore::topology::Brep, String> {
-    use solidcore::blend::fillet_executive::session::FilletSession;
-    use solidcore::surface::procedural_blend::chamfer::ChamferSize;
-
-    let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
-        .map_err(|error| error.to_string())?;
-    let mut session = FilletSession::new(kernel, &mut working)
-        .map_err(|error| format!("chamfer session: {error}"))?;
-    let edges: Vec<_> = selections.iter().map(|selection| selection.edge).collect();
-    let sizes = vec![ChamferSize::Distances([distance, distance]); edges.len()];
-    session
-        .prepare_chamfers(kernel, &edges, &sizes)
-        .map_err(|error| format!("chamfer prepare: {error}"))?;
-    session
-        .create_corners(kernel, None)
-        .map_err(|error| format!("chamfer corners: {error}"))?;
-    for corner in session
-        .fillet_corners()
-        .map_err(|error| format!("chamfer corners: {error}"))?
-    {
-        session
-            .set_corner_bevel(corner, true)
-            .map_err(|error| format!("chamfer bevel: {error}"))?;
-    }
-    session
-        .do_filleting(kernel, None)
-        .map_err(|error| format!("chamfer session: {error}"))?;
-    drop(session);
-    solidcore::topology::brep::p5::stitch_and_orient(
-        kernel,
-        &mut working,
-        &solidcore::topology::brep::p5::StitchAndOrientOptions::default(),
-    )
-    .map_err(|error| format!("chamfer stitch: {error}"))?;
-    nodecraft_layers::check_kernel_brep(kernel, &working)
-        .map_err(|error| format!("chamfer result failed solidcore check: {error}"))?;
-    Ok(working)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

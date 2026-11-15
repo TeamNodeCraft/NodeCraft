@@ -4,7 +4,7 @@ mod common;
 
 use nodecraft_blend::{
     BlendError, brep_center, edge_selections, select_edge_by_midpoint, select_edges_by_midpoints,
-    select_edges_by_ordinals, select_edges_from_values,
+    select_edges_by_ordinals, select_edges_from_values, tangent_chain,
 };
 
 #[test]
@@ -150,4 +150,17 @@ fn a_matching_edge_id_is_authoritative() {
     });
     let resolved = select_edges_from_values(&kernel, &brep, &values).expect("resolve");
     assert_eq!(resolved, vec![expected]);
+}
+
+
+/// `tangent_chain` copies the B-rep to run the kernel's walk, and the copy numbers its
+/// entities anew. The walker's answer must be mapped back to the input B-rep's own edge ids:
+/// a seed from the input still names the input's edge after the round trip.
+#[test]
+fn tangent_chain_keeps_the_input_breps_edge_ids() {
+    let (mut kernel, brep) = common::box_40_30_20();
+    let selections = edge_selections(&kernel, &brep).expect("selections");
+    let chain = tangent_chain(&mut kernel, &brep, &[selections[0].clone()], 0.5_f64.to_radians())
+        .expect("tangent chain");
+    assert_eq!(chain, vec![selections[0].clone()]);
 }

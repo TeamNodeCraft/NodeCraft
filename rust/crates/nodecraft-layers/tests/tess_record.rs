@@ -35,6 +35,10 @@ fn upstream_tess_meshes_a_record_box() {
     assert_eq!(display.stats.faces, 6);
     assert!(!display.mesh.faces.is_empty());
     assert_eq!(display.mesh.vertices.len(), display.mesh.normals.len());
+    assert!(
+        display.mesh.exact_normals,
+        "an evaluated plan's normals are the surface normals"
+    );
     assert_eq!(display.mesh.face_groups.len(), display.mesh.faces.len());
     let groups: std::collections::HashSet<_> = display.mesh.face_groups.iter().collect();
     assert_eq!(groups.len(), 6, "one face group per B-rep face");

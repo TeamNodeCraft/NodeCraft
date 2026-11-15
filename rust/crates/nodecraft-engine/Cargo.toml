@@ -9,6 +9,9 @@ name = "nodecraft_engine"
 path = "src/lib.rs"
 
 [dependencies]
+nodecraft-ops = { path = "../nodecraft-ops" }
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
+rayon = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-exact = { path = "../nodecraft-exact" }
 nodecraft-node-contract = { path = "../nodecraft-node-contract" }
@@ -26,10 +29,7 @@ nodecraft-step = { path = "../nodecraft-step" }
 nodecraft-extrude = { path = "../nodecraft-extrude" }
 nodecraft-bool = { path = "../nodecraft-bool" }
 nodecraft-blend = { path = "../nodecraft-blend" }
-step-nurbs = { path = "../step-nurbs" }
-step-schema = { path = "../step-schema" }
-step-assemblies = { path = "../step-assemblies" }
 solidcraft-sketch.workspace = true
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
 serde_json.workspace = true
 base64 = "0.22"

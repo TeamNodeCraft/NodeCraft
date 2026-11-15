@@ -55,6 +55,11 @@ fn terminal_targets(nodes: &[Value], connections: &[Value]) -> Vec<String> {
 }
 
 fn main() {
+    if let Err(error) = nodecraft_engine::thread_pools::init_rayon_pool() {
+        eprintln!("{error}");
+    }
+    let kernel_fixes = std::env::var("NODECRAFT_KERNEL_FIXES").map_or(true, |value| value != "0");
+    nodecraft_engine::configure_solidcore_fixes(kernel_fixes);
     if let Err(error) = run() { eprintln!("error: {error}"); std::process::exit(2); }
 }
 

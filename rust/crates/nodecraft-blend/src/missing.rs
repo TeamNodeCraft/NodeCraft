@@ -37,15 +37,4 @@ pub const LAW_CONTINUITY: &[&str] = &[
     "blend.fillet_standard_solver_p2 (G2/G3 law setup)",
 ];
 
-/// The solidcore port units that own the symbols above and are still partial or
-/// unported at the locked revision (`Cargo.lock` `6ecdaaa`).
-pub const PORT_UNITS: &[&str] = &[
-    "blend.fillet_executive_p1",
-    "blend.fillet_executive_p2",
-    "blend.fillet_corner_p1",
-    "blend.fillet_corner_p2",
-    "blend.fillet_standard_solver_p2",
-    "blend.fillet_geom_p3",
-    "blend.fillet_geom_p5",
-    "blend.fillet_geom_p6",
-];
+

@@ -42,20 +42,20 @@ fn exact_weight(node_type: &str) -> usize {
         "chamfer" => 8,
         "fillet" | "shell" | "surfaceloft" => 12,
         "loft" => 10,
-        "scatter" => 8,
+        "scatter" | "circularpattern" => 8,
         _ => 2,
     }
 }
 
 fn mesh_bodies(node: &Node) -> usize {
     match node.node_type.as_str() {
-        "scatter" => node
-            .values
-            .get("count")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(100.0)
-            .round()
-            .clamp(1.0, 5000.0) as usize,
+        "scatter" | "circularpattern" => crate::contract_number(
+            &node.node_type,
+            &node.values,
+            "count",
+        )
+        .round()
+        .clamp(1.0, 5000.0) as usize,
         "solid" | "primitive" | "stepimporter" => 1,
         _ => 0,
     }
@@ -203,6 +203,20 @@ mod tests {
         assert!(profile.exact_units >= 5);
         assert_eq!(profile.mesh_bodies, 3);
         assert!(profile.exact_dispatch_is_worthwhile());
+    }
+
+    #[test]
+    fn circular_pattern_estimates_count_bodies_from_the_contract() {
+        let mut pattern = node("pattern", "circularpattern");
+        pattern.values = json!({"count": 4.0});
+        assert_eq!(exact_weight("circularpattern"), 8);
+        let explicit = profile_flat(&[pattern.clone()], &[], &["pattern".into()]);
+        assert_eq!(explicit.mesh_bodies, 4);
+
+        // A fresh node has no saved count and uses the contract default (6).
+        pattern.values = json!({});
+        let default = profile_flat(&[pattern], &[], &["pattern".into()]);
+        assert_eq!(default.mesh_bodies, 6);
     }
 
     #[test]

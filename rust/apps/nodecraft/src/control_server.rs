@@ -7,6 +7,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub enum Command {
@@ -21,6 +22,9 @@ pub enum Command {
     SetValue { node: String, field: String, value: serde_json::Value },
     BeginSelection { node: String, field: String },
     ViewNode(String),
+    /// Flip the node's suppression flag through the same edit + evaluate path
+    /// as the node editor's toggle.
+    ToggleSuppressed(String),
     Home,
     Orbit { dx: f64, dy: f64 },
     Zoom(f64),
@@ -31,24 +35,66 @@ pub enum Command {
     State,
 }
 
+impl Command {
+    /// Read-only commands do not need another frame after they reply.
+    pub fn changes_state(&self) -> bool {
+        !matches!(self, Command::State)
+    }
+}
+
+/// A command handed to the app together with the one reply slot. The HTTP
+/// handler and the app race to take the slot: once either side has it, the
+/// other cannot run/answer. A handler that times out withdraws the slot, so a
+/// late frame must not execute a command whose client already gave up.
 pub struct Request {
     pub command: Command,
-    pub reply: Sender<String>,
+    reply: Arc<Mutex<Option<Sender<String>>>>,
 }
+
+impl Request {
+    /// Take the reply slot. `None` means the HTTP handler timed out first.
+    pub fn claim(&self) -> Option<Sender<String>> {
+        self.reply.lock().ok().and_then(|mut reply| reply.take())
+    }
+
+    /// Withdraw an unanswered request. Returns true if it was still pending.
+    pub fn withdraw(&self) -> bool {
+        self.reply
+            .lock()
+            .map(|mut reply| reply.take().is_some())
+            .unwrap_or(false)
+    }
+}
+
+/// The loopback port the control server binds. Automation passes
+/// `NODECRAFT_CONTROL_PORT` so a probe app never competes with an already
+/// running NodeCraft for the default port.
+fn control_port_from(value: Option<String>) -> u16 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_CONTROL_PORT)
+}
+
+fn control_port() -> u16 {
+    control_port_from(std::env::var("NODECRAFT_CONTROL_PORT").ok())
+}
+
+const DEFAULT_CONTROL_PORT: u16 = 47831;
 
 pub fn start(ctx: egui::Context) -> Receiver<Request> {
     let (tx, rx) = channel::<Request>();
     std::thread::Builder::new()
         .name("nodecraft-mcp-control".into())
         .spawn(move || {
-            let listener = match TcpListener::bind(("127.0.0.1", 47831)) {
+            let port = control_port();
+            let listener = match TcpListener::bind(("127.0.0.1", port)) {
                 Ok(listener) => listener,
                 Err(error) => {
-                    eprintln!("MCP control server: cannot bind 127.0.0.1:47831: {error}");
+                    eprintln!("MCP control server: cannot bind 127.0.0.1:{port}: {error}");
                     return;
                 }
             };
-            eprintln!("MCP control server listening on 127.0.0.1:47831");
+            eprintln!("MCP control server listening on 127.0.0.1:{port}");
             for stream in listener.incoming().flatten() {
                 let tx = tx.clone();
                 let ctx = ctx.clone();
@@ -168,6 +214,16 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
                 return;
             }
         },
+        "/toggle-suppress" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("id").and_then(|id| id.as_str()).map(str::to_owned))
+        {
+            Some(id) => Command::ToggleSuppressed(id),
+            None => {
+                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                return;
+            }
+        },
         "/home" => Command::Home,
         "/orbit" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
             Some((value.get("dx")?.as_f64()?, value.get("dy")?.as_f64()?))
@@ -234,18 +290,76 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         }
     };
     let (reply_tx, reply_rx) = channel::<String>();
-    if tx.send(Request { command, reply: reply_tx }).is_err() {
+    let reply = Arc::new(Mutex::new(Some(reply_tx)));
+    let request = Request { command, reply: Arc::clone(&reply) };
+    if tx.send(request).is_err() {
         let _ = respond(&mut stream, 503, "{\"ok\":false,\"error\":\"app unavailable\"}");
         return;
     }
+    // Wake the app even when the window is hidden or occluded; eframe calls
+    // `logic` for that case.
     ctx.request_repaint();
     match reply_rx.recv_timeout(Duration::from_secs(8)) {
         Ok(text) => {
             let _ = respond(&mut stream, 200, &text);
         }
         Err(_) => {
+            // Withdraw before replying: if the app has not claimed this command
+            // yet, it must never execute after the client has gone.
+            let _ = reply.lock().map(|mut reply| reply.take());
             let _ = respond(&mut stream, 504, "{\"ok\":false,\"error\":\"app did not answer\"}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pending() -> (Request, Receiver<String>) {
+        let (tx, rx) = channel::<String>();
+        (
+            Request {
+                command: Command::State,
+                reply: Arc::new(Mutex::new(Some(tx))),
+            },
+            rx,
+        )
+    }
+
+    #[test]
+    fn timed_out_command_is_withdrawn_before_the_app_drains_it() {
+        let (request, reply_rx) = pending();
+        // The HTTP handler hit its timeout first.
+        assert!(request.withdraw());
+        // A later frame must not run it or answer it.
+        assert!(request.claim().is_none());
+        assert!(reply_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_command_is_claimed_and_answered_at_most_once() {
+        let (request, reply_rx) = pending();
+        let reply = request.claim().expect("the app claims the pending command");
+        assert!(request.claim().is_none(), "a second drain must not run it again");
+        assert!(!request.withdraw(), "a claimed command cannot be withdrawn");
+        reply.send("ok".to_owned()).expect("reply");
+        assert_eq!(reply_rx.recv_timeout(Duration::from_secs(1)).unwrap(), "ok");
+    }
+
+    #[test]
+    fn the_control_port_defaults_and_can_move_for_automation() {
+        assert_eq!(control_port_from(None), DEFAULT_CONTROL_PORT);
+        assert_eq!(control_port_from(Some("47832".to_owned())), 47832);
+        assert_eq!(control_port_from(Some("not a port".to_owned())), DEFAULT_CONTROL_PORT);
+    }
+
+    #[test]
+    fn only_read_only_commands_skip_the_repaint_request() {
+        assert!(!Command::State.changes_state());
+        assert!(Command::SelectNode("u10".to_owned()).changes_state());
+        assert!(Command::FitGraph.changes_state());
+        assert!(Command::Capture("shot.png".to_owned()).changes_state());
     }
 }
 

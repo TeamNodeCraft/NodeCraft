@@ -11,9 +11,13 @@ use egui_wgpu::wgpu;
 use solidcraft_viewport_gpu::{GpuMesh, TessGpu};
 use nodecraft_layers::tess::TessPlan;
 
-use nodecraft_display::{DisplayTransform, PlanInstance};
+use nodecraft_display::PlanInstance;
+use crate::plan_math::{instance_matrix, multiply_f32, plan_identity_hash};
 
-use crate::gpu_viewport::{object_instance_layout, GpuInstance, ObjectUniforms, GHOST_SHADER, OBJECT_SHADER};
+use crate::gpu_viewport::{
+    face_colour, object_instance_layout, plan_object_shader, GpuInstance, ObjectUniforms,
+    DEFAULT_FACE_COLOUR, GHOST_SHADER,
+};
 
 /// Flat triangle-edge overlay for the plan mesh. It shares the plan vertex and
 /// instance layouts, but none of the PBR inputs.
@@ -48,7 +52,7 @@ fn fs() -> @location(0) vec4<f32> {
 "#;
 
 /// Plan vertex layout in `GpuMesh`: position, normal.
-fn plan_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+pub(crate) fn plan_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRS: [wgpu::VertexAttribute; 2] = [
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 16, shader_location: 1 },
@@ -60,17 +64,33 @@ fn plan_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-/// Colour is a one-instance vertex input at location 2, so the existing PBR
-/// shader works unchanged with a single body colour.
-fn plan_colour_layout() -> wgpu::VertexBufferLayout<'static> {
+/// Per-vertex plan pick id, read by both the pick pass and the shaded plan
+/// shader. Its low 20 bits are the B-rep face the colour table is indexed by.
+pub(crate) fn plan_face_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Float32x3,
+        format: wgpu::VertexFormat::Uint32,
         offset: 0,
         shader_location: 2,
     }];
     wgpu::VertexBufferLayout {
-        array_stride: 16,
+        array_stride: 4,
         step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRS,
+    }
+}
+
+/// Per-instance global body index. The plan shader uses it to find that body's
+/// slice in the shared colour table; the pick pass uses the same value for the
+/// `body:N` prefix.
+pub(crate) fn plan_body_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 0,
+        shader_location: 12,
+    }];
+    wgpu::VertexBufferLayout {
+        array_stride: 4,
+        step_mode: wgpu::VertexStepMode::Instance,
         attributes: &ATTRS,
     }
 }
@@ -84,6 +104,9 @@ struct PlanRenderer {
     bind_group: wgpu::BindGroup,
     ghost_uniforms: wgpu::Buffer,
     ghost_bind_group: wgpu::BindGroup,
+    /// Layout for the shared colour table: one storage array of colours and one
+    /// of per-body offsets. Tables are created per plan set, not per chunk.
+    colour_bind_layout: wgpu::BindGroupLayout,
 }
 
 impl PlanRenderer {
@@ -96,7 +119,7 @@ impl PlanRenderer {
     ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport-plan"),
-            source: wgpu::ShaderSource::Wgsl(OBJECT_SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(plan_object_shader().into()),
         });
         let ghost_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport-plan-ghost"),
@@ -126,9 +149,34 @@ impl PlanRenderer {
             layout: &bind_layout,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniforms.as_entire_binding() }],
         });
+        let colour_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewport-plan-colour-bind-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-plan-pipeline-layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
+            bind_group_layouts: &[Some(&bind_layout), Some(&colour_bind_layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -138,7 +186,7 @@ impl PlanRenderer {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(plan_vertex_layout()), Some(plan_colour_layout()), Some(object_instance_layout())],
+                buffers: &[Some(plan_vertex_layout()), Some(plan_face_layout()), Some(object_instance_layout()), Some(plan_body_layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -169,7 +217,7 @@ impl PlanRenderer {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(plan_vertex_layout()), Some(plan_colour_layout()), Some(object_instance_layout())],
+                buffers: &[Some(plan_vertex_layout()), Some(plan_face_layout()), Some(object_instance_layout()), Some(plan_body_layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &module,
@@ -243,7 +291,7 @@ impl PlanRenderer {
                 module: &module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(plan_vertex_layout()), Some(plan_colour_layout()), Some(object_instance_layout())],
+                buffers: &[Some(plan_vertex_layout()), Some(plan_face_layout()), Some(object_instance_layout()), Some(plan_body_layout())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &ghost_module,
@@ -287,6 +335,54 @@ impl PlanRenderer {
             bind_group,
             ghost_uniforms,
             ghost_bind_group,
+            colour_bind_layout,
+        }
+    }
+
+    /// Create the single shared colour table for a plan set. The table is a
+    /// storage array of `vec4` colours plus one `u32` start offset per body;
+    /// the shader indexes `colours[offsets[body] + face]`.
+    fn create_colour_table(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        colours: &[[f32; 4]],
+        offsets: &[u32],
+    ) -> PlanColourTable {
+        let colours_size = (colours.len().max(1) * std::mem::size_of::<[f32; 4]>()) as u64;
+        let offsets_size = (offsets.len().max(1) * std::mem::size_of::<u32>()) as u64;
+        let colour_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport-plan-colour-table"),
+            size: colours_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&colour_buffer, 0, bytemuck::cast_slice(colours));
+        let offset_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport-plan-colour-offsets"),
+            size: offsets_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&offset_buffer, 0, bytemuck::cast_slice(offsets));
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport-plan-colour-bind-group"),
+            layout: &self.colour_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: colour_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: offset_buffer.as_entire_binding() },
+            ],
+        });
+        PlanColourTable {
+            colours: colour_buffer,
+            offsets: offset_buffer,
+            bind_group,
+            colour_capacity: colours.len().max(1) as u32,
+            offset_capacity: offsets.len().max(1) as u32,
         }
     }
 
@@ -305,18 +401,22 @@ impl PlanRenderer {
 
     fn paint(
         &self,
-        pass: &mut wgpu::RenderPass<'static>,
+        pass: &mut wgpu::RenderPass<'_>,
         mesh: &GpuMesh,
-        colour: &wgpu::Buffer,
+        face_ids: &wgpu::Buffer,
         instances: &wgpu::Buffer,
+        bodies: &wgpu::Buffer,
+        table: &PlanColourTable,
         translucent: bool,
         instance_count: u32,
     ) {
         pass.set_pipeline(if translucent { &self.transparent_pipeline } else { &self.pipeline });
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &table.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-        pass.set_vertex_buffer(1, colour.slice(..));
+        pass.set_vertex_buffer(1, face_ids.slice(..));
         pass.set_vertex_buffer(2, instances.slice(..));
+        pass.set_vertex_buffer(3, bodies.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         let Some(part) = mesh.parts.first() else { return };
         pass.draw_indexed(part.indices.clone(), 0, 0..instance_count);
@@ -324,14 +424,16 @@ impl PlanRenderer {
 
     fn paint_triangle_edges(
         &self,
-        pass: &mut wgpu::RenderPass<'static>,
+        pass: &mut wgpu::RenderPass<'_>,
         mesh: &GpuMesh,
         instances: &wgpu::Buffer,
+        table: &PlanColourTable,
         lines: &TriangleLines,
         instance_count: u32,
     ) {
         pass.set_pipeline(&self.triangle_pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(1, &table.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
         pass.set_vertex_buffer(1, instances.slice(..));
         pass.set_index_buffer(lines.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -344,113 +446,25 @@ impl PlanRenderer {
 
     fn paint_ghost(
         &self,
-        pass: &mut wgpu::RenderPass<'static>,
+        pass: &mut wgpu::RenderPass<'_>,
         mesh: &GpuMesh,
-        colour: &wgpu::Buffer,
+        face_ids: &wgpu::Buffer,
         instances: &wgpu::Buffer,
+        bodies: &wgpu::Buffer,
+        table: &PlanColourTable,
         instance_count: u32,
     ) {
         pass.set_pipeline(&self.ghost_pipeline);
         pass.set_bind_group(0, &self.ghost_bind_group, &[]);
+        pass.set_bind_group(1, &table.bind_group, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-        pass.set_vertex_buffer(1, colour.slice(..));
+        pass.set_vertex_buffer(1, face_ids.slice(..));
         pass.set_vertex_buffer(2, instances.slice(..));
+        pass.set_vertex_buffer(3, bodies.slice(..));
         pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
         let Some(part) = mesh.parts.first() else { return };
         pass.draw_indexed(part.indices.clone(), 0, 0..instance_count);
     }
-}
-
-fn place_matrix(offset: [f64; 3], rotation: [f64; 3]) -> [[f64; 4]; 4] {
-    let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
-    let rotate = |p: [f64; 3]| {
-        let (mut x, mut y, mut z) = (p[0], p[1], p[2]);
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-        (y, z) = (y * cx - z * sx, y * sx + z * cx);
-        (x, z) = (x * cy + z * sy, -x * sy + z * cy);
-        (x, y) = (x * cz - y * sz, x * sz + y * cz);
-        [x, y, z]
-    };
-    let x = rotate([1.0, 0.0, 0.0]);
-    let y = rotate([0.0, 1.0, 0.0]);
-    let z = rotate([0.0, 0.0, 1.0]);
-    [
-        [x[0], x[1], x[2], 0.0],
-        [y[0], y[1], y[2], 0.0],
-        [z[0], z[1], z[2], 0.0],
-        [offset[0], offset[1], offset[2], 1.0],
-    ]
-}
-
-fn transform_matrix(transform: &DisplayTransform) -> [[f64; 4]; 4] {
-    match transform {
-        DisplayTransform::Place { offset, rotation } => place_matrix(*offset, *rotation),
-        DisplayTransform::Mirror { plane, offset } => {
-            let mut matrix = identity_f64();
-            match *plane {
-                "xz" => {
-                    matrix[1][1] = -1.0;
-                    matrix[3][1] = 2.0 * offset;
-                }
-                "yz" => {
-                    matrix[0][0] = -1.0;
-                    matrix[3][0] = 2.0 * offset;
-                }
-                _ => {
-                    matrix[2][2] = -1.0;
-                    matrix[3][2] = 2.0 * offset;
-                }
-            }
-            matrix
-        }
-        DisplayTransform::Scale { factor } => {
-            let mut matrix = identity_f64();
-            matrix[0][0] = *factor;
-            matrix[1][1] = *factor;
-            matrix[2][2] = *factor;
-            matrix
-        }
-    }
-}
-
-fn identity_f64() -> [[f64; 4]; 4] {
-    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
-}
-
-fn multiply(a: [[f64; 4]; 4], b: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
-    let mut out = [[0.0; 4]; 4];
-    for column in 0..4 {
-        for row in 0..4 {
-            out[column][row] = (0..4).map(|k| a[k][row] * b[column][k]).sum();
-        }
-    }
-    out
-}
-
-pub(crate) fn instance_matrix(transforms: &[DisplayTransform]) -> [[f32; 4]; 4] {
-    let mut matrix = identity_f64();
-    for transform in transforms {
-        matrix = multiply(transform_matrix(transform), matrix);
-    }
-    let mut out = [[0.0_f32; 4]; 4];
-    for column in 0..4 {
-        for row in 0..4 {
-            out[column][row] = matrix[column][row] as f32;
-        }
-    }
-    out
-}
-
-fn multiply_f32(a: [[f32; 4]; 4], b: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
-    let mut out = [[0.0_f32; 4]; 4];
-    for column in 0..4 {
-        for row in 0..4 {
-            out[column][row] = (0..4).map(|k| a[k][row] * b[column][k]).sum();
-        }
-    }
-    out
 }
 
 struct TriangleLines {
@@ -542,9 +556,12 @@ struct ResidentMesh {
     plan: std::sync::Arc<TessPlan>,
     mesh: std::sync::Arc<GpuMesh>,
     lines: Option<std::sync::Arc<TriangleLines>>,
-    colours: std::collections::HashMap<u64, std::sync::Arc<wgpu::Buffer>>,
-    colour_order: std::collections::VecDeque<u64>,
-    instances: std::collections::HashMap<(InstanceSlot, u64), InstanceBuffer>,
+    /// One buffer pair per pass. A plan is one instanced draw per pass now that
+    /// face colouring is looked up in the shared table.
+    instances: std::collections::HashMap<InstanceSlot, InstanceBuffer>,
+    /// Per-vertex face ids, keyed by whether the display has multiple bodies.
+    /// The body itself is per instance, so it is not part of this key.
+    faces: std::collections::HashMap<u64, std::sync::Arc<wgpu::Buffer>>,
     bytes: u64,
 }
 
@@ -555,8 +572,35 @@ enum InstanceSlot {
 }
 
 struct InstanceBuffer {
+    /// One `GpuInstance` per body of the group, in body order.
     buffer: std::sync::Arc<wgpu::Buffer>,
+    /// One body index per instance, parallel to `buffer`.
+    bodies: std::sync::Arc<wgpu::Buffer>,
     capacity: u32,
+}
+
+/// One GPU colour table for a whole plan set. `colours` holds every body's
+/// face colours contiguously; `offsets[body]` is the first entry for that body.
+/// A colour-only change rewrites these buffers in place, leaving every chunk,
+/// mesh and instance buffer untouched.
+struct PlanColourTable {
+    colours: wgpu::Buffer,
+    offsets: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    colour_capacity: u32,
+    offset_capacity: u32,
+}
+
+impl PlanColourTable {
+    fn can_hold(&self, colours: &[[f32; 4]], offsets: &[u32]) -> bool {
+        colours.len() as u32 <= self.colour_capacity
+            && offsets.len() as u32 <= self.offset_capacity
+    }
+
+    fn write(&self, queue: &wgpu::Queue, colours: &[[f32; 4]], offsets: &[u32]) {
+        queue.write_buffer(&self.colours, 0, bytemuck::cast_slice(colours));
+        queue.write_buffer(&self.offsets, 0, bytemuck::cast_slice(offsets));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -639,9 +683,51 @@ impl Residency {
 }
 
 struct DrawGroup {
+    /// Global body indices in body order. Face ids use them as the `body:N`
+    /// prefix, one instance at a time.
+    bodies: Vec<u32>,
     plan: std::sync::Arc<TessPlan>,
-    face_colors: Vec<[f32; 3]>,
+    /// One placement per body, in the same order as `bodies`. A group never
+    /// loses a body: `matrices.len() == bodies.len()` is the invariant that
+    /// keeps a shared plan from collapsing a mirror back onto its input.
     matrices: Vec<[[f32; 4]; 4]>,
+}
+
+/// Split a plan set into draw groups keyed only by the resident
+/// `Arc<TessPlan>`. Colour is no longer a grouping input: the shader looks each
+/// vertex's colour up from the shared table using the per-instance body index,
+/// so bodies with different face colours still share one instanced draw. Groups
+/// and bodies stay in body order.
+fn plan_draw_groups(
+    plans: &[PlanInstance],
+    extra: Option<[[f32; 4]; 4]>,
+) -> Vec<DrawGroup> {
+    let mut groups: Vec<DrawGroup> = Vec::new();
+    let mut by_plan: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::new();
+    for (body, instance) in plans.iter().enumerate() {
+        let matrix = instance_matrix(&instance.transforms);
+        let matrix = extra.map_or(matrix, |extra| multiply_f32(extra, matrix));
+        let plan_key = std::sync::Arc::as_ptr(&instance.plan) as usize;
+        let existing = by_plan.get(&plan_key).copied().filter(|index| {
+            std::sync::Arc::ptr_eq(&groups[*index].plan, &instance.plan)
+        });
+        match existing {
+            Some(index) => {
+                groups[index].bodies.push(body as u32);
+                groups[index].matrices.push(matrix);
+            }
+            None => {
+                by_plan.insert(plan_key, groups.len());
+                groups.push(DrawGroup {
+                    bodies: vec![body as u32],
+                    plan: std::sync::Arc::clone(&instance.plan),
+                    matrices: vec![matrix],
+                });
+            }
+        }
+    }
+    groups
 }
 
 fn prepare_triangle_lines_for_plan(
@@ -704,9 +790,42 @@ fn prepare_triangle_lines_for_plan(
     Some(TriangleLines { indices: buffer, ranges: vec![(start, indices.len() as u32)] })
 }
 
+/// Compute fills created during one prepare pass.
+///
+/// A fill writes the mesh's vertex buffer, so it must be submitted even when
+/// the frame that prepared it never reaches the GPU: `wgpu` surface acquisition
+/// can skip a frame after the renderer prepared its callbacks. Riding on that
+/// frame's encoder would leave a resident mesh with an empty vertex buffer
+/// forever. A separate encoder and queue submission makes the fill part of the
+/// mesh's residency, not of an unrelated paint frame.
+struct PlanFills {
+    encoder: Option<wgpu::CommandEncoder>,
+}
+
+impl PlanFills {
+    fn new() -> Self {
+        Self { encoder: None }
+    }
+
+    fn record(&mut self, device: &wgpu::Device, tess: &TessGpu, mesh: &GpuMesh) {
+        let encoder = self.encoder.get_or_insert_with(|| {
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewport-plan-fill"),
+            })
+        });
+        tess.record(encoder, mesh);
+    }
+
+    fn submit(self, queue: &wgpu::Queue) {
+        if let Some(encoder) = self.encoder {
+            queue.submit(Some(encoder.finish()));
+        }
+    }
+}
+
 fn resident_mesh(
     device: &wgpu::Device,
-    encoder: &mut wgpu::CommandEncoder,
+    fills: &mut PlanFills,
     queue: &wgpu::Queue,
     tess: &TessGpu,
     cache: &mut std::collections::HashMap<usize, ResidentMesh>,
@@ -735,7 +854,7 @@ fn resident_mesh(
             return None;
         }
     };
-    tess.record(encoder, &mesh);
+    fills.record(device, tess, &mesh);
     let mesh = std::sync::Arc::new(mesh);
     let lines = triangles
         .then(|| prepare_triangle_lines_for_plan(device, queue, &mesh, plan.as_ref()))
@@ -753,9 +872,8 @@ fn resident_mesh(
             plan: std::sync::Arc::clone(plan),
             mesh: std::sync::Arc::clone(&mesh),
             lines,
-            colours: std::collections::HashMap::new(),
-            colour_order: std::collections::VecDeque::new(),
             instances: std::collections::HashMap::new(),
+            faces: std::collections::HashMap::new(),
             bytes,
         },
     );
@@ -763,42 +881,77 @@ fn resident_mesh(
     Some(mesh)
 }
 
+/// Per-vertex face pick ids for one plan's resident mesh. Each id carries the
+/// B-rep face and whether the display has multiple bodies; the body index is
+/// added per instance from the group's body list. The same resident plan can
+/// therefore be drawn by every body of the group without rebuilding this array.
+fn prepare_face_ids(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    cache: &mut std::collections::HashMap<usize, ResidentMesh>,
+    plan: &std::sync::Arc<TessPlan>,
+    mesh: &GpuMesh,
+    multiple: bool,
+    residency: &mut Residency,
+) -> std::sync::Arc<wgpu::Buffer> {
+    let plan_key = std::sync::Arc::as_ptr(plan) as usize;
+    let face_key = u64::from(multiple);
+    if let Some(buffer) = cache
+        .get(&plan_key)
+        .and_then(|resident| resident.faces.get(&face_key))
+        .cloned()
+    {
+        return buffer;
+    }
+    let ids: Vec<u32> = (0..mesh.vertex_count as usize)
+        .map(|index| {
+            let face = mesh.vertex_face.get(index).copied().unwrap_or(u32::MAX);
+            crate::gpu_pick::face_pick_id(0, face, multiple)
+        })
+        .collect();
+    let bytes = (ids.len().max(1) * std::mem::size_of::<u32>()) as u64;
+    let buffer = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("viewport-plan-face-ids"),
+        size: bytes,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    }));
+    queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&ids));
+    if let Some(resident) = cache.get_mut(&plan_key) {
+        resident.faces.insert(face_key, std::sync::Arc::clone(&buffer));
+        resident.bytes = resident.bytes.saturating_add(bytes);
+    }
+    residency.add_bytes(plan_key, bytes);
+    buffer
+}
+
+/// Build one pass's GPU chunk list from a plan set. This is the single builder
+/// for both ways a set is installed: the staged activation (`pending.plans`)
+/// and the immediate resident commit (`self.plans`). Both therefore produce the
+/// same chunks: one per plan draw group, with every body of that plan in body
+/// order and one instance placement per body. The colour table is shared by
+/// every chunk in the set.
 fn prepare_plan_chunks(
     tess: &TessGpu,
-    encoder: &mut wgpu::CommandEncoder,
+    fills: &mut PlanFills,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     cache: &mut std::collections::HashMap<usize, ResidentMesh>,
     plans: &[PlanInstance],
-    colour: Option<[f32; 3]>,
+    table: std::sync::Arc<PlanColourTable>,
     alpha: f32,
     extra: Option<[[f32; 4]; 4]>,
     triangles: bool,
     pass: InstanceSlot,
     residency: &mut Residency,
 ) -> Vec<PlanChunk> {
-    let mut groups: Vec<DrawGroup> = Vec::new();
-    for instance in plans {
-        let matrix = instance_matrix(&instance.transforms);
-        let matrix = extra.map_or(matrix, |extra| multiply_f32(extra, matrix));
-        if let Some(group) = groups.iter_mut().find(|group| {
-            std::sync::Arc::ptr_eq(&group.plan, &instance.plan)
-                && group.face_colors == instance.face_colors
-        }) {
-            group.matrices.push(matrix);
-        } else {
-            groups.push(DrawGroup {
-                plan: std::sync::Arc::clone(&instance.plan),
-                face_colors: instance.face_colors.clone(),
-                matrices: vec![matrix],
-            });
-        }
-    }
+    let multiple_faces = plans.len() > 1;
+    let groups = plan_draw_groups(plans, extra);
     let mut chunks = Vec::with_capacity(groups.len());
     for group in groups {
         let Some(mesh) = resident_mesh(
             device,
-            encoder,
+            fills,
             queue,
             tess,
             cache,
@@ -808,110 +961,91 @@ fn prepare_plan_chunks(
         ) else {
             continue;
         };
-        let colour_hash = colour_cache_key(mesh.vertex_count, colour, &group.face_colors);
+        let face_ids = prepare_face_ids(
+            device,
+            queue,
+            cache,
+            &group.plan,
+            &mesh,
+            multiple_faces,
+            residency,
+        );
         let plan_key = std::sync::Arc::as_ptr(&group.plan) as usize;
-        let cached_colour = cache
-            .get(&plan_key)
-            .and_then(|resident| resident.colours.get(&colour_hash))
-            .cloned();
-        let colour_buffer = if let Some(buffer) = cached_colour {
-            // A hit is MRU: keep an in-use colouring from being evicted.
-            if let Some(resident) = cache.get_mut(&plan_key) {
-                resident.colour_order.retain(|key| *key != colour_hash);
-                resident.colour_order.push_back(colour_hash);
-            }
-            buffer
-        } else {
-            let mut colours = vec![[0.17_f32, 0.18, 0.195]; mesh.vertex_count as usize];
-            for (index, slot) in colours.iter_mut().enumerate() {
-                let face = mesh.vertex_face.get(index).copied().unwrap_or(0) as usize;
-                *slot = colour.unwrap_or_else(|| {
-                    group.face_colors.get(face).copied().unwrap_or([0.17, 0.18, 0.195])
-                });
-            }
-            let padded: Vec<[f32; 4]> =
-                colours.into_iter().map(|c| [c[0], c[1], c[2], 0.0]).collect();
-            let buffer = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("viewport-plan-colours"),
-                size: (padded.len() * std::mem::size_of::<[f32; 4]>()) as u64,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&padded));
-            let bytes = buffer.size();
-            if let Some(resident) = cache.get_mut(&plan_key) {
-                resident.colours.insert(colour_hash, std::sync::Arc::clone(&buffer));
-                resident.colour_order.push_back(colour_hash);
-                resident.bytes = resident.bytes.saturating_add(bytes);
-                // Keep a tiny colouring LRU; slider drags must not grow the
-                // resident mesh without bound.
-                while resident.colour_order.len() > 3 {
-                    let Some(old) = resident.colour_order.pop_front() else { break };
-                    if old == colour_hash {
-                        resident.colour_order.push_back(old);
-                        break;
-                    }
-                    if let Some(removed) = resident.colours.remove(&old) {
-                        // Active chunks may still hold an Arc to this buffer;
-                        // the accounting is conservative but safe.
-                        let freed = removed.size();
-                        resident.bytes = resident.bytes.saturating_sub(freed);
-                        residency.remove_bytes(plan_key, freed);
-                    }
-                }
-            }
-            residency.add_bytes(plan_key, bytes);
-            buffer
-        };
         let instances: Vec<GpuInstance> = group
             .matrices
             .iter()
             .map(|matrix| GpuInstance::from_model(*matrix, alpha))
             .collect();
+        let needed = instances.len() as u32;
         let instance_hash = if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
             use std::hash::{Hash, Hasher};
             let mut instance_hasher = std::collections::hash_map::DefaultHasher::new();
-            for instance in &instances {
-                bytemuck::bytes_of(instance).hash(&mut instance_hasher);
-            }
+            bytemuck::cast_slice::<GpuInstance, u8>(&instances).hash(&mut instance_hasher);
             instance_hasher.finish()
         } else {
             0
         };
-        let slot_key = (pass, colour_hash);
-        let needed = instances.len() as u32;
+        let slot_key = pass;
         let instance_bytes = std::mem::size_of::<GpuInstance>() as u64;
-        let instance_buffer = if let Some(slot) = cache
+        let one_body_bytes = std::mem::size_of::<u32>() as u64;
+        let (instance_buffer, body_buffer) = if let Some(slot) = cache
             .get_mut(&plan_key)
             .and_then(|resident| resident.instances.get_mut(&slot_key))
         {
             if slot.capacity < needed {
                 let bytes = u64::from(needed) * instance_bytes;
-                let old = u64::from(slot.capacity) * instance_bytes;
+                let body_bytes = u64::from(needed) * one_body_bytes;
+                let old = u64::from(slot.capacity) * (instance_bytes + one_body_bytes);
                 let buffer = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("viewport-plan-instances"),
                     size: bytes,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                    mapped_at_creation: false,
+                }));
+                let bodies = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("viewport-plan-instance-bodies"),
+                    size: body_bytes,
+                    usage: wgpu::BufferUsages::VERTEX
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
                     mapped_at_creation: false,
                 }));
                 slot.buffer = std::sync::Arc::clone(&buffer);
+                slot.bodies = std::sync::Arc::clone(&bodies);
                 slot.capacity = needed;
+                let bytes = bytes + body_bytes;
                 if bytes > old {
                     if let Some(resident) = cache.get_mut(&plan_key) {
                         resident.bytes = resident.bytes.saturating_add(bytes - old);
                     }
                     residency.add_bytes(plan_key, bytes - old);
                 }
-                buffer
+                (buffer, bodies)
             } else {
-                std::sync::Arc::clone(&slot.buffer)
+                (
+                    std::sync::Arc::clone(&slot.buffer),
+                    std::sync::Arc::clone(&slot.bodies),
+                )
             }
         } else {
             let bytes = u64::from(needed) * instance_bytes;
+            let body_bytes = u64::from(needed) * one_body_bytes;
             let buffer = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("viewport-plan-instances"),
                 size: bytes.max(instance_bytes),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+            let bodies = std::sync::Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewport-plan-instance-bodies"),
+                size: body_bytes.max(one_body_bytes),
+                usage: wgpu::BufferUsages::VERTEX
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
             if let Some(resident) = cache.get_mut(&plan_key) {
@@ -919,22 +1053,28 @@ fn prepare_plan_chunks(
                     slot_key,
                     InstanceBuffer {
                         buffer: std::sync::Arc::clone(&buffer),
+                        bodies: std::sync::Arc::clone(&bodies),
                         capacity: needed.max(1),
                     },
                 );
-                resident.bytes = resident.bytes.saturating_add(buffer.size());
+                resident.bytes = resident
+                    .bytes
+                    .saturating_add(buffer.size() + bodies.size());
             }
-            residency.add_bytes(plan_key, buffer.size());
-            buffer
+            residency.add_bytes(plan_key, buffer.size() + bodies.size());
+            (buffer, bodies)
         };
         queue.write_buffer(&instance_buffer, 0, bytemuck::cast_slice(&instances));
+        queue.write_buffer(&body_buffer, 0, bytemuck::cast_slice(&group.bodies));
         let key = std::sync::Arc::as_ptr(&group.plan) as usize;
         let lines = cache.get(&key).and_then(|resident| resident.lines.clone());
         chunks.push(PlanChunk {
             mesh,
-            colour: colour_buffer,
+            face_ids,
             instances: instance_buffer,
-            instance_count: instances.len() as u32,
+            bodies: body_buffer,
+            table: std::sync::Arc::clone(&table),
+            instance_count: needed,
             instance_hash,
             lines,
         });
@@ -947,8 +1087,15 @@ fn prepare_plan_chunks(
 
 struct PlanChunk {
     mesh: std::sync::Arc<GpuMesh>,
-    colour: std::sync::Arc<wgpu::Buffer>,
+    /// Per-vertex pick id carrying the B-rep face and the multi-body flag. The
+    /// same buffer feeds the pick pass and the shader's colour table lookup.
+    face_ids: std::sync::Arc<wgpu::Buffer>,
     instances: std::sync::Arc<wgpu::Buffer>,
+    /// Global body index per instance, parallel to `instances`.
+    bodies: std::sync::Arc<wgpu::Buffer>,
+    /// Shared colour table for the whole plan set. It changes only on a colour
+    /// edit, never on a transform or mesh edit.
+    table: std::sync::Arc<PlanColourTable>,
     instance_count: u32,
     instance_hash: u64,
     lines: Option<std::sync::Arc<TriangleLines>>,
@@ -958,90 +1105,133 @@ const RESIDENT_BUDGET: u64 = 512 << 20;
 const UPLOAD_VERTEX_BUDGET: usize = 2_000_000;
 const UPLOAD_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(4);
 
-fn hash_f64(hash: u64, value: f64) -> u64 {
-    hash.rotate_left(5) ^ value.to_bits()
-}
-
-pub(crate) fn plan_identity_hash(plans: &[PlanInstance]) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for instance in plans {
-        instance.target.hash(&mut hasher);
-        (std::sync::Arc::as_ptr(&instance.plan) as usize).hash(&mut hasher);
-        let mut transform_hash = 0u64;
-        for transform in &instance.transforms {
-            transform_hash = match transform {
-                DisplayTransform::Place { offset, rotation } => {
-                    let mut h = transform_hash;
-                    for value in offset.iter().chain(rotation.iter()) {
-                        h = hash_f64(h, *value);
-                    }
-                    h.rotate_left(1) ^ 1
-                }
-                DisplayTransform::Mirror { plane, offset } => {
-                    let mut h = hash_f64(transform_hash, *offset);
-                    h ^= plane.len() as u64 ^ 2;
-                    h
-                }
-                DisplayTransform::Scale { factor } => {
-                    hash_f64(transform_hash, *factor).rotate_left(1) ^ 3
-                }
-            };
-        }
-        transform_hash.hash(&mut hasher);
-        for colour in &instance.face_colors {
-            for value in colour {
-                value.to_bits().hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
 fn plans_ready(plans: &[PlanInstance], prepared: &std::collections::HashSet<usize>) -> bool {
     plans.iter().all(|instance| {
         prepared.contains(&(std::sync::Arc::as_ptr(&instance.plan) as usize))
     })
 }
 
-fn colour_cache_key(
-    vertex_count: u32,
-    colour: Option<[f32; 3]>,
-    face_colors: &[[f32; 3]],
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    vertex_count.hash(&mut hasher);
-    if let Some(value) = colour {
-        for channel in value {
-            channel.to_bits().hash(&mut hasher);
-        }
-    }
-    for value in face_colors {
-        for channel in value {
-            channel.to_bits().hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
-fn same_plan_set(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
+/// Geometry and placement identity. A change here needs new chunks; a change
+/// only in `face_colors` does not.
+fn same_plan_geometry(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(old, new)| {
             old.target == new.target
                 && std::sync::Arc::ptr_eq(&old.plan, &new.plan)
                 && old.transforms == new.transforms
-                && old.face_colors == new.face_colors
         })
+}
+
+fn same_plan_colours(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(old, new)| old.face_colors == new.face_colors)
+}
+
+#[cfg(test)]
+fn same_plan_set(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
+    same_plan_geometry(a, b) && same_plan_colours(a, b)
+}
+
+/// Flatten one plan set's face colours into the shared table. Each body owns a
+/// contiguous slice starting at `offsets[body]`; a body's slice covers its
+/// plan's face count even when the display only authored some faces. Face
+/// colouring and the ignore-look override are table fills too, so every draw
+/// path uses the same lookup.
+fn colour_table_data(
+    plans: &[PlanInstance],
+    colour: Option<[f32; 3]>,
+    face_colours: bool,
+) -> (Vec<[f32; 4]>, Vec<u32>) {
+    let mut colours = Vec::new();
+    let mut offsets = Vec::with_capacity(plans.len());
+    for instance in plans {
+        offsets.push(colours.len() as u32);
+        let count = instance
+            .face_colors
+            .len()
+            .max(instance.plan.faces.len())
+            .max(1);
+        for face in 0..count {
+            let value = if face_colours {
+                face_colour(face as u32)
+            } else if let Some(value) = colour {
+                value
+            } else {
+                instance
+                    .face_colors
+                    .get(face)
+                    .copied()
+                    .unwrap_or(DEFAULT_FACE_COLOUR)
+            };
+            colours.push([value[0], value[1], value[2], 0.0]);
+        }
+    }
+    (colours, offsets)
+}
+
+/// Write the table in place when it still fits, otherwise replace it. A
+/// colour-only edit therefore rewrites two storage buffers and leaves every
+/// chunk, mesh and instance buffer alone.
+fn refresh_colour_table(
+    renderer: &PlanRenderer,
+    cache: &mut Option<std::sync::Arc<PlanColourTable>>,
+    uploads: &mut u64,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    plans: &[PlanInstance],
+    colour: Option<[f32; 3]>,
+    face_colours: bool,
+) -> std::sync::Arc<PlanColourTable> {
+    let (colours, offsets) = colour_table_data(plans, colour, face_colours);
+    if let Some(table) = cache.as_ref()
+        && table.can_hold(&colours, &offsets)
+    {
+        table.write(queue, &colours, &offsets);
+        *uploads = uploads.saturating_add(1);
+        return std::sync::Arc::clone(table);
+    }
+    let table = std::sync::Arc::new(renderer.create_colour_table(
+        device,
+        queue,
+        &colours,
+        &offsets,
+    ));
+    *cache = Some(std::sync::Arc::clone(&table));
+    *uploads = uploads.saturating_add(1);
+    table
+}
+
+/// Whether every plan in `plans` already has a resident GPU mesh. A set whose
+/// plans are all resident needs no staged swap: preparing it uploads nothing,
+/// so `prepare` can activate it in the current frame. An empty set is also
+/// ready (it has nothing to upload).
+fn plans_resident(
+    plans: &[PlanInstance],
+    resident: impl Fn(usize) -> bool,
+) -> bool {
+    plans.iter().all(|instance| {
+        resident(std::sync::Arc::as_ptr(&instance.plan) as usize)
+    })
 }
 
 struct PendingPlans {
     plans: Vec<PlanInstance>,
+    /// Exact object state that produced this plan set (and its edge payload).
+    snapshot: u64,
     enabled: bool,
     colour: Option<[f32; 3]>,
     triangles: bool,
     prepared: std::collections::HashSet<usize>,
     failed: std::collections::HashSet<usize>,
+}
+
+/// Whether `PlanState::set_plans` installed the set now or staged it for a
+/// later activation. The viewport stages the matching display payload with the
+/// same wait: both activate in `prepare`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PlanSetState {
+    Immediate,
+    Staged,
 }
 
 /// GPU plan state shared between the viewport callback and `GpuViewport`.
@@ -1054,14 +1244,32 @@ pub(crate) struct PlanState {
     /// New geometry is prepared gradually while the previous chunks stay
     /// visible; the swap happens only when every new plan is resident.
     pending: Option<PendingPlans>,
+    /// Bumped whenever the plans that `paint` draws change. The viewport's
+    /// staged display waits for the matching activation, so edges and plan
+    /// triangles never switch on different frames.
+    activation: u64,
+    /// Exact object state whose plans are currently drawn. The staged edge
+    /// payload must carry the same id to activate with this plan set.
+    display_snapshot: u64,
     resident: std::collections::HashMap<usize, ResidentMesh>,
     residency: Residency,
     last_prepare_us: u64,
     last_uploads: u32,
     painted_chunks: std::sync::atomic::AtomicU32,
     painted_instances: std::sync::atomic::AtomicU32,
-    preview: Option<[[f32; 4]; 4]>,
     colour_override: Option<[f32; 3]>,
+    /// One table per pass. Chunks hold the same Arc, so a colour-only edit
+    /// rewrites it in place and leaves the chunks untouched.
+    colour_table: Option<std::sync::Arc<PlanColourTable>>,
+    ghost_colour_table: Option<std::sync::Arc<PlanColourTable>>,
+    colour_table_dirty: bool,
+    /// Distinct face colours for the whole body (the View menu's Face colours
+    /// mode). It is a table fill, not a renderer switch.
+    face_colours: bool,
+    /// Diagnostics: chunk list rebuilds and colour-table uploads are counted
+    /// separately so a colour edit can prove it did not rebuild geometry.
+    chunk_builds: u64,
+    table_uploads: u64,
     dirty: bool,
     enabled: bool,
     translucent: bool,
@@ -1080,6 +1288,9 @@ pub(crate) struct PlanState {
 pub(crate) struct PlanDebug {
     pub enabled: bool,
     pub pending: bool,
+    pub activation: u64,
+    pub snapshot: u64,
+    pub pending_snapshot: u64,
     pub chunks: usize,
     pub plans: usize,
     pub triangles: u32,
@@ -1089,6 +1300,9 @@ pub(crate) struct PlanDebug {
     pub instance_hash: u64,
     pub prepare_us: u64,
     pub uploads: u32,
+    pub face_colours: bool,
+    pub chunk_builds: u64,
+    pub table_uploads: u64,
     pub painted_chunks: u32,
     pub painted_instances: u32,
     pub resident_count: usize,
@@ -1111,14 +1325,21 @@ impl PlanState {
             plans: Vec::new(),
             chunks: Vec::new(),
             pending: None,
+            activation: 0,
+            display_snapshot: 0,
             resident: std::collections::HashMap::new(),
             residency: Residency::new(RESIDENT_BUDGET),
             last_prepare_us: 0,
             last_uploads: 0,
             painted_chunks: std::sync::atomic::AtomicU32::new(0),
             painted_instances: std::sync::atomic::AtomicU32::new(0),
-            preview: None,
             colour_override: None,
+            colour_table: None,
+            ghost_colour_table: None,
+            colour_table_dirty: true,
+            face_colours: false,
+            chunk_builds: 0,
+            table_uploads: 0,
             dirty: true,
             enabled: false,
             translucent: false,
@@ -1137,35 +1358,83 @@ impl PlanState {
         self.residency.touch(key);
     }
 
-    pub(crate) fn set_plans(&mut self, plans: Vec<PlanInstance>, enabled: bool, colour: Option<[f32; 3]>) {
-        // The display plan cache reuses the same plan Arcs across evaluations.
-        // Keep the resident GpuMesh when neither the geometry nor the draw mode
-        // changed; only a genuinely new plan/quality needs GPU preparation.
-        // Do not restart an in-progress staged swap when the same request is
-        // republished on the next frame.
-        if let Some(pending) = self.pending.as_ref()
-            && same_plan_set(&pending.plans, &plans)
-            && pending.enabled == enabled
-            && pending.colour == colour
-        {
-            return;
-        }
+    pub(crate) fn set_plans(
+        &mut self,
+        plans: Vec<PlanInstance>,
+        enabled: bool,
+        colour: Option<[f32; 3]>,
+        snapshot: u64,
+    ) -> PlanSetState {
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
             eprintln!(
-                "[plan] set {} active {} chunks {} pending={}",
+                "[plan] set {} active {} chunks {} pending={} snapshot={snapshot}",
                 plans.len(),
                 self.plans.len(),
                 self.chunks.len(),
                 self.pending.is_some(),
             );
         }
-        let same_plans = same_plan_set(&self.plans, &plans);
-        if same_plans && self.enabled == enabled && self.colour_override == colour {
+        // A staged set that still has the same geometry only needs its colour
+        // request updated. Do not restart its mesh preparation, and do not
+        // rebuild anything: the table is filled when the set activates.
+        if let Some(pending) = self.pending.as_mut()
+            && pending.enabled == enabled
+            && same_plan_geometry(&pending.plans, &plans)
+        {
+            pending.plans = plans;
+            pending.colour = colour;
+            pending.snapshot = snapshot;
+            return PlanSetState::Staged;
+        }
+        // The display plan cache reuses the same plan Arcs across evaluations.
+        // Keep chunks, meshes and instance buffers when only the colouring
+        // changed; a colour-only edit rewrites the shared table in `prepare`.
+        if same_plan_geometry(&self.plans, &plans) && self.enabled == enabled {
+            let colour_changed =
+                !same_plan_colours(&self.plans, &plans) || self.colour_override != colour;
             // An edit-back must cancel a still-pending future set; otherwise the
             // stale pending swap would activate after this frame.
             self.pending = None;
-            self.dirty = true;
-            return;
+            self.plans = plans;
+            self.colour_override = colour;
+            self.display_snapshot = snapshot;
+            if colour_changed {
+                self.colour_table_dirty = true;
+            }
+            if enabled && self.chunks.is_empty() {
+                self.dirty = true;
+            }
+            return PlanSetState::Immediate;
+        }
+        // A plan set whose meshes are all resident needs no staged swap: its
+        // preparation is instance/table churn over cached GPU meshes, with zero
+        // vertex uploads. Activate it in this frame instead of deferring the
+        // exact frame and replaying it once the "swap" is ready. The chunks are
+        // rebuilt by `prepare` from `self.plans` (dirty), so edges, picking and
+        // plan triangles still switch in this activation.
+        if !enabled || plans_resident(&plans, |key| self.resident.contains_key(&key)) {
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                eprintln!(
+                    "[plan] resident set {} no staging",
+                    plans.len(),
+                );
+            }
+            let keys: Vec<usize> = plans
+                .iter()
+                .map(|instance| std::sync::Arc::as_ptr(&instance.plan) as usize)
+                .collect();
+            self.residency.touch_set(&keys);
+            self.plans = plans;
+            self.enabled = enabled;
+            self.colour_override = colour;
+            self.pending = None;
+            self.display_snapshot = snapshot;
+            self.activation = self.activation.wrapping_add(1);
+            // A resident/empty enabled set still needs `prepare` to rebuild its
+            // chunks in this frame; a disabled set only clears them there.
+            self.dirty = enabled;
+            self.colour_table_dirty = enabled;
+            return PlanSetState::Immediate;
         }
         // Keep preparation progress for plans shared with the replaced set.
         let prepared = self
@@ -1186,6 +1455,7 @@ impl PlanState {
             .unwrap_or_default();
         self.pending = Some(PendingPlans {
             plans,
+            snapshot,
             enabled,
             colour,
             triangles: self.triangles,
@@ -1200,10 +1470,29 @@ impl PlanState {
                 .collect();
             self.residency.touch_set(&keys);
         }
+        PlanSetState::Staged
+    }
+
+    pub(crate) fn activation(&self) -> u64 {
+        self.activation
+    }
+
+    pub(crate) fn display_snapshot(&self) -> u64 {
+        self.display_snapshot
     }
 
     pub(crate) fn set_translucent(&mut self, translucent: bool) {
         self.translucent = translucent;
+    }
+
+    /// The View menu's face-colours mode is a table fill on the plan path. It
+    /// does not rebuild chunks, meshes or instance buffers.
+    pub(crate) fn set_face_colours(&mut self, enabled: bool) {
+        if self.face_colours == enabled {
+            return;
+        }
+        self.face_colours = enabled;
+        self.colour_table_dirty = true;
     }
 
     pub(crate) fn set_triangles(&mut self, enabled: bool) {
@@ -1266,8 +1555,12 @@ impl PlanState {
         self.pending = None;
         self.plans.clear();
         self.chunks.clear();
+        self.display_snapshot = 0;
+        self.activation = self.activation.wrapping_add(1);
         self.enabled = false;
         self.colour_override = None;
+        self.colour_table = None;
+        self.colour_table_dirty = false;
         self.clear_transient();
         self.dirty = false;
         // Resident meshes deliberately survive; they hold their plan Arcs and
@@ -1275,11 +1568,11 @@ impl PlanState {
     }
 
     pub(crate) fn clear_transient(&mut self) {
-        self.preview = None;
         self.dirty = true;
         self.ghost_matrix = None;
         self.ghost_plans.clear();
         self.ghost_chunks.clear();
+        self.ghost_colour_table = None;
         self.ghost_enabled = false;
         self.ghost_dirty = false;
     }
@@ -1299,6 +1592,9 @@ impl PlanState {
         PlanDebug {
             enabled: self.enabled,
             pending: self.pending.is_some(),
+            activation: self.activation,
+            snapshot: self.display_snapshot,
+            pending_snapshot: self.pending.as_ref().map_or(0, |pending| pending.snapshot),
             chunks: self.chunks.len(),
             plans: self.plans.len(),
             triangles,
@@ -1308,6 +1604,9 @@ impl PlanState {
             instance_hash,
             prepare_us: self.last_prepare_us,
             uploads: self.last_uploads,
+            face_colours: self.face_colours,
+            chunk_builds: self.chunk_builds,
+            table_uploads: self.table_uploads,
             painted_chunks: self.painted_chunks.load(std::sync::atomic::Ordering::Relaxed),
             painted_instances: self.painted_instances.load(std::sync::atomic::Ordering::Relaxed),
             resident_count: self.resident.len(),
@@ -1322,26 +1621,28 @@ impl PlanState {
             .is_some_and(|ready| ready.get().is_some())
     }
 
-    pub(crate) fn set_preview_transform(&mut self, preview: Option<[[f32; 4]; 4]>) {
-        if self.preview == preview {
-            return;
+    /// Upload the plan uniforms for one drawn frame. `preview` is the display
+    /// unit's single preview value for that frame; there is no second preview
+    /// owner in this state.
+    pub(crate) fn write_uniforms(
+        &self,
+        queue: &wgpu::Queue,
+        uniforms: &ObjectUniforms,
+        preview: Option<[[f32; 4]; 4]>,
+    ) {
+        if let Some(renderer) = self.renderer.as_ref() {
+            renderer.prepare(queue, uniforms, preview, self.ghost_matrix);
         }
-        self.preview = preview;
-        // The preview is a shader uniform; no instance/colour rebuild needed.
     }
 
-    pub(crate) fn prepare(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        uniforms: &ObjectUniforms,
-    ) {
+    /// Advance the staged plan set. The uniform upload is a separate step
+    /// ([`PlanState::write_uniforms`]) so the display unit can decide the one
+    /// preview value for the frame *after* an activation in this same
+    /// `prepare`, then hand that same value to the plan shader and the scene
+    /// projection.
+    pub(crate) fn prepare_chunks(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let started = std::time::Instant::now();
         self.last_uploads = 0;
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.prepare(queue, uniforms, self.preview, self.ghost_matrix);
-        }
         if self.tess.is_none() {
             self.tess = self.tess_ready.as_ref().and_then(|ready| ready.get().cloned());
         }
@@ -1350,6 +1651,7 @@ impl PlanState {
             self.ghost_chunks.clear();
             return;
         };
+        let mut fills = PlanFills::new();
         if let Some(mut pending) = self.pending.take() {
             if !pending.enabled || pending.plans.is_empty() {
                 self.plans = pending.plans;
@@ -1357,6 +1659,9 @@ impl PlanState {
                 self.colour_override = pending.colour;
                 self.chunks.clear();
                 self.dirty = false;
+                self.colour_table_dirty = false;
+                self.display_snapshot = pending.snapshot;
+                self.activation = self.activation.wrapping_add(1);
             } else {
                 // Spread first-time plan preparation over frames so a quality
                 // swap never stalls one render callback. Keep drawing the old
@@ -1384,7 +1689,7 @@ impl PlanState {
                     }
                     if resident_mesh(
                         device,
-                        encoder,
+                        &mut fills,
                         queue,
                         &tess,
                         &mut self.resident,
@@ -1417,24 +1722,41 @@ impl PlanState {
                             self.last_uploads,
                         );
                     }
+                    let table = {
+                        let Some(renderer) = self.renderer.as_ref() else { return };
+                        refresh_colour_table(
+                            renderer,
+                            &mut self.colour_table,
+                            &mut self.table_uploads,
+                            device,
+                            queue,
+                            &pending.plans,
+                            pending.colour,
+                            self.face_colours,
+                        )
+                    };
                     self.chunks = prepare_plan_chunks(
                         &tess,
-                        encoder,
+                        &mut fills,
                         device,
                         queue,
                         &mut self.resident,
                         &pending.plans,
-                        pending.colour,
+                        table,
                         1.0,
                         None,
                         pending.triangles,
                         InstanceSlot::Main,
                         &mut self.residency,
                     );
+                    self.chunk_builds = self.chunk_builds.saturating_add(1);
                     self.plans = pending.plans;
                     self.enabled = pending.enabled;
                     self.colour_override = pending.colour;
                     self.dirty = false;
+                    self.colour_table_dirty = false;
+                    self.display_snapshot = pending.snapshot;
+                    self.activation = self.activation.wrapping_add(1);
                     let keys: Vec<usize> = self
                         .plans
                         .iter()
@@ -1447,40 +1769,93 @@ impl PlanState {
             }
         } else if self.enabled && self.dirty {
             self.dirty = false;
+            let table = {
+                let Some(renderer) = self.renderer.as_ref() else { return };
+                refresh_colour_table(
+                    renderer,
+                    &mut self.colour_table,
+                    &mut self.table_uploads,
+                    device,
+                    queue,
+                    &self.plans,
+                    self.colour_override,
+                    self.face_colours,
+                )
+            };
             self.chunks = prepare_plan_chunks(
                 &tess,
-                encoder,
+                &mut fills,
                 device,
                 queue,
                 &mut self.resident,
                 &self.plans,
-                self.colour_override,
+                table,
                 1.0,
                 None,
                 self.triangles,
                 InstanceSlot::Main,
                 &mut self.residency,
             );
+            self.chunk_builds = self.chunk_builds.saturating_add(1);
+            self.colour_table_dirty = false;
+        } else if self.enabled && self.colour_table_dirty {
+            self.colour_table_dirty = false;
+            let table = {
+                let Some(renderer) = self.renderer.as_ref() else { return };
+                refresh_colour_table(
+                    renderer,
+                    &mut self.colour_table,
+                    &mut self.table_uploads,
+                    device,
+                    queue,
+                    &self.plans,
+                    self.colour_override,
+                    self.face_colours,
+                )
+            };
+            // Normally the table was rewritten in place, so every chunk already
+            // points at the updated colours. Only a capacity change replaces
+            // the table object, and then the chunks adopt the new handle.
+            for chunk in &mut self.chunks {
+                if !std::sync::Arc::ptr_eq(&chunk.table, &table) {
+                    chunk.table = std::sync::Arc::clone(&table);
+                }
+            }
         } else if !self.enabled {
             self.chunks.clear();
         }
         if self.ghost_dirty {
             self.ghost_dirty = false;
             self.ghost_chunks = if self.ghost_enabled {
-                prepare_plan_chunks(
+                let table = {
+                    let Some(renderer) = self.renderer.as_ref() else { return };
+                    refresh_colour_table(
+                        renderer,
+                        &mut self.ghost_colour_table,
+                        &mut self.table_uploads,
+                        device,
+                        queue,
+                        &self.ghost_plans,
+                        self.ghost_colour,
+                        self.face_colours,
+                    )
+                };
+                let chunks = prepare_plan_chunks(
                     &tess,
-                    encoder,
+                    &mut fills,
                     device,
                     queue,
                     &mut self.resident,
                     &self.ghost_plans,
-                    self.ghost_colour,
+                    table,
                     self.ghost_alpha,
                     None,
                     false,
                     InstanceSlot::Ghost,
                     &mut self.residency,
-                )
+                );
+                self.chunk_builds = self.chunk_builds.saturating_add(1);
+                chunks
             } else {
                 Vec::new()
             };
@@ -1491,6 +1866,10 @@ impl PlanState {
                 .collect();
             self.residency.touch_set(&keys);
         }
+        // Submit every new mesh's fill now, before the frame can be dropped
+        // and before any chunk draws it. `ResidentMesh` entries above are only
+        // observable as drawable once this returns.
+        fills.submit(queue);
         // Bytes and recency are maintained by `Residency`; evict only when
         // over budget, oldest unused first.
         if self.residency.bytes > self.residency.budget {
@@ -1511,6 +1890,60 @@ impl PlanState {
             }
         }
         self.last_prepare_us = started.elapsed().as_micros() as u64;
+        if self.last_prepare_us > 0 && std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+            eprintln!(
+                "[plan] prepare_us={} chunks={} instances={} uploads={} table_uploads={}",
+                self.last_prepare_us,
+                self.chunks.len(),
+                self.chunks.iter().map(|chunk| chunk.instance_count).sum::<u32>(),
+                self.last_uploads,
+                self.table_uploads,
+            );
+        }
+    }
+
+    /// Draw the main plan chunks' B-rep face ids into the pick target with the
+    /// same vertices, instance buffers and plan preview matrix as the visible
+    /// plan pass.
+    /// Draw the main plan chunks' B-rep face ids into the pick target with the
+    /// same vertices, instance buffers, per-instance body indices and plan
+    /// preview matrix as the visible plan pass.
+    pub(crate) fn paint_face_ids(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        for chunk in &self.chunks {
+            pass.set_vertex_buffer(0, chunk.mesh.vertices.slice(..));
+            pass.set_vertex_buffer(1, chunk.face_ids.slice(..));
+            pass.set_vertex_buffer(2, chunk.instances.slice(..));
+            pass.set_vertex_buffer(3, chunk.bodies.slice(..));
+            pass.set_index_buffer(chunk.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            if let Some(part) = chunk.mesh.parts.first() {
+                pass.draw_indexed(part.indices.clone(), 0, 0..chunk.instance_count);
+            }
+        }
+    }
+
+    pub(crate) fn paint_ghost_depth(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        for chunk in &self.ghost_chunks {
+            pass.set_vertex_buffer(0, chunk.mesh.vertices.slice(..));
+            pass.set_vertex_buffer(1, chunk.instances.slice(..));
+            pass.set_index_buffer(chunk.mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            if let Some(part) = chunk.mesh.parts.first() {
+                pass.draw_indexed(part.indices.clone(), 0, 0..chunk.instance_count);
+            }
+        }
     }
 
     pub(crate) fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
@@ -1524,17 +1957,41 @@ impl PlanState {
             std::sync::atomic::Ordering::Relaxed,
         );
         for chunk in &self.chunks {
-            renderer.paint(pass, &chunk.mesh, &chunk.colour, &chunk.instances, self.translucent, chunk.instance_count);
+            renderer.paint(
+                pass,
+                &chunk.mesh,
+                &chunk.face_ids,
+                &chunk.instances,
+                &chunk.bodies,
+                &chunk.table,
+                self.translucent,
+                chunk.instance_count,
+            );
         }
         if self.triangles {
             for chunk in &self.chunks {
                 if let Some(lines) = &chunk.lines {
-                    renderer.paint_triangle_edges(pass, &chunk.mesh, &chunk.instances, lines, chunk.instance_count);
+                    renderer.paint_triangle_edges(
+                        pass,
+                        &chunk.mesh,
+                        &chunk.instances,
+                        &chunk.table,
+                        lines,
+                        chunk.instance_count,
+                    );
                 }
             }
         }
         for chunk in &self.ghost_chunks {
-            renderer.paint_ghost(pass, &chunk.mesh, &chunk.colour, &chunk.instances, chunk.instance_count);
+            renderer.paint_ghost(
+                pass,
+                &chunk.mesh,
+                &chunk.face_ids,
+                &chunk.instances,
+                &chunk.bodies,
+                &chunk.table,
+                chunk.instance_count,
+            );
         }
     }
 }
@@ -1554,29 +2011,231 @@ mod tests {
     }
 
     #[test]
-    fn instance_cache_slots_include_pass_and_colour() {
-        let a = (InstanceSlot::Main, 1);
-        let b = (InstanceSlot::Main, 2);
-        let c = (InstanceSlot::Ghost, 1);
-        assert_ne!(a, b);
-        assert_ne!(a, c);
+    fn draw_groups_instance_every_body_of_a_shared_plan() {
+        let plan = std::sync::Arc::new(TessPlan::default());
+        let instance = |transforms| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&plan),
+            face_colors: Vec::new(),
+            transforms,
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let transforms = vec![
+            Vec::new(),
+            vec![nodecraft_display::DisplayTransform::Place {
+                offset: [10.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            vec![nodecraft_display::DisplayTransform::Place {
+                offset: [0.0, 20.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            vec![nodecraft_display::DisplayTransform::Mirror {
+                plane: "yz",
+                offset: 10.0,
+            }],
+        ];
+        let plans: Vec<PlanInstance> = transforms.iter().cloned().map(instance).collect();
+        let groups = plan_draw_groups(&plans, None);
+        assert_eq!(
+            groups.len(),
+            1,
+            "all bodies of one plan and colouring are one instanced draw group",
+        );
+        assert_eq!(
+            groups[0].bodies,
+            vec![0, 1, 2, 3],
+            "the group keeps every body, in body order",
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&groups[0].plan, &plan),
+            "the resident mesh is shared, not duplicated",
+        );
+        assert_eq!(groups[0].matrices.len(), 4);
+        for (matrix, transforms) in groups[0].matrices.iter().zip(&transforms) {
+            assert_eq!(*matrix, instance_matrix(transforms));
+        }
+    }
+
+    /// Every copy of one box shares one plan, so the copies are one chunk with
+    /// one instance per copy. Each instance matrix must place the plan exactly
+    /// where the CPU display path places its edges.
+    #[test]
+    fn circular_pattern_copies_are_one_instanced_draw_group_matching_the_cpu_transform() {
+        use nodecraft_display::{DisplayQuality, PlanCache};
+
+        let request: nodecraft_protocol::Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 4, "angle": 360, "axis": "z"}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("circular pattern request");
+        let output = nodecraft_engine::evaluate_exact(
+            request,
+            nodecraft_engine::EngineCache::new(),
+            None,
+        );
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("pattern").expect("circular pattern exact part").clone();
+        let mut cache = PlanCache::new(16);
+        let planned = nodecraft_display::plan_part(&part, DisplayQuality::Full(0.35), &mut cache)
+            .expect("display plan");
+        assert_eq!(planned.plans.len(), 4);
+        for instance in &planned.plans {
+            assert!(
+                std::sync::Arc::ptr_eq(&planned.plans[0].plan, &instance.plan),
+                "every copy must instance the same plan",
+            );
+        }
+
+        let groups = plan_draw_groups(&planned.plans, None);
+        assert_eq!(groups.len(), 1, "four copies of one box are one chunk");
+        assert_eq!(groups[0].bodies, vec![0, 1, 2, 3]);
+        assert_eq!(groups[0].matrices.len(), 4, "one instance per copy");
+        for (matrix, instance) in groups[0].matrices.iter().zip(&planned.plans) {
+            assert_eq!(*matrix, instance_matrix(&instance.transforms));
+        }
+
+        // The CPU display path turns the same transforms into edge points.
+        let mut expected = Vec::new();
+        for instance in &planned.plans {
+            let matrix = glam::Mat4::from_cols_array_2d(&instance_matrix(&instance.transforms));
+            for edge in &instance.plan.edges {
+                for point in edge {
+                    let transformed = matrix.transform_point3(glam::Vec3::new(
+                        point.x as f32,
+                        point.y as f32,
+                        point.z as f32,
+                    ));
+                    expected.push([transformed.x, transformed.y, transformed.z]);
+                }
+            }
+        }
+        assert_eq!(expected.len(), planned.edge_mesh.vertices.len());
+        for (index, (expected, actual)) in expected.iter().zip(&planned.edge_mesh.vertices).enumerate() {
+            for axis in 0..3 {
+                assert!(
+                    (expected[axis] - actual[axis]).abs() < 1.0e-3,
+                    "edge point {index} axis {axis}: plan_math {expected:?} != display {actual:?}",
+                );
+            }
+        }
     }
 
     #[test]
-    fn colour_key_changes_with_colours_and_is_stable_otherwise() {
-        let faces = [[0.2, 0.3, 0.4]];
+    fn draw_groups_instance_bodies_with_different_colourings() {
+        let plan = std::sync::Arc::new(TessPlan::default());
+        let instance = |face_colors: Vec<[f32; 3]>| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&plan),
+            face_colors,
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let red = vec![[1.0, 0.0, 0.0]];
+        let green = vec![[0.0, 1.0, 0.0]];
+        let plans = vec![
+            instance(red),
+            instance(green),
+            instance(Vec::new()),
+        ];
+        let groups = plan_draw_groups(&plans, None);
         assert_eq!(
-            colour_cache_key(8, None, &faces),
-            colour_cache_key(8, None, &faces)
+            groups.len(),
+            1,
+            "colour is a shader lookup, not a grouping key",
         );
-        assert_ne!(
-            colour_cache_key(8, None, &faces),
-            colour_cache_key(8, Some([1.0, 0.0, 0.0]), &faces)
+        assert_eq!(groups[0].bodies, vec![0, 1, 2]);
+        assert_eq!(groups[0].matrices.len(), 3);
+    }
+
+    #[test]
+    fn same_plan_with_a_new_placement_is_not_the_same_display() {
+        let plan = std::sync::Arc::new(TessPlan::default());
+        let base = PlanInstance {
+            target: "t".into(),
+            plan: std::sync::Arc::clone(&plan),
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let moved = PlanInstance {
+            transforms: vec![nodecraft_display::DisplayTransform::Place {
+                offset: [5.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            ..base.clone()
+        };
+        assert!(same_plan_set(std::slice::from_ref(&base), std::slice::from_ref(&base)));
+        assert!(
+            !same_plan_set(std::slice::from_ref(&base), std::slice::from_ref(&moved)),
+            "a placement change must not be treated as the same GPU display",
         );
-        assert_ne!(
-            colour_cache_key(8, None, &faces),
-            colour_cache_key(8, None, &[[0.2, 0.3, 0.5]])
+    }
+
+    #[test]
+    fn instance_cache_slots_are_keyed_by_pass() {
+        let main = InstanceSlot::Main;
+        let ghost = InstanceSlot::Ghost;
+        assert_ne!(main, ghost, "the ghost and main passes own separate instance data");
+    }
+
+    #[test]
+    fn colour_table_gives_every_body_its_own_face_slice() {
+        let plan = std::sync::Arc::new(TessPlan {
+            faces: vec![Default::default(); 2],
+            ..Default::default()
+        });
+        let instance = |face_colors: Vec<[f32; 3]>| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&plan),
+            face_colors,
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let red = [1.0, 0.0, 0.0];
+        let green = [0.0, 1.0, 0.0];
+        let blue = [0.0, 0.0, 1.0];
+        let plans = vec![
+            instance(vec![red, green]),
+            instance(vec![blue]),
+            instance(Vec::new()),
+        ];
+        let (colours, offsets) = colour_table_data(&plans, None, false);
+        assert_eq!(offsets, vec![0, 2, 4], "each body starts its own slice");
+        assert_eq!(
+            colours,
+            vec![
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.17, 0.18, 0.195, 0.0],
+                [0.17, 0.18, 0.195, 0.0],
+                [0.17, 0.18, 0.195, 0.0],
+            ],
+            "authored faces keep their colour and missing faces use the default",
         );
+
+        // The ignore-look override is the same table fill for every face.
+        let (colours, _) = colour_table_data(&plans, Some([0.4, 0.5, 0.6]), false);
+        assert!(colours.iter().all(|colour| *colour == [0.4, 0.5, 0.6, 0.0]));
+
+        // Face-colours mode fills the table from the shared palette, per face.
+        let (colours, _) = colour_table_data(&plans, None, true);
+        for (face, colour) in colours.iter().enumerate() {
+            let expected = face_colour((face % 2) as u32);
+            assert_eq!(
+                *colour,
+                [expected[0], expected[1], expected[2], 0.0],
+                "face {face} must use the palette colour, not a body colour",
+            );
+        }
     }
 
     #[test]
@@ -1622,6 +2281,436 @@ mod tests {
     }
 
     #[test]
+    fn a_resident_plan_set_activates_without_a_staged_swap() {
+        let a = instance();
+        let b = instance();
+        let a_key = std::sync::Arc::as_ptr(&a.plan) as usize;
+        let b_key = std::sync::Arc::as_ptr(&b.plan) as usize;
+        let resident = std::collections::HashSet::from([a_key, b_key]);
+        assert!(
+            plans_resident(&[a.clone(), b.clone()], |key| resident.contains(&key)),
+            "a set whose GPU meshes are all resident needs no staging",
+        );
+        assert!(
+            !plans_resident(&[a, b], |key| key == a_key),
+            "one missing GPU mesh still needs preparation",
+        );
+        assert!(
+            plans_resident(&[], |_| false),
+            "an empty set has nothing to upload and activates immediately",
+        );
+    }
+
+    /// A non-resident set must keep the old plan chunks drawn until the new
+    /// chunks are resident. The viewport stages its edge payload against this
+    /// same activation counter, so edges cannot overtake the plan swap.
+    #[test]
+    fn a_staged_plan_set_keeps_the_old_chunks_until_activation() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let old = box_plan_sized(10.0);
+        let instance = |plan: std::sync::Arc<TessPlan>| PlanInstance {
+            target: "test".into(),
+            plan,
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        state.set_plans(vec![instance(std::sync::Arc::clone(&old))], true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        let old_activation = state.activation();
+        assert_eq!(state.chunks.len(), 1);
+        assert!(std::sync::Arc::ptr_eq(&state.plans[0].plan, &old));
+
+        let new = box_plan_sized(20.0);
+        let status = state.set_plans(vec![instance(new)], true, None, 2);
+        assert_eq!(status, PlanSetState::Staged);
+        assert_eq!(
+            state.activation(),
+            old_activation,
+            "staging a non-resident set must not activate the display",
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&state.plans[0].plan, &old),
+            "the old chunks stay painted while the new set uploads",
+        );
+
+        state.prepare_chunks(&device, &queue);
+        assert!(
+            state.activation() > old_activation,
+            "the prepared set activates as one step",
+        );
+        assert_eq!(state.display_snapshot(), 2);
+        assert!(!std::sync::Arc::ptr_eq(&state.plans[0].plan, &old));
+    }
+
+    /// A colour-only edit must rewrite the shared table, not the chunk list.
+    /// The same plan drawn by three bodies with different face colours is one
+    /// instanced chunk before and after the edit; its mesh, instance, body and
+    /// face-id buffers are byte-for-byte the same allocations.
+    #[test]
+    fn a_colour_only_edit_keeps_the_chunk_and_instance_buffers() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let shared = box_plan_sized(10.0);
+        let faces = shared.faces.len();
+        let instance = |face_colors: Vec<[f32; 3]>, x: f64| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&shared),
+            face_colors,
+            transforms: vec![nodecraft_display::DisplayTransform::Place {
+                offset: [x, 0.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let red = vec![[0.8, 0.05, 0.05]; faces];
+        let green = vec![[0.05, 0.8, 0.05]; faces];
+        let blue = vec![[0.05, 0.05, 0.8]; faces];
+        let mut plans = vec![
+            instance(red, -20.0),
+            instance(green, 0.0),
+            instance(blue, 20.0),
+        ];
+        state.set_plans(plans.clone(), true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.debug_counts().chunks, 1);
+        assert_eq!(state.debug_counts().instances, 3);
+        let before = state.debug_counts();
+        let mesh = std::sync::Arc::clone(&state.chunks[0].mesh);
+        let instances = std::sync::Arc::clone(&state.chunks[0].instances);
+        let bodies = std::sync::Arc::clone(&state.chunks[0].bodies);
+        let face_ids = std::sync::Arc::clone(&state.chunks[0].face_ids);
+        let table = std::sync::Arc::clone(&state.chunks[0].table);
+
+        let yellow = [0.9, 0.8, 0.1];
+        plans[1].face_colors = vec![yellow; faces];
+        assert_eq!(
+            state.set_plans(plans, true, None, 1),
+            PlanSetState::Immediate,
+            "a colour-only edit must not stage geometry",
+        );
+        state.prepare_chunks(&device, &queue);
+
+        let after = state.debug_counts();
+        assert_eq!(after.chunks, 1, "colour does not split the chunk");
+        assert_eq!(after.instances, 3);
+        assert_eq!(
+            after.chunk_builds, before.chunk_builds,
+            "a colour-only edit must not rebuild the chunk list",
+        );
+        assert_eq!(after.uploads, 0, "no mesh vertex upload is needed");
+        assert!(
+            after.table_uploads > before.table_uploads,
+            "the shared table is the only upload",
+        );
+        assert!(std::sync::Arc::ptr_eq(&state.chunks[0].mesh, &mesh));
+        assert!(std::sync::Arc::ptr_eq(&state.chunks[0].instances, &instances));
+        assert!(std::sync::Arc::ptr_eq(&state.chunks[0].bodies, &bodies));
+        assert!(std::sync::Arc::ptr_eq(&state.chunks[0].face_ids, &face_ids));
+        assert!(
+            std::sync::Arc::ptr_eq(&state.chunks[0].table, &table),
+            "the table is rewritten in place, so its bind group stays valid",
+        );
+        let bytes = read_buffer(&device, &queue, &state.chunks[0].table.colours);
+        let colours: &[[f32; 4]] = bytemuck::cast_slice(&bytes);
+        assert_eq!(colours[faces], [yellow[0], yellow[1], yellow[2], 0.0]);
+        assert_eq!(colours[0], [0.8, 0.05, 0.05, 0.0]);
+    }
+
+    fn chunk_models(
+        state: &PlanState,
+        index: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Vec<[[f32; 4]; 4]> {
+        let chunk = &state.chunks[index];
+        let instance_floats = std::mem::size_of::<GpuInstance>() / std::mem::size_of::<f32>();
+        let bytes = read_buffer(device, queue, &chunk.instances);
+        let floats: &[f32] = bytemuck::cast_slice(&bytes);
+        (0..chunk.instance_count as usize)
+            .map(|instance| {
+                let start = instance * instance_floats;
+                let mut model = [[0.0f32; 4]; 4];
+                for (column, values) in model.iter_mut().enumerate() {
+                    values.copy_from_slice(&floats[start + column * 4..start + column * 4 + 4]);
+                }
+                model
+            })
+            .collect()
+    }
+
+    fn chunk_bodies(
+        state: &PlanState,
+        index: usize,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Vec<u32> {
+        let chunk = &state.chunks[index];
+        let bytes = read_buffer(device, queue, &chunk.bodies);
+        let ids: &[u32] = bytemuck::cast_slice(&bytes);
+        ids[..chunk.instance_count as usize].to_vec()
+    }
+
+    #[test]
+    fn shared_plan_bodies_stay_instances_through_staged_and_immediate_commits() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let shared = box_plan_sized(10.0);
+        let instance = |transforms| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&shared),
+            face_colors: Vec::new(),
+            transforms,
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let mirror = vec![nodecraft_display::DisplayTransform::Mirror {
+            plane: "yz",
+            offset: 10.0,
+        }];
+        let one = || vec![instance(Vec::new())];
+        let two = || vec![instance(Vec::new()), instance(mirror.clone())];
+        let expected = vec![instance_matrix(&[]), instance_matrix(&mirror)];
+        state.set_plans(two(), true, None, 2);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(
+            state.chunks.len(),
+            1,
+            "staged activation builds one chunk for both bodies of the shared plan",
+        );
+        assert_eq!(state.chunks[0].instance_count, 2);
+        assert_eq!(chunk_models(&state, 0, &device, &queue), expected);
+        assert_eq!(chunk_bodies(&state, 0, &device, &queue), vec![0, 1]);
+
+        assert_eq!(state.set_plans(one(), true, None, 3), PlanSetState::Immediate);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.chunks.len(), 1);
+        assert_eq!(state.chunks[0].instance_count, 1);
+        assert_eq!(chunk_models(&state, 0, &device, &queue), vec![expected[0]]);
+
+        assert_eq!(state.set_plans(two(), true, None, 4), PlanSetState::Immediate);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(
+            state.chunks.len(),
+            1,
+            "the resident immediate path must build the same one chunk as staging",
+        );
+        assert_eq!(state.debug_counts().instances, 2);
+        assert_eq!(state.chunks[0].instance_count, 2);
+        assert_eq!(
+            chunk_models(&state, 0, &device, &queue),
+            expected,
+            "the 2 -> 1 -> 2 toggle must keep both placements in body order",
+        );
+        assert_eq!(chunk_bodies(&state, 0, &device, &queue), vec![0, 1]);
+    }
+
+    #[test]
+    fn shared_plan_keeps_two_translates_and_a_mirror_as_one_instance_list() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let shared = box_plan_sized(10.0);
+        let instance = |transforms| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&shared),
+            face_colors: Vec::new(),
+            transforms,
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let transforms = vec![
+            Vec::new(),
+            vec![nodecraft_display::DisplayTransform::Place {
+                offset: [10.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            vec![nodecraft_display::DisplayTransform::Place {
+                offset: [0.0, 20.0, 0.0],
+                rotation: [0.0; 3],
+            }],
+            vec![nodecraft_display::DisplayTransform::Mirror {
+                plane: "yz",
+                offset: 10.0,
+            }],
+        ];
+        let expected: Vec<[[f32; 4]; 4]> =
+            transforms.iter().map(|transform| instance_matrix(transform)).collect();
+        let four = || transforms.iter().cloned().map(instance).collect::<Vec<_>>();
+
+        // Staged activation (the first set has to upload the resident mesh).
+        state.set_plans(four(), true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.chunks.len(), 1, "one chunk for the whole shared plan");
+        assert_eq!(state.chunks[0].instance_count, 4);
+        assert_eq!(chunk_models(&state, 0, &device, &queue), expected);
+        assert_eq!(chunk_bodies(&state, 0, &device, &queue), vec![0, 1, 2, 3]);
+
+        // Immediate resident commit after a one-body set.
+        state.set_plans(vec![instance(Vec::new())], true, None, 2);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.set_plans(four(), true, None, 3), PlanSetState::Immediate);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.chunks.len(), 1);
+        assert_eq!(state.chunks[0].instance_count, 4);
+        assert_eq!(
+            chunk_models(&state, 0, &device, &queue),
+            expected,
+            "the immediate path must keep every placement, including the mirror",
+        );
+        assert_eq!(chunk_bodies(&state, 0, &device, &queue), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_thousand_bodies_sharing_a_plan_are_one_chunk_and_one_draw() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let shared = box_plan_sized(1.0);
+        let plans: Vec<PlanInstance> = (0..1000)
+            .map(|body| PlanInstance {
+                target: "scatter".into(),
+                plan: std::sync::Arc::clone(&shared),
+                face_colors: Vec::new(),
+                transforms: if body == 0 {
+                    Vec::new()
+                } else {
+                    vec![nodecraft_display::DisplayTransform::Place {
+                        offset: [body as f64 * 2.0, 0.0, 0.0],
+                        rotation: [0.0; 3],
+                    }]
+                },
+                edge_ids: std::sync::Arc::from(Vec::new()),
+            })
+            .collect();
+        state.set_plans(plans, true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        let debug = state.debug_counts();
+        assert_eq!(debug.plans, 1000);
+        assert_eq!(debug.chunks, 1, "1000 bodies of one plan are one chunk");
+        assert_eq!(debug.instances, 1000, "the chunk has one instance per body");
+        assert_eq!(state.chunks.len(), 1, "one chunk means one draw per pass");
+        assert_eq!(state.chunks[0].instance_count, 1000);
+        let plan_key = std::sync::Arc::as_ptr(&shared) as usize;
+        assert_eq!(
+            state.resident[&plan_key].instances.len(),
+            1,
+            "one instance buffer for the group, not one per body",
+        );
+        assert_eq!(
+            chunk_bodies(&state, 0, &device, &queue),
+            (0..1000).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn a_newer_staged_plan_set_replaces_the_older_one_before_activation() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let instance = |plan: std::sync::Arc<TessPlan>, snapshot: u64| PlanInstance {
+            target: format!("snapshot-{snapshot}"),
+            plan,
+            face_colors: Vec::new(),
+            transforms: Vec::new(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+        };
+        let first = box_plan_sized(10.0);
+        state.set_plans(
+            vec![instance(std::sync::Arc::clone(&first), 1)],
+            true,
+            None,
+            1,
+        );
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.display_snapshot(), 1);
+
+        // Two newer states arrive before either can upload. Only the newest
+        // pending pair may survive and activate as a whole.
+        state.set_plans(vec![instance(box_plan_sized(20.0), 2)], true, None, 2);
+        state.set_plans(vec![instance(box_plan_sized(30.0), 3)], true, None, 3);
+        assert_eq!(state.display_snapshot(), 1);
+        assert_eq!(state.debug_counts().pending_snapshot, 3);
+        state.prepare_chunks(&device, &queue);
+        assert_eq!(state.display_snapshot(), 3);
+        assert_eq!(state.plans[0].target, "snapshot-3");
+    }
+
+    #[test]
     fn readiness_requires_every_plan_and_refused_plans_settle() {
         let a = instance();
         let b = instance();
@@ -1630,5 +2719,130 @@ mod tests {
         assert!(!plans_ready(&[a.clone(), b.clone()], &prepared));
         prepared.insert(std::sync::Arc::as_ptr(&b.plan) as usize);
         assert!(plans_ready(&[a, b], &prepared));
+    }
+
+    fn headless_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let instance = wgpu::Instance::default();
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: false,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+        .ok()
+        .or_else(|| {
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                force_fallback_adapter: true,
+                compatible_surface: None,
+                ..Default::default()
+            }))
+            .ok()
+        })?;
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()
+    }
+
+    fn box_plan_sized(size: f64) -> std::sync::Arc<TessPlan> {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let mut brep = api::create_box(
+            &mut kernel,
+            Point3::new(-size * 0.5, -size * 0.5, -size * 0.5),
+            size,
+            size,
+            size,
+        )
+        .expect("box");
+        nodecraft_layers::tessellate_kernel_preview(&mut kernel, &mut brep, 2)
+            .expect("box preview plan")
+            .plan
+    }
+
+    fn box_plan() -> std::sync::Arc<TessPlan> {
+        box_plan_sized(10.0)
+    }
+
+    fn read_buffer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+    ) -> Vec<u8> {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("plan test readback"),
+            size: buffer.size(),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("plan test readback"),
+        });
+        encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, buffer.size());
+        queue.submit(Some(encoder.finish()));
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        receiver.recv().expect("map callback").expect("map");
+        let bytes = slice.get_mapped_range().expect("map range").to_vec();
+        readback.unmap();
+        bytes
+    }
+
+    /// A GPU mesh's fill must not ride on a paint frame's encoder: if that frame
+    /// is dropped (surface acquire skips it), the resident entry would keep an
+    /// empty vertex buffer and the solid disappears while its edge overlay still
+    /// draws. `prepare` therefore submits the fill itself.
+    #[test]
+    fn a_resident_mesh_is_filled_even_when_the_prepare_frame_is_dropped() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let plan = box_plan();
+        state.set_plans(
+            vec![PlanInstance {
+                target: "test".into(),
+                plan,
+                face_colors: Vec::new(),
+                transforms: Vec::new(),
+                edge_ids: std::sync::Arc::from(Vec::new()),
+            }],
+            true,
+            None,
+            1,
+        );
+        // This encoder stands for the paint frame that is never submitted.
+        let frame = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("dropped prepare frame"),
+        });
+        state.prepare_chunks(&device, &queue);
+        drop(frame);
+        let mesh = state.chunks.first().expect("activated chunk").mesh.clone();
+        let bytes = read_buffer(&device, &queue, &mesh.vertices);
+        let stride = solidcraft_viewport_gpu::VERTEX_STRIDE as usize;
+        let filled = bytes.chunks_exact(stride).any(|vertex| {
+            let component = |at: usize| {
+                f32::from_ne_bytes(vertex[at..at + 4].try_into().expect("component"))
+            };
+            component(0) != 0.0 || component(4) != 0.0 || component(8) != 0.0
+        });
+        assert!(
+            filled,
+            "the resident GPU mesh must be filled even when no paint frame is submitted",
+        );
     }
 }

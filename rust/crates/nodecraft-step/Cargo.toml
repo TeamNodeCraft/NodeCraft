@@ -5,9 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 solidcore = { workspace = true }
-solidcore-step = { workspace = true }
 solidcore-record = { workspace = true }
 solidcore-convert = { workspace = true }
-step-export = { workspace = true }
-earcutr = "0.5.0"
+solidcore-ops = { workspace = true }
+solidcore-cadir = { workspace = true }
+cadmpeg-core = { workspace = true }
+cadmpeg-ir = { workspace = true }
+cadmpeg-registry = { workspace = true }
+cadmpeg-codec-step = { workspace = true }
+
+[dev-dependencies]
+nodecraft-ops = { path = "../nodecraft-ops" }
+solidcore = { workspace = true }
+cadmpeg-ir = { workspace = true }
+cadmpeg-codec-step = { workspace = true }

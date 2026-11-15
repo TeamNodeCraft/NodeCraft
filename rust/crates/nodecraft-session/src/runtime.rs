@@ -290,6 +290,69 @@ mod tests {
         assert_eq!(result.output.response.cache_stats.as_ref().expect("stats").misses, 0);
     }
 
+    fn many_branch_doc() -> GraphDocument {
+        let mut nodes = Vec::new();
+        let mut connections = Vec::new();
+        for index in 0..16 {
+            nodes.push(GraphNode {
+                expressions: Default::default(),
+                id: format!("p{index}"),
+                node_type: "primitive".into(),
+                values: json!({"primitiveType":"box","length":10,"width":10,"height":10}),
+                suppressed: false,
+                x: 0.0,
+                y: index as f64 * 100.0,
+            });
+            nodes.push(GraphNode {
+                expressions: Default::default(),
+                id: format!("t{index}"),
+                node_type: "translate".into(),
+                values: json!({"x": index}),
+                suppressed: false,
+                x: 100.0,
+                y: index as f64 * 100.0,
+            });
+            connections.push(GraphConnection {
+                from: format!("p{index}"),
+                to: format!("t{index}"),
+                input: "shape".into(),
+                out: "shape".into(),
+            });
+        }
+        GraphDocument {
+            schema_version: 1,
+            id: "many".into(),
+            root: crate::GraphDefinition {
+                id: "many".into(),
+                name: "Many".into(),
+                kind: "graph".into(),
+                nodes,
+                connections,
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prewarmed_leaf_stays_cached_across_another_branch_edit() {
+        let mut runtime = GraphRuntime::new(many_branch_doc());
+        let targets: Vec<String> = (0..16).map(|index| format!("t{index}")).collect();
+        runtime.evaluate(&targets, None).expect("first");
+        runtime
+            .apply_commands(&[Command::SetValue {
+                node: "t0".into(),
+                field: "x".into(),
+                value: json!(9),
+            }])
+            .expect("edit");
+        let result = runtime.evaluate(&targets, None).expect("second");
+        assert_eq!(result.dirty_nodes, vec!["t0"]);
+        let stats = result.output.response.cache_stats.as_ref().expect("stats");
+        assert_eq!(stats.misses, 1, "other branches must stay cached");
+        assert!(stats.hits >= 15, "prewarmed leaves should hit");
+    }
+
     #[test]
     fn value_edit_only_recomputes_changed_node_and_downstream() {
         let mut runtime = GraphRuntime::new(doc());

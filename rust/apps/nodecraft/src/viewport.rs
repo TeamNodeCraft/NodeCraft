@@ -21,6 +21,22 @@ use solidcore_record::Vec3;
 /// origin the same point by construction.
 const VIEW_ORIGIN: solidcore_record::Vec3 = solidcore_record::Vec3::ZERO;
 
+/// The colour every path uses when a body has no authored Look colour, and the
+/// ignore-look override. The plan table's missing-face fill uses this too.
+pub(crate) const DEFAULT_FACE_COLOUR: [f32; 3] = [0.17, 0.18, 0.195];
+
+/// The plan path's enablement and override colour. Face-colours deliberately
+/// does not appear in the enable decision: it is a table fill on the same plan
+/// renderer, not a reason to fall back to the CPU object mesh (which plan-only
+/// evaluation leaves without triangles).
+fn plan_draw_state(
+    plans_empty: bool,
+    _face_colours: bool,
+    ignore_look: bool,
+) -> (bool, Option<[f32; 3]>) {
+    (!plans_empty, ignore_look.then_some(DEFAULT_FACE_COLOUR))
+}
+
 fn lens_shift_for_visible(full: egui::Rect, visible: egui::Rect) -> [f32; 2] {
     [
         2.0 * (visible.center().x - full.center().x) / full.width().max(1.0),
@@ -96,35 +112,6 @@ impl ViewSettings {
     }
 }
 
-/// Which display bodies a gizmo drag preview moves.
-///
-/// Combine/Part results namespace their inputs as `body:{index}:` (nested
-/// combines nest prefixes), so an edit deep in one branch can preview without
-/// dragging the unrelated bodies it is assembled with.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PreviewScope {
-    /// Every body in the display mesh is downstream of the edited node.
-    All,
-    /// Only bodies whose namespaced ids start with one of these prefixes.
-    #[allow(dead_code)] // constructed by the body-scoped preview regression tests
-    Bodies(Vec<String>),
-}
-
-impl Default for PreviewScope {
-    fn default() -> Self {
-        Self::All
-    }
-}
-
-impl PreviewScope {
-    pub fn is_affected(&self, body_id: &str) -> bool {
-        match self {
-            Self::All => true,
-            Self::Bodies(prefixes) => prefixes.iter().any(|prefix| body_id.starts_with(prefix)),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SelectionMode {
     #[default]
@@ -144,6 +131,7 @@ fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     point.distance(a + ab * t)
 }
 
+#[cfg(not(feature = "gpu-viewport"))]
 fn raycast_face(
     mesh: &solidcraft_geom::Mesh,
     face_ids: &[String],
@@ -206,18 +194,18 @@ type PreparedObject = crate::gpu_viewport::PreparedObject;
 type PreparedObject = ();
 
 struct DisplayPrep {
-    tx: std::sync::mpsc::Sender<(u64, NodeMesh, ViewSettings)>,
-    rx: std::sync::mpsc::Receiver<(u64, DisplayMesh, Option<PreparedObject>)>,
+    tx: std::sync::mpsc::Sender<(u64, u64, NodeMesh, ViewSettings)>,
+    rx: std::sync::mpsc::Receiver<(u64, u64, DisplayMesh, Option<PreparedObject>)>,
 }
 
 impl Default for DisplayPrep {
     fn default() -> Self {
-        let (tx, requests) = std::sync::mpsc::channel::<(u64, NodeMesh, ViewSettings)>();
-        let (results, rx) = std::sync::mpsc::channel::<(u64, DisplayMesh, Option<PreparedObject>)>();
+        let (tx, requests) = std::sync::mpsc::channel::<(u64, u64, NodeMesh, ViewSettings)>();
+        let (results, rx) = std::sync::mpsc::channel::<(u64, u64, DisplayMesh, Option<PreparedObject>)>();
         std::thread::Builder::new()
             .name("nodecraft-display-prep".into())
             .spawn(move || {
-                while let Ok((generation, mesh, view)) = requests.recv() {
+                while let Ok((generation, snapshot, mesh, view)) = requests.recv() {
                     let mut display = adapter::display_mesh(&mesh);
                     if view.ignore_look_colors {
                         display.face_colors.clear();
@@ -226,7 +214,7 @@ impl Default for DisplayPrep {
                     let prepared = Some(crate::gpu_viewport::prepare_object(&display, &view));
                     #[cfg(not(feature = "gpu-viewport"))]
                     let prepared = None;
-                    if results.send((generation, display, prepared)).is_err() {
+                    if results.send((generation, snapshot, display, prepared)).is_err() {
                         break;
                     }
                 }
@@ -263,6 +251,17 @@ pub struct Viewport {
     lod_index: usize,
     /// Display plans from the current evaluation, kept for GPU tessellation.
     pub(crate) plans: Vec<nodecraft_display::PlanInstance>,
+    /// The plan set is staged in the GPU layer: display updates ride with it
+    /// and become visible in the same activation.
+    plan_set_staged: bool,
+    /// Exact snapshot the current/staged plan set came from. Edge/object
+    /// payloads are tagged with it so a pair can only activate together.
+    plans_snapshot: u64,
+    /// Snapshot of the display geometry currently on the GPU.
+    displayed_snapshot: u64,
+    /// Target whose display mesh is currently shown. Staged targets switch only
+    /// when the plan set activates.
+    displayed_target: Option<String>,
     /// Planner defects from the current display tessellation.
     tessellation_diagnostics: Vec<String>,
     /// Whether the camera has been fitted to a display mesh. Before that, the
@@ -298,6 +297,15 @@ pub struct Viewport {
     last_full: Option<egui::Rect>,
     last_visible: Option<egui::Rect>,
     pending_view_restore: Option<ViewSnapshot>,
+    last_gpu_pick_inputs: Option<([f32; 2], u64, Option<[[f32; 4]; 4]>, Camera)>,
+    /// An edge click waiting for its own GPU pick result, with the pick scene
+    /// generation it was requested against.
+    pending_gpu_pick: Option<(u64, egui::Pos2, u64)>,
+    /// A face pick used only to answer "did this edge click miss the body?".
+    pending_face_empty: Option<(u64, egui::Pos2, u64)>,
+    /// The latest hover request. A result from an older request must not move
+    /// the hover back to a stale pointer.
+    latest_hover_pick: Option<u64>,
     /// Development-only camera diagnostics. Deliberately not serialized.
     show_view_matrix: bool,
     /// Opt-in GPU/frame diagnostics overlay. Off by default.
@@ -330,11 +338,13 @@ pub struct Viewport {
     /// Display-only drag preview applied to the GPU instances and scene edges
     /// until the kernel result for the edited values arrives.
     preview_transform: Option<[[f32; 4]; 4]>,
-    /// Display bodies the preview moves (see [`PreviewScope`]).
-    preview_scope: PreviewScope,
-    /// Alpha for scoped edit-preview geometry. 1.0 is the normal opaque drag
-    /// preview; lower values put the moved range in the ghost layer.
+    /// Alpha for the drag-preview instances. 1.0 is the normal opaque drag
+    /// preview; lower values put the preview in the ghost layer.
     preview_alpha: f32,
+    /// What the display currently being staged does to the preview when its
+    /// plan set and edges activate. Overlays staged in the same display update
+    /// use the same decision.
+    display_retires_preview: bool,
     /// Current standalone edit-ghost transform, retained so display-setting
     /// changes can update the ghost renderer without re-evaluating.
     edit_ghost_transform: Option<[[f32; 4]; 4]>,
@@ -402,6 +412,10 @@ impl Default for Viewport {
             chrome_visible: true,
             display: None,
             plans: Vec::new(),
+            plan_set_staged: false,
+            plans_snapshot: 0,
+            displayed_snapshot: 0,
+            displayed_target: None,
             tessellation_diagnostics: Vec::new(),
             camera_fit: false,
             display_prep: DisplayPrep::default(),
@@ -424,6 +438,10 @@ impl Default for Viewport {
             last_full: None,
             last_visible: None,
             pending_view_restore: None,
+            last_gpu_pick_inputs: None,
+            pending_gpu_pick: None,
+            pending_face_empty: None,
+            latest_hover_pick: None,
             show_view_matrix: false,
             show_gpu_info: false,
             frame_ms: 0.0,
@@ -443,8 +461,8 @@ impl Default for Viewport {
             gizmo_update: None,
             comparison_ghost: false,
             preview_transform: None,
-            preview_scope: PreviewScope::All,
             preview_alpha: 1.0,
+            display_retires_preview: true,
             edit_ghost_transform: None,
             edit_ghost_edges: Vec::new(),
                     edit_ghost_plans: Vec::new(),
@@ -549,6 +567,13 @@ impl Viewport {
     }
 
     pub fn set_tessellation_diagnostics(&mut self, diagnostics: Vec<String>) {
+        if self.plan_set_staged {
+            #[cfg(feature = "gpu-viewport")]
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.stage_diagnostics(diagnostics);
+                return;
+            }
+        }
         self.tessellation_diagnostics = diagnostics;
     }
 
@@ -566,12 +591,7 @@ impl Viewport {
     pub fn plan_pending(&self) -> bool {
         #[cfg(feature = "gpu-viewport")]
         {
-            self.plan_ready()
-                && self
-                    .gpu
-                    .as_ref()
-                    .and_then(|gpu| gpu.plan_debug())
-                    .is_some_and(|debug| debug.pending)
+            self.plan_ready() && self.plan_debug_struct().is_some_and(|debug| debug.pending)
         }
         #[cfg(not(feature = "gpu-viewport"))]
         {
@@ -580,13 +600,26 @@ impl Viewport {
     }
 
     pub fn view_plans_hash(&self) -> u64 {
-        crate::gpu_plan::plan_identity_hash(&self.plans)
-    }
-
-    pub fn plan_debug(&self) -> Option<crate::gpu_plan::PlanDebug> {
         #[cfg(feature = "gpu-viewport")]
         {
-            self.gpu.as_ref().and_then(|gpu| gpu.plan_debug())
+            crate::plan_math::plan_identity_hash(&self.plans)
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            0
+        }
+    }
+
+    #[cfg(feature = "gpu-viewport")]
+    fn plan_debug_struct(&self) -> Option<crate::gpu_plan::PlanDebug> {
+        self.gpu.as_ref().and_then(|gpu| gpu.plan_debug())
+    }
+
+    pub fn plan_debug(&self) -> Option<serde_json::Value> {
+        #[cfg(feature = "gpu-viewport")]
+        {
+            self.plan_debug_struct()
+                .and_then(|debug| serde_json::to_value(debug).ok())
         }
         #[cfg(not(feature = "gpu-viewport"))]
         {
@@ -596,23 +629,134 @@ impl Viewport {
 
     pub fn set_plans(&mut self, plans: Vec<nodecraft_display::PlanInstance>) {
         self.plans = plans;
-        self.refresh_plan_state();
+        self.plan_set_staged = self.refresh_plan_state();
     }
 
-    /// Plan rendering needs a uniform body colour. Re-evaluate that after the
-    /// display mesh (and therefore its face colours) becomes available.
-    fn refresh_plan_state(&mut self) {
-        // The plan path carries per-vertex face colours itself; only the
-        // override modes need the CPU display colours.
-        let colour = self
-            .view
-            .ignore_look_colors
-            .then_some([0.17, 0.18, 0.195]);
-        let enabled = !self.plans.is_empty() && !self.view.face_colours;
+    /// Hand one display frame to the viewport. The plan set and the display it
+    /// belongs to are one unit: when the plans need staging, the edge mesh,
+    /// picking display, diagnostics and target are staged with them and become
+    /// visible in the same GPU activation. `retire_preview` is part of that
+    /// pair: an authoritative display at the edited placement retires the drag
+    /// preview only when it activates, while a live drag keeps it. Returns
+    /// whether the display is staged.
+    pub fn set_display(
+        &mut self,
+        plans: Vec<nodecraft_display::PlanInstance>,
+        mesh: Option<&NodeMesh>,
+        diagnostics: Vec<String>,
+        target: &str,
+        snapshot: u64,
+        retire_preview: bool,
+    ) -> bool {
+        self.sync_activated_display();
+        self.display_retires_preview = retire_preview;
+        self.plans = plans;
+        self.plans_snapshot = snapshot;
+        let staged = self.refresh_plan_state();
+        if staged {
+            #[cfg(feature = "gpu-viewport")]
+            {
+                let display = mesh.map(|mesh| self.display_mesh_for_view(mesh));
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.stage_display(
+                        display,
+                        mesh.cloned(),
+                        Some(diagnostics),
+                        Some(target.to_owned()),
+                        snapshot,
+                        retire_preview,
+                    );
+                }
+                self.plan_set_staged = true;
+                // Any older async display prep belongs to a superseded
+                // snapshot; its result will be rejected by the snapshot check.
+                self.pending_display = false;
+                self.dirty = true;
+                return true;
+            }
+        }
+        self.plan_set_staged = false;
+        self.displayed_snapshot = snapshot;
+        self.displayed_target = Some(target.to_owned());
+        self.tessellation_diagnostics = diagnostics;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_plans(self.plans.clone(), enabled, colour);
+            gpu.commit_immediate_snapshot(snapshot);
         }
+        // Plan triangles and this display are one commit. Never let an async
+        // display-prep worker leave the new plan chunks visible with the old
+        // edge mesh: plan-path displays commit synchronously. The >=100k-face
+        // async path remains for CPU fallback displays with no plan set.
+        self.update_mesh_with(mesh, self.plans.is_empty(), retire_preview);
+        false
+    }
+
+    pub fn displayed_target(&self) -> Option<&str> {
+        self.displayed_target.as_deref()
+    }
+
+    pub fn displayed_snapshot(&self) -> u64 {
+        self.displayed_snapshot
+    }
+
+    /// Diagnostic entry point: copy a display the GPU already activated into
+    /// the CPU mirror before reporting state.
+    pub fn refresh_display_mirror(&mut self) {
+        self.sync_activated_display();
+    }
+
+    /// Copy the display payload the GPU layer activated during a paint callback
+    /// into this CPU mirror. The GPU display, edges and picking already switched
+    /// together; this only keeps the viewport's CPU-side copy in step.
+    fn sync_activated_display(&mut self) {
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut()
+            && let Some(active) = gpu.take_activated_display()
+        {
+            self.display = active.display.map(|display| (*display).clone());
+            self.source_mesh = active.source_mesh;
+            if let Some(diagnostics) = active.diagnostics {
+                self.tessellation_diagnostics = diagnostics;
+            }
+            if let Some(target) = active.target {
+                self.displayed_target = Some(target);
+            }
+            // A retirement is the one activation change the CPU mirror cannot
+            // know on its own. A kept preview is already the app's current
+            // value (or newer), so never roll a live drag back to the copy the
+            // pair captured when it was staged.
+            if active.preview.is_none() {
+                self.preview_transform = None;
+                self.preview_alpha = 1.0;
+            }
+            self.displayed_snapshot = active.snapshot;
+            self.plan_set_staged = false;
+            self.dirty = true;
+        }
+    }
+
+    /// Re-evaluate the plan draw state after the display mesh (and therefore
+    /// its face colours) becomes available. Returns whether the GPU layer
+    /// staged the set for a later activation.
+    fn refresh_plan_state(&mut self) -> bool {
+        // The plan shader looks colours up in the shared table; only the
+        // ignore-look override replaces every face at once. Face-colours is a
+        // table fill, so it must not disable the plan path: that fallback used
+        // the CPU display mesh, which plan-only evaluation has not built since
+        // 7fe0c772a.
+        let (enabled, colour) = plan_draw_state(
+            self.plans.is_empty(),
+            self.view.face_colours,
+            self.view.ignore_look_colors,
+        );
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            return gpu.set_plans(self.plans.clone(), enabled, colour, self.plans_snapshot)
+                == crate::gpu_plan::PlanSetState::Staged;
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        let _ = (enabled, colour);
+        false
     }
 
     /// Drop every display resource owned by the current document: plans, GPU
@@ -622,6 +766,11 @@ impl Viewport {
         self.set_plans(Vec::new());
         self.set_mesh(None);
         self.clear_edit_ghost();
+        self.plan_set_staged = false;
+        self.plans_snapshot = 0;
+        self.displayed_snapshot = 0;
+        self.displayed_target = None;
+        self.tessellation_diagnostics.clear();
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.clear_plan_document();
@@ -630,7 +779,7 @@ impl Viewport {
     }
 
     pub fn set_mesh(&mut self, mesh: Option<&NodeMesh>) {
-        self.update_mesh(mesh);
+        self.update_mesh(mesh, true);
         self.fit();
     }
 
@@ -638,7 +787,9 @@ impl Viewport {
     /// gizmo is being dragged so the viewport follows the edit instead of
     /// snapping back to a fitted view on every evaluation result.
     pub fn set_mesh_preserving_camera(&mut self, mesh: Option<&NodeMesh>) {
-        self.update_mesh(mesh);
+        // A caller that wants the preview retired does so explicitly through
+        // the display unit; this path keeps a live drag preview in step.
+        self.update_mesh(mesh, false);
     }
 
 
@@ -649,15 +800,32 @@ impl Viewport {
         added: &NodeMesh,
         removed: &NodeMesh,
     ) {
+        self.sync_activated_display();
         self.comparison_ghost = false;
         self.selected_edges.clear();
         self.hovered_edge = None;
         self.reset_lods();
-        self.display = Some(crate::adapter::display_mesh_with_difference(base, added, removed));
+        let display = crate::adapter::display_mesh_with_difference(base, added, removed);
+        #[cfg(feature = "gpu-viewport")]
+        if self.plan_set_staged {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.stage_display(
+                    Some(display),
+                    None,
+                    None,
+                    None,
+                    self.plans_snapshot,
+                    self.display_retires_preview,
+                );
+            }
+            self.dirty = true;
+            return;
+        }
+        self.display = Some(display);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref(), self.display_retires_preview);
         }
         self.dirty = true;
     }
@@ -665,16 +833,40 @@ impl Viewport {
     /// Display `ghost` as a faint feature-input layer under `base`. This is not
     /// an exact material difference; it is the selected feature's upstream body.
     pub fn set_feature_ghost_mesh(&mut self, base: &NodeMesh, ghost: &NodeMesh) {
+        self.sync_activated_display();
         self.comparison_ghost = true;
         self.selected_edges.clear();
         self.hovered_edge = None;
         let empty = NodeMesh::default();
         self.reset_lods();
-        self.display = Some(crate::adapter::display_mesh_with_difference(base, &empty, ghost));
+        let display = crate::adapter::display_mesh_with_difference(base, &empty, ghost);
+        #[cfg(feature = "gpu-viewport")]
+        if self.plan_set_staged {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.stage_display(
+                    Some(display),
+                    None,
+                    None,
+                    None,
+                    self.plans_snapshot,
+                    self.display_retires_preview,
+                );
+                gpu.set_ghost_matrix(None);
+                gpu.set_ghost_plans(
+                    self.feature_ghost_plans.clone(),
+                    self.view.ghost_opacity,
+                    Some(ghost_plan_colour()),
+                    !self.feature_ghost_plans.is_empty(),
+                );
+            }
+            self.dirty = true;
+            return;
+        }
+        self.display = Some(display);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref(), self.display_retires_preview);
             gpu.set_ghost_matrix(None);
             gpu.set_ghost_plans(
                 self.feature_ghost_plans.clone(),
@@ -693,6 +885,7 @@ impl Viewport {
         added: &NodeMesh,
         removed: &NodeMesh,
     ) {
+        self.sync_activated_display();
         self.comparison_ghost = false;
         self.selected_edges.clear();
         self.hovered_edge = None;
@@ -702,16 +895,59 @@ impl Viewport {
         display.edges = crate::adapter::display_mesh(selection_source).edges;
         display.selection_edges = None;
         self.reset_lods();
+        #[cfg(feature = "gpu-viewport")]
+        if self.plan_set_staged {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.stage_display(
+                    Some(display),
+                    None,
+                    None,
+                    None,
+                    self.plans_snapshot,
+                    self.display_retires_preview,
+                );
+            }
+            self.dirty = true;
+            return;
+        }
         self.display = Some(display);
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref(), self.display_retires_preview);
         }
         self.dirty = true;
     }
 
-    fn update_mesh(&mut self, mesh: Option<&NodeMesh>) {
+    fn update_mesh(&mut self, mesh: Option<&NodeMesh>, retire_preview: bool) {
+        self.update_mesh_with(mesh, true, retire_preview);
+    }
+
+    fn update_mesh_with(
+        &mut self,
+        mesh: Option<&NodeMesh>,
+        allow_async: bool,
+        retire_preview: bool,
+    ) {
+        self.sync_activated_display();
+        if self.plan_set_staged {
+            #[cfg(feature = "gpu-viewport")]
+            {
+                let display = mesh.map(|mesh| self.display_mesh_for_view(mesh));
+                if let Some(gpu) = self.gpu.as_mut() {
+                    gpu.stage_display(
+                        display,
+                        mesh.cloned(),
+                        None,
+                        None,
+                        self.plans_snapshot,
+                        retire_preview,
+                    );
+                }
+                self.dirty = true;
+                return;
+            }
+        }
         self.comparison_ghost = false;
         // Edge ids belong to the previous display target. Keeping the highlight
         // across an evaluation makes unrelated edges look selected on the next
@@ -723,9 +959,10 @@ impl Viewport {
         // while its transform is still live; the main evaluation must not blank
         // the ghost's faces between preview frames.
         let keep_edit_ghost = self.edit_ghost_transform.is_some();
-        self.preview_transform = None;
-        self.preview_scope = PreviewScope::All;
-        self.preview_alpha = 1.0;
+        if retire_preview {
+            self.preview_transform = None;
+            self.preview_alpha = 1.0;
+        }
         if !keep_edit_ghost {
             self.edit_ghost_transform = None;
             self.edit_ghost_edges.clear();
@@ -740,7 +977,7 @@ impl Viewport {
         self.source_mesh = mesh.cloned();
         self.reset_lods();
         if let Some(mesh) = mesh {
-            if mesh.faces.len() >= ASYNC_DISPLAY_TRIANGLES {
+            if allow_async && mesh.faces.len() >= ASYNC_DISPLAY_TRIANGLES {
                 // Conversion and normal splitting run on the display-prep
                 // worker; the old display stays visible until the new one is
                 // ready.
@@ -753,7 +990,7 @@ impl Viewport {
                 let _ = self
                     .display_prep
                     .tx
-                    .send((generation, mesh.clone(), self.view));
+                    .send((generation, self.plans_snapshot, mesh.clone(), self.view));
                 self.dirty = true;
                 #[cfg(feature = "gpu-viewport")]
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -770,7 +1007,7 @@ impl Viewport {
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref(), retire_preview);
             if !keep_edit_ghost {
                 gpu.clear_ghost();
             }
@@ -778,10 +1015,17 @@ impl Viewport {
     }
 
     fn poll_display_prep(&mut self) {
-        let Some((generation, display, prepared)) = self.display_prep.rx.try_recv().ok() else {
+        let Some((generation, snapshot, display, prepared)) = self.display_prep.rx.try_recv().ok()
+        else {
             return;
         };
         if generation != self.display_generation || !self.pending_display {
+            return;
+        }
+        // An async prep belongs to one object state. If a newer snapshot has
+        // since replaced the plans, this display must not attach to it.
+        if snapshot != self.plans_snapshot {
+            self.pending_display = false;
             return;
         }
         self.pending_display = false;
@@ -791,12 +1035,32 @@ impl Viewport {
                 self.display_prep_started.take().map_or(0, |started| started.elapsed().as_millis())
             );
         }
+        self.sync_activated_display();
+        let staged = self.refresh_plan_state();
+        #[cfg(feature = "gpu-viewport")]
+        if staged {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.stage_display(
+                    Some(display),
+                    self.source_mesh.clone(),
+                    None,
+                    None,
+                    self.plans_snapshot,
+                    true,
+                );
+            }
+            self.plan_set_staged = true;
+            self.dirty = true;
+            return;
+        }
+        self.plan_set_staged = false;
         self.display = Some(display);
-        self.refresh_plan_state();
+        self.preview_transform = None;
+        self.preview_alpha = 1.0;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_prepared_mesh(self.display.as_ref(), prepared);
+            gpu.set_prepared_mesh(self.display.as_ref(), prepared, true);
         }
         if self.fit_when_display_ready {
             self.fit_when_display_ready = false;
@@ -920,7 +1184,7 @@ impl Viewport {
             #[cfg(feature = "gpu-viewport")]
             if let Some(gpu) = self.gpu.as_mut() {
                 gpu.set_view(self.view, self.display.as_ref());
-                gpu.set_mesh(self.display.as_ref());
+                gpu.set_mesh(self.display.as_ref(), true);
             }
         }
         #[cfg(feature = "gpu-viewport")]
@@ -949,19 +1213,14 @@ impl Viewport {
             if ghost_changed && self.preview_transform.is_some() {
                 // A live ghost-transparency slider must update the current
                 // preview instances, not wait for the next evaluation.
-                gpu.set_preview_transform(
-                    self.preview_transform,
-                    self.display.as_ref(),
-                    self.preview_scope.clone(),
-                    view.ghost_opacity,
-                );
+                gpu.set_preview_transform(self.preview_transform, view.ghost_opacity);
             }
         }
         if ghost_changed {
             self.preview_alpha = view.ghost_opacity;
         }
         // Face-colour and translucency modes switch the plan renderer off/on.
-        self.refresh_plan_state();
+        self.plan_set_staged = self.refresh_plan_state();
         self.dirty = true;
     }
 
@@ -986,6 +1245,10 @@ impl Viewport {
         if mode != self.selection_mode {
             self.selected_edges.clear();
             self.hovered_edge = None;
+            self.hovered_face = None;
+            self.pending_gpu_pick = None;
+            self.pending_face_empty = None;
+            self.latest_hover_pick = None;
         }
         self.selection_mode = mode;
     }
@@ -1025,12 +1288,16 @@ impl Viewport {
             self.selected_edges.clear();
             return;
         };
+        let ghost_edges = self
+            .edit_ghost_edges
+            .iter()
+            .filter(|edge| !edge.id.starts_with("preview-edge:"));
         let available: std::collections::HashSet<&str> = if self.picking_input_ghost_only() {
-            self.edit_ghost_edges.iter().map(|edge| edge.id.as_str()).collect()
+            ghost_edges.map(|edge| edge.id.as_str()).collect()
         } else {
             self.topology_edges(display)
                 .iter()
-                .chain(self.edit_ghost_edges.iter())
+                .chain(ghost_edges)
                 .map(|edge| edge.id.as_str())
                 .collect()
         };
@@ -1084,6 +1351,7 @@ impl Viewport {
     /// Face ids in display-triangle order, derived from the display target's
     /// `TessPlan` faces. This keeps face picking on the exact B-rep face ids
     /// instead of relying on the display mesh's group strings.
+    #[cfg(not(feature = "gpu-viewport"))]
     fn plan_face_ids(&self) -> Option<Vec<String>> {
         let display = self.display.as_ref()?;
         let multiple = self.plans.len() > 1;
@@ -1112,7 +1380,12 @@ impl Viewport {
 
     pub fn edge_ids(&self) -> std::collections::HashSet<String> {
         if self.picking_input_ghost_only() {
-            return self.edit_ghost_edges.iter().map(|edge| edge.id.clone()).collect();
+            return self
+                .edit_ghost_edges
+                .iter()
+                .filter(|edge| !edge.id.starts_with("preview-edge:"))
+                .map(|edge| edge.id.clone())
+                .collect();
         }
         self.display
             .as_ref()
@@ -1128,6 +1401,23 @@ impl Viewport {
     pub fn fit(&mut self) {
         if self.pending_display {
             self.fit_when_display_ready = true;
+            return;
+        }
+        #[cfg(feature = "gpu-viewport")]
+        if self.plan_set_staged
+            && let Some((radius, center)) = self
+                .gpu
+                .as_ref()
+                .and_then(crate::gpu_viewport::GpuViewport::pending_display_bounds)
+        {
+            let (yaw, pitch) = StandardView::Iso.angles();
+            self.camera.target = center;
+            self.camera.yaw = -yaw;
+            self.camera.pitch = pitch;
+            self.camera.distance = (radius * 3.0).max(1.0);
+            self.lens_shift = [0.0, 0.0];
+            self.camera_fit = true;
+            self.dirty = true;
             return;
         }
         let Some(display) = &self.display else {
@@ -1312,7 +1602,7 @@ impl Viewport {
             self.gizmo_state.reset();
             // A selection change mid-drag must not leave the previewed geometry
             // displaced after the triad disappears.
-            self.set_preview_transform(None, PreviewScope::All);
+            self.set_preview_transform(None, 1.0);
         }
         self.transform_gizmo = gizmo;
     }
@@ -1391,7 +1681,7 @@ impl Viewport {
         let multiple_bodies = self.edit_ghost_plans.len() > 1;
         let mut edges = Vec::new();
         for (body, instance) in self.edit_ghost_plans.iter().enumerate() {
-            let matrix = crate::gpu_plan::instance_matrix(&instance.transforms);
+                        let matrix = crate::plan_math::instance_matrix(&instance.transforms);
             for (index, polyline) in instance.plan.edges.iter().enumerate() {
                 let points: Vec<Vec3> = polyline
                     .iter()
@@ -1465,7 +1755,6 @@ impl Viewport {
         if !self.plans.is_empty() && self.gpu_active() {
             self.comparison_ghost = false;
             self.preview_transform = None;
-            self.preview_scope = PreviewScope::All;
             self.preview_alpha = 1.0;
             self.edit_ghost_transform = Some(transform);
             if self.edit_ghost_plans.is_empty() {
@@ -1497,7 +1786,6 @@ impl Viewport {
         let base = self.display_mesh_for_view(base);
         self.comparison_ghost = false;
         self.preview_transform = None;
-        self.preview_scope = PreviewScope::All;
         self.preview_alpha = 1.0;
         self.reset_lods();
         self.display = Some(base);
@@ -1516,7 +1804,7 @@ impl Viewport {
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
             gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref());
+            gpu.set_mesh(self.display.as_ref(), false);
             let use_plan_ghost = !self.edit_ghost_plans.is_empty();
             gpu.set_ghost_matrix(Some(transform));
             gpu.set_ghost_plans(
@@ -1568,54 +1856,31 @@ impl Viewport {
         }
     }
 
-    pub fn set_preview_transform(&mut self, transform: Option<[[f32; 4]; 4]>, scope: PreviewScope) {
-        self.set_preview_transform_with_alpha(transform, scope, 1.0);
-    }
-
-    /// Scoped preview with an explicit alpha. Values below 1.0 render the moved
-    /// range in the depth-test-free ghost layer over the opaque scene.
-    pub fn set_preview_transform_with_alpha(
-        &mut self,
-        transform: Option<[[f32; 4]; 4]>,
-        scope: PreviewScope,
-        alpha: f32,
-    ) {
-        // A scoped preview only works when the display mesh actually carries
-        // those body names; otherwise fall back to moving the whole mesh rather
-        // than freezing the preview.
-        let scope = self.resolve_preview_scope(scope);
-        if self.preview_transform == transform
-            && self.preview_scope == scope
-            && self.preview_alpha == alpha
-        {
+    /// Show `transform` on the whole drawn body with `alpha`. The preview is
+    /// one value: the object instances, plan uniform and scene projection all
+    /// read it, so they cannot disagree during a drag.
+    pub fn set_preview_transform(&mut self, transform: Option<[[f32; 4]; 4]>, alpha: f32) {
+        let cpu_matches = self.preview_transform == transform && self.preview_alpha == alpha;
+        // A staged activation can retire the unit's preview before this CPU
+        // mirror syncs. Requiring both to match keeps an apparently unchanged
+        // preview from being dropped just because the mirror is stale.
+        #[cfg(feature = "gpu-viewport")]
+        let gpu_matches = self
+            .gpu
+            .as_ref()
+            .is_none_or(|gpu| gpu.preview_matches(transform, alpha));
+        #[cfg(not(feature = "gpu-viewport"))]
+        let gpu_matches = true;
+        if cpu_matches && gpu_matches {
             return;
         }
         self.preview_transform = transform;
-        self.preview_scope = scope.clone();
         self.preview_alpha = alpha;
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_preview_transform(transform, self.display.as_ref(), scope, alpha);
+            gpu.set_preview_transform(transform, alpha);
         }
         self.dirty = true;
-    }
-
-    fn resolve_preview_scope(&self, scope: PreviewScope) -> PreviewScope {
-        let PreviewScope::Bodies(_) = &scope else { return scope };
-        let Some(display) = self.display.as_ref() else { return PreviewScope::All };
-        // Fall back only when the display mesh carries no `body:N:` provenance
-        // at all. A scope that simply matches no body legitimately means
-        // "nothing moves" and must not be widened to the whole mesh.
-        let namespaced = if display.mesh.triangles.is_empty() {
-            display.edges.iter().any(|edge| edge.id.starts_with("body:"))
-        } else {
-            display.face_ids.iter().any(|id| id.starts_with("body:"))
-        };
-        if namespaced {
-            scope
-        } else {
-            PreviewScope::All
-        }
     }
 
     fn draw_transform_gizmo(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -1670,6 +1935,7 @@ impl Viewport {
         blockers: &[egui::Rect],
         backdrop_rect: egui::Rect,
     ) {
+        self.sync_activated_display();
         self.poll_display_prep();
         if self.show_gpu_info {
             self.tick_frame_stats(ui);
@@ -1872,28 +2138,221 @@ impl Viewport {
             return;
         }
         let Some(pointer) = pointer else { return };
-        let nearest = self.nearest_edge(pointer, viewport, 7.0);
-        let nearest_id = nearest.as_ref().map(|(id, _)| id.clone());
-        if nearest_id != self.hovered_edge {
-            self.hovered_edge = nearest_id;
-            ui.ctx().request_repaint();
-        }
-        if clicked {
-            let Some((edge_id, center)) = nearest else {
-                if !self.pointer_hits_body(pointer, viewport) {
-                    self.selection_miss = true;
-                    ui.ctx().request_repaint();
-                }
-                return;
+        #[cfg(feature = "gpu-viewport")]
+        if self.gpu_active() && self.edge_picking_enabled {
+            use crate::gpu_pick::{
+                accept_pick, edge_click_action, resolve_face_id, EdgeClickAction, PickKind,
+                PickOutcome,
             };
-            if !self.selected_edges.remove(&edge_id) {
-                self.selected_edges.insert(edge_id.clone());
+            let ppp = ui.ctx().pixels_per_point();
+            let physical = [
+                (pointer.x - viewport.min.x) * ppp,
+                (pointer.y - viewport.min.y) * ppp,
+            ];
+            let physical_at = |pointer: egui::Pos2| {
+                [
+                    (pointer.x - viewport.min.x) * ppp,
+                    (pointer.y - viewport.min.y) * ppp,
+                ]
+            };
+            let (key, ghost_matrix) = self.gpu.as_ref().map_or((0, None), |gpu| {
+                (gpu.pick_key(), gpu.ghost_edge_matrix())
+            });
+            let inputs = (physical, key, ghost_matrix, self.camera);
+            let moved = self.last_gpu_pick_inputs != Some(inputs);
+            self.last_gpu_pick_inputs = Some(inputs);
+            let mut next_click = self.pending_gpu_pick;
+            let mut next_empty = self.pending_face_empty;
+            let mut pending_click = next_click.map(|(id, _, _)| id);
+            let mut pending_empty = next_empty.map(|(id, _, _)| id);
+            let mut outcome = PickOutcome::Ignore;
+            if let Some(gpu) = self.gpu.as_mut() {
+                // A display/ghost change bumps the pick key and drops the old
+                // request. Re-ask for the still-wanted click at its own pointer
+                // so it can resolve from the current scene.
+                if let Some((_, pending_pointer, pending_key)) = next_click
+                    && pending_key != key
+                {
+                    let physical = physical_at(pending_pointer);
+                    let id = gpu.request_ghost_pick(physical, 7.0 * ppp, true, PickKind::Edges);
+                    next_click = Some((id, pending_pointer, key));
+                    pending_click = Some(id);
+                }
+                if let Some((_, pending_pointer, pending_key)) = next_empty
+                    && pending_key != key
+                {
+                    let physical = physical_at(pending_pointer);
+                    let id = gpu.request_ghost_pick(
+                        physical,
+                        crate::gpu_pick::FACE_PICK_RADIUS_PX * ppp,
+                        true,
+                        PickKind::Faces,
+                    );
+                    next_empty = Some((id, pending_pointer, key));
+                    pending_empty = Some(id);
+                }
+                if clicked {
+                    let id = gpu.request_ghost_pick(physical, 7.0 * ppp, true, PickKind::Edges);
+                    next_click = Some((id, pointer, key));
+                    pending_click = Some(id);
+                    // A new click supersedes an unfinished empty check.
+                    next_empty = None;
+                    pending_empty = None;
+                    self.latest_hover_pick = None;
+                } else if self.pending_gpu_pick.is_none()
+                    && self.pending_face_empty.is_none()
+                    && (moved || self.latest_hover_pick.is_none())
+                {
+                    let id = gpu.request_ghost_pick(physical, 7.0 * ppp, false, PickKind::Edges);
+                    self.latest_hover_pick = Some(id);
+                }
+                if let Some(result) = gpu.take_pick_result() {
+                    if pending_empty == Some(result.id) && result.commit {
+                        // The edge pick found nothing; item 2's face pass says
+                        // whether the click was on the body at all.
+                        next_empty = None;
+                        if resolve_face_id(result.index).is_none() {
+                            self.selection_miss = true;
+                        }
+                        ui.ctx().request_repaint();
+                    } else {
+                        let click_pointer = next_click.map_or(pointer, |(_, pointer, _)| pointer);
+                        outcome = accept_pick(&result, key, pending_click);
+                        match outcome {
+                            PickOutcome::Hover(index) => {
+                                if self.pending_gpu_pick.is_none()
+                                    && self.pending_face_empty.is_none()
+                                    && Some(result.id) == self.latest_hover_pick
+                                {
+                                    let id = crate::gpu_viewport::resolve_pick(
+                                        gpu.pick_data(),
+                                        index,
+                                    )
+                                    .map(|(id, _)| id);
+                                    if id != self.hovered_edge {
+                                        self.hovered_edge = id;
+                                        ui.ctx().request_repaint();
+                                    }
+                                }
+                            }
+                            PickOutcome::Commit(index) => {
+                                next_click = None;
+                                match edge_click_action(outcome, index) {
+                                    EdgeClickAction::Apply(index) => {
+                                        if let Some((edge_id, center)) =
+                                            crate::gpu_viewport::resolve_pick(
+                                                gpu.pick_data(),
+                                                index,
+                                            )
+                                        {
+                                            if !self.selected_edges.remove(&edge_id) {
+                                                self.selected_edges.insert(edge_id.clone());
+                                            }
+                                            self.edge_picks.push(EdgePick {
+                                                id: edge_id,
+                                                center,
+                                            });
+                                            ui.ctx().request_repaint();
+                                        }
+                                    }
+                                    EdgeClickAction::CheckBody => {
+                                        // Item 2's face pass answers whether the
+                                        // click was on the body at all.
+                                        let physical = physical_at(click_pointer);
+                                        let id = gpu.request_ghost_pick(
+                                            physical,
+                                            crate::gpu_pick::FACE_PICK_RADIUS_PX * ppp,
+                                            true,
+                                            PickKind::Faces,
+                                        );
+                                        next_empty = Some((id, click_pointer, key));
+                                    }
+                                    EdgeClickAction::Retry | EdgeClickAction::Ignore => {}
+                                }
+                            }
+                            PickOutcome::StaleCommit => {
+                                // The pick scene changed under the click. Ask
+                                // again for the current scene; the click still
+                                // resolves from its own GPU pass.
+                                let physical = physical_at(click_pointer);
+                                let id = gpu.request_ghost_pick(
+                                    physical,
+                                    7.0 * ppp,
+                                    true,
+                                    PickKind::Edges,
+                                );
+                                next_click = Some((id, click_pointer, key));
+                            }
+                            PickOutcome::Ignore => {}
+                        }
+                    }
+                }
             }
-            self.edge_picks.push(EdgePick { id: edge_id, center });
-            ui.ctx().request_repaint();
+            self.pending_gpu_pick = next_click;
+            self.pending_face_empty = next_empty;
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some()
+                && matches!(outcome, PickOutcome::Hover(_) | PickOutcome::Commit(_))
+            {
+                eprintln!("[pick] edge={:?}", self.hovered_edge);
+            }
+            if self.pending_gpu_pick.is_some()
+                || self.pending_face_empty.is_some()
+                || self.gpu.as_ref().is_some_and(|gpu| gpu.pick_pending())
+            {
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            self.pending_gpu_pick = None;
+            self.pending_face_empty = None;
+            let nearest = self.nearest_edge(pointer, viewport, 7.0);
+            let nearest_id = nearest.as_ref().map(|(id, _)| id.clone());
+            if nearest_id != self.hovered_edge {
+                self.hovered_edge = nearest_id;
+                ui.ctx().request_repaint();
+            }
+            if clicked {
+                let Some((edge_id, center)) = nearest else {
+                    if !self.pointer_hits_body(pointer, viewport) {
+                        self.selection_miss = true;
+                        ui.ctx().request_repaint();
+                    }
+                    return;
+                };
+                if !self.selected_edges.remove(&edge_id) {
+                    self.selected_edges.insert(edge_id.clone());
+                }
+                self.edge_picks.push(EdgePick { id: edge_id, center });
+                ui.ctx().request_repaint();
+            }
         }
     }
 
+    #[cfg(not(feature = "gpu-viewport"))]
+    fn apply_edge_click(
+        &mut self,
+        nearest: Option<(String, [f64; 3])>,
+        pointer: egui::Pos2,
+        viewport: egui::Rect,
+        ui: &mut egui::Ui,
+    ) {
+        let Some((edge_id, center)) = nearest else {
+            if !self.pointer_hits_body(pointer, viewport) {
+                self.selection_miss = true;
+                ui.ctx().request_repaint();
+            }
+            return;
+        };
+        if !self.selected_edges.remove(&edge_id) {
+            self.selected_edges.insert(edge_id.clone());
+        }
+        self.edge_picks.push(EdgePick { id: edge_id, center });
+        ui.ctx().request_repaint();
+    }
+
+    #[cfg(not(feature = "gpu-viewport"))]
     fn nearest_edge(&self, pointer: egui::Pos2, viewport: egui::Rect, threshold: f32) -> Option<(String, [f64; 3])> {
         if !self.edge_picking_enabled {
             return None;
@@ -1911,7 +2370,7 @@ impl Viewport {
                 let points: Vec<egui::Pos2> = edge
                     .points
                     .iter()
-                    .filter_map(|point| self.project_to_viewport_body(*point, viewport, &edge.id))
+                    .filter_map(|point| self.project_to_viewport(*point, viewport))
                     .collect();
                 for pair in points.windows(2) {
                     let distance = distance_to_segment(pointer, pair[0], pair[1]);
@@ -1927,6 +2386,9 @@ impl Viewport {
         // feature's own frame, so they can be stored without inverse mapping.
         if self.edit_ghost_transform.is_some() {
             for edge in &self.edit_ghost_edges {
+                if edge.id.starts_with("preview-edge:") {
+                    continue;
+                }
                 let points: Vec<egui::Pos2> = edge
                     .points
                     .iter()
@@ -1944,29 +2406,13 @@ impl Viewport {
         nearest
     }
 
+    /// Project an overlay point through the same camera and preview transform
+    /// as the shaded solid, so mesh-derived overlays cannot drift from it.
     fn project_to_viewport(&self, point: solidcore_record::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
-        // Unclassified overlay geometry follows the preview only when the whole
-        // display is downstream of the edit.
-        self.project_to_viewport_body(point, viewport, "")
-    }
-
-    /// Project an overlay point belonging to `body_id`, applying the preview
-    /// transform only when that body moves. Mesh-derived overlays (edge
-    /// highlights, face hover) use this so they cannot drift from the shaded
-    /// solid during a partial-body drag.
-    fn project_to_viewport_body(
-        &self,
-        point: solidcore_record::Vec3,
-        viewport: egui::Rect,
-        body_id: &str,
-    ) -> Option<egui::Pos2> {
         let display = self.display.as_ref()?;
         let width = f64::from(viewport.width()).max(1.0);
         let height = f64::from(viewport.height()).max(1.0);
-        let transform = self
-            .preview_transform
-            .filter(|_| self.preview_scope.is_affected(body_id));
-        let point = transform.map_or(point, |matrix| {
+        let point = self.preview_transform.map_or(point, |matrix| {
             let m = matrix.map(|column| column.map(f64::from));
             solidcore_record::Vec3::new(
                 m[0][0] * point.x + m[1][0] * point.y + m[2][0] * point.z + m[3][0],
@@ -2086,7 +2532,7 @@ impl Viewport {
                 .iter()
                 .filter_map(|corner| {
                     let point = display.mesh.positions.get(*corner as usize)?;
-                    self.project_to_viewport_body(*point, viewport, body)
+                    self.project_to_viewport(*point, viewport)
                 })
                 .collect();
             if points.len() != 3 { continue; }
@@ -2242,7 +2688,7 @@ impl Viewport {
             } else {
                 edge.points
                     .iter()
-                    .filter_map(|point| self.project_to_viewport_body(*point, viewport, id))
+                    .filter_map(|point| self.project_to_viewport(*point, viewport))
                     .collect()
             };
             for pair in points.windows(2) {
@@ -2265,7 +2711,8 @@ impl Viewport {
         }
     }
 
-    /// Pick the nearest display-mesh face under the pointer in face mode.
+    /// CPU fallback for builds with no GPU viewport at all.
+    #[cfg(not(feature = "gpu-viewport"))]
     fn pointer_hits_body(&self, pointer: egui::Pos2, viewport: egui::Rect) -> bool {
         let Some(display) = self.display.as_ref() else { return false };
         let width = f64::from(viewport.width()).max(1.0);
@@ -2291,27 +2738,119 @@ impl Viewport {
             self.hovered_face = None;
             return;
         }
-        let Some(display) = self.display.as_ref() else { return };
-        let width = f64::from(viewport.width()).max(1.0);
-        let height = f64::from(viewport.height()).max(1.0);
-        let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
-        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
-        let (origin, direction) = self.camera.ray(x, y, width, height);
-        let plan_ids = self.plan_face_ids();
-        let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
-        let hovered = raycast_face(&display.mesh, face_ids, origin, direction);
-        if hovered != self.hovered_face {
-            self.hovered_face = hovered.clone();
-            ui.ctx().request_repaint();
-        }
-        if clicked {
-            let Some(face) = hovered else {
-                self.selection_miss = true;
-                ui.ctx().request_repaint();
-                return;
+        #[cfg(feature = "gpu-viewport")]
+        if self.gpu_active() && self.edge_picking_enabled {
+            use crate::gpu_pick::{accept_pick, resolve_face_id, PickKind, PickOutcome};
+            let ppp = ui.ctx().pixels_per_point();
+            let physical = [
+                (pointer.x - viewport.min.x) * ppp,
+                (pointer.y - viewport.min.y) * ppp,
+            ];
+            let key = self.gpu.as_ref().map_or(0, |gpu| gpu.pick_key());
+            let physical_at = |pointer: egui::Pos2| {
+                [
+                    (pointer.x - viewport.min.x) * ppp,
+                    (pointer.y - viewport.min.y) * ppp,
+                ]
             };
-            self.face_picks.push(face);
-            ui.ctx().request_repaint();
+            let mut pending_click = self.pending_gpu_pick.map(|(id, _, _)| id);
+            if let Some(gpu) = self.gpu.as_mut() {
+                // A scene change drops the old request. Re-ask for an
+                // in-flight click so it still resolves from a GPU pass.
+                if let Some((_, pending_pointer, pending_key)) = self.pending_gpu_pick
+                    && pending_key != key
+                {
+                    let id = gpu.request_ghost_pick(
+                        physical_at(pending_pointer),
+                        crate::gpu_pick::FACE_PICK_RADIUS_PX * ppp,
+                        true,
+                        PickKind::Faces,
+                    );
+                    self.pending_gpu_pick = Some((id, pending_pointer, key));
+                    pending_click = Some(id);
+                }
+                if clicked {
+                    let id = gpu.request_ghost_pick(
+                        physical,
+                        crate::gpu_pick::FACE_PICK_RADIUS_PX * ppp,
+                        true,
+                        PickKind::Faces,
+                    );
+                    self.pending_gpu_pick = Some((id, pointer, key));
+                    self.pending_face_empty = None;
+                    self.latest_hover_pick = None;
+                    pending_click = Some(id);
+                } else if self.pending_gpu_pick.is_none() {
+                    let id = gpu.request_ghost_pick(
+                        physical,
+                        crate::gpu_pick::FACE_PICK_RADIUS_PX * ppp,
+                        false,
+                        PickKind::Faces,
+                    );
+                    self.latest_hover_pick = Some(id);
+                }
+                if let Some(result) = gpu.take_pick_result() {
+                    match accept_pick(&result, key, pending_click) {
+                        PickOutcome::Hover(index) => {
+                            if self.pending_gpu_pick.is_none()
+                                && Some(result.id) == self.latest_hover_pick
+                            {
+                                let hovered = resolve_face_id(index);
+                                if hovered != self.hovered_face {
+                                    self.hovered_face = hovered;
+                                    ui.ctx().request_repaint();
+                                }
+                            }
+                        }
+                        PickOutcome::Commit(index) => {
+                            self.pending_gpu_pick = None;
+                            match resolve_face_id(index) {
+                                Some(face) => self.face_picks.push(face),
+                                None => self.selection_miss = true,
+                            }
+                            ui.ctx().request_repaint();
+                        }
+                        PickOutcome::StaleCommit => {
+                            // The pick scene changed under the click. The click
+                            // resolves only from its own GPU pass; there is no
+                            // CPU fallback to substitute.
+                            self.pending_gpu_pick = None;
+                        }
+                        PickOutcome::Ignore => {}
+                    }
+                }
+            }
+            if self.pending_gpu_pick.is_some()
+                || self.gpu.as_ref().is_some_and(|gpu| gpu.pick_pending())
+            {
+                ui.ctx().request_repaint();
+            }
+            return;
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            let Some(display) = self.display.as_ref() else { return };
+            let width = f64::from(viewport.width()).max(1.0);
+            let height = f64::from(viewport.height()).max(1.0);
+            let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
+            let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+            let (origin, direction) = self.camera.ray(x, y, width, height);
+            let plan_ids = self.plan_face_ids();
+            let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
+            let hovered = raycast_face(&display.mesh, face_ids, origin, direction);
+            if hovered != self.hovered_face {
+                self.hovered_face = hovered.clone();
+                ui.ctx().request_repaint();
+            }
+            if clicked {
+                let Some(face) = hovered else {
+                    self.selection_miss = true;
+                    ui.ctx().request_repaint();
+                    return;
+                };
+                self.face_picks.push(face);
+                ui.ctx().request_repaint();
+            }
         }
     }
 
@@ -2929,6 +3468,7 @@ mod tests {
         assert!(distance_to_segment(egui::pos2(25.0, 0.0), a, b) - 5.0 < 1.0e-6);
     }
 
+    #[cfg(not(feature = "gpu-viewport"))]
     #[test]
     fn face_pick_returns_the_solidcore_face_group() {
         let mesh = solidcraft_geom::Mesh {
@@ -2979,21 +3519,20 @@ mod tests {
         assert_eq!(before, after);
     }
 
+    /// Face-colours used to disable the plan path and fall back to the CPU
+    /// object mesh. Plan-only evaluation leaves that mesh with edges but no
+    /// triangles, so the fallback renders a wireframe. Face-colours is now a
+    /// table fill and must keep the plan renderer enabled.
     #[test]
-    fn edit_overlay_scope_resolves_to_the_branch_body() {
-        let mut mesh = crate::adapter::display_mesh(&nodecraft_protocol::Mesh {
-            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
-            normals: vec![[0.0, 0.0, 1.0]; 6],
-            faces: vec![[0, 1, 2], [3, 4, 5]],
-            face_groups: vec!["body:0:face:0".to_owned(), "body:1:face:0".to_owned()],
-            ..nodecraft_protocol::Mesh::default()
-        });
-        mesh.mesh = std::sync::Arc::new((*mesh.mesh).clone());
-        let mut viewport = Viewport::default();
-        viewport.display = Some(mesh);
+    fn face_colours_do_not_disable_the_plan_path() {
+        let (enabled, colour) = plan_draw_state(false, true, false);
+        assert!(enabled, "face-colours mode must keep drawing the plan set");
+        assert_eq!(colour, None);
+        assert!(!plan_draw_state(true, true, false).0, "no plans, no plan draw");
         assert_eq!(
-            viewport.resolve_preview_scope(PreviewScope::Bodies(vec!["body:0:".to_owned()])),
-            PreviewScope::Bodies(vec!["body:0:".to_owned()])
+            plan_draw_state(false, false, true).1,
+            Some(DEFAULT_FACE_COLOUR),
+            "ignore-look still replaces every face with the override",
         );
     }
 
@@ -3020,6 +3559,7 @@ mod tests {
         assert!(viewport.display.is_none(), "closed project kept its display mesh");
     }
 
+    #[cfg(not(feature = "gpu-viewport"))]
     #[test]
     fn face_picking_uses_plan_brep_face_ids() {
         let mut face = nodecraft_layers::tess::FacePlan::default();
@@ -3052,6 +3592,7 @@ mod tests {
             }),
             lods: Vec::new(),
             face_ids: vec!["display-only".into()],
+            exact_normals: false,
             face_colors: Vec::new(),
             edges: Vec::new(),
             comparison: None,
@@ -3103,6 +3644,7 @@ mod tests {
             mesh: std::sync::Arc::new(solidcraft_geom::Mesh::default()),
             lods: Vec::new(),
             face_ids: Vec::new(),
+            exact_normals: false,
             face_colors: Vec::new(),
             edges: vec![crate::adapter::DisplayEdge {
                 id: "edge:downstream".into(),
@@ -3147,6 +3689,7 @@ mod tests {
             mesh: std::sync::Arc::new(solidcraft_geom::Mesh::default()),
             lods: Vec::new(),
             face_ids: Vec::new(),
+            exact_normals: false,
             face_colors: Vec::new(),
             edges: Vec::new(),
             comparison: None,
@@ -3165,35 +3708,6 @@ mod tests {
         assert_eq!(viewport.quality_detail(), Some(2));
     }
 
-    #[test]
-    fn preview_scope_only_moves_overlays_of_affected_bodies() {
-        let mut viewport = Viewport::default();
-        viewport.set_mesh(Some(&NodeMesh::default()));
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
-        let point = solidcore_record::Vec3::new(1.0, 0.5, 0.0);
-        let shift = solidcore_record::Vec3::new(4.0, 0.0, 0.0);
-        let plain = viewport
-            .project_to_viewport_body(point, rect, "body:1:face:0")
-            .expect("point projects");
-        let moved = viewport
-            .project_to_viewport_body(point + shift, rect, "body:0:face:0")
-            .expect("moved point projects");
-        let mut preview = [[0.0f32; 4]; 4];
-        for (axis, column) in preview.iter_mut().enumerate() {
-            column[axis] = 1.0;
-        }
-        preview[3][0] = shift.x as f32;
-        viewport.preview_transform = Some(preview);
-        viewport.preview_scope = PreviewScope::Bodies(vec!["body:0:".to_owned()]);
-        let affected = viewport
-            .project_to_viewport_body(point, rect, "body:0:face:0")
-            .expect("affected point projects");
-        let stationary = viewport
-            .project_to_viewport_body(point, rect, "body:1:face:0")
-            .expect("stationary point projects");
-        assert!((affected - moved).length() < 1.0e-3, "{affected:?} {moved:?}");
-        assert!((stationary - plain).length() < 1.0e-3, "{stationary:?} {plain:?}");
-    }
     fn view_snapshot(dist: f64, visible: [f32; 2], lens: [f32; 2]) -> ViewSnapshot {
         ViewSnapshot {
             camera: Camera { distance: dist, ..Camera::default() },

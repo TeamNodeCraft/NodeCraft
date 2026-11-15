@@ -15,6 +15,36 @@ The sketch line-type icons under
 `line-centerline.svg` and `line-infinite.svg` are adapted from SolidCraft's
 `assets/icons/ui/design/svg/model/` icons under the same license.
 
+## Vendored SolidCore
+
+The public snapshot vendors the SolidCore crates NodeCraft builds under
+`vendor/solidcore/`. They come from the `solidcore/` subtree of
+<https://github.com/tangency-labs/solidcraft> at revision
+`c71236a40de9f36713194df624663a252d0f71a3` plus NodeCraft patches: see patches/
+(`patches/solidcore-ops-seam.patch`). Those patches add the NodeCraft ops seam
+and the `solidcore-cadir` crate (with the `solidcore-step::assembly` stage) from
+SolidCraft PR 16906, which is not in the pinned revision.
+
+SolidCore is licensed under the Apache License, Version 2.0. Copyright (c) 2026
+The solidcore contributors. It is a Rust port of the SMLib and SM_API components
+of USD BRep, Copyright (c) 2020-2026 NVIDIA CORPORATION & AFFILIATES, also under
+the Apache License, Version 2.0. The full terms and attribution are in:
+
+```text
+vendor/solidcore/LICENSE
+vendor/solidcore/NOTICE
+vendor/solidcore/ATTRIBUTION.md
+vendor/solidcore/SolidCraft-LICENSE-MIT
+vendor/solidcore/SolidCraft-LICENSE-APACHE
+vendor/solidcore/SolidCraft-NOTICE
+```
+
+The vendored tree is the SolidCore workspace root and only the crates in
+NodeCraft's resolved dependency closure; its workspace `members` list is trimmed
+to those crates and tests, benches, examples, fixtures and docs are omitted.
+SolidCraft application crates used by NodeCraft remain normal git dependencies
+at the same revision.
+
 ## SolidCraft expression language
 
 The `nodecraft-expr` crate is a port of SolidCraft's

@@ -24,6 +24,10 @@ pub(super) enum TabViewMode {
 pub(super) struct DocumentTab {
     pub(super) id: u64,
     pub(super) document_id: String,
+    /// Evaluation identity of this tab's session. Restored on activation so a
+    /// per-tab exact cache survives a round trip through another tab, and bumped
+    /// only when the tab's session is replaced.
+    pub(super) session_generation: u64,
     pub(super) path: Option<PathBuf>,
     pub(super) selected_nodes: HashSet<String>,
     pub(super) selected_connections: HashSet<ConnectionKey>,
@@ -392,6 +396,7 @@ impl NodeCraftApp {
         let mesh = if move_mesh { self.mesh.take() } else { self.mesh.clone() };
         let display = if move_mesh { self.last_applied_display.take() } else { self.last_applied_display.clone() };
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
+        tab.session_generation = self.session_generation;
         tab.path = self.path.clone();
         tab.selected_nodes = self.selected_nodes.clone();
         tab.selected_connections = self.selected_connections.clone();
@@ -426,6 +431,7 @@ impl NodeCraftApp {
         let tab = DocumentTab {
             id: tab_id,
             document_id,
+            session_generation: 0,
             path: source.path.clone(),
             selected_nodes: HashSet::new(),
             selected_connections: HashSet::new(),
@@ -450,13 +456,15 @@ impl NodeCraftApp {
         self.active_tab = self.tabs.len().saturating_sub(1);
         self.install_session(Some(session.clone()));
         self.active_session_revision = session.revision();
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.session_generation = self.session_generation;
+        }
         self.path = source.path.clone();
         self.selected_nodes.clear();
         self.selected_connections.clear();
         self.edit_target = None;
         self.viewer_breakpoint = source.viewer_breakpoint.clone();
         self.mesh = None;
-        self.last_eval_key = None;
         if let Some(view) = source.view {
             self.viewport.restore_view(view);
             self.camera_initialized = true;
@@ -593,6 +601,7 @@ impl NodeCraftApp {
         let view = tab.view;
         let node_width = tab.node_width;
         let inspector_width = tab.inspector_width;
+        let session_generation = tab.session_generation;
         let definition_view = self
             .tabs
             .get(self.active_tab)
@@ -644,6 +653,9 @@ impl NodeCraftApp {
         };
         self.active_session_revision = session.revision();
         self.install_session(Some(session));
+        // Activation must not change the tab's evaluation identity, otherwise a
+        // per-tab exact cache would be dead after the first tab switch.
+        self.session_generation = session_generation;
         self.node_editor.set_panel_width(node_width);
         if inspector_width > 0.0 {
             self.inspector_width = inspector_width;
@@ -675,9 +687,7 @@ impl NodeCraftApp {
         self.layout_animation = None;
         self.node_position_animation = None;
         if let Some((frame, target, feature_ghost)) = display {
-            self.applying_deferred_display = true;
             self.apply_display_frame(&frame, &target, feature_ghost, true);
-            self.applying_deferred_display = false;
         } else if self.mesh.is_some() {
             self.viewport
                 .set_mesh_preserving_camera(self.mesh.as_ref());
@@ -1082,6 +1092,7 @@ impl NodeCraftApp {
         self.save_active_tab();
         let closing_active = index == self.active_tab;
         let removed = self.tabs.remove(index);
+        self.exact_results.remove(&removed.id);
         if !self.tabs.iter().any(|tab| tab.document_id == removed.document_id) {
             self.documents.remove(&removed.document_id);
         }
@@ -1112,6 +1123,9 @@ impl NodeCraftApp {
             .collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
         self.install_session(Some(session.clone()));
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            tab.session_generation = self.session_generation;
+        }
         self.pending_dirty.clear();
         self.eval_progress = None;
         self.path = None;
@@ -1194,8 +1208,13 @@ impl NodeCraftApp {
         self.pending_display = None;
         self.quality_display = None;
         self.display_snapshot = None;
+        self.pending_exact = None;
         self.last_exact = None;
-        self.displayed_target = None;
+        self.validation_pending.clear();
+        self.validation_requested.clear();
+        self.validation_results.clear();
+        self.base_node_errors.clear();
+        self.base_node_warnings.clear();
         self.edit_preview = None;
         self.edit_preview_target = None;
         self.comparison_pair = None;
@@ -1204,8 +1223,6 @@ impl NodeCraftApp {
         self.display_error = None;
         self.gizmo_drag = None;
         self.gizmo_dragging = false;
-        self.deferred_display = None;
-        self.applying_deferred_display = false;
         self.last_applied_display = None;
         self.mesh = None;
         self.viewport.clear_document_display();
@@ -1237,6 +1254,7 @@ impl NodeCraftApp {
         let tab = DocumentTab {
             id,
             document_id,
+            session_generation: 0,
             path: path.clone(),
             selected_nodes: selected_nodes.clone(),
             selected_connections: HashSet::new(),

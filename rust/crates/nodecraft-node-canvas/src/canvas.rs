@@ -289,6 +289,7 @@ pub struct NodeEditor {
     fade_document: Option<String>,
     glow_pulse: Option<Instant>,
     error_nodes: HashSet<String>,
+    warning_nodes: HashSet<String>,
     last_selected: HashSet<String>,
     activity: HashMap<String, ActivityGlow>,
     activity_fade_in: Duration,
@@ -343,6 +344,7 @@ impl Default for NodeEditor {
             fade_document: None,
             glow_pulse: None,
             error_nodes: HashSet::new(),
+            warning_nodes: HashSet::new(),
             last_selected: HashSet::new(),
             activity: HashMap::new(),
             activity_fade_in: Duration::from_millis(40),
@@ -841,6 +843,12 @@ impl NodeEditor {
         }
     }
 
+    pub fn set_warning_nodes(&mut self, nodes: HashSet<String>) {
+        if self.warning_nodes != nodes {
+            self.warning_nodes = nodes;
+        }
+    }
+
     /// Restart the selected-node glow envelope. Called when evaluation
     /// completes so the pulse follows the result rather than the click.
     pub fn pulse_glow(&mut self) {
@@ -959,6 +967,14 @@ impl NodeEditor {
                 if self.error_nodes.contains(id) { continue; }
                 if let Some(node) = nodes.get(id.as_str()) {
                     shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, radius);
+                }
+            }
+        }
+        if !self.warning_nodes.is_empty() {
+            let radius = glow_radius(self.zoom);
+            for id in &self.warning_nodes {
+                if let Some(node) = document.nodes.iter().find(|node| &node.id == id) {
+                    shape_glow(&mut activity_glows, graph_rect(node), self.theme.f32(self.theme.node_warning), 3.0, 0.7, radius);
                 }
             }
         }
@@ -2581,6 +2597,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "graph" => "graph",
         "group" => "group",
         "scatter" => "scatter",
+        "circularpattern" => "circular-pattern",
         "exporter" => "export",
         "stepimporter" => "import",
         "linkedpart" => "linked",
@@ -2612,6 +2629,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "loft" => include_bytes!("../../../../vendor/iconify-design/nodes/loft.svg"),
         "surfaceloft" => include_bytes!("../../../../vendor/iconify-design/nodes/surfaceloft.svg"),
         "scatter" => include_bytes!("../../../../vendor/iconify-design/nodes/scatter.svg"),
+        "circular-pattern" => include_bytes!("../../../../vendor/iconify-design/nodes/circular-pattern.svg"),
         "graph" => include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg"),
         "group" => include_bytes!("../../../../vendor/iconify-design/nodes/group.svg"),
         "import" => include_bytes!("../../../../vendor/iconify-design/nodes/import.svg"),
@@ -2640,6 +2658,7 @@ fn node_title(node_type: &str) -> &'static str {
         "wedge" => "Wedge",
         "translate" => "Transform",
         "scatter" => "Scatter",
+        "circularpattern" => "Circular Pattern",
         "combine" => "Combine to Part",
         "fuse" | "boolean" => "Boolean",
         "linkedpart" => "Linked Part",
@@ -2688,6 +2707,7 @@ fn node_inputs<'a>(node: &'a nodecraft_session::GraphNode) -> Cow<'a, [&'a str]>
         "shell" => &["shape", "thickness"],
         "translate" => &["shape", "x", "y", "z", "rx", "ry", "rz"],
         "scatter" => &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"],
+        "circularpattern" => &["shape", "count", "angle", "axis", "centerX", "centerY", "centerZ"],
         "combine" => &["shape"],
         "boolean" | "fuse" => &["a", "b"],
         "loft" => &["bottom", "top", "ruled"],
@@ -4920,6 +4940,30 @@ mod tests {
             [255, 0, 0, 255],
         );
         assert!(svg.contains("#ff0000"), "combine icon was not tinted");
+    }
+
+    #[test]
+    fn circular_pattern_icon_keeps_its_mask_through_tinting_and_viewbox_scaling() {
+        let source = include_bytes!("../../../../vendor/iconify-design/nodes/circular-pattern.svg");
+        for colour in [[245, 245, 247, 255], [33, 33, 33, 255]] {
+            let svg = colorized_icon_svg(source, colour);
+            assert!(svg.contains(&hex_colour(colour)), "icon was not tinted for {colour:?}");
+            assert!(svg.contains(r#"mask id=""#), "icon mask was removed");
+            assert!(svg.contains(r##"stroke="#fff""##), "mask highlight was tinted");
+            assert!(svg.contains(r##"fill="#555""##), "mask twotone fill was tinted");
+            let image = egui_extras::image::load_svg_bytes_with_size(
+                svg.as_bytes(),
+                egui::SizeHint::Size { width: 128, height: 128, maintain_aspect_ratio: true },
+                &Default::default(),
+            )
+            .expect("circular pattern icon renders");
+            assert_eq!(image.size, [128, 128], "48x48 viewBox did not scale");
+            assert!(image.pixels.iter().any(|pixel| pixel.a() > 0), "icon rendered blank");
+            assert!(
+                image.pixels.iter().any(|pixel| pixel.a() > 0 && pixel.a() < 255),
+                "mask produced no translucent pixels"
+            );
+        }
     }
 
     #[test]

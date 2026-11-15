@@ -8,6 +8,7 @@ members = [
   "crates/nodecraft-worker",
   "crates/nodecraft-engine",
   "crates/nodecraft-display",
+  "crates/nodecraft-ops",
   "crates/nodecraft-mesh",
   "crates/nodecraft-layers",
   "crates/nodecraft-sweep",
@@ -24,10 +25,6 @@ members = [
   "crates/nodecraft-extrude",
   "crates/nodecraft-blend",
   "crates/nodecraft-step",
-  "crates/step-schema",
-  "crates/step-conics",
-  "crates/step-assemblies",
-  "crates/step-nurbs",
   "crates/nodecraft-cli",
 ]
 resolver = "2"
@@ -37,6 +34,13 @@ resolver = "2"
 # available; line tables make the surrounding stack useful too).
 debug = "line-tables-only"
 
+# Test builds run the kernel (SolidCore, solidcore-ops) and its maths unoptimised
+# otherwise: 16 shells take 3.9 s in debug against 0.28 s in release, and a single
+# G2 fillet can take 167 s. Optimise every non-workspace dependency so the kernel
+# is fast under `cargo test`, while our own crates stay debug for quick rebuilds.
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace.package]
 edition = "2024"
 version = "0.0.1"
@@ -44,12 +48,31 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
+rayon = "1"
 serde_json = "1"
-solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcore-step = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-step-export = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
-solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "525171eb861f172bdc1e23c7c5c070a44a8fc831" }
+solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+# cadmpeg (CADIR) is pinned to exactly the versions and features SolidCraft pins.
+cadmpeg-core = "=0.6.7"
+cadmpeg-ir = "=0.6.7"
+cadmpeg-registry = { version = "=0.6.7", default-features = false, features = ["fcstd", "rhino", "step"] }
+cadmpeg-codec-step = "=0.6.7"
+# solidcore-cadir is in SolidCraft PR 16906 but not at the pinned revision, so a
+# [patch] cannot add it (Cargo only patches existing packages). Use the seam path
+# until the pin contains it; see docs/solidcore-sync.md.
+solidcore-cadir = { path = "../vendor/solidcore/crates/solidcore-cadir" }
+
+
+# Run scripts/setup-solidcore-seam.sh first; it creates the local seam checkout.
+# The private build reads these packages from that seam. The public snapshot
+# exporter rewrites the paths to ../vendor/solidcore/ and vendors the crates.
+[patch."https://github.com/tangency-labs/solidcraft"]
+solidcore = { path = "../vendor/solidcore/crates/solidcore" }
+solidcore-record = { path = "../vendor/solidcore/crates/solidcore-record" }
+solidcore-convert = { path = "../vendor/solidcore/crates/solidcore-convert" }
+solidcore-tess = { path = "../vendor/solidcore/crates/solidcore-tess" }
+solidcore-ops = { path = "../vendor/solidcore/crates/solidcore-ops" }

@@ -21,6 +21,9 @@ mod ui_shape;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_backdrop;
 #[cfg(feature = "gpu-viewport")]
+mod gpu_pick;
+mod plan_math;
+#[cfg(feature = "gpu-viewport")]
 mod gpu_viewport;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_plan;
@@ -55,6 +58,9 @@ fn main() -> eframe::Result {
 }
 
 fn run() -> eframe::Result {
+    if let Err(error) = nodecraft_engine::thread_pools::init_rayon_pool() {
+        eprintln!("{error}");
+    }
     #[cfg(target_os = "macos")]
     nodecraft_macos::install_observer();
     let mut args: Vec<String> = std::env::args().skip(1).collect();

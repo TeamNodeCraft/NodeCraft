@@ -25,10 +25,12 @@ fn parses_the_node_values_the_app_writes() {
     assert_eq!(treatment.distance2, Some(1.25));
     assert_eq!(treatment.angle, Some(30.0));
 
-    // Missing fields use the app defaults (mode chamfer, equal, circular, length 2).
+    // Missing fields use the contract defaults (mode chamfer, equal, circular,
+    // length 2, distance2 2, angle 45).
     let defaults = EdgeTreatment::from_node_values(&json!({})).expect("defaults");
-    assert_eq!(defaults, EdgeTreatment::default());
     assert_eq!(defaults.length, 2.0);
+    assert_eq!(defaults.distance2, Some(2.0));
+    assert_eq!(defaults.angle, Some(45.0));
     assert_eq!(defaults.continuity, Continuity::Circular);
     assert_eq!(defaults.chamfer_type, ChamferType::Equal);
     assert_eq!(defaults.mode, EdgeMode::Chamfer);

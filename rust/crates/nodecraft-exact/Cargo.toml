@@ -6,4 +6,5 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 solidcore = { workspace = true }

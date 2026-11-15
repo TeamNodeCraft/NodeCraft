@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
 mod evaluation;
@@ -62,7 +62,7 @@ use nodecraft_node_canvas::theme::CanvasTheme;
 use crate::ui_shape;
 use crate::control_server;
 use crate::sketch_gui::SketchGui;
-use crate::viewport::{PreviewScope, Viewport};
+use crate::viewport::Viewport;
 use crate::viewer_gizmo::Gizmo;
 
 pub(crate) fn tint_svg(source: &[u8], colour: &str) -> String {
@@ -163,6 +163,28 @@ fn show_viewer_error(
     inspector: egui::Rect,
     error: &str,
 ) {
+    show_viewer_message(ctx, viewport, node_panel, inspector, error, "NODE ERROR", crate::theme::get().node_error);
+}
+
+fn show_viewer_warning(
+    ctx: &egui::Context,
+    viewport: egui::Rect,
+    node_panel: egui::Rect,
+    inspector: egui::Rect,
+    warning: &str,
+) {
+    show_viewer_message(ctx, viewport, node_panel, inspector, warning, "NODE WARNING", crate::theme::get().node_warning);
+}
+
+fn show_viewer_message(
+    ctx: &egui::Context,
+    viewport: egui::Rect,
+    node_panel: egui::Rect,
+    inspector: egui::Rect,
+    error: &str,
+    title: &str,
+    accent: [u8; 4],
+) {
     if error.trim().is_empty() {
         return;
     }
@@ -180,18 +202,18 @@ fn show_viewer_error(
         .show(ctx, |ui| {
             ui.set_max_width(max_width);
             egui::Frame::new()
-                .fill(theme.with_alpha(theme.node_error, 34))
-                .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.node_error, 190)))
+                .fill(theme.with_alpha(accent, 34))
+                .stroke(egui::Stroke::new(1.0, theme.with_alpha(accent, 190)))
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::symmetric(12, 8))
                 .show(ui, |ui| {
                     ui.set_max_width((max_width - 24.0).max(120.0));
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("NODE ERROR")
+                            egui::RichText::new(title)
                                 .size(10.0)
                                 .strong()
-                                .color(theme.color(theme.node_error)),
+                                .color(theme.color(accent)),
                         );
                         ui.with_layout(
                             egui::Layout::right_to_left(egui::Align::Center),
@@ -309,8 +331,6 @@ struct GizmoDragPreview {
     /// Downstream placement chain from the edited node to the displayed target.
     /// Topology does not change during a drag, so it is resolved once.
     chain: nodecraft_session::placement::Affine3,
-    /// Display bodies the edit feeds, also resolved once at drag start.
-    scope: PreviewScope,
     /// Placement from the edited branch's local space into the viewed target's
     /// space at drag start. Branch previews combine this with the drag delta.
     base_transform: nodecraft_session::placement::Affine3,
@@ -344,47 +364,6 @@ struct PendingDialogState {
     status_before: String,
 }
 
-/// Identity of one evaluation request. The session generation distinguishes a
-/// replacement graph from the old result even when every graph-level field matches.
-type EvalKey = (
-    u64,
-    String,
-    u64,
-    Option<String>,
-    Option<(String, String)>,
-    Option<String>,
-    Option<String>,
-    Vec<String>,
-    bool,
-    Option<u8>,
-);
-
-fn eval_key(
-    session_generation: u64,
-    document_id: &str,
-    revision: u64,
-    selection: &Option<String>,
-    comparison: &Option<(String, String)>,
-    ghost_input: &Option<String>,
-    edit_preview: &Option<String>,
-    validation_targets: &[String],
-    run_exporters: bool,
-    preview_detail: Option<u8>,
-) -> EvalKey {
-    (
-        session_generation,
-        document_id.to_owned(),
-        revision,
-        selection.clone(),
-        comparison.clone(),
-        ghost_input.clone(),
-        edit_preview.clone(),
-        validation_targets.to_vec(),
-        run_exporters,
-        preview_detail,
-    )
-}
-
 /// The before/after pair for the selected feature. The viewport chooses whether
 /// to use the selected result as the base or overlay its difference on the
 /// viewed breakpoint's body.
@@ -416,6 +395,57 @@ fn transform_edit_input(document: &GraphDocument, edit_target: &str) -> Option<S
 /// The input mesh a feature edit should preview: a transform's shape input or
 /// an edge tool's source body. This is what the transform-edit ghost draws and
 /// what an edge selection picks against, without replacing the breakpoint.
+/// Add or remove one edge pick from a feature's reference list.
+fn merge_edge_reference(
+    references: &mut Vec<serde_json::Value>,
+    pick: &crate::viewport::EdgePick,
+    inverse: Option<nodecraft_session::placement::Affine3>,
+) {
+    let center = inverse
+        .map(|frame| frame.apply_point(pick.center))
+        .unwrap_or(pick.center);
+    let existing = references.iter().position(|reference| {
+        if inverse.is_none()
+            && reference.get("id").and_then(serde_json::Value::as_str) == Some(&pick.id)
+        {
+            return true;
+        }
+        let Some(reference_center) = reference.get("center").and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        if reference_center.len() != 3 {
+            return false;
+        }
+        let dx = reference_center[0].as_f64().unwrap_or_default() - center[0];
+        let dy = reference_center[1].as_f64().unwrap_or_default() - center[1];
+        let dz = reference_center[2].as_f64().unwrap_or_default() - center[2];
+        (dx * dx + dy * dy + dz * dz).sqrt() <= 1.0e-4
+    });
+    if let Some(index) = existing {
+        references.remove(index);
+    } else if inverse.is_some() {
+        references.push(serde_json::json!({"center": center}));
+    } else {
+        references.push(serde_json::json!({"id": pick.id, "center": center}));
+    }
+}
+
+fn edit_preview_target_for(document: &GraphDocument, edit_target: &str) -> Option<String> {
+    edit_preview_input(document, edit_target)
+}
+
+fn edge_pick_gate_open(
+    eval_target: Option<&str>,
+    topology_target: &str,
+    face_pick_target: Option<&str>,
+    edit_preview_target: Option<&str>,
+) -> bool {
+    eval_target.is_some()
+        && (eval_target == Some(topology_target)
+            || (face_pick_target.is_some() && face_pick_target == edit_preview_target))
+}
+
 fn edit_preview_input(document: &GraphDocument, edit_target: &str) -> Option<String> {
     let node = document.nodes.iter().find(|node| node.id == edit_target)?;
     match node.node_type.as_str() {
@@ -597,6 +627,89 @@ fn transform_ghost_for(
 }
 
 
+/// One screenshot request. A CLI `--screenshot` request exits once the image is
+/// written; a control-server `/capture` request answers its HTTP caller and
+/// keeps the app running, because the control API outlives any one capture.
+struct CaptureRequest {
+    path: PathBuf,
+    /// Correlates this request with the `Event::Screenshot` it asked for, so a
+    /// late image from an earlier request can never satisfy a newer one.
+    id: u64,
+    reply: Option<Sender<String>>,
+    exit_after: bool,
+    started: Instant,
+    frames: u32,
+    requests: u32,
+}
+
+/// Write an egui screen capture as PNG. Kept out of the frame loop so the
+/// capture state machine can report a save failure to its HTTP caller.
+fn save_screenshot(path: &Path, image: &egui::ColorImage) -> Result<(), String> {
+    let rgba: Vec<u8> = image.pixels.iter().flat_map(|pixel| pixel.to_array()).collect();
+    let buffer = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        image.size[0] as u32,
+        image.size[1] as u32,
+        rgba,
+    )
+    .ok_or_else(|| "screenshot buffer dimensions were invalid".to_owned())?;
+    buffer.save(path).map_err(|error| error.to_string())
+}
+
+/// The id of the capture a screenshot event belongs to. A capture only accepts
+/// the event it asked for; a stale image from an earlier request is ignored.
+fn screenshot_event_id(user_data: &egui::UserData) -> Option<u64> {
+    user_data
+        .data
+        .as_ref()
+        .and_then(|data| data.downcast_ref::<u64>())
+        .copied()
+}
+
+impl CaptureRequest {
+    fn finish(&self, outcome: Result<(u32, u32), String>) -> String {
+        match outcome {
+            Ok((width, height)) => serde_json::json!({
+                "ok": true,
+                "path": self.path.to_string_lossy(),
+                "width": width,
+                "height": height,
+            })
+            .to_string(),
+            Err(error) => serde_json::json!({
+                "ok": false,
+                "error": error,
+            })
+            .to_string(),
+        }
+    }
+}
+
+/// An explicit request to view a target. `minimum_revision` is the display
+/// submission sequence at activation: only a frame submitted after the click
+/// can frame the camera, because an older frame still shows the geometry the
+/// user just asked to refresh.
+#[derive(Clone, Debug)]
+pub(super) struct ViewRequest {
+    pub tab_id: u64,
+    pub target: String,
+    pub minimum_revision: u64,
+}
+
+/// Does `request` ask for the frame `(tab_id, target, revision)` to be framed?
+/// A stale frame that was already in flight must leave the request pending.
+fn view_request_matches(
+    request: Option<&ViewRequest>,
+    tab_id: u64,
+    target: &str,
+    revision: u64,
+) -> bool {
+    request.is_some_and(|request| {
+        request.tab_id == tab_id
+            && request.target == target
+            && revision > request.minimum_revision
+    })
+}
+
 pub struct NodeCraftApp {
     session: Option<Session>,
     active_session_revision: u64,
@@ -633,11 +746,23 @@ pub struct NodeCraftApp {
     /// Selected nodes outside the viewed closure that are evaluated for error
     /// glow even though they do not contribute to the displayed mesh.
     validation_selection: Option<Vec<String>>,
+    /// Low-priority validation requests and their per-target diagnostics.
+    validation_next: u64,
+    validation_pending: HashMap<u64, evaluation::ValidationPending>,
+    validation_requested: HashSet<evaluation::ExactKey>,
+    validation_results: HashMap<String, evaluation::ValidationDiagnostics>,
+    /// Diagnostics from the displayed exact result, before validation merges.
+    base_node_errors: std::collections::BTreeMap<String, String>,
+    base_node_warnings: std::collections::BTreeMap<String, Vec<String>>,
     difference_stats: Option<(usize, usize)>,
     node_errors: HashSet<String>,
+    node_warnings: std::collections::BTreeMap<String, Vec<String>>,
     activity_seen: HashSet<String>,
     activity_active: HashSet<String>,
     node_error_messages: std::collections::BTreeMap<String, String>,
+    /// The exact result's background proof generation; a refusing report that names it is
+    /// applied to the nodes after the fact.
+    proof_generation: Option<u64>,
     difference_error: Option<String>,
     difference_approximate: bool,
     /// Developer-only: panic on the first frame to exercise the local crash dialog.
@@ -656,19 +781,17 @@ pub struct NodeCraftApp {
     display_snapshot: Option<evaluation::DisplaySnapshot>,
     display_error: Option<String>,
     last_display_us: Option<(u64, u64)>,
-    deferred_display: Option<(
-        std::sync::Arc<nodecraft_display::service::DisplayFrame>,
-        String,
-        bool,
-        Instant,
-    )>,
     last_applied_display: Option<(
         std::sync::Arc<nodecraft_display::service::DisplayFrame>,
         String,
         bool,
     )>,
-    applying_deferred_display: bool,
-    displayed_target: Option<String>,
+    /// Target whose explicit breakpoint activation must frame the camera when
+    /// its display next applies. Tab-scoped so a stale id cannot match another
+    /// document's target, and revision-gated so a frame that was already on its
+    /// way when the user clicked cannot consume the request. Consumed by the
+    /// apply that honours it.
+    view_request: Option<ViewRequest>,
     display_next: u64,
     eval_next: u64,
     eval_pending: Option<u64>,
@@ -676,7 +799,11 @@ pub struct NodeCraftApp {
     /// keyed by this too, so a replacement graph that happens to share the old
     /// document id, revision and target cannot be mistaken for the old result.
     session_generation: u64,
-    last_eval_key: Option<EvalKey>,
+    /// Exact results owned by the app, one bounded map per tab. A cached result
+    /// is applied here without sending a worker job or restarting evaluation.
+    exact_results: HashMap<u64, evaluation::ExactCache>,
+    /// Key and display-only inputs of the foreground job in flight.
+    pending_exact: Option<(evaluation::ExactKey, evaluation::DisplayFields)>,
     eval_progress: Option<EvalProgress>,
     egui_ctx: egui::Context,
     mesh: Option<Mesh>,
@@ -704,7 +831,8 @@ pub struct NodeCraftApp {
     /// Provisional display quality detail; None is the full plan.
     preview_detail: Option<u8>,
     warmup_until: Instant,
-    screenshot: Option<(std::path::PathBuf, u32)>,
+    screenshot: Option<CaptureRequest>,
+    next_capture_id: u64,
     render_model: bool,
     preserve_view_for_next_mesh: bool,
     /// Values captured when a gizmo drag starts, driving the display-only
@@ -783,8 +911,12 @@ fn mesh_preserves_camera(
     had_mesh: bool,
     same_target: bool,
     requested: bool,
+    explicit_view: bool,
 ) -> bool {
-    requested || (camera_initialized && had_mesh && same_target)
+    // An explicit breakpoint activation always frames the target's current
+    // geometry; preserving the old camera could leave it off-screen when an
+    // upstream edit (for example a suppression) moved the body.
+    !explicit_view && (requested || (camera_initialized && had_mesh && same_target))
 }
 
 /// Build the atomic command set for resizing an inline graph's body ports.
@@ -990,6 +1122,13 @@ fn commands_are_layout_only(commands: &[Command]) -> bool {
         && commands
             .iter()
             .all(|command| matches!(command, Command::SetPosition { .. }))
+}
+
+/// The one suppression edit. Every toggle (node editor, inspector, control
+/// server) flips the flag this way and then evaluates, so the session edit and
+/// the display refresh are identical whichever surface asked for it.
+fn suppression_toggle_command(node: &GraphNode) -> Command {
+    Command::SetSuppressed { node: node.id.clone(), suppressed: !node.suppressed }
 }
 
 /// Build the atomic edits for resizing a graph definition interface.
@@ -1205,11 +1344,19 @@ impl NodeCraftApp {
             comparison_pair: None,
             preview_ghost: None,
             validation_selection: None,
+            validation_next: 0,
+            validation_pending: HashMap::new(),
+            validation_requested: HashSet::new(),
+            validation_results: HashMap::new(),
+            base_node_errors: std::collections::BTreeMap::new(),
+            base_node_warnings: std::collections::BTreeMap::new(),
             difference_stats: None,
             node_errors: HashSet::new(),
+            node_warnings: std::collections::BTreeMap::new(),
             activity_seen: HashSet::new(),
             activity_active: HashSet::new(),
             node_error_messages: std::collections::BTreeMap::new(),
+            proof_generation: None,
             difference_error: None,
             difference_approximate: false,
             crash_test,
@@ -1219,7 +1366,7 @@ impl NodeCraftApp {
             workload_profiler: settings.workload_profiler,
             kernel_fixes: settings.kernel_fixes,
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
-            eval_worker: EvalWorker::new(std::sync::Arc::clone(&display_worker)),
+            eval_worker: EvalWorker::new(),
             commands: commands::CommandManager,
             display_worker,
             pending_display: None,
@@ -1227,15 +1374,14 @@ impl NodeCraftApp {
             display_snapshot: None,
             display_error: None,
             last_display_us: None,
-            deferred_display: None,
-            applying_deferred_display: false,
             last_applied_display: None,
-            displayed_target: None,
+            view_request: None,
             display_next: 0,
             eval_next: 0,
             eval_pending: None,
             session_generation: 0,
-            last_eval_key: None,
+            exact_results: HashMap::new(),
+            pending_exact: None,
             eval_progress: None,
             egui_ctx: cc.egui_ctx.clone(),
             mesh: None,
@@ -1257,7 +1403,16 @@ impl NodeCraftApp {
             preview_detail: Some(1),
             // The SolidCraft callback needs a prepare frame before its first blit.
             warmup_until: Instant::now() + std::time::Duration::from_secs(2),
-            screenshot: screenshot.map(|path| (path, 0)),
+            screenshot: screenshot.map(|path| CaptureRequest {
+                path,
+                id: 1,
+                reply: None,
+                exit_after: true,
+                started: Instant::now(),
+                frames: 0,
+                requests: 0,
+            }),
+            next_capture_id: 2,
             render_model,
             preserve_view_for_next_mesh: false,
             gizmo_drag: None,
@@ -1355,6 +1510,14 @@ impl NodeCraftApp {
     }
 
     fn export_document(&mut self) {
+        if !self.node_errors.is_empty() {
+            self.error = Some(
+                "Export refused: the document has failed nodes; partial models are not exported"
+                    .to_owned(),
+            );
+            self.status = "Export failed".to_owned();
+            return;
+        }
         let Some(session) = &self.session else {
             self.error = Some("No document loaded to export".to_owned());
             self.status = "Export failed".to_owned();
@@ -1421,6 +1584,17 @@ impl NodeCraftApp {
             self.status = "Re-evaluate failed".to_owned();
             return;
         };
+        self.eval_worker.cancel_active();
+        self.finish_remaining_node_activity();
+        self.node_errors.clear();
+        self.node_error_messages.clear();
+        self.node_warnings.clear();
+        self.node_editor.set_error_nodes(HashSet::new());
+        self.node_editor.set_warning_nodes(HashSet::new());
+        self.eval_progress = None;
+        // Safe: dirty marks are a hint; the new run's content hashes still
+        // catch any branch changed between the cancel and the restart.
+        self.pending_dirty.clear();
         self.viewer_breakpoint = Some(target.clone());
         self.error = None;
         self.status = format!("Re-evaluating {target}…");
@@ -1616,6 +1790,7 @@ impl NodeCraftApp {
         self.active_session_revision = self.session.as_ref().map_or(0, Session::revision);
         if let Some(current) = self.tabs.get_mut(self.active_tab) {
             current.document_id = source_document_id.to_owned();
+            current.session_generation = self.session_generation;
             current.path = path.clone();
             current.mesh = None;
             current.selected_nodes.clear();
@@ -1666,6 +1841,7 @@ impl NodeCraftApp {
         self.install_session(Some(Session::new(projection)));
         self.active_session_revision = self.session.as_ref().map_or(0, Session::revision);
         if let Some(current) = self.tabs.get_mut(self.active_tab) {
+            current.session_generation = self.session_generation;
             current.path = None;
             current.mesh = None;
             current.selected_nodes.clear();
@@ -1955,7 +2131,6 @@ impl NodeCraftApp {
                 && session.apply_derived_commands(&[command]).is_ok()
             {
                 self.active_session_revision = session.revision();
-                self.last_eval_key = None;
                 self.publish_active_document();
             }
             self.mesh = None;
@@ -2042,7 +2217,6 @@ impl NodeCraftApp {
                     .is_ok()
             {
                 self.active_session_revision = session.revision();
-                self.last_eval_key = None;
                 self.publish_active_document();
             }
             if let Some(tab) = self
@@ -2944,8 +3118,7 @@ impl NodeCraftApp {
                     self.edit_preview_target = None;
                     // The selection prefetch may have produced the same key but
                     // not the branch mesh; force the main pass to refresh.
-                    self.last_eval_key = None;
-                }
+                    }
                 self.edit_target = Some(id.to_owned());
                 self.open_inspector();
                 self.status = format!("Editing {id}");
@@ -3059,7 +3232,6 @@ impl NodeCraftApp {
                 node_id: node.id.clone(),
                 start_values: node.values.clone(),
                 chain: Affine3::identity(),
-                scope: PreviewScope::All,
                 base_transform: Affine3::identity(),
                 preview_mesh: None,
                 branch_preview: false,
@@ -3073,7 +3245,6 @@ impl NodeCraftApp {
             node_id: node.id.clone(),
             start_values: node.values.clone(),
             chain: frame.chain,
-            scope: PreviewScope::All,
             base_transform: frame.placement,
             // The branch mesh and its GPU plans may still be in flight. The drag
             // values can start immediately; `attach_pending_edit_ghost` adds the
@@ -3083,8 +3254,8 @@ impl NodeCraftApp {
         })
     }
 
-    /// Per-frame preview update: only the values change now. The chain, scope
-    /// and (for large meshes) the affected geometry are all cached.
+    /// Per-frame preview update: only the values change now. The chain and base
+    /// placement are cached.
     fn refresh_gizmo_preview(&mut self) {
         let resolved = match self.gizmo_drag.as_ref() {
             Some(drag) => {
@@ -3102,19 +3273,16 @@ impl NodeCraftApp {
                         &drag.start_values,
                         &current,
                     );
-                    let matrix = if drag.branch_preview {
+                    if drag.branch_preview {
                         delta.compose(drag.base_transform).to_column_major_f32()
                     } else {
                         delta.to_column_major_f32()
-                    };
-                    (matrix, drag.scope.clone())
+                    }
                 })
             }
             None => None,
         };
-        let (matrix, scope) = resolved
-            .map(|(matrix, scope)| (Some(matrix), scope))
-            .unwrap_or((None, PreviewScope::All));
+        let matrix = resolved;
         let alpha = self
             .gizmo_drag
             .as_ref()
@@ -3128,7 +3296,7 @@ impl NodeCraftApp {
         {
             self.viewport.update_ghost_transform(matrix, alpha);
         } else {
-            self.viewport.set_preview_transform_with_alpha(matrix, scope, alpha);
+            self.viewport.set_preview_transform(matrix, alpha);
         }
     }
 
@@ -3197,7 +3365,7 @@ impl NodeCraftApp {
                         eprintln!("[gizmo] publish {}ms", started.elapsed().as_millis());
                     }
                 }
-                self.viewport.set_preview_transform(None, PreviewScope::All);
+                self.viewport.set_preview_transform(None, 1.0);
             }
             return;
         };
@@ -3267,13 +3435,13 @@ impl NodeCraftApp {
                 if self.eval_pending.is_none() {
                     // Nothing started (the viewed target is unaffected), so no
                     // new mesh will replace the preview.
-                    self.viewport.set_preview_transform(None, PreviewScope::All);
+                    self.viewport.set_preview_transform(None, 1.0);
                     if had_preview_mesh {
                         self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
                     }
                 }
             } else {
-                self.viewport.set_preview_transform(None, PreviewScope::All);
+                self.viewport.set_preview_transform(None, 1.0);
                 if had_preview_mesh {
                     self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
                 }
@@ -3350,8 +3518,10 @@ impl NodeCraftApp {
                         self.install_session(Some(Session::new(projection)));
                         self.active_session_revision =
                             self.session.as_ref().map_or(0, Session::revision);
-                        self.last_eval_key = None;
-                        self.node_editor.request_fit();
+                        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+                            tab.session_generation = self.session_generation;
+                        }
+                                self.node_editor.request_fit();
                     } else if let Some(session) = self.session.as_mut()
                         && session
                             .apply_derived_commands(&[Command::SetRootDefinition {
@@ -3361,8 +3531,7 @@ impl NodeCraftApp {
                     {
                         self.active_session_revision = session.revision();
                         if !layout_only {
-                            self.last_eval_key = None;
-                        }
+                                    }
                     }
                     if !layout_only {
                         self.auto_eval_due = Some(Instant::now());
@@ -3499,8 +3668,7 @@ impl NodeCraftApp {
                 .is_ok()
         {
             self.active_session_revision = session.revision();
-            self.last_eval_key = None;
-            self.publish_active_document();
+                self.publish_active_document();
         }
         if let Some(tab) = self
             .tabs
@@ -3896,6 +4064,41 @@ impl NodeCraftApp {
         }
     }
 
+    fn consume_edge_picks(&mut self, node: &GraphNode, picks: Vec<crate::viewport::EdgePick>) {
+        let Some((field, mode)) = Self::selection_spec(&node.node_type) else { return };
+        if mode != crate::viewport::SelectionMode::Edge {
+            return;
+        }
+        let mut references: Vec<serde_json::Value> = node
+            .values
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let pick_node = node.id.clone();
+        let inverse = if self.selection_view_target.is_some() {
+            self.selection_view_affine(&pick_node)
+                .map(nodecraft_session::placement::Affine3::inverse)
+        } else {
+            None
+        };
+        for pick in picks {
+            merge_edge_reference(&mut references, &pick, inverse);
+        }
+        if self.apply_commands(
+            &[Command::SetValue {
+                node: node.id.clone(),
+                field: field.to_owned(),
+                value: serde_json::Value::Array(references),
+            }],
+            Some("edge-pick"),
+        ) {
+            // Stay in the edge-selection session so existing selections remain
+            // visible and can be toggled off.
+            self.evaluate();
+        }
+    }
+
     fn toggle_reference_picks(
         &mut self,
         node: &nodecraft_session::GraphNode,
@@ -4127,9 +4330,46 @@ impl NodeCraftApp {
         }
     }
 
+    /// Flip a node's suppression through the shared edit + evaluate path.
+    /// Returns whether the session actually changed.
+    pub(super) fn toggle_node_suppressed(&mut self, id: &str) -> bool {
+        let Some(node) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.document().nodes.iter().find(|node| node.id == id))
+            .cloned()
+        else {
+            return false;
+        };
+        let changed = self.apply_commands(
+            &[suppression_toggle_command(&node)],
+            Some("suppress-node"),
+        );
+        if changed {
+            self.evaluate();
+        }
+        changed
+    }
+
+    /// Record an explicit request to view a node. The next display applied for
+    /// this target frames it, even when it is already the displayed target:
+    /// the user asked to see this geometry now, not to keep the old camera.
+    pub(super) fn request_view(&mut self, target: String) {
+        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
+        self.view_request = Some(ViewRequest {
+            tab_id,
+            target,
+            minimum_revision: self.display_next,
+        });
+    }
+
     fn poll_control(&mut self) {
-        while let Ok(request) = self.control_requests.try_recv() {
-            let reply = match request.command {
+        'requests: while let Ok(request) = self.control_requests.try_recv() {
+            // A timed-out HTTP client withdrew its reply slot. Never execute a
+            // command whose caller has already gone.
+            let Some(reply) = request.claim() else { continue };
+            let changes_state = request.command.changes_state();
+            let text = match request.command {
                 control_server::Command::ReplaceProject(value) => {
                     match serde_json::from_value::<GraphDocument>(value) {
                         Ok(document) => {
@@ -4221,9 +4461,17 @@ impl NodeCraftApp {
                     }
                 }
                 control_server::Command::ViewNode(id) => {
-                    self.viewer_breakpoint = Some(id);
+                    self.viewer_breakpoint = Some(id.clone());
+                    self.request_view(id);
                     self.evaluate();
                     "{\"ok\":true}".to_owned()
+                }
+                control_server::Command::ToggleSuppressed(id) => {
+                    if self.toggle_node_suppressed(&id) {
+                        serde_json::json!({ "ok": true, "changed": true }).to_string()
+                    } else {
+                        serde_json::json!({ "ok": false, "changed": false }).to_string()
+                    }
                 }
                 control_server::Command::Home => {
                     self.viewport.home();
@@ -4267,12 +4515,26 @@ impl NodeCraftApp {
                     }
                 }
                 control_server::Command::Capture(path) => {
-                    self.screenshot = Some((PathBuf::from(path), 0));
+                    // Answer only when the image exists (or capture failed).
+                    // The HTTP handler owns the timeout; this command must not
+                    // pretend a screenshot exists before it has been painted.
+                    let id = self.next_capture_id;
+                    self.next_capture_id = self.next_capture_id.wrapping_add(1);
+                    self.screenshot = Some(CaptureRequest {
+                        path: PathBuf::from(path),
+                        id,
+                        reply: Some(reply),
+                        exit_after: false,
+                        started: Instant::now(),
+                        frames: 0,
+                        requests: 0,
+                    });
                     self.egui_ctx.request_repaint();
-                    "{\"ok\":true}".to_owned()
+                    continue 'requests;
                 }
                 control_server::Command::State => {
                     if let Some(session) = &self.session {
+                        self.viewport.refresh_display_mirror();
                         let display_plan_count = self.viewport.plans.len();
                         let unique_plan_count = self.viewport.plans.iter()
                             .map(|plan| std::sync::Arc::as_ptr(&plan.plan) as usize)
@@ -4300,7 +4562,8 @@ impl NodeCraftApp {
                         "displayPlans": display_plan_count,
                         "planDebug": self.viewport.plan_debug(),
                         "displayTiming": self.last_display_us,
-                        "deferredDisplay": self.deferred_display.is_some(),
+                        "displayedTarget": self.viewport.displayed_target(),
+                        "displayedSnapshot": self.viewport.displayed_snapshot(),
                         "viewPlansHash": self.viewport.view_plans_hash(),
                         "uniquePlans": unique_plan_count,
                         "bodyKeys": body_keys,
@@ -4308,7 +4571,6 @@ impl NodeCraftApp {
                         "qualityDisplay": self.quality_display.as_ref().map(|(revision, _, _, _, _)| *revision),
                         "displaySnapshot": self.display_snapshot.as_ref().map(|snapshot| snapshot.id),
                         "pendingDisplay": self.pending_display.as_ref().map(|(id, _, _, _)| *id),
-                        "displayPlans": self.viewport.plans.len(),
                         "nodeActivity": self.activity_active.len(),
                         "previewDetail": self.preview_detail,
                         "editTarget": self.edit_target,
@@ -4335,7 +4597,12 @@ impl NodeCraftApp {
                     }
                 }
             };
-            let _ = request.reply.send(reply);
+            let _ = reply.send(text);
+            // State-changing commands must produce a frame even when the event
+            // was drained while the window was hidden.
+            if changes_state {
+                self.egui_ctx.request_repaint();
+            }
         }
     }
 
@@ -4398,6 +4665,10 @@ impl NodeCraftApp {
             ctx.request_repaint();
         }
         self.poll_dialog(ctx);
+        // Drain here, not in ui(): eframe calls logic once per frame and also
+        // when the window is hidden or occluded, so commands still run without
+        // a paint. This is the single drain point.
+        self.poll_control();
         self.node_editor.set_cable_routing(self.cable_routing);
         let view = self.viewport.view();
         let theme_id = Some(crate::theme::active_preset().id);
@@ -4435,19 +4706,6 @@ impl NodeCraftApp {
             }
         }
         self.poll_evaluation();
-        if self.deferred_display.is_some() {
-            let expired = self
-                .deferred_display
-                .as_ref()
-                .is_some_and(|(_, _, _, at)| at.elapsed() >= std::time::Duration::from_millis(250));
-            if self.viewport.plan_pending() && !expired {
-                ctx.request_repaint_after(std::time::Duration::from_millis(16));
-            } else if let Some((frame, target, feature_ghost, _)) = self.deferred_display.take() {
-                self.applying_deferred_display = true;
-                self.apply_display_frame(&frame, &target, feature_ghost, false);
-                self.applying_deferred_display = false;
-            }
-        }
         if self.eval_pending.is_none()
             // A drag previews the placement on the GPU; evaluating mid-drag would
             // replace that geometry and double-apply the transform.
@@ -4464,10 +4722,7 @@ impl NodeCraftApp {
             // request submitted while an exact frame is in flight overwrites
             // that frame before the app can poll it.
             && self.pending_display.is_none()
-            && self
-                .display_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.id == self.eval_next)
+            && self.display_snapshot.is_some()
             && self.gizmo_drag.is_none()
             && self.session.is_some()
         {
@@ -4480,9 +4735,11 @@ impl NodeCraftApp {
                 // the legacy planner.
                 if let Some(snapshot) = self.display_snapshot.clone() {
                     self.display_next = self.display_next.wrapping_add(1);
-                    // Revisions share one display worker with evaluation
-                    // requests; camera-only frames use a distinct range.
-                    let revision = (1u64 << 63) | self.display_next;
+                    // One monotonically increasing submission sequence shared
+                    // by exact and quality requests. The exact snapshot id is
+                    // the display order that matters; this revision only breaks
+                    // ties between re-plans of the same snapshot.
+                    let revision = self.display_next;
                     self.display_worker.submit(nodecraft_display::service::DisplayRequest {
                         revision,
                         snapshot_id: snapshot.id,
@@ -4514,39 +4771,91 @@ impl NodeCraftApp {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
 
-        let Some((path, frames)) = self.screenshot.as_mut() else { return };
-        *frames += 1;
-        // Keep the event loop awake and ask again until the compositor has presented
-        // at least one complete frame. A single request can race the first show.
-        ctx.request_repaint();
-        if self.eval_pending.is_none() && *frames >= 10 && (*frames - 10) % 30 == 0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-        }
-        let image = ctx.input(|input| {
-            input.raw.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        if let Some(image) = image {
-            let rgba: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
-            match image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
-                image.size[0] as u32,
-                image.size[1] as u32,
-                rgba,
-            ) {
-                Some(buffer) => match buffer.save(&*path) {
-                    Ok(()) => eprintln!("screenshot saved: {}", path.display()),
-                    Err(error) => eprintln!("screenshot save failed: {error}"),
-                },
-                None => eprintln!("screenshot buffer dimensions were invalid"),
+        self.poll_capture(ctx);
+    }
+
+    /// Drive one outstanding screenshot to an answer.
+    ///
+    /// A screenshot is produced by the paint pass, and the event announcing it
+    /// arrives in the next frame's raw input. A minimized or fully occluded
+    /// window runs `logic` only and never paints, so capture first asks the
+    /// compositor to show the window. Every request carries its own id and only
+    /// an event with that id can complete it, so a late image from an earlier
+    /// request can never answer a newer one. The app never closes here: a
+    /// control-server capture always replies with an image or an error.
+    fn poll_capture(&mut self, ctx: &egui::Context) {
+        const CAPTURE_TIMEOUT: Duration = Duration::from_secs(6);
+        let mut completed = false;
+        if let Some(capture) = self.screenshot.as_mut() {
+            capture.frames += 1;
+            // Keep the event loop awake while the image is in flight.
+            ctx.request_repaint();
+            if capture.frames == 1 {
+                // `logic` still runs with no paint when the window is
+                // minimized/occluded. Make it paintable before asking for the
+                // image; otherwise the request can never be answered.
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
+            let image = ctx.input(|input| {
+                input.raw.events.iter().rev().find_map(|event| match event {
+                    egui::Event::Screenshot { image, user_data, .. } => {
+                        (screenshot_event_id(user_data) == Some(capture.id))
+                            .then(|| image.clone())
+                    }
+                    _ => None,
+                })
+            });
+            if let Some(image) = image {
+                let width = image.size[0] as u32;
+                let height = image.size[1] as u32;
+                let text = match save_screenshot(&capture.path, &image) {
+                    Ok(()) => {
+                        eprintln!("screenshot saved: {}", capture.path.display());
+                        capture.finish(Ok((width, height)))
+                    }
+                    Err(error) => {
+                        eprintln!("screenshot save failed: {error}");
+                        capture.finish(Err(error))
+                    }
+                };
+                if let Some(reply) = capture.reply.take() {
+                    let _ = reply.send(text);
+                }
+                if capture.exit_after {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                completed = true;
+            } else if capture.started.elapsed() >= CAPTURE_TIMEOUT {
+                eprintln!(
+                    "screenshot timed out after {} frames",
+                    capture.frames
+                );
+                let text = capture.finish(Err("screenshot timed out".to_owned()));
+                if let Some(reply) = capture.reply.take() {
+                    let _ = reply.send(text);
+                }
+                if capture.exit_after {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                completed = true;
+            } else {
+                // Wait for the evaluated display to settle, then ask again
+                // until an answer arrives. A request can race the first show
+                // or a mapping callback; re-asking is cheaper than one long
+                // timeout and keeps the UI responsive.
+                let settled = self.eval_pending.is_none() && !self.viewport.plan_pending();
+                let next_request = 3 + capture.requests * 20;
+                if settled && capture.frames >= next_request {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                        egui::UserData::new(capture.id),
+                    ));
+                    capture.requests = capture.requests.saturating_add(1);
+                }
+            }
+        }
+        if completed {
             self.screenshot = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        } else if *frames > 3600 {
-            eprintln!("screenshot timed out after 3600 frames");
-            self.screenshot = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
 
@@ -4561,7 +4870,6 @@ impl NodeCraftApp {
         }
         crate::window_chrome::prepare_main_window();
         self.accept_dropped_files(ui.ctx());
-        self.poll_control();
         #[cfg(target_os = "macos")]
         self.poll_open_documents();
         // The native macOS titlebar must not start a window move when the
@@ -5322,74 +5630,33 @@ impl NodeCraftApp {
             self.end_selection_session();
         }
         let edge_picks = self.viewport.take_edge_picks();
-        if !edge_picks.is_empty()
-            && self.eval_target.is_some()
-            && (self.eval_target == self.topology_target() || self.edge_selection_on_preview())
-            && let Some(node) = selected_node.as_ref()
-            && let Some((field, mode)) = Self::selection_spec(&node.node_type)
-            && mode == crate::viewport::SelectionMode::Edge
-        {
-            let mut references: Vec<serde_json::Value> = node
-                .values
-                .get(field)
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let pick_node = node.id.clone();
-            let inverse = if self.selection_view_target.is_some() {
-                self.selection_view_affine(&pick_node)
-                    .map(nodecraft_session::placement::Affine3::inverse)
+        if !edge_picks.is_empty() {
+            let topology = self.topology_target();
+            let gate = edge_pick_gate_open(
+                self.eval_target.as_deref(),
+                topology.as_deref().unwrap_or(""),
+                self.face_pick_target.as_deref(),
+                self.edit_preview_target.as_deref(),
+            );
+            if gate
+                && let Some(node) = selected_node.as_ref()
+                && Self::selection_spec(&node.node_type)
+                    .is_some_and(|(_, mode)| mode == crate::viewport::SelectionMode::Edge)
+            {
+                self.consume_edge_picks(node, edge_picks);
             } else {
-                None
-            };
-            for pick in edge_picks {
-                let center = inverse
-                    .map(|frame| frame.apply_point(pick.center))
-                    .unwrap_or(pick.center);
-                let existing = references.iter().position(|reference| {
-                    if inverse.is_none()
-                        && reference.get("id").and_then(serde_json::Value::as_str)
-                            == Some(&pick.id)
-                    {
-                        return true;
-                    }
-                    let Some(reference_center) =
-                        reference.get("center").and_then(serde_json::Value::as_array)
-                    else {
-                        return false;
-                    };
-                    if reference_center.len() != 3 {
-                        return false;
-                    }
-                    let dx = reference_center[0].as_f64().unwrap_or_default() - center[0];
-                    let dy = reference_center[1].as_f64().unwrap_or_default() - center[1];
-                    let dz = reference_center[2].as_f64().unwrap_or_default() - center[2];
-                    (dx * dx + dy * dy + dz * dz).sqrt() <= 1.0e-4
-                });
-                if let Some(index) = existing {
-                    references.remove(index);
-                } else if inverse.is_some() {
-                    // Downstream ids are not the feature's B-rep ids. Keep the
-                    // mapped centre so the exact resolver can find the edge.
-                    references.push(serde_json::json!({"center": center}));
-                } else {
-                    references.push(serde_json::json!({
-                        "id": pick.id,
-                        "center": center,
-                    }));
+                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                    eprintln!(
+                        "[edge-pick] dropped eval_target={:?} topology={:?} face_pick={:?} preview={:?} edit_target={:?} selected={:?}",
+                        self.eval_target,
+                        self.topology_target(),
+                        self.face_pick_target,
+                        self.edit_preview_target,
+                        self.edit_target,
+                        self.selected_nodes,
+                    );
                 }
-            }
-            if self.apply_commands(
-                &[Command::SetValue {
-                    node: node.id.clone(),
-                    field: field.to_owned(),
-                    value: serde_json::Value::Array(references),
-                }],
-                Some("edge-pick"),
-            ) {
-                // Stay in the edge-selection session so existing selections remain
-                // visible and can be toggled off.
-                self.evaluate();
+                self.status = "Edge pick ignored: preview not ready".to_owned();
             }
         }
 
@@ -5644,6 +5911,18 @@ impl NodeCraftApp {
             && let Some(error) = self.node_error_messages.get(&node.id)
         {
             show_viewer_error(ui.ctx(), viewport_rect, node_panel_rect, inspector_rect, error);
+        } else if !inspector_is_fallback
+            && let Some(node) = &selected_node
+            && let Some(warnings) = self.node_warnings.get(&node.id)
+            && !warnings.is_empty()
+        {
+            show_viewer_warning(
+                ui.ctx(),
+                viewport_rect,
+                node_panel_rect,
+                inspector_rect,
+                &format!("Warning: {}", warnings.join("; ")),
+            );
         }
         if inspector_is_fallback {
             if let (Some(output), Some(node), Some(document_id)) = (
@@ -5805,11 +6084,8 @@ impl NodeCraftApp {
                     );
                 }
                 if output.toggle_suppressed {
-                    let command = Command::SetSuppressed {
-                        node: node.id.clone(),
-                        suppressed: !node.suppressed,
-                    };
-                    changed |= self.apply_commands(&[command], Some("suppress-node"));
+                    changed |= self
+                        .apply_commands(&[suppression_toggle_command(&node)], Some("suppress-node"));
                 }
                 if changed {
                     self.evaluate();
@@ -5908,18 +6184,7 @@ impl NodeCraftApp {
                     }
                 }
                 NodeEditorAction::ToggleSuppressed { id } => {
-                    let suppressed = self
-                        .session
-                        .as_ref()
-                        .and_then(|session| session.document().nodes.iter().find(|node| node.id == id))
-                        .map(|node| node.suppressed)
-                        .unwrap_or(false);
-                    if self.apply_commands(
-                        &[Command::SetSuppressed { node: id, suppressed: !suppressed }],
-                        Some("suppress-node"),
-                    ) {
-                        self.evaluate();
-                    }
+                    self.toggle_node_suppressed(&id);
                 }
                 NodeEditorAction::EnterGroup { id } => {
                     self.enter_group(&id);
@@ -5929,7 +6194,10 @@ impl NodeCraftApp {
                 }
                 NodeEditorAction::SetViewerBreakpoint { id } => {
                     // The eye controls the viewer only; it never mutates selection.
-                    self.viewer_breakpoint = Some(id);
+                    // Activating a breakpoint frames its current geometry, even
+                    // when the same target was already shown implicitly.
+                    self.viewer_breakpoint = Some(id.clone());
+                    self.request_view(id);
                     self.evaluate();
                 }
                 NodeEditorAction::CleanupLayout { mode } => {
@@ -6103,6 +6371,7 @@ fn canvas_theme(theme: &crate::theme::Theme) -> CanvasTheme {
         highlight: theme.highlight,
         node_activity: theme.node_activity,
         node_error: theme.node_error,
+        node_warning: theme.node_warning,
         port_input: theme.port_input,
         card: theme.card,
         card_border: theme.card_border,
@@ -6539,15 +6808,340 @@ mod tests {
         assert_eq!(session.document().connections.len(), 2);
     }
 
+    fn exact_key(
+        generation: u64,
+        revision: u64,
+        target: Option<String>,
+    ) -> evaluation::ExactKey {
+        evaluation::ExactKey::new(
+            generation,
+            "untitled-1".to_owned(),
+            revision,
+            target,
+            None,
+            None,
+            None,
+            false,
+            false,
+            &Default::default(),
+        )
+    }
+
     #[test]
     fn replaced_sessions_get_a_new_evaluation_identity() {
-        let selection = Some("extrude".to_owned());
-        let comparison = None;
-        let first = eval_key(1, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false, None);
-        let replacement = eval_key(2, "untitled-1", 0, &selection, &comparison, &None, &None, &[], false, None);
+        let first = exact_key(1, 0, Some("extrude".to_owned()));
+        let replacement = exact_key(2, 0, Some("extrude".to_owned()));
         assert_ne!(first, replacement, "a replaced session must not reuse the old result");
     }
 
+    #[test]
+    fn exact_cache_keeps_other_targets_and_edits_invalidate() {
+        let mut cache = evaluation::ExactCache::default();
+        let u34 = exact_key(1, 5, Some("u34".to_owned()));
+        let u10 = exact_key(1, 5, Some("u10".to_owned()));
+        let edited_u34 = exact_key(1, 6, Some("u34".to_owned()));
+        let evaluation = |target: &str, ms: f64| engine_bridge::Evaluation {
+            target: target.to_owned(),
+            difference_error: None,
+            difference_approximate: false,
+            node_errors: Default::default(),
+            node_warnings: Default::default(),
+            error: None,
+            elapsed_ms: ms,
+            kernel_ms: ms,
+            cache_hits: 0,
+            cache_misses: 0,
+            brep_hits: 0,
+            part_hits: 0,
+            exact_parts: Default::default(),
+            exact_comparison: None,
+            proof_generation: 0,
+        };
+        cache.insert(u34.clone(), evaluation("u34", 58.0));
+        cache.insert(u10.clone(), evaluation("u10", 17.0));
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(&u34).expect("u34 retained").elapsed_ms, 58.0);
+        assert_eq!(cache.get(&u10).expect("u10 retained").elapsed_ms, 17.0);
+        assert!(cache.get(&edited_u34).is_none(), "an edit must miss the old content");
+    }
+
+    #[test]
+    fn selection_outside_the_viewed_closure_is_validation_only() {
+        let closure: HashSet<String> = ["u10", "crt0"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let selected = vec!["u10".to_owned(), "u30".to_owned()];
+        assert_eq!(
+            evaluation::validation_targets_outside(&selected, &closure),
+            vec!["u30".to_owned()],
+            "a selected node inside the viewed closure is not a validation target"
+        );
+    }
+
+    #[test]
+    fn validation_diagnostics_only_merge_while_selected() {
+        let mut base_errors = std::collections::BTreeMap::new();
+        base_errors.insert("u10".to_owned(), "displayed failure".to_owned());
+        let base_warnings = std::collections::BTreeMap::new();
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            "u30".to_owned(),
+            evaluation::ValidationDiagnostics {
+                errors: [("u30".to_owned(), "cold union refused".to_owned())]
+                    .into_iter()
+                    .collect(),
+                warnings: Default::default(),
+            },
+        );
+        let (errors, _) = evaluation::merge_diagnostics(
+            &base_errors,
+            &base_warnings,
+            &["u30".to_owned()],
+            &results,
+        );
+        assert_eq!(errors.get("u10").map(String::as_str), Some("displayed failure"));
+        assert_eq!(errors.get("u30").map(String::as_str), Some("cold union refused"));
+        let (after, _) = evaluation::merge_diagnostics(
+            &base_errors,
+            &base_warnings,
+            &[],
+            &results,
+        );
+        assert!(
+            !after.contains_key("u30"),
+            "deselecting the target must drop its validation glow"
+        );
+    }
+
+    #[test]
+    fn display_quality_is_not_part_of_exact_identity() {
+        // A quality tier only changes the display request. Two exact keys for
+        // the same content are identical, so a tier change hits the exact map
+        // instead of starting an EvalJob.
+        let before = exact_key(1, 5, Some("u10".to_owned()));
+        let after = exact_key(1, 5, Some("u10".to_owned()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn suppression_toggle_flips_the_session_flag_through_the_shared_command() {
+        let document = legacy_document(json!({
+            "nodes": [
+                {"id": "t1", "type": "translate", "suppressed": false, "values": {}, "x": 0.0, "y": 0.0}
+            ],
+            "connections": []
+        }));
+        let mut session = Session::new(document);
+        let before = session.revision();
+        let command = suppression_toggle_command(&session.document().nodes[0]);
+        assert!(matches!(
+            command,
+            Command::SetSuppressed { ref node, suppressed: true } if node == "t1"
+        ));
+        let change = session.apply_commands(&[command]).expect("apply suppression");
+        assert!(change.changed);
+        assert!(session.document().nodes[0].suppressed);
+        assert!(session.revision() > before, "a suppression edit changes the exact identity");
+
+        let command = suppression_toggle_command(&session.document().nodes[0]);
+        assert!(matches!(
+            command,
+            Command::SetSuppressed { ref node, suppressed: false } if node == "t1"
+        ));
+        session.apply_commands(&[command]).expect("apply unsuppression");
+        assert!(!session.document().nodes[0].suppressed);
+    }
+
+    fn translate_chain(translate_x: f64, suppressed: bool) -> GraphDocument {
+        legacy_document(json!({
+            "nodes": [
+                {"id": "p", "type": "primitive", "values": {"primitiveType": "box", "length": 40, "width": 20, "height": 10}, "x": 0.0, "y": 0.0},
+                {"id": "t1", "type": "translate", "suppressed": suppressed, "values": {"x": translate_x, "y": 0.0, "z": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0, "space": "world"}, "x": 200.0, "y": 0.0},
+                {"id": "t2", "type": "translate", "values": {"x": 0.0, "y": 30.0, "z": 0.0, "rx": 0.0, "ry": 0.0, "rz": 0.0, "space": "world"}, "x": 400.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "p", "to": "t1", "in": "shape", "out": "shape"},
+                {"from": "t1", "to": "t2", "in": "shape", "out": "shape"}
+            ]
+        }))
+    }
+
+    fn eval_downstream(document: &GraphDocument, target: &str) -> engine_bridge::Evaluation {
+        let (evaluation, _) = engine_bridge::evaluate_flat_exact(
+            document,
+            target.to_owned(),
+            nodecraft_engine::EngineCache::new(),
+            None,
+            None,
+            false,
+            &HashSet::new(),
+            None,
+            &[],
+            None,
+            false,
+        );
+        evaluation.expect("downstream evaluation")
+    }
+
+    fn part_keys(part: &nodecraft_exact::ExactPart) -> Vec<nodecraft_exact::BodyKey> {
+        part.bodies.iter().map(|body| body.key).collect()
+    }
+
+    fn part_transforms(part: &nodecraft_exact::ExactPart) -> Vec<Vec<nodecraft_exact::DisplayTransform>> {
+        part.bodies.iter().map(|body| body.transforms.clone()).collect()
+    }
+
+    fn submit_for_test(
+        evaluation: &engine_bridge::Evaluation,
+        worker: &nodecraft_display::service::DisplayWorker,
+        next: &mut u64,
+        installed: &mut Option<evaluation::DisplaySnapshot>,
+        pending: &mut Option<(u64, String, bool, Instant)>,
+        quality: &mut Option<(u64, u64, String, bool, Instant)>,
+    ) -> bool {
+        evaluation::submit_exact_snapshot(
+            evaluation::DisplaySubmission {
+                evaluation,
+                feature_ghost: false,
+                edit_preview: None,
+                ghost_input: None,
+                comparison: None,
+                run_exporters: false,
+                quality: Some(1),
+            },
+            worker,
+            next,
+            installed,
+            pending,
+            quality,
+        )
+    }
+
+    #[test]
+    fn unsuppressing_a_translate_hands_the_new_downstream_placement_to_display() {
+        let suppressed = eval_downstream(&translate_chain(60.0, true), "t2");
+        let active = eval_downstream(&translate_chain(60.0, false), "t2");
+        let suppressed_part = suppressed.exact_parts.get("t2").expect("suppressed part");
+        let active_part = active.exact_parts.get("t2").expect("active part");
+        assert_eq!(
+            part_keys(suppressed_part),
+            part_keys(active_part),
+            "placement-only changes keep the producing node's BodyKey",
+        );
+        assert_ne!(
+            part_transforms(suppressed_part),
+            part_transforms(active_part),
+            "unsuppressing the translate changes the downstream placement",
+        );
+
+        let worker = nodecraft_display::service::DisplayWorker::start(8, || {})
+            .expect("display worker");
+        let mut next = 0;
+        let mut installed = None;
+        let mut pending = None;
+        let mut quality = None;
+        assert!(submit_for_test(&suppressed, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        let first = installed.as_ref().expect("first snapshot").id;
+        assert!(submit_for_test(&active, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        let second = installed.as_ref().expect("second snapshot");
+        assert!(second.id > first, "a newer snapshot must replace the older one");
+        assert_eq!(second.id, pending.as_ref().expect("pending").0);
+        assert_eq!(
+            part_transforms(&second.snapshot.breakpoint["t2"]),
+            part_transforms(active_part),
+            "the submitted snapshot carries the translated placement",
+        );
+
+        // The worker's newest frame must be the unsuppressed snapshot. The
+        // control toggle reaches this same submit_exact_snapshot path.
+        let mut frame = None;
+        for _ in 0..100 {
+            frame = worker
+                .latest_frame()
+                .filter(|frame| frame.revision == second.id);
+            if frame.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let frame = frame.expect("published unsuppressed frame");
+        assert_eq!(frame.snapshot_id, second.id);
+
+        // The suppressed frame's display order is older no matter which request
+        // sequence number the worker happened to give it, so it can never
+        // replace the unsuppressed snapshot.
+        let suppressed_order = evaluation::DisplayOrder {
+            snapshot_id: first,
+            revision: u64::MAX,
+        };
+        let active_order = evaluation::DisplayOrder {
+            snapshot_id: second.id,
+            revision: second.id,
+        };
+        assert!(suppressed_order.is_stale(Some(second.id)));
+        assert!(!suppressed_order.supersedes(active_order));
+        assert!(active_order.supersedes(suppressed_order));
+    }
+
+    #[test]
+    fn display_order_puts_the_exact_snapshot_before_the_request_sequence() {
+        let normal = evaluation::DisplayOrder { snapshot_id: 7, revision: 7 };
+        let quality_replan = evaluation::DisplayOrder { snapshot_id: 7, revision: 8 };
+        assert!(
+            quality_replan.supersedes(normal),
+            "a later quality tier re-plans the same snapshot",
+        );
+        assert!(!quality_replan.is_stale(Some(7)));
+
+        let older_snapshot_quality = evaluation::DisplayOrder { snapshot_id: 6, revision: u64::MAX };
+        assert!(
+            !older_snapshot_quality.supersedes(normal),
+            "a quality frame for an older snapshot must not clear a newer staged frame",
+        );
+        assert!(normal.supersedes(older_snapshot_quality));
+        assert!(older_snapshot_quality.is_stale(Some(7)));
+    }
+
+    #[test]
+    fn editing_a_translate_placement_hands_the_new_downstream_placement_to_display() {
+        let before = eval_downstream(&translate_chain(60.0, false), "t2");
+        let after = eval_downstream(&translate_chain(100.0, false), "t2");
+        let before_part = before.exact_parts.get("t2").expect("before part");
+        let after_part = after.exact_parts.get("t2").expect("after part");
+        assert_eq!(part_keys(before_part), part_keys(after_part));
+        assert_ne!(part_transforms(before_part), part_transforms(after_part));
+
+        let worker = nodecraft_display::service::DisplayWorker::start(8, || {})
+            .expect("display worker");
+        let mut next = 0;
+        let mut installed = None;
+        let mut pending = None;
+        let mut quality = None;
+        assert!(submit_for_test(&before, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        assert!(submit_for_test(&after, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        let second = installed.as_ref().expect("edited snapshot");
+        assert_eq!(second.id, 2);
+        assert_eq!(
+            part_transforms(&second.snapshot.breakpoint["t2"]),
+            part_transforms(after_part),
+        );
+    }
+
+    #[test]
+    fn an_identical_exact_review_is_still_handed_to_the_display_service() {
+        let exact = eval_downstream(&translate_chain(60.0, false), "t2");
+        let worker = nodecraft_display::service::DisplayWorker::start(8, || {})
+            .expect("display worker");
+        let mut next = 0;
+        let mut installed = None;
+        let mut pending = None;
+        let mut quality = None;
+        assert!(submit_for_test(&exact, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        assert!(submit_for_test(&exact, &worker, &mut next, &mut installed, &mut pending, &mut quality));
+        assert_eq!(next, 2, "the app must not cache a display identity of its own");
+        assert_eq!(installed.as_ref().expect("snapshot").id, 2);
+    }
 
     fn legacy_document(value: Value) -> GraphDocument {
         if value.get("root").is_some() {
@@ -6993,6 +7587,79 @@ mod tests {
         assert_eq!(frame.placement.apply_point([0.0, 0.0, 0.0]), [22.0, 0.0, 6.0]);
     }
 
+    /// A Transform that feeds a repeater activates at copy 0, the untouched
+    /// source body. The same rule covers Circular Pattern, combining Mirror and
+    /// Scatter, so the gizmo never disappears or anchors to a downstream copy.
+    fn assert_repeater_anchor(target: &str, values: serde_json::Value) {
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let link = |from: &str, to: &str| GraphConnection {
+            from: from.into(),
+            to: to.into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        };
+        let start = serde_json::json!({
+            "x": 34.0, "y": 0.0, "z": 0.0,
+            "rx": 0.0, "ry": 0.0, "rz": 0.0,
+        });
+        let current = serde_json::json!({
+            "x": 50.0, "y": 0.0, "z": 0.0,
+            "rx": 0.0, "ry": 0.0, "rz": 0.0,
+        });
+        let mut document = GraphDocument::new(format!("repeater-{target}"));
+        document.nodes = vec![
+            node("box", "solid", serde_json::json!({"primitiveType": "box"})),
+            node("move", "translate", start.clone()),
+            node(target, target, values),
+        ];
+        document.connections = vec![link("box", "move"), link("move", target)];
+
+        // The gizmo resolves through the repeater and sits on the source
+        // copy, not at the origin and not on the reflected/rotated copy.
+        let frame = transform_frame(&document, "move", target)
+            .unwrap_or_else(|| panic!("{target}: upstream transform has no gizmo frame"));
+        assert_eq!(frame.pivot, [34.0, 0.0, 0.0], "{target}: gizmo pivot");
+        let placement = edit_placement(&document, "move", target)
+            .unwrap_or_else(|| panic!("{target}: upstream transform has no edit placement"));
+        assert_eq!(
+            placement.apply_point([0.0, 0.0, 0.0]),
+            [34.0, 0.0, 0.0],
+            "{target}: branch ghost placement",
+        );
+
+        // A drag writes the Transform's values; the preview delta carries
+        // the source copy from the old to the new placement so every copy
+        // follows when the graph re-evaluates.
+        let preview =
+            nodecraft_session::placement::preview_transform(frame.chain, &start, &current);
+        assert_eq!(
+            preview.apply_point([34.0, 0.0, 0.0]),
+            [50.0, 0.0, 0.0],
+            "{target}: dragged values must move the source copy",
+        );
+    }
+
+    #[test]
+    fn upstream_transform_gizmo_anchors_at_copy_zero_of_circular_pattern() {
+        assert_repeater_anchor("circularpattern", serde_json::json!({"count": 4}));
+    }
+
+    #[test]
+    fn upstream_transform_gizmo_anchors_at_copy_zero_of_mirror() {
+        assert_repeater_anchor(
+            "mirror",
+            serde_json::json!({"plane": "yz", "offset": 10.0, "combine": true}),
+        );
+    }
+
     #[test]
     fn deep_transform_overlay_uses_the_input_mesh() {
         let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode { expressions: Default::default(),
@@ -7026,6 +7693,54 @@ mod tests {
         assert!((plan.unwrap().alpha - 0.45).abs() < 1.0e-6);
         let plan = transform_ghost_for(&document, "move", "boolean", Some(&preview), Some(&breakpoint), 0.45);
         assert!(plan.is_some(), "a Boolean breakpoint should also get the branch overlay");
+    }
+
+    #[test]
+    fn edge_pick_gate_opens_for_the_edit_input_overlay() {
+        let node = |id: &str, node_type: &str| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let link = |from: &str, to: &str, input: &str| GraphConnection {
+            from: from.into(),
+            to: to.into(),
+            input: input.into(),
+            out: "shape".into(),
+        };
+        let mut document = GraphDocument::new("edge-gate");
+        document.nodes = vec![
+            node("box", "solid"),
+            node("fillet", "fillet"),
+            node("out", "combine"),
+        ];
+        document.connections = vec![
+            link("box", "fillet", "shape"),
+            link("fillet", "out", "shape"),
+        ];
+        let preview = edit_preview_target_for(&document, "fillet");
+        assert_eq!(preview.as_deref(), Some("box"));
+        assert!(edge_pick_gate_open(Some("out"), "fillet", Some("box"), preview.as_deref()));
+        assert!(!edge_pick_gate_open(Some("out"), "fillet", Some("box"), None));
+
+        let mut references = Vec::new();
+        merge_edge_reference(
+            &mut references,
+            &crate::viewport::EdgePick { id: "edge:1".into(), center: [1.0, 2.0, 3.0] },
+            None,
+        );
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0]["id"], "edge:1");
+        merge_edge_reference(
+            &mut references,
+            &crate::viewport::EdgePick { id: "edge:1".into(), center: [1.0, 2.0, 3.0] },
+            None,
+        );
+        assert!(references.is_empty(), "second pick toggles the edge off");
     }
 
     #[test]
@@ -7564,10 +8279,60 @@ mod tests {
     fn entering_a_topology_selection_keeps_the_viewport_camera() {
         // Same target: always preserve; different target: only when the selection
         // transition asked for it.
-        assert!(mesh_preserves_camera(true, true, true, false));
-        assert!(!mesh_preserves_camera(true, true, false, false));
-        assert!(mesh_preserves_camera(true, true, false, true));
-        assert!(mesh_preserves_camera(false, false, false, true));
+        assert!(mesh_preserves_camera(true, true, true, false, false));
+        assert!(!mesh_preserves_camera(true, true, false, false, false));
+        assert!(mesh_preserves_camera(true, true, false, true, false));
+        assert!(mesh_preserves_camera(false, false, false, true, false));
+        // Activating the breakpoint frames its current geometry even when the
+        // target did not change, so a moved body cannot stay off-screen.
+        assert!(!mesh_preserves_camera(true, true, true, false, true));
+        assert!(!mesh_preserves_camera(true, true, false, true, true));
+    }
+
+    #[test]
+    fn only_a_captures_own_screenshot_event_can_answer_it() {
+        assert_eq!(
+            screenshot_event_id(&egui::UserData::default()),
+            None,
+            "an uncorrelated screenshot event must not answer a capture"
+        );
+        assert_eq!(screenshot_event_id(&egui::UserData::new(7_u64)), Some(7));
+    }
+
+    #[test]
+    fn a_control_capture_reports_timeout_without_closing_the_app() {
+        let request = CaptureRequest {
+            path: PathBuf::from("capture.png"),
+            id: 3,
+            reply: None,
+            exit_after: false,
+            started: Instant::now(),
+            frames: 0,
+            requests: 0,
+        };
+        let text = request.finish(Err("screenshot timed out".to_owned()));
+        let value: serde_json::Value = serde_json::from_str(&text).expect("capture reply JSON");
+        assert_eq!(value["ok"], serde_json::Value::Bool(false));
+        assert_eq!(value["error"], serde_json::Value::String("screenshot timed out".into()));
+        assert!(!request.exit_after, "a control capture must keep the app running");
+    }
+
+    #[test]
+    fn a_stale_frame_cannot_consume_a_view_request() {
+        let request = ViewRequest {
+            tab_id: 7,
+            target: "t2".to_owned(),
+            minimum_revision: 10,
+        };
+        assert!(
+            !view_request_matches(Some(&request), 7, "t2", 10),
+            "a frame already in flight must not frame the old geometry"
+        );
+        assert!(!view_request_matches(Some(&request), 7, "t2", 9));
+        assert!(view_request_matches(Some(&request), 7, "t2", 11));
+        assert!(!view_request_matches(Some(&request), 8, "t2", 11));
+        assert!(!view_request_matches(Some(&request), 7, "t1", 11));
+        assert!(!view_request_matches(None, 7, "t2", 11));
     }
 
     #[test]

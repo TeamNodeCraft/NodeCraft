@@ -216,8 +216,8 @@ pub fn export_mesh(
     Ok(ExportMesh { mesh: display.mesh, stats: display.stats })
 }
 
-/// Write a Part as exact STEP from realized B-reps. Display/mesh state is not
-/// involved; faceted export is a separate future path.
+/// Write a Part as STEP through CADIR. The exact format writes the realized B-reps;
+/// `format = "faceted"` writes the display mesh as planar triangular faces.
 pub fn export_step(
     part: &ExactPart,
     path: &std::path::Path,
@@ -228,51 +228,93 @@ pub fn export_step(
         return Err("nothing to export".into());
     }
     let path_text = path.to_str().ok_or("export path is not UTF-8")?;
-    nodecraft_step::write_breps_exact(path_text, &breps)?;
-    nodecraft_step::import_solids(path_text)
+    let options = export_options(values)?;
+    if values.get("format").and_then(serde_json::Value::as_str) == Some("faceted") {
+        let mut cache = PlanCache::new(8);
+        let mesh = export_mesh(
+            part,
+            ExportOptions {
+                tolerance: 0.05,
+                require_closed: false,
+            },
+            &mut cache,
+        )?;
+        nodecraft_step::write_step_faceted(
+            path_text,
+            &mesh.mesh.vertices,
+            &mesh.mesh.faces,
+            &options,
+        )?;
+    } else {
+        nodecraft_step::write_breps_exact_with_options(path_text, &breps, &options)?;
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("{path_text}: {error}"))?;
+    let import = nodecraft_step::read_cad(&bytes, path_text)
         .map_err(|error| format!("exported STEP did not re-import: {error}"))?;
-    apply_export_metadata(values, path_text)
-}
-
-fn apply_export_metadata(values: &serde_json::Value, path: &str) -> Result<(), String> {
-    use nodecraft_step::LengthUnit;
-    let target = match values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase().as_str() {
-        "cm" | "centimetre" | "centimeter" => Some(LengthUnit::Centimetre),
-        "m" | "metre" | "meter" => Some(LengthUnit::Metre),
-        "km" | "kilometre" | "kilometer" => Some(LengthUnit::Kilometre),
-        "um" | "micrometre" | "micrometer" => Some(LengthUnit::Micrometre),
-        "in" | "inch" => Some(LengthUnit::Inch),
-        _ => None,
-    };
-    if let Some(target) = target {
-        let source = nodecraft_step::read_length_unit(path).unwrap_or(LengthUnit::Millimetre);
-        nodecraft_step::convert_step_units(path, source, target)?;
-    }
-    let name = values.get("fileName").and_then(serde_json::Value::as_str).unwrap_or("solid");
-    let author = values.get("author").and_then(serde_json::Value::as_str).unwrap_or("");
-    let organization = values.get("organization").and_then(serde_json::Value::as_str).unwrap_or("NodeCraft");
-    nodecraft_step::set_header(path, name, author, organization)?;
-    if let Some(schema) = values.get("schema").and_then(serde_json::Value::as_str) {
-        nodecraft_step::set_schema(path, schema)?;
-    }
-    if let Some(name) = values.get("productName").and_then(serde_json::Value::as_str) {
-        nodecraft_step::set_product_name(path, name)?;
-    }
-    if let Some(layer) = values.get("layer").and_then(serde_json::Value::as_str) {
-        nodecraft_step::set_layer(path, layer)?;
-    }
-    if let Some(material) = values.get("material").and_then(serde_json::Value::as_str) {
-        nodecraft_step::set_material(path, material)?;
-    }
-    if let Some(color) = values.get("color").and_then(serde_json::Value::as_str) {
-        let hex = color.trim_start_matches('#');
-        if hex.len() != 6 {
-            return Err("color must be #RRGGBB".into());
-        }
-        let component = |range| u8::from_str_radix(&hex[range], 16).map(|value| f64::from(value) / 255.0).map_err(|error| error.to_string());
-        nodecraft_step::set_color(path, component(0..2)?, component(2..4)?, component(4..6)?)?;
+    if import.bodies.is_empty() {
+        return Err(format!(
+            "exported STEP did not re-import: {}",
+            import.warnings.first().cloned().unwrap_or_else(|| "no bodies".into())
+        ));
     }
     Ok(())
+}
+
+fn export_options(values: &serde_json::Value) -> Result<nodecraft_step::StepExportOptions, String> {
+    let unit = values
+        .get("unit")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("mm")
+        .to_ascii_lowercase();
+    if !matches!(unit.as_str(), "" | "mm" | "millimetre" | "millimeter") {
+        return Err(format!(
+            "STEP export writes millimetres; {unit:?} output is not supported"
+        ));
+    }
+    let color = values
+        .get("color")
+        .and_then(serde_json::Value::as_str)
+        .map(|color| {
+            let hex = color.trim_start_matches('#');
+            if hex.len() != 6 {
+                return Err("color must be #RRGGBB".to_string());
+            }
+            let component = |range| {
+                u8::from_str_radix(&hex[range], 16)
+                    .map(|value| f64::from(value) / 255.0)
+                    .map_err(|error| error.to_string())
+            };
+            Ok([component(0..2)?, component(2..4)?, component(4..6)?])
+        })
+        .transpose()?;
+    Ok(nodecraft_step::StepExportOptions {
+        product_name: values
+            .get("productName")
+            .or_else(|| values.get("fileName"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("solid")
+            .to_string(),
+        schema: values
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("ap242")
+            .to_string(),
+        author: values
+            .get("author")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        organization: values
+            .get("organization")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("NodeCraft")
+            .to_string(),
+        color,
+        layer: values
+            .get("layer")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 /// Mesh one standalone B-rep through the display service.
@@ -448,6 +490,8 @@ fn brep_face_colours(brep: &nodecraft_solidcore::solidcore::topology::Brep, coun
 /// Plan each body without evaluating the plan into triangles. The returned
 /// `edge_mesh` contains only plan edge polylines and is used for picking.
 pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCache) -> Result<PartPlans, String> {
+    let started = std::time::Instant::now();
+    let body_count = part.bodies.len();
     let (tolerance, detail) = match quality {
         DisplayQuality::Full(tolerance) => (tolerance, None),
         DisplayQuality::Preview(detail) => (0.35, Some(detail)),
@@ -467,6 +511,7 @@ pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCach
     for (key, indices) in &pending {
         misses.push((*key, indices[0]));
     }
+    let mut plan_threads = 0;
     if !misses.is_empty() {
         // Forest-like Parts have hundreds of independent bodies. Planning them
         // one by one is the remaining serial meshing bottleneck.
@@ -474,6 +519,7 @@ pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCach
             .map_or(4, std::num::NonZeroUsize::get)
             .clamp(1, 16)
             .min(misses.len());
+        plan_threads = threads;
         let chunk = misses.len().div_ceil(threads);
         let mut results = Vec::with_capacity(misses.len());
         std::thread::scope(|scope| -> Result<(), String> {
@@ -569,6 +615,13 @@ pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCach
             transforms: body.transforms.clone(),
             edge_ids: std::sync::Arc::from(cached.edge_ids),
         });
+    }
+    if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+        eprintln!(
+            "[pool] plan_part bodies={body_count} misses={} threads={plan_threads} wall_ms={:.2}",
+            misses.len(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
     }
     Ok(PartPlans { plans, stats, edge_mesh })
 }

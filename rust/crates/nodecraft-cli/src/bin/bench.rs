@@ -24,6 +24,7 @@ struct Args {
     mesh: bool,
     target: Option<String>,
     json: bool,
+    fillet_edits: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -36,6 +37,7 @@ fn parse_args() -> Result<Args, String> {
         mesh: false,
         target: None,
         json: false,
+        fillet_edits: false,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -44,6 +46,7 @@ fn parse_args() -> Result<Args, String> {
             "--mesh" => out.mesh = true,
             "--target" => out.target = Some(args.next().ok_or("--target needs a node id")?),
             "--json" => out.json = true,
+            "--fillet-edits" => out.fillet_edits = true,
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -119,6 +122,11 @@ impl Drop for Worker {
 }
 
 fn main() {
+    if let Err(error) = nodecraft_engine::thread_pools::init_rayon_pool() {
+        eprintln!("{error}");
+    }
+    let kernel_fixes = std::env::var("NODECRAFT_KERNEL_FIXES").map_or(true, |value| value != "0");
+    nodecraft_engine::configure_solidcore_fixes(kernel_fixes);
     if let Err(error) = run() {
         eprintln!("error: {error}");
         std::process::exit(2);
@@ -138,10 +146,12 @@ fn run() -> Result<(), String> {
         Some(target) => target,
         None => terminal_target(&nodes, &connections).ok_or("graph has no terminal target")?,
     };
+    if args.fillet_edits {
+        return run_fillet_edits(&nodes, &connections, &target, args.timeout);
+    }
     let edit_index = nodes
         .iter()
-        .position(|node| numeric_field(node).is_some())
-        .ok_or("graph has no numeric field to edit")?;
+        .position(|node| numeric_field(node).is_some());
     let mesh_targets = if args.mesh { vec![target.clone()] } else { Vec::new() };
     let mut worker = Worker::spawn()?;
     let mut results = Vec::new();
@@ -179,6 +189,7 @@ fn run() -> Result<(), String> {
     run_phase("warm", &nodes, &mut worker)?;
     let mut response = cold;
     for edit in 0..args.edits {
+        let Some(edit_index) = edit_index else { break };
         let (field, next) = {
             let node = &mut nodes[edit_index];
             let (field, value) = numeric_field(node).ok_or("edit node lost its numeric field")?;
@@ -219,6 +230,90 @@ fn run() -> Result<(), String> {
     }
     if !summary["ok"].as_bool().unwrap_or(false) {
         std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn run_fillet_edits(
+    nodes: &[Value],
+    connections: &[Value],
+    target: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    use nodecraft_engine::kernel_pool::set_current_revision_token;
+    use nodecraft_engine::CancelToken;
+    let fillet = nodes
+        .iter()
+        .position(|node| node.get("type").and_then(Value::as_str) == Some("fillet"))
+        .ok_or("graph has no fillet node")?;
+    let mut nodes = nodes.to_vec();
+    let edits: [(f64, &str); 5] = [
+        (1.0, ""),
+        (1.2, ""),
+        (1.4, ""),
+        (1.6, ""),
+        (1.6, "G2"),
+    ];
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut previous: Option<CancelToken> = None;
+    for (index, (length, continuity)) in edits.iter().copied().enumerate() {
+        nodes[fillet]["values"]["length"] = json!(length);
+        nodes[fillet]["values"]["continuity"] = json!(continuity);
+        let keyed = keyed_nodes(&nodes, connections);
+        let request = json!({
+            "requestId": index as u64 + 1,
+            "targets": [target],
+            "meshTargets": [],
+            "binaryMesh": false,
+            "nodes": keyed,
+            "connections": connections,
+        });
+        let request: nodecraft_protocol::Request =
+            serde_json::from_value(request).map_err(|error| format!("request: {error}"))?;
+        let token = CancelToken::new();
+        if let Some(previous) = previous.take() {
+            previous.cancel();
+        }
+        previous = Some(token.clone());
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            set_current_revision_token(token.clone());
+            let started = Instant::now();
+            let output = nodecraft_engine::evaluate_exact(request, nodecraft_engine::EngineCache::new(), None);
+            let _ = tx.send((index + 1, length, continuity, token.is_cancelled(), started.elapsed(), output.response.node_errors.len()));
+        });
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    drop(tx);
+    println!("{:<5} {:>6} {:>4} {:>10} {:>9} {:>8}", "edit", "size", "cont", "cancelled", "wall ms", "errors");
+    let mut seen = 0;
+    let mut last_result = None;
+    while seen < edits.len() {
+        match rx.recv_timeout(timeout) {
+            Ok((index, length, continuity, cancelled, elapsed, errors)) => {
+                seen += 1;
+                if index == edits.len() {
+                    last_result = Some(elapsed);
+                }
+                println!(
+                    "{:<5} {:>6.1} {:>4} {:>10} {:>9.1} {:>8}",
+                    index,
+                    length,
+                    if continuity.is_empty() { "G1" } else { continuity },
+                    if cancelled { "yes" } else { "no" },
+                    elapsed.as_secs_f64() * 1000.0,
+                    errors,
+                );
+            }
+            Err(_) => {
+                println!("edit {}: TIMEOUT after {:.0} ms", seen + 1, timeout.as_secs_f64() * 1000.0);
+                break;
+            }
+        }
+    }
+    match last_result {
+        Some(elapsed) => println!("last edit -> result: {:.1} ms", elapsed.as_secs_f64() * 1000.0),
+        None => println!("last edit -> result: TIMEOUT / still running"),
     }
     Ok(())
 }

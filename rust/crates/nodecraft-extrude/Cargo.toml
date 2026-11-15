@@ -12,6 +12,4 @@ solidcore-record = { workspace = true }
 [dependencies]
 solidcore = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
-nodecraft-solidcore = { path = "../nodecraft-solidcore" }
-nodecraft-step = { path = "../nodecraft-step" }
 serde_json.workspace = true

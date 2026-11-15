@@ -90,6 +90,12 @@ pub struct Mesh {
     pub faces: Vec<[u32; 3]>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub normals: Vec<[f32; 3]>,
+    /// True when `normals` are the surface's evaluated normals, already split
+    /// per B-rep face by `solidcore-tess` (including one copy per incident
+    /// triangle at a pole). Consumers must not rebuild them with a crease rule.
+    /// Meshes built without an upstream evaluation leave this false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact_normals: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertices_data: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -141,6 +147,9 @@ pub struct Response {
     pub empty_targets: Vec<String>,
     #[serde(default)]
     pub node_errors: BTreeMap<String, String>,
+    /// Non-fatal warnings per node, kept alongside errors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_warnings: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub evaluation_order: Vec<String>,
     #[serde(default)]

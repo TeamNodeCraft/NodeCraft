@@ -16,7 +16,7 @@ pub(crate) fn suppression_source(node: &Node, connections: &[nodecraft_protocol:
             .find(|link| link.to == node.id && link.input == "a")
             .or_else(|| connections.iter().find(|link| link.to == node.id && link.input == "b"))
             .map(|link| link.from.clone()),
-        "translate" | "mirror" | "chamfer" | "fillet" | "shell" | "extrude" | "look" => connections
+        "translate" | "mirror" | "circularpattern" | "chamfer" | "fillet" | "shell" | "extrude" | "look" => connections
             .iter()
             .find(|link| link.to == node.id && (link.input == "shape" || link.input == "profile"))
             .map(|link| link.from.clone()),

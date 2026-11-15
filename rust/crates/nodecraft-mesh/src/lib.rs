@@ -12,7 +12,8 @@ use nodecraft_protocol::Mesh;
 pub mod step_import;
 
 pub use step_import::{
-    StepDiagnostics, StepImport, import_step, import_step_brep, merge_meshes,
+    StepBrepBody, StepBrepImport, StepDiagnostics, StepImport, import_step, import_step_breps,
+    merge_meshes,
 };
 
 thread_local! {
@@ -165,6 +166,9 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
     }
     render.vertices_data = None;
     render.normals_data = None;
+    // These normals are rebuilt from triangle geometry, not the evaluated
+    // surface normals, so the result must never claim to be exact.
+    render.exact_normals = false;
     render
 }
 

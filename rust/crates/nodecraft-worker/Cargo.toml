@@ -9,6 +9,7 @@ name = "nodecraft-worker"
 path = "src/main.rs"
 
 [dependencies]
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
 nodecraft-display = { path = "../nodecraft-display" }
 nodecraft-session = { path = "../nodecraft-session", default-features = false }

@@ -46,26 +46,6 @@ fn check_body(body: &solidcore_ops::Body) -> Result<(), String> {
     }
 }
 
-/// Validate a kernel B-rep through the upstream ops body and its
-/// `solidcore::topology::brep::validation` checks.
-///
-/// The returned report is the kernel's own text; callers should surface
-/// `CheckReport` rather than translating individual failure numbers.
-pub fn check_kernel_brep(
-    kernel: &mut Kernel,
-    brep: &KernelBrep,
-) -> Result<solidcore_ops::CheckReport, String> {
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("check copy: {error}"))?;
-    let (record, _) = solidcore_convert::brep::to_record(kernel, &mut copy)
-        .map_err(|error| format!("check record: {error}"))?;
-    let (body, _) = solidcore_ops::Body::from_record(&record, true)
-        .map_err(|error| format!("check body: {error}"))?;
-    body.check(solidcore_ops::CheckLevel::Geometry)
-        .map_err(|error| format!("solidcore check: {error}"))
-}
-
 /// Configure the process-wide `solidcore-ops` session with the same upstream
 /// fix profile the application applies to its own kernels. Ops operations
 /// (Boolean, shell, offset, blend) otherwise run with the upstream default.
@@ -278,6 +258,11 @@ pub fn tessellate_record(
 
 fn protocol_mesh(tess: &solidcore_tess::Mesh, edge_polylines: &[Vec<[f32; 3]>]) -> Mesh {
     let mut mesh = Mesh::default();
+    // `solidcore-tess` evaluated these normals from the surface, split per
+    // B-rep face and per incident triangle at a pole. They are the shading
+    // source of truth; a later crease-split would average them back toward a
+    // pole's axis.
+    mesh.exact_normals = true;
     mesh.vertices = tess
         .positions
         .iter()
@@ -365,6 +350,17 @@ fn kernel_body_edit(
     solidcore_convert::brep::to_kernel(kernel, &record, true)
         .map(|(brep, _)| brep)
         .map_err(|error| format!("record to kernel: {error}"))
+}
+
+/// Resolve canonical record face indices to kernel `FaceId`s.
+pub fn record_face_ids(kernel: &mut Kernel, brep: &mut KernelBrep, indices: &[usize]) -> Result<Vec<FaceId>, String> {
+    let order = solidcore_convert::brep::to_record(kernel, brep)
+        .map_err(|error| format!("kernel to record: {error}"))?
+        .1;
+    indices
+        .iter()
+        .map(|index| order.faces.get(*index).copied().ok_or_else(|| format!("record face {index} is out of range")))
+        .collect()
 }
 
 /// Shell an exact kernel B-rep through `solidcore-ops`, opening record face
@@ -792,12 +788,14 @@ mod tests {
 
     #[test]
     fn cached_plan_evaluation_preserves_kernel_edge_ids() {
-        let mut kernel = Kernel::default();
+        let mut kernel = nodecraft_kernel_profile::kernel();
         let mut brep =
             api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
                 .expect("box");
         let display = tessellate_kernel(&mut kernel, &mut brep, 0.1).expect("tessellate");
         let evaluated = evaluate_plan(&display.plan, &display.plan_edge_ids);
+        assert!(display.mesh.exact_normals);
+        assert!(evaluated.mesh.exact_normals);
         let ids = |mesh: &nodecraft_protocol::Mesh| {
             mesh.brep_edges.iter().map(|edge| edge.id.clone()).collect::<Vec<_>>()
         };
@@ -806,7 +804,7 @@ mod tests {
 
     #[test]
     fn display_edge_ids_name_the_kernel_edge_they_lie_on() {
-        let mut kernel = Kernel::default();
+        let mut kernel = nodecraft_kernel_profile::kernel();
         let mut brep =
             api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
                 .expect("box");

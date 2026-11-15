@@ -54,7 +54,7 @@ impl ExactPart {
     /// Bake each body's placement/mirror/scale into standalone B-reps for
     /// export and exact consumers. Display planning never mutates these B-reps.
     pub fn realized_breps(&self) -> Result<Vec<solidcore::topology::Brep>, String> {
-        let mut kernel = solidcore::kernel::Kernel::default();
+        let mut kernel = nodecraft_kernel_profile::kernel();
         let mut breps = Vec::with_capacity(self.bodies.len());
         for body in &self.bodies {
             let mut brep = body
@@ -130,7 +130,7 @@ fn mirror_brep(
 fn scale_brep(brep: &mut solidcore::topology::Brep, factor: f64) -> Result<(), String> {
     use solidcore::geom::axis2_placement::Axis2Placement;
     use solidcore::math::{Point3, Vec3};
-    let mut kernel = solidcore::kernel::Kernel::default();
+    let mut kernel = nodecraft_kernel_profile::kernel();
     let placement = Axis2Placement::new(Point3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
     solidcore::topology::brep::p5::transform(
         &mut kernel,

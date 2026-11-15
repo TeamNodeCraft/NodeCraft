@@ -200,7 +200,7 @@ mod tests {
     use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
 
     fn box_part() -> ExactPart {
-        let mut kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+        let mut kernel = nodecraft_kernel_profile::kernel();
         let brep = api::create_box(
             &mut kernel,
             Point3::new(-5.0, -5.0, -5.0),
@@ -239,6 +239,102 @@ mod tests {
         assert_eq!(frame.overlays.len(), 1);
         assert!(!frame.breakpoint["look"].plans.is_empty());
         assert!(!frame.overlays[0].plans.is_empty());
+    }
+
+    fn two_body_part() -> ExactPart {
+        let mut part = box_part();
+        let mut second = part.bodies[0].clone();
+        second.key = nodecraft_exact::BodyKey::new(2, 0);
+        part.bodies.push(second);
+        part
+    }
+
+    fn placed(part: &ExactPart, offsets: [[f64; 3]; 2]) -> ExactPart {
+        let mut placed = part.clone();
+        for (body, offset) in placed.bodies.iter_mut().zip(offsets) {
+            body.transforms = vec![nodecraft_exact::DisplayTransform::Place {
+                offset,
+                rotation: [0.0; 3],
+            }];
+        }
+        placed
+    }
+
+    fn request(target: &str, part: ExactPart, revision: u64) -> DisplayRequest {
+        DisplayRequest {
+            revision,
+            snapshot_id: revision,
+            quality: DisplayQuality::Full(0.35),
+            feature_ghost: false,
+            snapshot: Arc::new(ExactSnapshot {
+                breakpoint: BTreeMap::from([(target.to_owned(), part)]),
+                overlays: Vec::new(),
+            }),
+        }
+    }
+
+    #[test]
+    fn placement_only_change_is_a_plan_cache_hit_and_carries_new_instances() {
+        let base = two_body_part();
+        let before = placed(&base, [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]]);
+        let after = placed(&base, [[40.0, 0.0, 0.0], [70.0, 0.0, 0.0]]);
+        let mut service = DisplayService::new(8);
+        let first = service.plan(&request("look", before, 1)).expect("first frame");
+        let cached = service.cache.len();
+        assert_eq!(cached, 2, "one plan per body");
+        let second = service.plan(&request("look", after, 2)).expect("second frame");
+        assert_eq!(
+            service.cache.len(),
+            cached,
+            "a placement-only change must reuse every body plan",
+        );
+        for (old, new) in first.breakpoint["look"]
+            .plans
+            .iter()
+            .zip(&second.breakpoint["look"].plans)
+        {
+            assert!(
+                Arc::ptr_eq(&old.plan, &new.plan),
+                "no body may be tessellated again for a placement change",
+            );
+        }
+        assert_eq!(
+            second.breakpoint["look"]
+                .plans
+                .iter()
+                .map(|plan| plan.transforms.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                vec![nodecraft_exact::DisplayTransform::Place {
+                    offset: [40.0, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                }],
+                vec![nodecraft_exact::DisplayTransform::Place {
+                    offset: [70.0, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                }],
+            ],
+        );
+    }
+
+    #[test]
+    fn an_identical_review_reuses_every_body_plan() {
+        let part = two_body_part();
+        let mut service = DisplayService::new(8);
+        let first = service.plan(&request("look", part.clone(), 1)).expect("first frame");
+        let cached = service.cache.len();
+        let second = service.plan(&request("look", part, 2)).expect("second frame");
+        assert_eq!(service.cache.len(), cached);
+        for (old, new) in first.breakpoint["look"]
+            .plans
+            .iter()
+            .zip(&second.breakpoint["look"].plans)
+        {
+            assert!(
+                Arc::ptr_eq(&old.plan, &new.plan),
+                "an identical re-view must not tessellate again",
+            );
+        }
     }
 
     #[test]
@@ -361,6 +457,7 @@ impl DisplayWorker {
         let worker_stop = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
             .name("nodecraft-display".into())
+            .stack_size(nodecraft_kernel_profile::KERNEL_THREAD_STACK)
             .spawn(move || {
                 let mut service = DisplayService::new(cache_limit);
                 let mut last_planned = None;

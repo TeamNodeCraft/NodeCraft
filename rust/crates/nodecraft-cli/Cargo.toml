@@ -13,4 +13,6 @@ name = "nodecraft-bench"
 path = "src/bin/bench.rs"
 
 [dependencies]
+nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
+nodecraft-protocol = { path = "../nodecraft-protocol" }
 serde_json.workspace = true

@@ -34,6 +34,8 @@ fn equal_chamfer_removes_the_edge_and_stays_closed() {
         distance2: None,
         angle: None,
         corner_turn: CornerTurn::Mitre,
+        chamfer_facet: false,
+        flip: false,
     };
     let mesh = apply_edge_treatment(&kernel, &brep, std::slice::from_ref(&edge), &treatment)
         .expect("chamfer preview");
@@ -87,6 +89,8 @@ fn two_distance_chamfer_is_asymmetric() {
         distance2: Some(1.0),
         angle: None,
         corner_turn: CornerTurn::Mitre,
+        chamfer_facet: false,
+        flip: false,
     };
     let mesh = apply_edge_treatment(&kernel, &brep, &selections[..1], &treatment).expect("preview");
     let (_, bad) = common::closure_report(&mesh);
@@ -159,6 +163,8 @@ fn distance_angle_chamfer_matches_the_angle_construction() {
         distance2: None,
         angle: Some(30.0),
         corner_turn: CornerTurn::Mitre,
+        chamfer_facet: false,
+        flip: false,
     };
     let mesh = apply_edge_treatment(&kernel, &brep, &selections[..1], &treatment).expect("preview");
     let (_, bad) = common::closure_report(&mesh);
@@ -207,6 +213,8 @@ fn circular_fillet_is_faceted_tangent_and_closed() {
         distance2: None,
         angle: None,
         corner_turn: CornerTurn::Mitre,
+        chamfer_facet: false,
+        flip: false,
     };
     let mesh = apply_edge_treatment(&kernel, &brep, &selections[..1], &treatment).expect("fillet");
     let (_, bad) = common::closure_report(&mesh);

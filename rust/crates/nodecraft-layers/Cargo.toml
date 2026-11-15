@@ -6,6 +6,7 @@ license.workspace = true
 description = "Adapters onto the upstream solidcore record/ops/tess layers"
 
 [dependencies]
+nodecraft-kernel-profile = { path = "../nodecraft-kernel-profile" }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 solidcore = { workspace = true }
 solidcore-convert = { workspace = true }

@@ -5,13 +5,14 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+nodecraft-ops = { path = "../nodecraft-ops" }
 solidcore = { workspace = true }
 solidcore-convert = { workspace = true }
-solidcore-ops = { workspace = true }
 solidcore-record = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-solidcore = { path = "../nodecraft-solidcore" }
 nodecraft-layers = { path = "../nodecraft-layers" }
 nodecraft-bool = { path = "../nodecraft-bool" }
-nodecraft-step = { path = "../nodecraft-step" }
+nodecraft-node-contract = { path = "../nodecraft-node-contract" }
+earcutr = "0.5.0"
 serde_json.workspace = true

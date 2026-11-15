@@ -210,9 +210,26 @@ pub fn tangent_chain(
     selections: &[EdgeSelection],
     tangency_radians: f64,
 ) -> Result<Vec<EdgeSelection>, BlendError> {
+    // `brep_copy` numbers the copy's entities anew, so an edge id from `brep` is not valid on
+    // the working copy. The copy keeps the edge order, so walk through positions and map the
+    // kernel's answer back to this B-rep's own ids.
+    let source_edges = brep.edge_list().to_vec();
     let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
         .map_err(|error| BlendError::Kernel(error.to_string()))?;
-    let seeds: Vec<EdgeId> = selections.iter().map(|selection| selection.edge).collect();
+    let working_edges = working.edge_list().to_vec();
+    if working_edges.len() != source_edges.len() {
+        return Err(BlendError::Kernel("tangent chain: the B-rep copy changed the edge count".into()));
+    }
+    let seeds: Vec<EdgeId> = selections
+        .iter()
+        .map(|selection| {
+            source_edges
+                .iter()
+                .position(|edge| *edge == selection.edge)
+                .map(|index| working_edges[index])
+                .ok_or_else(|| BlendError::InvalidInput(format!("tangent chain: edge {:?} is not on the body", selection.edge)))
+        })
+        .collect::<Result<_, _>>()?;
     let chain = solidcore::blend::blend_refusal::tangent_chain(
         kernel,
         &mut working,
@@ -220,6 +237,16 @@ pub fn tangent_chain(
         tangency_radians,
     )
     .map_err(|error| BlendError::Kernel(format!("tangent chain: {error}")))?;
+    let working_edges = working.edge_list().to_vec();
+    let chain: Vec<EdgeId> = chain
+        .into_iter()
+        .filter_map(|edge| {
+            working_edges
+                .iter()
+                .position(|candidate| *candidate == edge)
+                .map(|index| source_edges[index])
+        })
+        .collect();
 
     let all = edge_selections(kernel, brep)?;
     let mut out = Vec::with_capacity(chain.len());

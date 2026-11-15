@@ -162,21 +162,24 @@ impl ToolSection {
         ];
         const MODIFY: &[ToolItem] = &[
             ToolItem { label: "Transform", node_type: "translate", primitive: None , submenu: None },
-            ToolItem { label: "Mirror", node_type: "mirror", primitive: None , submenu: None },
             ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None , submenu: None },
             ToolItem { label: "Fillet", node_type: "fillet", primitive: None , submenu: None },
             ToolItem { label: "Shell", node_type: "shell", primitive: None , submenu: None },
             ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None , submenu: None },
         ];
         const BOOLEAN: &[ToolItem] = &[ToolItem { label: "Boolean", node_type: "boolean", primitive: None , submenu: None }];
-        const PATTERN: &[ToolItem] = &[ToolItem { label: "Scatter", node_type: "scatter", primitive: None , submenu: None }];
+        const PATTERN: &[ToolItem] = &[
+            ToolItem { label: "Mirror", node_type: "mirror", primitive: None , submenu: None },
+            ToolItem { label: "Circular Pattern", node_type: "circularpattern", primitive: None , submenu: None },
+            ToolItem { label: "Scatter", node_type: "scatter", primitive: None , submenu: None },
+        ];
         const ORGANISE: &[ToolItem] = &[
             ToolItem { label: "Combine to Part", node_type: "combine", primitive: None , submenu: None },
             ToolItem { label: "Graph", node_type: "graph", primitive: None , submenu: None },
             ToolItem { label: "Look", node_type: "look", primitive: None , submenu: None },
         ];
         const IO: &[ToolItem] = &[
-            ToolItem { label: "Import STEP", node_type: "stepimporter", primitive: None , submenu: None },
+            ToolItem { label: "Import CAD", node_type: "stepimporter", primitive: None , submenu: None },
             ToolItem { label: "Linked Part", node_type: "linkedpart", primitive: None , submenu: None },
             ToolItem { label: "Export STEP", node_type: "exporter", primitive: None , submenu: None },
         ];

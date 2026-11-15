@@ -42,6 +42,7 @@ pub struct EngineCache {
     part_order: std::collections::VecDeque<CacheKey>,
     part_limit: usize,
     parts_hits: u64,
+    warnings: HashMap<CacheKey, Vec<String>>,
     failures: HashMap<CacheKey, String>,
     failure_order: std::collections::VecDeque<CacheKey>,
     failure_hits: u64,
@@ -62,7 +63,7 @@ impl Default for EngineCache {
 impl EngineCache {
     #[must_use]
     pub fn new() -> Self {
-        Self { breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, comparisons: HashMap::new(), comparison_order: VecDeque::new(), comparison_failures: HashMap::new(), comparison_bytes: 0, comparison_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
+        Self { breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, warnings: HashMap::new(), failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, comparisons: HashMap::new(), comparison_order: VecDeque::new(), comparison_failures: HashMap::new(), comparison_bytes: 0, comparison_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
     }
 
     #[must_use]
@@ -159,7 +160,16 @@ impl EngineCache {
         while self.parts.len() > self.part_limit {
             let Some(oldest) = self.part_order.pop_front() else { break; };
             self.parts.remove(&oldest);
+            self.warnings.remove(&oldest);
         }
+    }
+
+    pub(crate) fn insert_warnings(&mut self, key: CacheKey, warnings: Vec<String>) {
+        self.warnings.insert(key, warnings);
+    }
+
+    pub(crate) fn warnings(&self, key: &CacheKey) -> Option<Vec<String>> {
+        self.warnings.get(key).cloned()
     }
 
     pub(crate) fn insert_part(&mut self, key: CacheKey, part: Arc<Part>) {
@@ -169,8 +179,16 @@ impl EngineCache {
         while self.parts.len() > self.part_limit {
             let Some(oldest) = self.part_order.pop_front() else { break; };
             self.parts.remove(&oldest);
+            self.warnings.remove(&oldest);
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_part_limit(&mut self, limit: usize) { self.part_limit = limit; }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn warning_entries(&self) -> usize { self.warnings.len() }
 
     #[cfg(test)]
     #[must_use]
@@ -184,6 +202,9 @@ impl EngineCache {
     pub fn failure(&self, key: &CacheKey) -> Option<String> { self.failures.get(key).cloned() }
 
     pub fn insert_failure(&mut self, key: CacheKey, error: String) {
+        if crate::kernel_pool::current_revision_token().is_cancelled() {
+            return;
+        }
         if self.failures.insert(key.clone(), error).is_none() {
             self.failure_order.push_back(key);
         }
@@ -252,6 +273,41 @@ mod tests {
         assert!(cache.part_limit >= 10_000, "large graph should size the Part cache");
         cache.ensure_part_capacity(1);
         assert_eq!(cache.part_limit, DEFAULT_PART_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn cancelled_runs_do_not_store_failures() {
+        let token = crate::kernel_pool::RevisionToken::new();
+        token.cancel();
+        crate::kernel_pool::set_current_revision_token(token);
+        let mut cache = EngineCache::new();
+        cache.insert_failure(("n".into(), String::new()), "cancelled".into());
+        assert!(cache.failure(&("n".into(), String::new())).is_none());
+    }
+
+    #[test]
+    fn warnings_are_evicted_with_their_parts() {
+        let mut cache = EngineCache::new();
+        cache.set_part_limit(2);
+        for index in 0..3 {
+            let key = (format!("node{index}"), String::new());
+            cache.insert_part(key.clone(), Arc::new(Part::empty()));
+            cache.insert_warnings(key, vec!["warning".to_owned()]);
+        }
+        assert_eq!(cache.part_entries(), 2);
+        assert_eq!(cache.warning_entries(), 2);
+        assert!(cache.warnings(&("node0".to_owned(), String::new())).is_none());
+    }
+
+    #[test]
+    fn warnings_are_kept_with_the_cache_entry() {
+        let mut cache = EngineCache::new();
+        let key = ("warning-node".to_owned(), "hash".to_owned());
+        cache.insert_warnings(key.clone(), vec!["edge 2 was removed by a larger round".to_owned()]);
+        assert_eq!(
+            cache.warnings(&key),
+            Some(vec!["edge 2 was removed by a larger round".to_owned()])
+        );
     }
 
     #[test]

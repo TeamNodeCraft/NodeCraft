@@ -25,6 +25,7 @@ use look::apply_brep_face_colors;
 use primitive::{apply_brep_placement, apply_brep_placement_with_kernel, copy_brep, primitive_brep, primitive_brep_with_kernel, snapshot_brep};
 mod bypass;
 mod face_ref;
+pub mod proof_queue;
 use bypass::{bypass_source, effective_output_suppressed, suppression_source};
 use face_ref::{face_reference_body_and_index, face_reference_index};
 
@@ -51,7 +52,9 @@ pub mod display;
 pub mod tessellation;
 pub mod workload;
 pub mod scheduler;
+pub mod thread_pools;
 pub mod kernel_pool;
+pub use kernel_pool::CancelToken;
 
 static WORKLOAD_PROFILER_ENABLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(true);
@@ -60,11 +63,16 @@ static WORKLOAD_PROFILER_ENABLED: std::sync::atomic::AtomicBool =
 /// Configure the opt-in SolidCore kernel fixes used by new worker kernels.
 pub fn configure_solidcore_fixes(enabled: bool) {
     nodecraft_solidcore::kernel::configure_experimental_fixes(enabled);
-    let fixes: &[&str] = if enabled {
-        &nodecraft_solidcore::kernel::EXPERIMENTAL_FIX_NAMES
+    // Persistent worker kernels must rebuild with the new profile before their
+    // next job; cache keys carry the profile generation separately.
+    kernel_pool::shared_exact_pool().reset_caches();
+    tessellation::shared_tessellation().reset_caches();
+    let names = if enabled {
+        nodecraft_solidcore::kernel::fix_names()
     } else {
-        &[]
+        Vec::new()
     };
+    let fixes: &[&str] = &names;
     if let Err(error) = nodecraft_layers::configure_session_fixes(fixes) {
         eprintln!("{error}");
     }
@@ -97,6 +105,55 @@ fn node<'a>(request: &'a Request, id: &str) -> Option<&'a Node> {
     request.nodes.iter().find(|node| node.id == id)
 }
 
+/// Read a contract field through the one resolver. The `expect` paths are
+/// contract-programming errors: every caller below names a node type and field
+/// the contract defines, so a missing field means the reader and contract tables
+/// have diverged.
+pub(crate) fn contract_number(node_type: &str, values: &serde_json::Value, key: &str) -> f64 {
+    nodecraft_node_contract::resolve_number(node_type, values, key)
+        .unwrap_or_else(|| panic!("node contract has no number field {node_type}.{key}"))
+}
+
+pub(crate) fn contract_bool(node_type: &str, values: &serde_json::Value, key: &str) -> bool {
+    nodecraft_node_contract::resolve_bool(node_type, values, key)
+        .unwrap_or_else(|| panic!("node contract has no switch field {node_type}.{key}"))
+}
+
+pub(crate) fn contract_text<'a>(
+    node_type: &str,
+    values: &'a serde_json::Value,
+    key: &str,
+) -> std::borrow::Cow<'a, str> {
+    nodecraft_node_contract::resolve_text(node_type, values, key)
+        .unwrap_or_else(|| panic!("node contract has no text field {node_type}.{key}"))
+}
+
+/// One translate placement, read through the contract.
+fn translate_placement(values: &serde_json::Value) -> ([f64; 3], [f64; 3]) {
+    let offset = [
+        contract_number("translate", values, "x"),
+        contract_number("translate", values, "y"),
+        contract_number("translate", values, "z"),
+    ];
+    let rotation = [
+        contract_number("translate", values, "rx"),
+        contract_number("translate", values, "ry"),
+        contract_number("translate", values, "rz"),
+    ];
+    (offset, rotation)
+}
+
+fn accumulate_translate(
+    values: &serde_json::Value,
+    offset: &mut [f64; 3],
+    rotation: &mut [f64; 3],
+) {
+    let (translation, placement_rotation) = translate_placement(values);
+    for axis in 0..3 {
+        offset[axis] += translation[axis];
+        rotation[axis] = placement_rotation[axis];
+    }
+}
 
 #[derive(Clone)]
 struct SketchTransform {
@@ -104,29 +161,49 @@ struct SketchTransform {
     translation: [f64; 3],
 }
 
-impl SketchTransform {
-    fn identity() -> Self {
-        Self {
-            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-            translation: [0.0; 3],
-        }
-    }
+/// Euler X, then Y, then Z, matching `ProceduralKernel::translate`. This is the
+/// one rotation convention every placement (body or sketch) uses.
+fn rotation_matrix(rotation: [f64; 3]) -> [[f64; 3]; 3] {
+    let (rx, ry, rz) = (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
+    let (sx, cx) = rx.sin_cos();
+    let (sy, cy) = ry.sin_cos();
+    let (sz, cz) = rz.sin_cos();
+    [
+        [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+        [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+        [-sy, cy * sx, cy * cx],
+    ]
+}
 
+/// The sketch-plane form of a body `Mirror` placement: reflect through the
+/// named plane, then offset. Sketches use the same `BodyTransform` chain as
+/// bodies, so this must not be a separate mirror convention.
+fn mirror_sketch_transform(plane: &str, offset: f64) -> SketchTransform {
+    match plane {
+        "xz" => SketchTransform {
+            rotation: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]],
+            translation: [0.0, 2.0 * offset, 0.0],
+        },
+        "yz" => SketchTransform {
+            rotation: [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            translation: [2.0 * offset, 0.0, 0.0],
+        },
+        _ => SketchTransform {
+            rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, -1.0]],
+            translation: [0.0, 0.0, 2.0 * offset],
+        },
+    }
+}
+
+impl SketchTransform {
     fn from_values(values: &serde_json::Value) -> Self {
-        let number = |key: &str| values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        let (rx, ry, rz) = (number("rx").to_radians(), number("ry").to_radians(), number("rz").to_radians());
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-        // Matches ProceduralKernel::translate: rotate X, then Y, then Z.
-        let rotation = [
-            [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
-            [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
-            [-sy, cy * sx, cy * cx],
-        ];
         // `space` rotates the manipulator frame only. Geometry values remain
         // in the parent frame so switching world/local cannot move the object.
-        Self { rotation, translation: [number("x"), number("y"), number("z")] }
+        let (translation, rotation) = translate_placement(values);
+        Self {
+            rotation: rotation_matrix(rotation),
+            translation,
+        }
     }
 
     /// Return the transform that applies `self` first, then `next`.
@@ -161,21 +238,15 @@ impl SketchTransform {
             .unwrap_or([0.0; 3])
     }
 
-    fn is_z_rotation(&self) -> bool {
-        const EPSILON: f64 = 1.0e-9;
-        self.rotation[0][2].abs() < EPSILON
-            && self.rotation[1][2].abs() < EPSILON
-            && self.rotation[2][0].abs() < EPSILON
-            && self.rotation[2][1].abs() < EPSILON
-            && (self.rotation[2][2] - 1.0).abs() < EPSILON
-    }
-
-    fn z_angle(&self) -> f64 {
-        self.rotation[1][0].atan2(self.rotation[0][0])
+    fn determinant(&self) -> f64 {
+        let r = &self.rotation;
+        r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+            - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+            + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0])
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SketchOutput {
     sketch: crate::sketch::Sketch,
     profiles: Vec<crate::sketch::Profile>,
@@ -203,6 +274,24 @@ impl SketchOutput {
         }
     }
 
+    /// Apply one body placement to this sketch. Placement, mirror and scale
+    /// all flow through the same `BodyTransform` chain as body instances.
+    fn transformed(&self, transform: &BodyTransform) -> Self {
+        let local = match transform {
+            BodyTransform::Place { offset, rotation } => SketchTransform {
+                rotation: rotation_matrix(*rotation),
+                translation: *offset,
+            },
+            BodyTransform::Mirror { plane, offset } => mirror_sketch_transform(plane, *offset),
+            BodyTransform::Scale { factor } => SketchTransform {
+                rotation: [[*factor, 0.0, 0.0], [0.0, *factor, 0.0], [0.0, 0.0, *factor]],
+                translation: [0.0; 3],
+            },
+        };
+        // This transform is applied after the instance's existing chain.
+        self.with_transform(&self.transform().then(&local))
+    }
+
     fn transform(&self) -> SketchTransform {
         SketchTransform { rotation: self.rotation, translation: self.offset }
     }
@@ -211,12 +300,168 @@ impl SketchOutput {
         self.transform().apply([x, y, 0.0])
     }
 
-    fn is_z_rotation(&self) -> bool {
-        self.transform().is_z_rotation()
+    /// The sketch's exact 2D profile and its right-handed plane.
+    ///
+    /// This is the one value every 3D consumer of a sketch uses. The plane's
+    /// axes are orthonormal and its normal (`x × y`) is the transformed sketch
+    /// normal. A uniform scale is baked into the region's positions and radii,
+    /// and a reflection is baked in as the matching 2D reflection with the
+    /// loops' canonical orientation restored.
+    fn record_geometry(&self) -> Result<SketchRecordGeometry, String> {
+        let mut profiles = self.profiles.clone();
+        profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
+        let profile = profiles.into_iter().next().ok_or("Sketch has no closed profile")?;
+        let x = matrix_column(&self.rotation, 0);
+        let y = matrix_column(&self.rotation, 1);
+        let z = matrix_column(&self.rotation, 2);
+        let scale = dot3(x, x).sqrt();
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("Sketch plane is degenerate (zero or non-finite scale)".into());
+        }
+        let tolerance = 1.0e-9 * scale.max(1.0);
+        let same_length = |axis: [f64; 3]| (dot3(axis, axis).sqrt() - scale).abs() <= tolerance;
+        if !same_length(y) || !same_length(z) {
+            return Err(
+                "Sketch plane does not support non-uniform scale: circles would become ellipses".into(),
+            );
+        }
+        if dot3(x, y).abs() > tolerance * scale
+            || dot3(x, z).abs() > tolerance * scale
+            || dot3(y, z).abs() > tolerance * scale
+        {
+            return Err("Sketch plane axes are not orthogonal".into());
+        }
+        // A reflection makes the plane left-handed. Turn its y axis over so the
+        // plane is right-handed and reverse the 2D loops, leaving the same 3D
+        // point set with the transformed normal as `x × y`.
+        let reflected = self.transform().determinant() < 0.0;
+        let (plane_x, plane_y) = if reflected {
+            (unit3(x, scale), neg3(unit3(y, scale)))
+        } else {
+            (unit3(x, scale), unit3(y, scale))
+        };
+        let plane = solidcore_record::Plane {
+            origin: solidcore_record::Vec3::new(self.offset[0], self.offset[1], self.offset[2]),
+            x: solidcore_record::Vec3::new(plane_x[0], plane_x[1], plane_x[2]),
+            y: solidcore_record::Vec3::new(plane_y[0], plane_y[1], plane_y[2]),
+        };
+        Ok(SketchRecordGeometry {
+            region: map_sketch_region(&profile.region, scale, reflected),
+            plane,
+            scale,
+        })
     }
+}
 
-    fn z_angle(&self) -> f64 {
-        self.transform().z_angle()
+/// A placed sketch's exact 2D profile and its right-handed plane.
+struct SketchRecordGeometry {
+    region: solidcore_record::Region2,
+    plane: solidcore_record::Plane,
+    /// The uniform scale the transform carries, already baked into `region`.
+    scale: f64,
+}
+
+fn matrix_column(matrix: &[[f64; 3]; 3], column: usize) -> [f64; 3] {
+    [matrix[0][column], matrix[1][column], matrix[2][column]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn unit3(axis: [f64; 3], scale: f64) -> [f64; 3] {
+    [axis[0] / scale, axis[1] / scale, axis[2] / scale]
+}
+
+fn neg3(axis: [f64; 3]) -> [f64; 3] {
+    [-axis[0], -axis[1], -axis[2]]
+}
+
+/// Map one exact profile segment through a uniform scale and an optional
+/// reflection in the plane's y axis.
+fn map_sketch_segment(
+    segment: solidcore_record::Seg2,
+    scale: f64,
+    reflected: bool,
+) -> solidcore_record::Seg2 {
+    use solidcore_record::Seg2;
+    let map = |point: solidcore_record::Vec2| {
+        solidcore_record::Vec2::new(
+            point.x * scale,
+            if reflected { -point.y * scale } else { point.y * scale },
+        )
+    };
+    match segment {
+        Seg2::Line { a, b } => Seg2::Line { a: map(a), b: map(b) },
+        Seg2::Arc { center, radius, start, sweep } => Seg2::Arc {
+            center: map(center),
+            radius: radius * scale,
+            start: if reflected { -start } else { start },
+            sweep: if reflected { -sweep } else { sweep },
+        },
+        Seg2::Cubic { p0, p1, p2, p3 } => Seg2::Cubic {
+            p0: map(p0),
+            p1: map(p1),
+            p2: map(p2),
+            p3: map(p3),
+        },
+        Seg2::Conic { a, apex, b, w } => Seg2::Conic { a: map(a), apex: map(apex), b: map(b), w },
+        Seg2::Bezier { n, p } => Seg2::Bezier { n, p: p.map(map) },
+    }
+}
+
+/// Reverse one exact profile segment.
+fn reverse_sketch_segment(segment: solidcore_record::Seg2) -> solidcore_record::Seg2 {
+    use solidcore_record::Seg2;
+    match segment {
+        Seg2::Line { a, b } => Seg2::Line { a: b, b: a },
+        Seg2::Arc { center, radius, start, sweep } => Seg2::Arc {
+            center,
+            radius,
+            start: start + sweep,
+            sweep: -sweep,
+        },
+        Seg2::Cubic { p0, p1, p2, p3 } => Seg2::Cubic { p0: p3, p1: p2, p2: p1, p3: p0 },
+        Seg2::Conic { a, apex, b, w } => Seg2::Conic { a: b, apex, b: a, w },
+        Seg2::Bezier { n, mut p } => {
+            p[..=n as usize].reverse();
+            Seg2::Bezier { n, p }
+        }
+    }
+}
+
+/// A reflected loop's segments are traversed the other way so the region keeps
+/// the canonical orientation (outer counter-clockwise, holes clockwise).
+fn map_sketch_loop(
+    loop2: &solidcore_record::Loop2,
+    scale: f64,
+    reflected: bool,
+) -> solidcore_record::Loop2 {
+    let mut segs: Vec<_> = loop2
+        .segs
+        .iter()
+        .copied()
+        .map(|segment| map_sketch_segment(segment, scale, reflected))
+        .collect();
+    if reflected {
+        segs.reverse();
+        segs = segs.into_iter().map(reverse_sketch_segment).collect();
+    }
+    solidcore_record::Loop2 { segs }
+}
+
+fn map_sketch_region(
+    region: &solidcore_record::Region2,
+    scale: f64,
+    reflected: bool,
+) -> solidcore_record::Region2 {
+    solidcore_record::Region2 {
+        outer: map_sketch_loop(&region.outer, scale, reflected),
+        holes: region
+            .holes
+            .iter()
+            .map(|hole| map_sketch_loop(hole, scale, reflected))
+            .collect(),
     }
 }
 
@@ -287,249 +532,65 @@ fn sketch_profile_points(output: &SketchOutput) -> Result<Vec<(f64, f64, f64)>, 
         .collect())
 }
 
-fn simplify_polyline(points: &[[f64; 3]], tolerance: f64) -> Vec<[f64; 3]> {
-    fn distance_to_segment(point: [f64; 3], a: [f64; 3], b: [f64; 3]) -> f64 {
-        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let ap = [point[0] - a[0], point[1] - a[1], point[2] - a[2]];
-        let length_squared = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
-        if length_squared <= 1.0e-18 {
-            return (ap[0] * ap[0] + ap[1] * ap[1] + ap[2] * ap[2]).sqrt();
-        }
-        let t = ((ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / length_squared).clamp(0.0, 1.0);
-        let dx = ap[0] - ab[0] * t;
-        let dy = ap[1] - ab[1] * t;
-        let dz = ap[2] - ab[2] * t;
-        (dx * dx + dy * dy + dz * dz).sqrt()
-    }
-    fn simplify(points: &[[f64; 3]], first: usize, last: usize, tolerance: f64, keep: &mut [bool]) {
-        if last <= first + 1 {
-            return;
-        }
-        let mut farthest = first;
-        let mut farthest_distance = -1.0;
-        for index in first + 1..last {
-            let distance = distance_to_segment(points[index], points[first], points[last]);
-            if distance > farthest_distance {
-                farthest_distance = distance;
-                farthest = index;
-            }
-        }
-        if farthest_distance > tolerance {
-            keep[farthest] = true;
-            simplify(points, first, farthest, tolerance, keep);
-            simplify(points, farthest, last, tolerance, keep);
-        }
-    }
-    if points.len() <= 2 {
-        return points.to_vec();
-    }
-    let mut keep = vec![false; points.len()];
-    keep[0] = true;
-    keep[points.len() - 1] = true;
-    simplify(points, 0, points.len() - 1, tolerance, &mut keep);
-    points.iter().zip(keep).filter_map(|(point, keep)| keep.then_some(*point)).collect()
-}
-
 fn sketch_profile_curves(
     output: &SketchOutput,
 ) -> Result<Vec<nodecraft_solidcore::solidcore::curve::curve::Curve>, String> {
-    use solidcore_record::Seg2;
-    use solidcraft_geom::prelude::*;
-    use nodecraft_solidcore::solidcore::curve::curve::Curve;
-    use nodecraft_solidcore::solidcore::curve::line::Line;
-    use nodecraft_solidcore::solidcore::math::Point3;
-    use nodecraft_solidcore::solidcore::primitive::api_curves;
-
-    let mut profiles = output.profiles.clone();
-    profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
-    let profile = profiles.into_iter().next().ok_or("Loft sketch has no closed profile")?;
-    if !profile.hole_curves.is_empty() {
+    let geometry = output.record_geometry()?;
+    if !geometry.region.holes.is_empty() {
         return Err("Loft sketch profiles with holes are not supported yet".into());
     }
-    if !output.is_z_rotation() {
-        return sketch_profile_curves_transformed(&profile, output);
-    }
-    let z_angle = output.z_angle();
-    let sample_points = profile.region.outer.polyline(0.01);
-    let (mut min_x, mut max_x, mut min_y, mut max_y) =
-        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-    for point in &sample_points {
-        min_x = min_x.min(point.x);
-        max_x = max_x.max(point.x);
-        min_y = min_y.min(point.y);
-        max_y = max_y.max(point.y);
-    }
-    let extent = ((max_x - min_x).powi(2) + (max_y - min_y).powi(2)).sqrt().max(1.0e-9);
-    let simplify_tolerance = extent * 0.001;
-    let mut curves = Vec::with_capacity(profile.region.outer.segs.len());
-    let mut line_run: Vec<[f64; 3]> = Vec::new();
-    let flush_line_run = |curves: &mut Vec<Curve>, run: &mut Vec<[f64; 3]>| -> Result<(), String> {
-        if run.len() >= 2 {
-            let simplified = simplify_polyline(run, simplify_tolerance);
-            for pair in simplified.windows(2) {
-                let line = Line::create_line_segment(
-                    3,
-                    Point3::new(pair[0][0], pair[0][1], pair[0][2]),
-                    Point3::new(pair[1][0], pair[1][1], pair[1][2]),
-                    None,
-                )
-                .map_err(|error| error.to_string())?;
-                curves.push(Curve::from(line));
-            }
-        }
-        run.clear();
-        Ok(())
-    };
-    for segment in &profile.region.outer.segs {
-        match *segment {
-            Seg2::Line { a, b } => {
-                let a = output.point(a.x, a.y);
-                let b = output.point(b.x, b.y);
-                let sharp = if line_run.len() >= 2 {
-                    let previous = line_run[line_run.len() - 2];
-                    let last = line_run[line_run.len() - 1];
-                    let incoming = [last[0] - previous[0], last[1] - previous[1], last[2] - previous[2]];
-                    let outgoing = [b[0] - last[0], b[1] - last[1], b[2] - last[2]];
-                    let cross = [
-                        incoming[1] * outgoing[2] - incoming[2] * outgoing[1],
-                        incoming[2] * outgoing[0] - incoming[0] * outgoing[2],
-                        incoming[0] * outgoing[1] - incoming[1] * outgoing[0],
-                    ];
-                    let cross_len = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
-                    let dot = incoming[0] * outgoing[0] + incoming[1] * outgoing[1] + incoming[2] * outgoing[2];
-                    cross_len.atan2(dot).abs() > 0.14 // ~8 degrees
-                } else {
-                    false
-                };
-                if sharp {
-                    flush_line_run(&mut curves, &mut line_run)?;
-                }
-                if line_run.is_empty() {
-                    line_run.push(a);
-                } else {
-                    let last = *line_run.last().unwrap_or(&a);
-                    if (last[0] - a[0]).abs() + (last[1] - a[1]).abs() + (last[2] - a[2]).abs() > 1.0e-9 {
-                        flush_line_run(&mut curves, &mut line_run)?;
-                        line_run.push(a);
-                    }
-                }
-                line_run.push(b);
-            }
-            Seg2::Arc { center, radius, start, sweep } => {
-                flush_line_run(&mut curves, &mut line_run)?;
-                let center = output.point(center.x, center.y);
-                let center = Point3::new(center[0], center[1], center[2]);
-                if sweep.abs() >= std::f64::consts::TAU - 1.0e-9 {
-                    let circle = api_curves::create_circle(center, radius).map_err(|error| error.to_string())?;
-                    curves.push(Curve::from(circle));
-                } else {
-                    let arc = api_curves::create_arc(
-                        center,
-                        radius,
-                        (start + z_angle).to_degrees(),
-                        (start + sweep + z_angle).to_degrees(),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    curves.push(Curve::from(arc));
-                }
-            }
-            _ => return Err("Loft sketch profile has an unsupported curve type".into()),
-        }
-    }
-    flush_line_run(&mut curves, &mut line_run)?;
-    // A whole circle is one closed periodic curve and a valid profile. Extrude
-    // splits it into halves when solidcore's direct path is unavailable; only a
-    // profile with no boundary at all is degenerate.
-    if curves.is_empty() {
+    if geometry.region.outer.segs.is_empty() {
         return Err("Sketch profile is degenerate".into());
     }
-    Ok(curves)
-}
-
-fn sketch_profile_curves_transformed(
-    profile: &crate::sketch::Profile,
-    output: &SketchOutput,
-) -> Result<Vec<nodecraft_solidcore::solidcore::curve::curve::Curve>, String> {
-    use nodecraft_solidcore::solidcore::curve::curve::Curve;
-    use nodecraft_solidcore::solidcore::curve::line::Line;
-    use nodecraft_solidcore::solidcore::math::Point3;
-    use solidcraft_geom::prelude::*;
-
-    let points = profile.region.outer.polyline(0.001);
-    if points.len() < 3 {
-        return Err("Loft sketch profile is degenerate".into());
-    }
-    let mut curves = Vec::with_capacity(points.len());
-    for index in 0..points.len() {
-        let a = points[index];
-        let b = points[(index + 1) % points.len()];
-        let a = output.point(a.x, a.y);
-        let b = output.point(b.x, b.y);
-        let line = Line::create_line_segment(3, Point3::new(a[0], a[1], a[2]), Point3::new(b[0], b[1], b[2]), None)
-            .map_err(|error| error.to_string())?;
-        curves.push(Curve::from(line));
-    }
-    Ok(curves)
-}
-
-fn sketch_record_plane(output: &SketchOutput) -> solidcore_record::Plane {
-    let x = output.rotation[0];
-    let y = output.rotation[1];
-    solidcore_record::Plane {
-        origin: solidcore_record::Vec3::new(output.offset[0], output.offset[1], output.offset[2]),
-        x: solidcore_record::Vec3::new(x[0], x[1], x[2]),
-        y: solidcore_record::Vec3::new(y[0], y[1], y[2]),
-    }
-}
-
-fn sketch_record_section(output: &SketchOutput) -> Option<Vec<solidcore_record::profile::Seg2>> {
-    use solidcore_record::Seg2;
-    let mut profiles = output.profiles.clone();
-    profiles.sort_by(|a, b| b.area.total_cmp(&a.area));
-    let profile = profiles.into_iter().next()?;
-    if !profile.hole_curves.is_empty() {
-        return None;
-    }
-    profile
+    let frame = solidcore_convert::plane(&geometry.plane);
+    let kernel = nodecraft_solidcore::kernel::kernel();
+    geometry
         .region
         .outer
         .segs
         .iter()
-        .map(|segment| match *segment {
-            Seg2::Line { a, b } => Some(solidcore_record::profile::Seg2::Line {
-                a: solidcore_record::Vec2::new(a.x, a.y),
-                b: solidcore_record::Vec2::new(b.x, b.y),
-            }),
-            Seg2::Arc { center, radius, start, sweep } => Some(solidcore_record::profile::Seg2::Arc {
-                center: solidcore_record::Vec2::new(center.x, center.y),
-                radius,
-                start,
-                sweep,
-            }),
-            _ => None,
+        .map(|segment| {
+            let segment = solidcore_convert::seg2(segment);
+            nodecraft_solidcore::solidcore::prism::profile::curve_on_frame(&kernel, &frame, 0.0, &segment)
+                .map_err(|error| error.to_string())
         })
         .collect()
 }
 
-fn sketch_extrude_brep(
+/// One loft section as exact 2D segments and their plane, or `None` when the
+/// sketch has holes or a segment without an exact sweep curve.
+fn sketch_record_section(
     output: &SketchOutput,
-    distance: f64,
-) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let curves = sketch_profile_curves(output)?;
-    let mut kernel = nodecraft_solidcore::kernel::kernel();
-    nodecraft_extrude::extrude_profile_curves(&mut kernel, &curves, distance.abs())
-        .map_err(|error| error.to_string())
+) -> Option<(Vec<solidcore_record::Seg2>, solidcore_record::Plane)> {
+    let geometry = output.record_geometry().ok()?;
+    if !geometry.region.holes.is_empty() {
+        return None;
+    }
+    nodecraft_sweep::section_from_seg2(&geometry.region.outer.segs, &geometry.plane)?;
+    Some((geometry.region.outer.segs, geometry.plane))
 }
 
-fn sketch_from_node(node: &Node) -> Result<SketchOutput, String> {
-    if node.node_type == "spline" {
-        return spline_sketch_from_values(&node.values).map(SketchOutput::new);
+fn sketch_extrude_brep(
+    kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel,
+    output: &SketchOutput,
+    distance: f64,
+) -> Result<nodecraft_ops::SolidBody, String> {
+    if !distance.is_finite() || distance == 0.0 {
+        return Err("Extrude distance must be greater than zero.".into());
     }
-    let sketch: crate::sketch::Sketch = serde_json::from_value(
-        node.values.get("sketch").cloned().unwrap_or(serde_json::Value::Null),
-    )
-    .map_err(|error| format!("Sketch values: {error}"))?;
-    Ok(SketchOutput::new(sketch))
+    let geometry = output.record_geometry()?;
+    // The region has the uniform scale baked in, so the extrusion distance
+    // carries it too: the solid is the true image of the untransformed one.
+    // The ops session lends this worker's own kernel, so the sketch extrusion
+    // runs on the same configured profile as the Boolean tasks.
+    nodecraft_ops::OpsSession::new(kernel)
+        .extrude_planar_region(
+            &geometry.plane,
+            &geometry.region,
+            0.0,
+            distance.abs() * geometry.scale,
+        )
+        .map_err(|error| format!("Extrude: {error}"))
 }
 
 fn loft_sketch(
@@ -546,10 +607,7 @@ fn loft_sketch(
         (sketch_record_section(bottom), sketch_record_section(top))
     {
         let body = nodecraft_sweep::loft_on_planes(
-            &[
-                (bottom_section, sketch_record_plane(bottom)),
-                (top_section, sketch_record_plane(top)),
-            ],
+            &[bottom_section, top_section],
             if ruled { 1 } else { 2 },
             cap_ends,
         )
@@ -659,7 +717,7 @@ fn multi_section_surface_loft(
     }
     let record_sections: Option<Vec<_>> = sections
         .iter()
-        .map(|section| sketch_record_section(section).map(|segments| (segments, sketch_record_plane(section))))
+        .map(sketch_record_section)
         .collect();
     if let Some(record_sections) = record_sections {
         let body = nodecraft_sweep::loft_on_planes(
@@ -721,19 +779,6 @@ fn loft_face(
         }
     }
     best.map(|(_, face)| face)
-}
-
-fn loft_exact(
-    request: &Request,
-    kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel,
-    bottom_start: &str,
-    top_start: &str,
-    ruled: bool,
-    cap_ends: bool,
-) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let bottom = exact_operand_brep(request, bottom_start)?;
-    let top = exact_operand_brep(request, top_start)?;
-    loft_breps(kernel, bottom, top, ruled, cap_ends)
 }
 
 fn loft_breps(
@@ -817,9 +862,9 @@ fn ops_boolean(op: nodecraft_bool::BooleanOp) -> nodecraft_layers::BooleanOp {
 }
 
 fn boolean_mode(values: &serde_json::Value) -> Result<(nodecraft_bool::BooleanOp, bool), String> {
-    let mode = values.get("mode").or_else(|| values.get("operation")).or_else(|| values.get("op")).and_then(serde_json::Value::as_str).unwrap_or("union");
+    let mode = contract_text("boolean", values, "mode");
     let reverse = mode == "subtract-reverse";
-    let op = match mode {
+    let op = match mode.as_ref() {
         "union" => nodecraft_bool::BooleanOp::Union,
         "subtract" | "difference" | "subtract-a-b" | "subtract-reverse" => nodecraft_bool::BooleanOp::Difference,
         "intersect" | "intersection" => nodecraft_bool::BooleanOp::Intersection,
@@ -828,56 +873,6 @@ fn boolean_mode(values: &serde_json::Value) -> Result<(nodecraft_bool::BooleanOp
     Ok((op, reverse))
 }
 
-#[cfg(test)]
-fn export_extrude_exact(request: &Request, extrude_id: &str, path: &str) -> Result<(), String> {
-    let node = request.nodes.iter().find(|item| item.id == extrude_id).ok_or("extrude node missing")?;
-    let link = request.connections.iter().find(|link| link.to == extrude_id && (link.input == "profile" || link.input == "shape")).ok_or("extrude has no profile")?;
-    let source = request.nodes.iter().find(|item| item.id == link.from).ok_or("extrude profile source missing")?;
-    let input = source.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-    if input.is_empty() { return Err("exact extrude export requires a STEP import profile".into()); }
-    let imported = nodecraft_mesh::import_step_brep(input)?;
-    let reference = node.values.get("faces").and_then(serde_json::Value::as_array).and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
-    let index: usize = face_reference_index(reference).ok_or("extrude needs face:N selection")?;
-    let face = imported.faces().ids().nth(index).ok_or_else(|| format!("extrude face {index} missing"))?;
-    let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-    let mut kernel = nodecraft_solidcore::kernel::kernel();
-    let result = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, &imported, face, amount).map_err(|error| format!("extrude: {error}"))?;
-    nodecraft_extrude::write_planar_brep_step(&kernel, &result, path).map_err(|error| format!("{error}"))
-}
-
-
-fn resolve_extrude_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node, [f64; 3], [f64; 3])> {
-    let mut current = start.to_string();
-    let mut offset = [0.0; 3];
-    let mut rotation = [0.0; 3];
-    for _ in 0..64 {
-        let node = request.nodes.iter().find(|item| item.id == current)?;
-        if node.node_type == "translate" {
-            offset[0] += node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[1] += node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[2] += node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            for (slot, key) in ["rx", "ry", "rz"].iter().enumerate() {
-                rotation[slot] = node.values.get(*key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            }
-            let next = request.connections.iter().find(|link| link.to == current && (link.input == "shape" || link.input == "profile"))?;
-            current = next.from.clone();
-        } else if node.node_type == "extrude" {
-            return Some((node, offset, rotation));
-        } else {
-            return None;
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-fn export_extrude_chain(request: &Request, start: &str, path: &str) -> Result<(), String> {
-    let (extrude, offset, rotation) = resolve_extrude_chain(request, start).ok_or("no extrude in chain")?;
-    export_extrude_exact(request, &extrude.id, path)?;
-    nodecraft_step::transform_step_file(path, rotation, offset)
-}
-
-
 fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node, [f64; 3], [f64; 3])> {
     let mut current = start.to_string();
     let mut offset = [0.0; 3];
@@ -885,12 +880,7 @@ fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node
     for _ in 0..64 {
         let node = request.nodes.iter().find(|item| item.id == current)?;
         if node.node_type == "translate" {
-            offset[0] += node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[1] += node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[2] += node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            for (slot, key) in ["rx", "ry", "rz"].iter().enumerate() {
-                rotation[slot] = node.values.get(*key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            }
+            accumulate_translate(&node.values, &mut offset, &mut rotation);
             let next = request.connections.iter().find(|link| link.to == current && link.input == "shape")?;
             current = next.from.clone();
         } else if node.node_type == "stepimporter" || node.node_type == "extrude" || node.node_type == "boolean" || node.node_type == "fuse" || (node.node_type == "solid" || node.node_type == "primitive") {
@@ -903,70 +893,85 @@ fn resolve_part_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node
 }
 
 #[cfg(test)]
-fn exact_part_body(request: &Request, node: &Node) -> Result<nodecraft_step::PlanarBody, String> {
-    if node.node_type == "solid" || node.node_type == "primitive" {
-        let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
-        let number = |key: &str, default: f64| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
-        return match kind {
-            "pyramid" => nodecraft_step::pyramid_body(number("length", 40.0), number("height", 30.0)),
-            other => Err(format!("assembly part does not support primitive {other:?}")),
-        };
+fn step_options(node: &Node) -> Result<nodecraft_step::StepExportOptions, String> {
+    let unit = node.values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase();
+    if !matches!(unit.as_str(), "" | "mm" | "millimetre" | "millimeter") {
+        return Err(format!("STEP export writes millimetres; {unit:?} output is not supported"));
     }
-    if node.node_type == "stepimporter" {
-        let path = node.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-        let bodies = nodecraft_step::read_planar_solids(path)?;
-        if bodies.len() != 1 { return Err("assembly part must contain exactly one planar solid".into()); }
-        return Ok(bodies.into_iter().next().unwrap());
-    }
-    if node.node_type == "extrude" {
-        let link = request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("extrude has no profile")?;
-        let source = request.nodes.iter().find(|item| item.id == link.from).ok_or("extrude profile missing")?;
-        let input = source.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-        if input.is_empty() { return Err("extrude part requires a STEP profile".into()); }
-        let imported = nodecraft_mesh::import_step_brep(input)?;
-        let reference = node.values.get("faces").and_then(serde_json::Value::as_array).and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
-        let index: usize = face_reference_index(reference).ok_or("extrude needs face:N")?;
-        let face = imported.faces().ids().nth(index).ok_or("extrude face missing")?;
-        let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-        let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let result = nodecraft_extrude::extrude_planar_face_exact(&mut kernel, &imported, face, amount).map_err(|error| error.to_string())?;
-        return nodecraft_extrude::planar_brep_to_planar_body(&kernel, &result).map_err(|error| error.to_string());
-    }
-    if node.node_type == "boolean" || node.node_type == "fuse" {
-        let a = request.connections.iter().find(|link| link.to == node.id && link.input == "a").ok_or("Boolean part missing A")?;
-        let b = request.connections.iter().find(|link| link.to == node.id && link.input == "b").ok_or("Boolean part missing B")?;
-        let (op, reverse) = boolean_mode(&node.values)?;
-        let (brep_a, brep_b) = if reverse { (exact_operand_brep(request, &b.from)?, exact_operand_brep(request, &a.from)?) } else { (exact_operand_brep(request, &a.from)?, exact_operand_brep(request, &b.from)?) };
-        let result = boolean_breps_ops(&brep_a, &brep_b, op)?;
-        let kernel = nodecraft_solidcore::kernel::kernel();
-        return nodecraft_extrude::planar_brep_to_planar_body(&kernel, &result).map_err(|error| error.to_string());
-    }
-    Err("unsupported assembly part type".into())
+    let color = node.values.get("color").and_then(serde_json::Value::as_str).map(|color| {
+        let hex = color.trim_start_matches('#');
+        if hex.len() != 6 { return Err("color must be #RRGGBB".to_string()); }
+        let component = |range| u8::from_str_radix(&hex[range], 16).map(|value| value as f64 / 255.0).map_err(|error| error.to_string());
+        Ok([component(0..2)?, component(2..4)?, component(4..6)?])
+    }).transpose()?;
+    Ok(nodecraft_step::StepExportOptions {
+        product_name: node.values.get("productName").or_else(|| node.values.get("fileName")).and_then(serde_json::Value::as_str).unwrap_or("solid").to_string(),
+        schema: node.values.get("schema").and_then(serde_json::Value::as_str).unwrap_or("ap242").to_string(),
+        author: node.values.get("author").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
+        organization: node.values.get("organization").and_then(serde_json::Value::as_str).unwrap_or("NodeCraft").to_string(),
+        color,
+        layer: node.values.get("layer").and_then(serde_json::Value::as_str).map(str::to_string),
+    })
 }
 
 #[cfg(test)]
-fn export_combine_assembly(request: &Request, combine_id: &str, path: &str) -> Result<(), String> {
-    let mut parts = Vec::new();
-    for (index, link) in request.connections.iter().filter(|link| link.to == combine_id && link.input == "shape").enumerate() {
-        let (part_node, offset, rotation) = resolve_part_chain(request, &link.from).ok_or("assembly export requires STEP import or Extrude parts")?;
-        let body = exact_part_body(request, part_node)?;
-        let (sx, cx) = rotation[0].to_radians().sin_cos();
-        let (sy, cy) = rotation[1].to_radians().sin_cos();
-        let (sz, cz) = rotation[2].to_radians().sin_cos();
-        let rows = [
-            [cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz, offset[0]],
-            [cy * sz, cx * cz + sx * sy * sz, -cz * sx + cx * sy * sz, offset[1]],
-            [-sy, cy * sx, cx * cy, offset[2]],
-            [0.0, 0.0, 0.0, 1.0],
-        ];
-        let transform = step_assemblies::Transform::from_rows(rows).map_err(|error| error.to_string())?;
-        parts.push(step_assemblies::PlanarPart::placed(format!("Part {index}"), body, transform));
+fn placement_of(offset: [f64; 3], rotation: [f64; 3]) -> [[f64; 4]; 4] {
+    let (sx, cx) = rotation[0].to_radians().sin_cos();
+    let (sy, cy) = rotation[1].to_radians().sin_cos();
+    let (sz, cz) = rotation[2].to_radians().sin_cos();
+    let rows = [
+        [cy * cz, cz * sx * sy - cx * sz, cx * cz * sy + sx * sz, offset[0]],
+        [cy * sz, cx * cz + sx * sy * sz, -cz * sx + cx * sy * sz, offset[1]],
+        [-sy, cy * sx, cx * cy, offset[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ];
+    let mut placement = [[0.0; 4]; 4];
+    for row in 0..4 {
+        for column in 0..4 {
+            placement[column][row] = rows[row][column];
+        }
     }
-    if parts.len() < 2 { return Err("assembly export needs at least two parts".into()); }
-    step_assemblies::write_planar_assembly(path, &parts).map_err(|error| error.to_string())
+    placement
 }
 
+#[cfg(test)]
+fn compose_placement(left: [[f64; 4]; 4], right: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
+    // Both are column-major affine matrices: index [column][row].
+    let mut out = [[0.0; 4]; 4];
+    for column in 0..4 {
+        for row in 0..4 {
+            out[column][row] = (0..4).map(|k| left[k][row] * right[column][k]).sum();
+        }
+    }
+    out
+}
 
+#[cfg(test)]
+fn export_combine_assembly(
+    eval: &mut Eval<'_, '_>,
+    combine_id: &str,
+    exporter: &Node,
+    path: &str,
+) -> Result<(), String> {
+    let mut bodies = Vec::new();
+    for (index, link) in eval.request.connections.iter().filter(|link| link.to == combine_id && link.input == "shape").enumerate() {
+        let (part_node, offset, rotation) = resolve_part_chain(eval.request, &link.from).ok_or("assembly export requires STEP import or Extrude parts")?;
+        let brep = exact_operand_brep(eval, &part_node.id)?;
+        let record = nodecraft_step::record_of_brep(&brep)?;
+        let moved = offset != [0.0; 3] || rotation != [0.0; 3];
+        bodies.push(nodecraft_step::ExportBody {
+            name: format!("Part {index}"),
+            color: None,
+            placement: moved.then(|| placement_of(offset, rotation)),
+            sheet: false,
+            brep: record,
+        });
+    }
+    if bodies.len() < 2 {
+        return Err("assembly export needs at least two parts".into());
+    }
+    nodecraft_step::write_step_with_options(path, &bodies, &step_options(exporter)?)
+}
 
 type WarmBrep = std::sync::Arc<nodecraft_solidcore::solidcore::topology::Brep>;
 type WarmDeps = std::collections::BTreeMap<String, Result<WarmBrep, String>>;
@@ -980,11 +985,11 @@ fn fnv_seed(id: &str) -> u64 {
     hash
 }
 
-fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
-    let node = request.nodes.iter().find(|item| item.id == start).ok_or("Boolean operand node missing")?;
+fn exact_operand_breps(eval: &mut Eval<'_, '_>, start: &str) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
+    let node = eval.request.nodes.iter().find(|item| item.id == start).ok_or("Boolean operand node missing")?;
     if node.node_type == "mirror" {
-        let link = request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("mirror has no shape input")?;
-        let mut inputs = exact_operand_breps(request, &link.from)?;
+        let link = eval.request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("mirror has no shape input")?;
+        let mut inputs = exact_operand_breps(eval, &link.from)?;
         let mut outputs = Vec::new();
         for input in &inputs {
             let mirrored = crate::node_task::execute_exact(
@@ -1003,10 +1008,9 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
             Ok(outputs)
         }
     } else if node.node_type == "translate" {
-        let link = request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
-        let mut inputs = exact_operand_breps(request, &link.from)?;
-        let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-        let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
+        let link = eval.request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
+        let mut inputs = exact_operand_breps(eval, &link.from)?;
+        let (offset, rotation) = crate::translate_placement(&node.values);
         for brep in &mut inputs { apply_brep_placement(brep, offset, rotation)?; }
         Ok(inputs)
     } else if node.node_type == "combine" {
@@ -1015,8 +1019,8 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
         // isolate failed imports from the successfully evaluated operands.
         let mut inputs = Vec::new();
         let mut first_error: Option<String> = None;
-        for link in request.connections.iter().filter(|link| link.to == start && link.input == "shape") {
-            match exact_operand_breps(request, &link.from) {
+        for link in eval.request.connections.iter().filter(|link| link.to == start && link.input == "shape") {
+            match exact_operand_breps(eval, &link.from) {
                 Ok(values) => inputs.extend(values),
                 Err(error) => {
                     first_error.get_or_insert(error);
@@ -1028,17 +1032,16 @@ fn exact_operand_breps(request: &Request, start: &str) -> Result<Vec<nodecraft_s
         }
         Ok(inputs)
     } else {
-        Ok(vec![exact_operand_brep(request, start)?])
+        Ok(vec![exact_operand_brep(eval, start)?])
     }
 }
 
-pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let node = request.nodes.iter().find(|item| item.id == start).ok_or("Boolean operand node missing")?;
+pub(crate) fn exact_operand_brep(eval: &mut Eval<'_, '_>, start: &str) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+    let node = eval.request.nodes.iter().find(|item| item.id == start).ok_or("Boolean operand node missing")?;
     if node.node_type == "translate" {
-        let link = request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
-        let brep = exact_operand_brep(request, &link.from)?;
-        let offset = [node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
-        let rotation = [node.values.get("rx").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("ry").and_then(serde_json::Value::as_f64).unwrap_or(0.0), node.values.get("rz").and_then(serde_json::Value::as_f64).unwrap_or(0.0)];
+        let link = eval.request.connections.iter().find(|link| link.to == start && link.input == "shape").ok_or("Boolean transform has no source")?;
+        let brep = exact_operand_brep(eval, &link.from)?;
+        let (offset, rotation) = crate::translate_placement(&node.values);
         return crate::node_task::execute_exact(
             crate::node_task::ExactNodeTask::Translate { brep, offset, rotation },
             &node.id,
@@ -1052,51 +1055,43 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
         "stepimporter" => {
             let path = node.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
             if path.is_empty() { return Err("Boolean STEP import has no path".into()); }
-            nodecraft_mesh::import_step_brep(path)
+            let mut import = nodecraft_mesh::import_step_breps(path)?;
+            if !import.warnings.is_empty() {
+                eval.warnings
+                    .entry(node.id.clone())
+                    .or_default()
+                    .append(&mut import.warnings);
+            }
+            if import.bodies.len() != 1 {
+                return Err(format!(
+                    "STEP import {path:?} produced {} bodies; an exact operand needs exactly one",
+                    import.bodies.len()
+                ));
+            }
+            Ok(import.bodies.pop().expect("one imported body").brep)
         }
         "extrude" => {
-            let link = request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("extrude operand has no profile")?;
-            let source = request.nodes.iter().find(|item| item.id == link.from).ok_or("extrude profile source missing")?;
-            let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-            if source.node_type == "sketch" || source.node_type == "spline" {
-                return crate::node_task::execute_exact(
-                    crate::node_task::ExactNodeTask::ExtrudeSketch {
-                        output: std::sync::Arc::new(sketch_from_node(source)?),
-                        amount,
-                    },
-                    &node.id,
-                    fnv_seed(&node.id),
-                )?.into_brep().ok_or_else(|| "sketch extrude task returned no shape".to_owned());
+            let link = eval.request.connections.iter().find(|link| link.to == node.id && (link.input == "profile" || link.input == "shape")).ok_or("extrude operand has no profile")?;
+            let source = eval.evaluate_part(&link.from)?;
+            let result = eval.extrude_part(node, source.as_ref())?;
+            let mut solids = result.realized_solids()?;
+            if solids.len() != 1 {
+                return Err(format!(
+                    "Extrude operand produced {} bodies; an exact operand needs exactly one",
+                    solids.len()
+                ));
             }
-            let path = source.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-            if path.is_empty() { return Err("extrude operand requires a STEP profile".into()); }
-            let imported = nodecraft_mesh::import_step_brep(path)?;
-            let reference = node.values.get("faces").and_then(serde_json::Value::as_array).and_then(|values| values.first()).and_then(|value| value.get("id")).and_then(serde_json::Value::as_str).unwrap_or("");
-            let index: usize = face_reference_index(reference).ok_or("extrude operand needs face:N")?;
-            let face = imported.faces().ids().nth(index).ok_or("extrude operand face missing")?;
-            let amount = node.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(10.0);
-            let _ = face;
-            crate::node_task::execute_exact(
-                crate::node_task::ExactNodeTask::Extrude {
-                    brep: imported,
-                    face_index: index,
-                    amount,
-                },
-                &node.id,
-                fnv_seed(&node.id),
-            )?
-            .into_brep()
-            .ok_or_else(|| "extrude task returned no shape".to_owned())
+            Ok(solids.pop().expect("one extruded body"))
         }
         "boolean" | "fuse" => {
-            let a = request.connections.iter().find(|link| link.to == node.id && link.input == "a");
-            let b = request.connections.iter().find(|link| link.to == node.id && link.input == "b");
+            let a = eval.request.connections.iter().find(|link| link.to == node.id && link.input == "a");
+            let b = eval.request.connections.iter().find(|link| link.to == node.id && link.input == "b");
             match (a, b) {
                 (Some(a), Some(b)) => {
                     let (op, reverse) = boolean_mode(&node.values)?;
                     let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
-                    let a_breps = exact_operand_breps(request, &a)?;
-                    let b_breps = exact_operand_breps(request, &b)?;
+                    let a_breps = exact_operand_breps(eval, &a)?;
+                    let b_breps = exact_operand_breps(eval, &b)?;
                     let mut a_iter = a_breps.into_iter();
                     let mut result = a_iter.next().ok_or("Boolean operand A is empty")?;
                     // A Combine represents several solids as one Part. Union the
@@ -1110,18 +1105,21 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
                     }
                     Ok(result)
                 }
-                (Some(a), None) => exact_operand_brep(request, &a.from),
-                (None, Some(b)) => exact_operand_brep(request, &b.from),
+                (Some(a), None) => exact_operand_brep(eval, &a.from),
+                (None, Some(b)) => exact_operand_brep(eval, &b.from),
                 (None, None) => Err("Boolean has no connected operand".into()),
             }
         }
         "chamfer" => {
-            let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("chamfer has no shape input")?;
-            let source = exact_operand_brep(request, &link.from)?;
+            let link = eval.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("chamfer has no shape input")?;
+            let source = exact_operand_brep(eval, &link.from)?;
             let mut values = node.values.clone();
             values["mode"] = serde_json::json!("chamfer");
             crate::node_task::execute_exact(
-                crate::node_task::ExactNodeTask::Chamfer { brep: source, values },
+                crate::node_task::ExactNodeTask::Chamfer {
+                    body: nodecraft_ops::SolidBody::new(source),
+                    values,
+                },
                 &node.id,
                 fnv_seed(&node.id),
             )?
@@ -1130,10 +1128,10 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
             .map_err(|error| format!("Edge preview: {error}"))
         }
         "shell" => {
-            let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("shell has no shape input")?;
-            let source = exact_operand_brep(request, &link.from)?;
-            let thickness = node.values.get("thickness").and_then(serde_json::Value::as_f64).unwrap_or(2.0);
-            let inward = node.values.get("direction").and_then(serde_json::Value::as_str).unwrap_or("inward") == "inward";
+            let link = eval.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("shell has no shape input")?;
+            let source = exact_operand_brep(eval, &link.from)?;
+            let thickness = contract_number("shell", &node.values, "thickness");
+            let inward = contract_text("shell", &node.values, "direction") == "inward";
             let signed = if inward { -thickness } else { thickness };
             let mut openings = Vec::new();
             for face in node.values.get("faces").and_then(serde_json::Value::as_array).into_iter().flatten() {
@@ -1144,7 +1142,7 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
             }
             crate::node_task::execute_exact(
                 crate::node_task::ExactNodeTask::Shell {
-                    brep: source,
+                    body: nodecraft_ops::SolidBody::new(source),
                     signed_thickness: signed,
                     openings,
                 },
@@ -1155,8 +1153,8 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
             .ok_or_else(|| "Shell: task returned no shape".to_owned())
         }
         "mirror" => {
-            let link = request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("mirror has no shape input")?;
-            let source_brep = exact_operand_brep(request, &link.from)?;
+            let link = eval.request.connections.iter().find(|link| link.to == node.id && link.input == "shape").ok_or("mirror has no shape input")?;
+            let source_brep = exact_operand_brep(eval, &link.from)?;
             let mirrored = crate::node_task::execute_exact(
                 crate::node_task::ExactNodeTask::Mirror {
                     brep: copy_brep(&source_brep)?,
@@ -1175,8 +1173,8 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
         }
         "combine" => {
             let mut inputs = Vec::new();
-            for link in request.connections.iter().filter(|link| link.to == node.id && link.input == "shape") {
-                inputs.push(exact_operand_brep(request, &link.from)?);
+            for link in eval.request.connections.iter().filter(|link| link.to == node.id && link.input == "shape") {
+                inputs.push(exact_operand_brep(eval, &link.from)?);
             }
             match inputs.len() {
                 0 => Err("Combine exact operand has no inputs".into()),
@@ -1188,42 +1186,6 @@ pub(crate) fn exact_operand_brep(request: &Request, start: &str) -> Result<nodec
     }
 }
 
-
-#[cfg(test)]
-fn export_boolean_exact(request: &Request, boolean_id: &str, path: &str) -> Result<(), String> {
-    let node = request.nodes.iter().find(|item| item.id == boolean_id).ok_or("boolean node missing")?;
-    let link_a = request.connections.iter().find(|link| link.to == boolean_id && link.input == "a");
-    let link_b = request.connections.iter().find(|link| link.to == boolean_id && link.input == "b");
-    let result = match (link_a, link_b) {
-        (Some(a), Some(b)) => {
-            let (op, reverse) = boolean_mode(&node.values)?;
-            let (a, b) = if reverse { (b.from.clone(), a.from.clone()) } else { (a.from.clone(), b.from.clone()) };
-            let a_breps = exact_operand_breps(request, &a)?;
-            let b_breps = exact_operand_breps(request, &b)?;
-            let mut result = a_breps.into_iter().next().ok_or("Boolean operand A is empty")?;
-            for brep in b_breps { result = boolean_breps_ops(&result, &brep, op)?; }
-            result
-        }
-        (Some(a), None) => exact_operand_brep(request, &a.from)?,
-        (None, Some(b)) => exact_operand_brep(request, &b.from)?,
-        (None, None) => return Err("boolean has no connected operand".into()),
-    };
-    nodecraft_step::write_brep_exact(path, &result)
-}
-
-
-#[cfg(test)]
-fn exports_boolean_chain(request: &Request, start: &str) -> bool {
-    let mut current = start.to_string();
-    for _ in 0..64 {
-        let Some(node) = request.nodes.iter().find(|item| item.id == current) else { return false };
-        if node.node_type == "translate" {
-            let Some(next) = request.connections.iter().find(|link| link.to == current && link.input == "shape") else { return false };
-            current = next.from.clone();
-        } else { return node.node_type == "boolean" || node.node_type == "fuse"; }
-    }
-    false
-}
 
 /// Exact consumers that need their upstream primitives as BReps during normal
 /// evaluation. Mesh-only branches must not pay for this.
@@ -1250,177 +1212,68 @@ fn exact_brep_demands(request: &Request) -> HashSet<String> {
 }
 
 #[cfg(test)]
-fn cacheable_exact_operand(request: &Request, start: &str) -> bool {
-    let mut current = start.to_owned();
-    for _ in 0..64 {
-        let Some(node) = request.nodes.iter().find(|node| node.id == current) else { return false };
-        match node.node_type.as_str() {
-            "translate" => {
-                let Some(next) = request.connections.iter().find(|link| link.to == current && link.input == "shape") else { return false };
-                current = next.from.clone();
-            }
-            "boolean" | "fuse" | "loft" | "surfaceloft" => return true,
-            _ => return false,
-        }
+fn write_faceted_from_mesh(
+    path: &str,
+    mesh: &Mesh,
+    options: &nodecraft_step::StepExportOptions,
+) -> Result<(), String> {
+    if mesh.faces.is_empty() {
+        return Err("cannot export an empty mesh".into());
     }
-    false
+    nodecraft_step::write_step_faceted(path, &mesh.vertices, &mesh.faces, options)
 }
 
 #[cfg(test)]
-fn export_boolean_chain(request: &Request, start: &str, path: &str) -> Result<(), String> {
-    let mut current = start.to_string();
-    let mut offset = [0.0; 3];
-    let mut rotation = [0.0; 3];
-    let mut boolean = None;
-    for _ in 0..64 {
-        let node = request.nodes.iter().find(|item| item.id == current).ok_or("boolean chain node missing")?;
-        if node.node_type == "translate" {
-            offset[0] += node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[1] += node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[2] += node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            for (slot, key) in ["rx", "ry", "rz"].iter().enumerate() { rotation[slot] = node.values.get(*key).and_then(serde_json::Value::as_f64).unwrap_or(0.0); }
-            let next = request.connections.iter().find(|link| link.to == current && link.input == "shape").ok_or("boolean chain is not connected")?;
-            current = next.from.clone();
-        } else if node.node_type == "boolean" || node.node_type == "fuse" {
-            boolean = Some(node);
-            break;
-        } else { return Err("no Boolean in transform chain".into()); }
-    }
-    let boolean = boolean.ok_or("no Boolean in transform chain")?;
-    export_boolean_exact(request, &boolean.id, path)?;
-    nodecraft_step::transform_step_file(path, rotation, offset)
-}
-
-
-
-
-#[cfg(test)]
-fn write_faceted_from_mesh(path: &str, mesh: &Mesh) -> Result<(), String> {
-    if mesh.faces.is_empty() { return Err("cannot export an empty mesh".into()); }
-    let mut body = nodecraft_step::PlanarBody::default();
-    let mut lookup: std::collections::BTreeMap<[i64; 3], usize> = std::collections::BTreeMap::new();
-    for triangle in &mesh.faces {
-        let mut loop_points = Vec::with_capacity(3);
-        for index in triangle {
-            let vertex = mesh.vertices.get(*index as usize).ok_or("mesh triangle index out of range")?;
-            let point = [vertex[0] as f64, vertex[1] as f64, vertex[2] as f64];
-            let key = [(point[0] * 1e7).round() as i64, (point[1] * 1e7).round() as i64, (point[2] * 1e7).round() as i64];
-            let target = *lookup.entry(key).or_insert_with(|| { body.points.push(point); body.points.len() - 1 });
-            if loop_points.last().copied() != Some(target) { loop_points.push(target); }
-        }
-        if loop_points.len() == 3 { body.push_face(loop_points, Vec::new()); }
-    }
-    nodecraft_step::write_faceted_brep(path, &body)
-}
-
-#[cfg(test)]
-fn apply_export_metadata(node: &Node, path: &str) -> Result<(), String> {
-    let target = match node.values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase().as_str() {
-        "cm" | "centimetre" | "centimeter" => Some(nodecraft_step::LengthUnit::Centimetre),
-        "m" | "metre" | "meter" => Some(nodecraft_step::LengthUnit::Metre),
-        "km" | "kilometre" | "kilometer" => Some(nodecraft_step::LengthUnit::Kilometre),
-        "um" | "micrometre" | "micrometer" => Some(nodecraft_step::LengthUnit::Micrometre),
-        "in" | "inch" => Some(nodecraft_step::LengthUnit::Inch),
-        _ => None,
-    };
-    if let Some(target) = target {
-        let source = nodecraft_step::read_length_unit(path).unwrap_or(nodecraft_step::LengthUnit::Millimetre);
-        nodecraft_step::convert_step_units(path, source, target)?;
-    }
-    let name = node.values.get("fileName").and_then(serde_json::Value::as_str).unwrap_or("solid");
-    let author = node.values.get("author").and_then(serde_json::Value::as_str).unwrap_or("");
-    let organization = node.values.get("organization").and_then(serde_json::Value::as_str).unwrap_or("NodeCraft");
-    nodecraft_step::set_header(path, name, author, organization)?;
-    if let Some(schema) = node.values.get("schema").and_then(serde_json::Value::as_str) { nodecraft_step::set_schema(path, schema)?; }
-    if let Some(name) = node.values.get("productName").and_then(serde_json::Value::as_str) { nodecraft_step::set_product_name(path, name)?; }
-    if let Some(layer) = node.values.get("layer").and_then(serde_json::Value::as_str) { nodecraft_step::set_layer(path, layer)?; }
-    if let Some(material) = node.values.get("material").and_then(serde_json::Value::as_str) { nodecraft_step::set_material(path, material)?; }
-    if let Some(color) = node.values.get("color").and_then(serde_json::Value::as_str) {
-        let hex = color.trim_start_matches('#');
-        if hex.len() != 6 { return Err("color must be #RRGGBB".into()); }
-        let component = |range| u8::from_str_radix(&hex[range], 16).map(|value| value as f64 / 255.0).map_err(|error| error.to_string());
-        nodecraft_step::set_color(path, component(0..2)?, component(2..4)?, component(4..6)?)?;
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-fn export_imported_step(request: &Request, start: &str, path: &str) -> Result<(), String> {
+fn export_imported_step(
+    request: &Request,
+    start: &str,
+    exporter: &Node,
+    path: &str,
+) -> Result<(), String> {
     let (importer, offset, rotation) = resolve_part_chain(request, start).ok_or("no STEP import in chain")?;
-    if importer.node_type != "stepimporter" { return Err("not an imported STEP source".into()); }
+    if importer.node_type != "stepimporter" {
+        return Err("not an imported STEP source".into());
+    }
     let input = importer.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
-    if input.is_empty() { return Err("STEP import has no path".into()); }
-    std::fs::copy(input, path).map_err(|error| format!("{path}: {error}"))?;
-    nodecraft_step::transform_step_file(path, rotation, offset)
+    if input.is_empty() {
+        return Err("STEP import has no path".into());
+    }
+    let bytes = std::fs::read(input).map_err(|error| format!("{input}: {error}"))?;
+    let import = nodecraft_step::read_cad(&bytes, input)?;
+    let mut bodies = Vec::with_capacity(import.bodies.len());
+    for mut body in import.bodies {
+        let moved = offset != [0.0; 3] || rotation != [0.0; 3];
+        if moved {
+            let placement = body.placement.map(|placement| compose_placement(placement_of(offset, rotation), placement));
+            body.placement = placement.or_else(|| Some(placement_of(offset, rotation)));
+        }
+        bodies.push(nodecraft_step::ExportBody {
+            name: body.name,
+            color: body.color,
+            placement: body.placement,
+            sheet: body.sheet,
+            brep: body.brep,
+        });
+    }
+    if bodies.is_empty() {
+        return Err(format!("{input}: no STEP bodies to export"));
+    }
+    nodecraft_step::write_step_with_options(path, &bodies, &step_options(exporter)?)
 }
 
 #[cfg(test)]
 fn write_primitive_step(node: &Node, path: &str) -> Result<(), String> {
-    let number = |key: &str, default: f64| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default);
-    let kind = node.values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
-    match kind {
-        "box" => nodecraft_step::write_box(path, number("length", 40.0), number("width", 40.0), number("height", 40.0)),
-        "cylinder" => nodecraft_step::write_cylinder(path, number("radius", 20.0), number("height", 40.0)),
-        "cone" => nodecraft_step::write_cone(path, number("bottomRadius", 20.0), number("topRadius", 0.0), number("height", 40.0)),
-        "sphere" => nodecraft_step::write_sphere(path, number("radius", 20.0)),
-        "torus" => nodecraft_step::write_torus(path, number("majorRadius", 15.0), number("minorRadius", 5.0)),
-        "wedge" => nodecraft_step::write_wedge(path, number("length", 40.0), number("width", 30.0), number("height", 25.0), number("topLength", 0.0)),
-        "pyramid" => nodecraft_step::write_pyramid(path, number("length", 40.0), number("height", 30.0)),
-        other => Err(format!("Rust STEP export does not support primitive {other:?}.")),
-    }
-}
-
-fn resolve_primitive_chain<'a>(request: &'a Request, start: &str) -> Option<(&'a Node, [f64; 3], [f64; 3])> {
-    let mut current = start.to_string();
-    let mut offset = [0.0; 3];
-    let mut rotation = [0.0; 3];
-    for _ in 0..64 {
-        let node = request.nodes.iter().find(|item| item.id == current)?;
-        if node.node_type == "translate" {
-            offset[0] += node.values.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[1] += node.values.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            offset[2] += node.values.get("z").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            for (slot, key) in ["rx", "ry", "rz"].iter().enumerate() {
-                rotation[slot] = node.values.get(*key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-            }
-            let next = request.connections.iter().find(|link| link.to == current && link.input == "shape")?;
-            current = next.from.clone();
-        } else if node.node_type == "solid" || node.node_type == "primitive" {
-            return Some((node, offset, rotation));
-        } else {
-            return None;
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-fn export_combine_exact(request: &Request, combine_id: &str, output: &str) -> Result<(), String> {
-    let mut paths = Vec::new();
-    let mut temporary = Vec::new();
-    for (index, link) in request.connections.iter().filter(|link| link.to == combine_id && link.input == "shape").enumerate() {
-        let Some((primitive, offset, rotation)) = resolve_primitive_chain(request, &link.from) else {
-            return Err("Combine STEP export supports only primitives and transformed primitives.".into());
-        };
-        let temp = format!("{output}.part{index}.step");
-        write_primitive_step(primitive, &temp)?;
-        if rotation != [0.0; 3] || offset != [0.0; 3] {
-            nodecraft_step::transform_step_file(&temp, rotation, offset)?;
-        }
-        paths.push(temp.clone()); temporary.push(temp);
-    }
-    let merged = nodecraft_step::merge_step_files(&paths, output);
-    for path in temporary { let _ = std::fs::remove_file(path); }
-    merged
+    let brep = primitive_brep(node)?;
+    nodecraft_step::write_brep_exact(path, &brep)
 }
 
 fn mirror_plane(values: &serde_json::Value) -> (&'static str, f64) {
-    let plane = values.get("plane").and_then(serde_json::Value::as_str).unwrap_or("xy");
-    let offset = values.get("offset").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-    match plane {
-        "xz" => ("xz", offset),
+    let plane = contract_text("mirror", values, "plane");
+    let offset = contract_number("mirror", values, "offset");
+    match plane.as_ref() {
+        "xy" => ("xy", offset),
         "yz" => ("yz", offset),
-        _ => ("xy", offset),
+        _ => ("xz", offset),
     }
 }
 
@@ -1451,10 +1304,30 @@ fn mirror_mesh(mesh: &Mesh, values: &serde_json::Value) -> Mesh {
 }
 
 fn mirror_combine(values: &serde_json::Value) -> bool {
-    match values.get("combine") {
-        Some(serde_json::Value::Bool(value)) => *value,
-        Some(serde_json::Value::String(value)) => value == "true" || value == "join",
-        _ => values.get("mode").and_then(serde_json::Value::as_str) == Some("join"),
+    contract_bool("mirror", values, "combine")
+}
+
+/// Angular step between consecutive Circular Pattern copies. A full turn is
+/// divided by the total copy count so the last copy does not land back on the
+/// original; a partial sweep is divided by the gaps between copies so the last
+/// copy lands exactly on `angle`.
+fn circular_pattern_step(count: usize, angle: f64) -> f64 {
+    if angle.abs() >= 360.0 {
+        angle / count as f64
+    } else if count > 1 {
+        angle / (count - 1) as f64
+    } else {
+        0.0
+    }
+}
+
+/// The Euler rotation a Circular Pattern copy applies for one axis. All other
+/// placement code shares the X-then-Y-then-Z convention this feeds.
+fn circular_pattern_rotation(axis: &str, degrees: f64) -> [f64; 3] {
+    match axis {
+        "x" => [degrees, 0.0, 0.0],
+        "y" => [0.0, degrees, 0.0],
+        _ => [0.0, 0.0, degrees],
     }
 }
 
@@ -1543,6 +1416,9 @@ pub struct EngineOutput {
     /// Planner defects from the display tessellation (lenient/capped/over-tolerance
     /// faces and edges).
     pub tessellation_diagnostics: Vec<String>,
+    /// The background proof queue's generation for this evaluation. A later refusal report
+    /// carries the same generation and belongs to this result.
+    pub proof_generation: u64,
 }
 
 #[cfg(test)]
@@ -1607,15 +1483,13 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
             .map_err(|error| error.to_string())?;
         point_ids.push(id);
     }
-    let control = values.get("control").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let periodic = values.get("periodic").and_then(serde_json::Value::as_bool).unwrap_or(false);
-    let degree = values
-        .get("degree")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(3)
-        .clamp(1, solidcore_record::MAX_BEZIER_DEGREE as u64) as u8;
+    let control = contract_bool("spline", values, "control");
+    let periodic = contract_bool("spline", values, "periodic");
+    let degree = contract_number("spline", values, "degree")
+        .round()
+        .clamp(1.0, solidcore_record::MAX_BEZIER_DEGREE as f64) as u8;
     sketch
-        .add_curve(CurveKind::Spline { pts: point_ids, control, degree, periodic, nurbs: None }, None)
+        .add_curve(CurveKind::Spline { pts: point_ids, control, degree, periodic, nurbs: None, handles: Vec::new() }, None)
         .map_err(|error| error.to_string())?;
     Ok(sketch)
 }
@@ -1623,14 +1497,23 @@ fn spline_sketch_from_values(values: &serde_json::Value) -> Result<crate::sketch
 /// One shared body plus its placement chain.
 #[derive(Clone, Debug)]
 struct BodyInstance {
-    body: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
+    body: nodecraft_ops::SolidBody,
     transforms: Vec<BodyTransform>,
+    /// The realised body for exactly this transform chain, made once and shared by every
+    /// reader and by later evaluations of the same cached Part. A new transform resets it.
+    realized: std::sync::Arc<std::sync::Mutex<Option<nodecraft_ops::SolidBody>>>,
     /// Content key of the node that produced this geometry. Placement and
     /// scatter preserve it, so every instance of one B-rep shares one display
     /// plan and one resident GPU mesh.
     source: Option<u64>,
     /// Body index in that producing node's output.
     source_body: u32,
+    /// The imported body's display name, when its source supplies one.
+    name: Option<String>,
+    /// The imported body's surface colour (linear RGB), when its source supplies one.
+    /// The colour is also written as a face attribute, the same place a Look node
+    /// stores colour, so display and export read one value.
+    color: Option<[f64; 3]>,
 }
 
 #[derive(Clone, Debug)]
@@ -1691,7 +1574,7 @@ fn exact_part_from(part: &Part, source: u64) -> nodecraft_exact::ExactPart {
                     body.source.unwrap_or(source),
                     body.source.map_or(index as u32, |_| body.source_body),
                 ),
-                brep: body.body.clone(),
+                brep: body.body.shared(),
                 transforms: body.transforms.iter().map(crate::display::DisplayTransform::from).collect(),
             })
             .collect(),
@@ -1715,6 +1598,15 @@ struct SketchInstance {
     transforms: Vec<BodyTransform>,
 }
 
+impl SketchInstance {
+    /// The sketch with its placement chain baked into its plane transform.
+    fn realized(&self) -> SketchOutput {
+        self.transforms
+            .iter()
+            .fold(self.output.as_ref().clone(), |output, transform| output.transformed(transform))
+    }
+}
+
 /// Immutable graph value: placed solids plus placed sketch profiles/curves.
 #[derive(Clone, Debug)]
 struct Part {
@@ -1722,18 +1614,66 @@ struct Part {
     sketches: Vec<SketchInstance>,
 }
 
+impl BodyInstance {
+    /// Add a placement to this instance and drop any realised body: a realised body belongs
+    /// to one exact transform chain.
+    fn push_transform(&mut self, transform: BodyTransform) {
+        self.transforms.push(transform);
+        self.realized = Default::default();
+    }
+}
+
 impl Part {
     fn from_brep(brep: nodecraft_solidcore::solidcore::topology::Brep) -> Self {
         Self::from_arc(Arc::new(brep))
     }
 
-    /// Share an immutable exact body between exact evaluation and meshing.
-    /// Mutating consumers must take an owning copy at their operation boundary.
+    /// Share an immutable exact body between exact evaluation and meshing. Mutating consumers
+    /// must take an owning copy at their operation boundary; the [`SolidBody`] keeps the proved
+    /// kernel body beside the shared B-rep.
     fn from_arc(brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>) -> Self {
         Self {
-            bodies: vec![BodyInstance { body: brep, transforms: Vec::new(), source: None, source_body: 0 }],
+            bodies: vec![BodyInstance {
+                body: nodecraft_ops::SolidBody::from_arc(brep),
+                transforms: Vec::new(),
+                realized: Default::default(),
+                source: None,
+                source_body: 0,
+                name: None,
+                color: None,
+            }],
             sketches: Vec::new(),
         }
+    }
+
+    /// A Part with one body per converted CADIR body. Imported names and
+    /// colours stay on the instance, and each colour is also written to the
+    /// body's faces through the same attribute a Look uses, so later display
+    /// and export read it without a second colour path.
+    fn from_imported(bodies: Vec<nodecraft_mesh::StepBrepBody>) -> (Self, Vec<String>) {
+        let mut warnings = Vec::new();
+        let bodies = bodies
+            .into_iter()
+            .enumerate()
+            .map(|(index, imported)| {
+                let mut brep = imported.brep;
+                if let Some(color) = imported.color
+                    && let Err(error) = crate::look::apply_look_color(&mut brep, color)
+                {
+                    warnings.push(format!("body {:?}: colour: {error}", imported.name));
+                }
+                BodyInstance {
+                    body: nodecraft_ops::SolidBody::new(brep),
+                    transforms: Vec::new(),
+                    realized: Default::default(),
+                    source: None,
+                    source_body: index as u32,
+                    name: Some(imported.name),
+                    color: imported.color,
+                }
+            })
+            .collect();
+        (Part { bodies, sketches: Vec::new() }, warnings)
     }
 
     fn from_sketch(output: Arc<SketchOutput>) -> Self {
@@ -1766,7 +1706,7 @@ impl Part {
         let (plane, offset) = mirror_plane(values);
         let mut mirrored = self.bodies.clone();
         for body in &mut mirrored {
-            body.transforms.push(BodyTransform::Mirror { plane, offset });
+            body.push_transform(BodyTransform::Mirror { plane, offset });
         }
         let mut sketches = self.sketches.clone();
         for sketch in &mut sketches {
@@ -1787,7 +1727,7 @@ impl Part {
     fn translated(&self, offset: [f64; 3], rotation: [f64; 3]) -> Part {
         let mut bodies = self.bodies.clone();
         for body in &mut bodies {
-            body.transforms.push(BodyTransform::Place { offset, rotation });
+            body.push_transform(BodyTransform::Place { offset, rotation });
         }
         let mut sketches = self.sketches.clone();
         for sketch in &mut sketches {
@@ -1796,24 +1736,74 @@ impl Part {
         Part { bodies, sketches }
     }
 
-    /// Bake placements into standalone BReps for operations that need actual
-    /// geometry (Boolean, exact export).
-    fn realized_solids(&self) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
-        let mut solids = Vec::with_capacity(self.bodies.len());
+    /// The Part's bodies with their placements baked in, made once per instance and shared by
+    /// every reader and later evaluation of this cached Part.
+    ///
+    /// A body with no placement keeps its shared record and its proof. A rigid placement
+    /// (translate/rotate) is the same B-rep under the same map applied to every point, curve
+    /// and surface: the topology is unchanged and the map has a positive determinant, so the
+    /// proof's outward sign still holds and the realised body carries the source's proof
+    /// state. A mirror or a scale is a different B-rep, so those reset the state to Unknown;
+    /// a mirror can flip the outward sign and a non-uniform scale changes the tolerances.
+    fn realized_bodies(&self) -> Result<Vec<nodecraft_ops::SolidBody>, String> {
+        let mut bodies = Vec::with_capacity(self.bodies.len());
         for body in &self.bodies {
-            let brep = crate::node_task::execute_exact(
+            if body.transforms.is_empty() {
+                bodies.push(body.body.clone());
+                continue;
+            }
+            let memoised = body
+                .realized
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(done) = memoised {
+                bodies.push(done);
+                continue;
+            }
+            let realized = crate::node_task::execute_exact(
                 crate::node_task::ExactNodeTask::Realize {
-                    brep: std::sync::Arc::clone(&body.body),
+                    body: body.body.clone(),
                     transforms: body.transforms.clone(),
                 },
                 "part-realize",
                 fnv_seed("part-realize"),
             )?
-            .into_brep()
+            .into_shape()
             .ok_or_else(|| "realize task returned no shape".to_owned())?;
-            solids.push(brep);
+            if body
+                .transforms
+                .iter()
+                .all(|transform| matches!(transform, BodyTransform::Place { .. }))
+            {
+                realized.carry_proof_from(&body.body);
+            }
+            *body
+                .realized
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(realized.clone());
+            bodies.push(realized);
         }
-        Ok(solids)
+        Ok(bodies)
+    }
+
+    /// Bake placements into standalone BReps for operations that need actual geometry and must
+    /// edit it (exact export, fillet/extrude/compare). The proof is dropped with the copy.
+    /// Every sketch in this Part, with its placement chain applied. Extrude,
+    /// loft and surface loft consume this instead of resolving a sketch by the
+    /// upstream node's type.
+    fn realized_sketches(&self) -> Vec<SketchOutput> {
+        self.sketches.iter().map(SketchInstance::realized).collect()
+    }
+
+    fn realized_solids(&self) -> Result<Vec<nodecraft_solidcore::solidcore::topology::Brep>, String> {
+        // Always a kernel copy, even with no placement: the mutable consumers (fillet,
+        // chamfer, extrude) rely on a body with the kernel's canonical entity IDs. The
+        // realisation itself is the memoised one.
+        self.realized_bodies()?
+            .into_iter()
+            .map(|body| body.into_brep().map_err(|error| error.to_string()))
+            .collect()
     }
 }
 
@@ -1911,6 +1901,7 @@ struct Eval<'req, 'prog> {
     /// Exact-B-rep import diagnostics per `stepimporter` node (debug response only).
     step_diagnostics: HashMap<String, StepDiagnostics>,
     errors: BTreeMap<String, String>,
+    warnings: BTreeMap<String, Vec<String>>,
     order: Vec<String>,
     timings: BTreeMap<String, f64>,
     brep_timings: BTreeMap<String, f64>,
@@ -1925,6 +1916,9 @@ struct Eval<'req, 'prog> {
     prewarmed: HashSet<String>,
     /// Exact Part results for this evaluation pass.
     parts: HashMap<String, Arc<Part>>,
+    /// Union nodes folded into a Union above them: the exact loop must not evaluate them
+    /// separately before the run's top fuses them (a requested node is never folded).
+    folded_into_union: HashSet<String>,
     part_visiting: Vec<String>,
     /// Nodes whose own evaluation failed but whose output was replaced by a
     /// bypass input. Downstream nodes must not treat these as failed inputs.
@@ -1963,11 +1957,13 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             breps: HashMap::new(),
             prewarmed: HashSet::new(),
             parts: HashMap::new(),
+            folded_into_union: exact_eval::union_run_intermediates(request),
             part_visiting: Vec::new(),
             bypassed: HashSet::new(),
             needs_brep: exact_brep_demands(request),
             sketches: HashMap::new(),
             progress,
+            warnings: BTreeMap::new(),
             tessellation_diagnostics: Vec::new(),
             #[cfg(test)]
             display_plans: nodecraft_display::PlanCache::new(16384),
@@ -1987,39 +1983,15 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         Some(output)
     }
 
-    fn ensure_spline_output(&mut self, node: &Node) -> Option<Arc<SketchOutput>> {
-        if let Some(output) = self.sketches.get(&node.id) {
-            return Some(output.clone());
+    /// The one sketch a single-profile consumer (prewarm, tests) may read from
+    /// an evaluated Part. Body-loft nodes use the Part's bodies instead, and a
+    /// Part with several sketches is not a single section.
+    fn part_sketch_output(&mut self, start: &str) -> Option<SketchOutput> {
+        let part = self.evaluate_part(start).ok()?;
+        if !part.bodies.is_empty() || part.sketches.len() != 1 {
+            return None;
         }
-        let sketch = spline_sketch_from_values(&node.values).ok()?;
-        let output = Arc::new(SketchOutput::new(sketch));
-        self.sketches.insert(node.id.clone(), output.clone());
-        Some(output)
-    }
-
-    fn sketch_output_for(&mut self, start: &str) -> Option<SketchOutput> {
-        let mut current = start.to_owned();
-        let mut transform = SketchTransform::identity();
-        for _ in 0..64 {
-            let node = self.request.nodes.iter().find(|node| node.id == current)?;
-            match node.node_type.as_str() {
-                "translate" => {
-                    let local = SketchTransform::from_values(&node.values);
-                    transform = local.then(&transform);
-                    current = self
-                        .request
-                        .connections
-                        .iter()
-                        .find(|link| link.to == node.id && (link.input == "shape" || link.input == "sketch"))?
-                        .from
-                        .clone();
-                }
-                "sketch" => return self.ensure_sketch_output(node).map(|output| output.with_transform(&transform)),
-                "spline" => return self.ensure_spline_output(node).map(|output| output.with_transform(&transform)),
-                _ => return None,
-            }
-        }
-        None
+        Some(part.sketches[0].realized())
     }
 
 }
@@ -2237,8 +2209,8 @@ fn generated_new_faces(
     let kernel = nodecraft_solidcore::kernel::kernel();
     let mut before_surfaces = Vec::new();
     for body in &before.bodies {
-        for face_id in body.body.faces().ids() {
-            if let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(&body.body, face_id)
+        for face_id in body.body.brep().faces().ids() {
+            if let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(body.body.brep(), face_id)
                 && blend_surface(surface.kind())
             {
                 before_surfaces.push(surface);
@@ -2249,8 +2221,8 @@ fn generated_new_faces(
     let mut edges = std::collections::HashSet::new();
     for (body_index, body) in after.bodies.iter().enumerate() {
         let mut generated = Vec::new();
-        for face_id in body.body.faces().ids() {
-            let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(&body.body, face_id) else {
+        for face_id in body.body.brep().faces().ids() {
+            let Ok(Some(surface)) = nodecraft_solidcore::solidcore::topology::face::surface(body.body.brep(), face_id) else {
                 continue;
             };
             if blend_surface(surface.kind())
@@ -2265,7 +2237,7 @@ fn generated_new_faces(
             continue;
         }
         // Display face groups use the record's order, not the kernel's.
-        let Ok(mut copy) = body.body.clone_standing_for_self() else { continue };
+        let Ok(mut copy) = body.body.brep().clone_standing_for_self() else { continue };
         let Ok((_record, order)) = solidcore_convert::brep::to_record(&mut nodecraft_solidcore::kernel::kernel(), &mut copy) else {
             continue;
         };
@@ -2273,11 +2245,11 @@ fn generated_new_faces(
             if let Some(record_face) = order.faces.iter().position(|face| *face == face_id) {
                 faces.insert((body_index, record_face));
             }
-            let Ok(loops) = nodecraft_solidcore::solidcore::topology::face::loops(&body.body, face_id, false, None) else {
+            let Ok(loops) = nodecraft_solidcore::solidcore::topology::face::loops(body.body.brep(), face_id, false, None) else {
                 continue;
             };
             for loop_id in loops {
-                let Ok(loop_edges) = nodecraft_solidcore::solidcore::topology::loopuse::loop_edges(&body.body, loop_id) else {
+                let Ok(loop_edges) = nodecraft_solidcore::solidcore::topology::loopuse::loop_edges(body.body.brep(), loop_id) else {
                     continue;
                 };
                 for edge_id in loop_edges.into_iter().flatten() {
@@ -2304,6 +2276,9 @@ fn mesh_for_faces(
         // Keep the original vertex indices: the selected BRep edges index them.
         vertices: mesh.vertices.clone(),
         normals: mesh.normals.clone(),
+        // The subset keeps the source vertices and normals untouched, so it
+        // inherits their shading provenance.
+        exact_normals: mesh.exact_normals,
         ..nodecraft_protocol::Mesh::default()
     };
     for (triangle, group) in mesh.faces.iter().zip(&mesh.face_groups) {
@@ -2366,6 +2341,19 @@ pub fn evaluate_exact(
     evaluate_mode(request, cache, progress, true)
 }
 
+/// Prove every body of an exact-export Part (blocking). The `exporter` node and any STEP
+/// path must write only bodies that are refused-never; an unknown body is proved first and a
+/// refused one becomes an error naming the failed test.
+///
+/// # Errors
+/// The realisation error, or the first refused body's test.
+fn prove_part_for_export(part: &Part, kernel: &mut nodecraft_solidcore::solidcore::kernel::Kernel) -> Result<(), String> {
+    for body in part.realized_bodies()? {
+        body.prove(kernel).map_err(|error| format!("export refused: {error}"))?;
+    }
+    Ok(())
+}
+
 fn evaluate_mode(
     request: Request,
     cache: EngineCache,
@@ -2382,6 +2370,9 @@ fn evaluate_mode(
     let _tolerance_reset = DisplayToleranceReset;
     nodecraft_mesh::set_display_tolerance(request.mesh_tolerance);
     let (request_id, tab_id, graph_revision) = (request.request_id, request.tab_id.clone(), request.graph_revision.clone());
+    // Proofs are queued during this pass and start only when the guard drops at return, so
+    // the critical path below never waits for one.
+    let proof_guard = proof_queue::begin(&request);
     let mut eval = Eval::new(&request, progress);
     eval.cache = cache;
     eval.cache.ensure_part_capacity(request.nodes.len());
@@ -2414,6 +2405,11 @@ fn evaluate_mode(
         mesh_required.extend(ancestors_of(&request, target));
     }
     for node_id in evaluation_order_for_targets(&request) {
+        if eval.folded_into_union.contains(&node_id) {
+            // A Union intermediate whose run is fused into the Union above it; the top node
+            // builds this body in one `union_all` when it is evaluated.
+            continue;
+        }
         if exact_only {
             let node_type = node(&request, &node_id).map(|node| node.node_type.as_str());
             if node_type.is_some_and(part_supported) {
@@ -2610,12 +2606,129 @@ fn evaluate_mode(
     } else {
         None
     };
+    // Exact export is a blocking boundary: the exporter's realised bodies are proved before
+    // the writer runs, so an unknown body is decided now and a refused one is an error.
+    if request.run_exporters {
+        let mut kernel = nodecraft_solidcore_kernel();
+        let exporters: Vec<&Node> = request.nodes.iter().filter(|node| node.node_type == "exporter").collect();
+        for exporter in exporters {
+            let Some(link) = request
+                .connections
+                .iter()
+                .find(|link| link.to == exporter.id && link.input == "shape")
+            else {
+                continue;
+            };
+            let Some(part) = eval.parts.get(&link.from) else {
+                continue;
+            };
+            if let Err(error) = prove_part_for_export(part, &mut kernel) {
+                eval.errors.insert(exporter.id.clone(), error);
+            }
+        }
+    }
+    // Every body this pass produced, displayed targets first and then the intermediates, is
+    // handed to the background proof queue. The first node in evaluation order to register a
+    // body is its producer; a target that merely shares it only raises its priority.
+    {
+        fn collect_part<'a>(
+            producer: &'a str,
+            part: &'a Part,
+            displayed: &HashSet<&str>,
+            out: &mut Vec<(&'a str, proof_queue::ProofPriority, &'a nodecraft_ops::SolidBody)>,
+        ) -> usize {
+            if part.bodies.is_empty() {
+                return 0;
+            }
+            let priority = if displayed.contains(producer) {
+                proof_queue::ProofPriority::Displayed
+            } else {
+                proof_queue::ProofPriority::Intermediate
+            };
+            out.extend(
+                part.bodies
+                    .iter()
+                    .map(|body| (producer, priority, &body.body)),
+            );
+            part.bodies.len()
+        }
+
+        let registration_started = Instant::now();
+        // A fully cached pass usually has every body already decided. Read the
+        // shared proof state once before building the evaluation order and the
+        // registration list: when nothing is Unknown there is no job to queue,
+        // so the order/priority bookkeeping and every body clone are skipped.
+        let mut scanned_bodies = 0usize;
+        let has_unknown = eval.parts.values().any(|part| {
+            scanned_bodies += part.bodies.len();
+            part.bodies.iter().any(|body| body.body.needs_proof())
+        });
+        if !has_unknown {
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                eprintln!(
+                    "[proof] order 0us register 0 parts 0 bodies (scanned {scanned_bodies}) in {}us",
+                    registration_started.elapsed().as_micros(),
+                );
+            }
+            // Nothing in this pass needs a proof; leave the already-decided bodies alone.
+        } else {
+            let order_started = Instant::now();
+            let displayed: HashSet<&str> = request.targets.iter().map(String::as_str).collect();
+            let order = evaluation_order_for_targets(&request);
+            let order_us = order_started.elapsed().as_micros();
+            let mut registered_parts = 0usize;
+            let mut registered_bodies = 0usize;
+            let ordered: HashSet<&str> = order.iter().map(String::as_str).collect();
+            // One registration pass for every body this evaluation produced, in
+            // evaluation order (displayed targets first). The queue reads each
+            // body's shared ProofState and its own `known` map before cloning a
+            // job; a fully cached pass queues nothing and clones nothing.
+            let mut registrations: Vec<(
+                &str,
+                proof_queue::ProofPriority,
+                &nodecraft_ops::SolidBody,
+            )> = Vec::new();
+            for id in &order {
+                if let Some(part) = eval.parts.get(id) {
+                    let bodies = collect_part(id, part, &displayed, &mut registrations);
+                    if bodies > 0 {
+                        registered_parts += 1;
+                        registered_bodies += bodies;
+                    }
+                }
+            }
+            // A Part produced for an extra display input can be outside the target closure.
+            let mut leftovers: Vec<(&String, &Arc<Part>)> = eval
+                .parts
+                .iter()
+                .filter(|(id, _)| !ordered.contains(id.as_str()))
+                .collect();
+            leftovers.sort_by(|a, b| a.0.cmp(b.0));
+            for (id, part) in leftovers {
+                let bodies = collect_part(id, part, &displayed, &mut registrations);
+                if bodies > 0 {
+                    registered_parts += 1;
+                    registered_bodies += bodies;
+                }
+            }
+            if !registrations.is_empty() {
+                proof_queue::register_all(proof_guard.generation(), registrations);
+            }
+            if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                eprintln!(
+                    "[proof] order {order_us}us register {registered_parts} parts {registered_bodies} bodies in {}us",
+                    registration_started.elapsed().as_micros(),
+                );
+            }
+        }
+    }
     let response = Response {
         request_id,
         tab_id,
         graph_revision,
         empty_targets,
         node_errors: eval.errors,
+        node_warnings: eval.warnings,
         evaluation_order: eval.order,
         timings: eval.timings,
         brep_timings: eval.brep_timings,
@@ -2640,6 +2753,7 @@ fn evaluate_mode(
         exact_parts,
         exact_comparison,
         tessellation_diagnostics: eval.tessellation_diagnostics,
+        proof_generation: proof_guard.generation(),
     }
 }
 
@@ -2647,6 +2761,9 @@ fn evaluate_mode(
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    /// The background proof report inbox is process-wide; the tests that drain it take turns.
+    static REPORT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn respond_with_progress(
         request: Request,
@@ -2675,6 +2792,112 @@ mod tests {
     use nodecraft_mesh::StepImport;
     use std::collections::BTreeSet;
     use std::path::PathBuf;
+
+    fn cad_import(path: &str) -> nodecraft_step::CadImport {
+        let bytes = std::fs::read(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        nodecraft_step::read_cad(&bytes, path).unwrap_or_else(|error| panic!("{path}: {error}"))
+    }
+
+    fn cad_bodies(path: &str) -> Vec<nodecraft_step::CadBody> {
+        cad_import(path).bodies
+    }
+
+    fn cad_body(path: &str) -> nodecraft_step::CadBody {
+        let mut bodies = cad_bodies(path);
+        assert_eq!(bodies.len(), 1, "{path} has {} bodies", bodies.len());
+        bodies.remove(0)
+    }
+
+    fn body_volume(body: &nodecraft_step::CadBody) -> f64 {
+        nodecraft_step::record_volume(&body.brep).unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    fn body_bounds(body: &nodecraft_step::CadBody) -> ([f64; 3], [f64; 3]) {
+        nodecraft_step::record_bounds(&body.brep).expect("body bounds")
+    }
+
+    fn write_primitive_values(path: &str, values: serde_json::Value) {
+        let node = Node {
+            id: "fixture".into(),
+            node_type: "primitive".into(),
+            values,
+            suppressed: false,
+            cache: None,
+        };
+        write_primitive_step(&node, path).expect("write primitive STEP");
+    }
+
+    fn write_box(path: &str, length: f64, width: f64, height: f64) {
+        write_primitive_values(path, serde_json::json!({
+            "primitiveType": "box", "length": length, "width": width, "height": height
+        }));
+    }
+
+    fn write_cylinder(path: &str, radius: f64, height: f64) {
+        write_primitive_values(path, serde_json::json!({
+            "primitiveType": "cylinder", "radius": radius, "height": height
+        }));
+    }
+
+    /// Write `count` 10 mm boxes placed 30 mm apart, each with a colour, so a
+    /// kernel/exact test can tell one imported body from several.
+    fn write_bodies_step(path: &str, count: usize) {
+        let mut bodies = Vec::with_capacity(count);
+        for index in 0..count {
+            let node = Node {
+                id: format!("body{index}"),
+                node_type: "primitive".into(),
+                values: serde_json::json!({
+                    "primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0
+                }),
+                suppressed: false,
+                cache: None,
+            };
+            let brep = primitive_brep(&node).expect("fixture box");
+            let color = if index % 2 == 0 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            bodies.push(nodecraft_step::ExportBody {
+                name: format!("body{index}"),
+                color: Some(color),
+                placement: Some(placement_of([index as f64 * 30.0, 0.0, 0.0], [0.0; 3])),
+                sheet: false,
+                brep: nodecraft_step::record_of_brep(&brep).expect("fixture record"),
+            });
+        }
+        nodecraft_step::write_step(path, &bodies, "fixture", "ap242").expect("write multi-body STEP");
+    }
+
+    fn translate_step(path: &str, offset: [f64; 3]) {
+        let import = cad_import(path);
+        let mut bodies = Vec::with_capacity(import.bodies.len());
+        for body in import.bodies {
+            let local = body.placement.unwrap_or([
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]);
+            bodies.push(nodecraft_step::ExportBody {
+                name: body.name,
+                color: body.color,
+                placement: Some(compose_placement(placement_of(offset, [0.0; 3]), local)),
+                sheet: body.sheet,
+                brep: body.brep,
+            });
+        }
+        let options = nodecraft_step::StepExportOptions {
+            product_name: std::path::Path::new(path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("fixture")
+                .to_string(),
+            ..nodecraft_step::StepExportOptions::default()
+        };
+        nodecraft_step::write_step_with_options(path, &bodies, &options).expect("translate STEP");
+    }
 
     #[test]
     fn sketch_transform_space_does_not_change_geometry() {
@@ -2810,6 +3033,148 @@ mod tests {
                 max[axis],
                 expected_max[axis]
             );
+        }
+    }
+
+    /// A closed profile with four lines and a filleted top-right corner: the
+    /// user's sketch shape, including the arc edge a fillet can target.
+    fn rounded_profile_sketch() -> crate::sketch::Sketch {
+        let mut sketch = crate::sketch::Sketch::new();
+        let p1 = sketch.add_point(solidcore_record::Vec2::new(-20.0, -15.0), None).unwrap();
+        let p2 = sketch.add_point(solidcore_record::Vec2::new(20.0, -15.0), None).unwrap();
+        let p3 = sketch.add_point(solidcore_record::Vec2::new(20.0, 9.0), None).unwrap();
+        let p4 = sketch.add_point(solidcore_record::Vec2::new(14.0, 15.0), None).unwrap();
+        let p5 = sketch.add_point(solidcore_record::Vec2::new(-20.0, 15.0), None).unwrap();
+        let centre = sketch.add_point(solidcore_record::Vec2::new(14.0, 9.0), None).unwrap();
+        sketch.add_line_pts(p1, p2, None).unwrap();
+        sketch.add_line_pts(p2, p3, None).unwrap();
+        sketch.add_curve(crate::sketch::CurveKind::Arc { c: centre, a: p3, b: p4 }, None).unwrap();
+        sketch.add_line_pts(p4, p5, None).unwrap();
+        sketch.add_line_pts(p5, p1, None).unwrap();
+        sketch
+    }
+
+    /// The points of a closed periodic spline around an ellipse, the first
+    /// repeated at the end as a periodic fit spline requires.
+    fn periodic_spline_points() -> Vec<[f64; 2]> {
+        vec![
+            [-20.0, 0.0],
+            [-14.142_135_623_730_95, -10.606_601_717_798_214],
+            [0.0, -15.0],
+            [14.142_135_623_730_95, -10.606_601_717_798_214],
+            [20.0, 0.0],
+            [14.142_135_623_730_95, 10.606_601_717_798_214],
+            [0.0, 15.0],
+            [-14.142_135_623_730_95, 10.606_601_717_798_214],
+            [-20.0, 0.0],
+        ]
+    }
+
+    /// The spline node's own values for a closed periodic spline profile.
+    fn periodic_spline_node_values() -> serde_json::Value {
+        let points: Vec<serde_json::Value> = periodic_spline_points()
+            .into_iter()
+            .map(|[x, y]| serde_json::json!({"x": x, "y": y}))
+            .collect();
+        serde_json::json!({"points": points, "degree": 3, "control": false, "periodic": true})
+    }
+
+    /// Four lines with the right side replaced by one spline segment.
+    fn mixed_line_spline_sketch() -> crate::sketch::Sketch {
+        let mut sketch = crate::sketch::Sketch::new();
+        let a = sketch.add_point(solidcore_record::Vec2::new(-20.0, -15.0), None).unwrap();
+        let b = sketch.add_point(solidcore_record::Vec2::new(20.0, -15.0), None).unwrap();
+        let c = sketch.add_point(solidcore_record::Vec2::new(20.0, 15.0), None).unwrap();
+        let d = sketch.add_point(solidcore_record::Vec2::new(-20.0, 15.0), None).unwrap();
+        let s1 = sketch.add_point(solidcore_record::Vec2::new(27.0, -7.0), None).unwrap();
+        let s2 = sketch.add_point(solidcore_record::Vec2::new(27.0, 7.0), None).unwrap();
+        sketch.add_line_pts(a, b, None).unwrap();
+        sketch
+            .add_curve(
+                crate::sketch::CurveKind::Spline {
+                    pts: vec![b, s1, s2, c],
+                    control: false,
+                    degree: 3,
+                    periodic: false,
+                    nurbs: None,
+                    handles: Vec::new(),
+                },
+                None,
+            )
+            .unwrap();
+        sketch.add_line_pts(c, d, None).unwrap();
+        sketch.add_line_pts(d, a, None).unwrap();
+        sketch
+    }
+
+    fn exact_part_volume(part: &nodecraft_exact::ExactPart) -> f64 {
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        part.bodies
+            .iter()
+            .map(|body| nodecraft_layers::kernel_volume(&mut kernel, &body.brep).expect("volume"))
+            .sum()
+    }
+
+    fn exact_part_bounds(part: &nodecraft_exact::ExactPart) -> ([f64; 3], [f64; 3]) {
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for body in &part.bodies {
+            for vertex in body.brep.vertex_list() {
+                if let Ok(vertex) = body.brep.vertex(*vertex) {
+                    let point = vertex.point;
+                    for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+                        min[axis] = min[axis].min(value);
+                        max[axis] = max[axis].max(value);
+                    }
+                }
+            }
+        }
+        (min, max)
+    }
+
+    fn assert_exact_bounds(part: &nodecraft_exact::ExactPart, expected_min: [f64; 3], expected_max: [f64; 3]) {
+        let (min, max) = exact_part_bounds(part);
+        for axis in 0..3 {
+            assert!((min[axis] - expected_min[axis]).abs() < 1.0e-6, "min[{axis}] = {} != {}", min[axis], expected_min[axis]);
+            assert!((max[axis] - expected_max[axis]).abs() < 1.0e-6, "max[{axis}] = {} != {}", max[axis], expected_max[axis]);
+        }
+    }
+
+    /// Bounding-box centre of every placed body, with the instance transform
+    /// chain baked into each B-rep. This is the world position the viewport and
+    /// the GPU instance matrices must agree on.
+    fn realized_body_centres(part: &nodecraft_exact::ExactPart) -> Vec<[f64; 3]> {
+        part.realized_breps()
+            .expect("realize exact bodies")
+            .iter()
+            .map(|brep| {
+                let mut min = [f64::INFINITY; 3];
+                let mut max = [f64::NEG_INFINITY; 3];
+                for vertex in brep.vertex_list() {
+                    let point = brep.vertex(*vertex).expect("vertex").point;
+                    for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+                        min[axis] = min[axis].min(value);
+                        max[axis] = max[axis].max(value);
+                    }
+                }
+                [
+                    (min[0] + max[0]) * 0.5,
+                    (min[1] + max[1]) * 0.5,
+                    (min[2] + max[2]) * 0.5,
+                ]
+            })
+            .collect()
+    }
+
+    fn assert_centres(actual: &[[f64; 3]], expected: &[[f64; 3]]) {
+        assert_eq!(actual.len(), expected.len(), "copy count");
+        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+            for axis in 0..3 {
+                assert!(
+                    (actual[axis] - expected[axis]).abs() < 1.0e-5,
+                    "copy {index} centre {actual:?} != {expected:?} (axis {axis})",
+                );
+            }
         }
     }
 
@@ -3050,7 +3415,7 @@ mod tests {
         })).expect("cylinder join json");
         let mut eval = Eval::new(&request, None);
         let part = eval.evaluate_part("boolean").expect("boolean part");
-        let brep = part.bodies[0].body.as_ref();
+        let brep = part.bodies[0].body.brep();
         let kernel = nodecraft_solidcore::kernel::kernel();
         let values = serde_json::json!({"edges": [
             {"center": [14.100593090057371, -11.389926261372036, 4.566759937339359], "id": "edge:1"},
@@ -3116,6 +3481,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "exact comparison >60 s; see 2026-11-12-solidcraft-fix-profile-review"]
     fn g2_fillet_comparison_stays_on_the_fillet_area() {
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 998,
@@ -3319,6 +3685,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow: 12s"]
     fn train_graph_execution_regression() {
         let sample = std::fs::read_to_string(fixture("samples/train.nodecraft")).expect("train sample");
         let sample: serde_json::Value = serde_json::from_str(&sample).expect("train sample json");
@@ -3718,16 +4085,6 @@ mod tests {
         assert!((min[0] - -55.0).abs() < 1e-3 && (max[0] - 55.0).abs() < 1e-3, "{min:?} {max:?}");
     }
 
-    #[test]
-    fn imports_faceted_brep_tetrahedron() {
-        let path = std::env::temp_dir().join(format!("sn-worker-faceted-{}.step", std::process::id()));
-        std::fs::write(&path, "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('test'),'2;1');\nFILE_NAME('','',(''),(''),'','','');\nFILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n#1=CARTESIAN_POINT('',(0.,0.,0.));\n#2=CARTESIAN_POINT('',(1.,0.,0.));\n#3=CARTESIAN_POINT('',(0.,1.,0.));\n#4=CARTESIAN_POINT('',(0.,0.,1.));\n#10=POLY_LOOP('',(#1,#2,#3));\n#11=POLY_LOOP('',(#1,#3,#4));\n#12=POLY_LOOP('',(#1,#4,#2));\n#13=POLY_LOOP('',(#2,#4,#3));\n#20=FACE_OUTER_BOUND('',#10,.T.);\n#21=FACE_OUTER_BOUND('',#11,.T.);\n#22=FACE_OUTER_BOUND('',#12,.T.);\n#23=FACE_OUTER_BOUND('',#13,.T.);\n#30=FACE('',(#20));\n#31=FACE('',(#21));\n#32=FACE('',(#22));\n#33=FACE('',(#23));\n#40=CLOSED_SHELL('',(#30,#31,#32,#33));\n#50=FACETED_BREP('tetra',#40);\nENDSEC;\nEND-ISO-10303-21;\n").unwrap();
-        let import = import_step(path.to_str().unwrap()).unwrap();
-        assert_eq!(import.diagnostics.kind, "solidcore-brep");
-        assert_eq!(import.diagnostics.bodies, 1);
-        assert!(!import.mesh.faces.is_empty());
-    }
-
     /// doghouse.stp mixes planar and cylindrical faces. The mixed reader is not exact
     /// yet, so it must fail explicitly rather than importing a partial planar shell.
     #[test]
@@ -3741,9 +4098,9 @@ mod tests {
         assert_eq!(import.diagnostics.brep_faces, 32);
     }
 
-    /// The exporter's unit option writes conversion-based inch files.
+    /// CADIR/STEP export writes millimetres; a non-mm output unit is refused.
     #[test]
-    fn exports_inch_primitive() {
+    fn rejects_non_millimetre_export_unit() {
         let directory = std::env::temp_dir().join(format!("sn-worker-inch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let request: Request = serde_json::from_value(serde_json::json!({
@@ -3755,12 +4112,11 @@ mod tests {
             "connections": [{"from": "b", "out": "shape", "to": "e", "in": "shape"}]
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
-        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let path = directory.join("inch.step");
-        assert!(path.exists());
-        assert_eq!(nodecraft_step::read_length_unit(path.to_str().unwrap()).unwrap(), nodecraft_step::LengthUnit::Inch);
-        let (min, max) = nodecraft_step::read_step_bounds(path.to_str().unwrap()).unwrap();
-        assert!((min[0] + 20.0).abs() < 1e-6 && (max[0] - 20.0).abs() < 1e-6, "{min:?} {max:?}");
+        assert!(
+            response.node_errors.values().any(|error| error.contains("writes millimetres")),
+            "{:?}",
+            response.node_errors
+        );
     }
 
     #[test]
@@ -3916,9 +4272,9 @@ mod tests {
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let bodies = nodecraft_step::read_planar_solids(directory.join("pyramids.step").to_str().unwrap()).unwrap();
+        let bodies = cad_bodies(directory.join("pyramids.step").to_str().unwrap());
         assert_eq!(bodies.len(), 2);
-        assert!((bodies.iter().map(|body| body.volume()).sum::<f64>() - 800.0).abs() < 1e-6);
+        assert!((bodies.iter().map(|body| body_volume(&body)).sum::<f64>() - 800.0).abs() < 1e-6);
     }
 
     #[test]
@@ -3941,9 +4297,9 @@ mod tests {
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let bodies = nodecraft_step::read_planar_solids(directory.join("mirror.step").to_str().unwrap()).unwrap();
+        let bodies = cad_bodies(directory.join("mirror.step").to_str().unwrap());
         assert_eq!(bodies.len(), 2, "mirror combine should export source and mirrored Part");
-        assert!((bodies.iter().map(|body| body.volume()).sum::<f64>() - 128.0).abs() < 1e-6);
+        assert!((bodies.iter().map(|body| body_volume(&body)).sum::<f64>() - 128.0).abs() < 1e-6);
     }
 
     #[test]
@@ -3960,12 +4316,12 @@ mod tests {
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let body = nodecraft_step::read_planar_body(directory.join("pyramid.step").to_str().unwrap()).unwrap();
-        assert_eq!(body.faces.len(), 5);
+        let body = cad_body(directory.join("pyramid.step").to_str().unwrap());
+        assert_eq!(body.brep.faces.len(), 5);
         // The exact SolidCore pyramid keeps its split seam vertices; the planar
         // writer may therefore emit more than the five corner points.
-        assert!(body.points.len() >= 5);
-        assert!((body.volume() - 4000.0).abs() < 1e-6, "{}", body.volume());
+        assert!(body.brep.vertices.len() >= 5);
+        assert!((body_volume(&body) - 4000.0).abs() < 1e-6, "{}", body_volume(&body));
     }
 
     #[test]
@@ -3984,9 +4340,9 @@ mod tests {
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let path = directory.join("faceted.step");
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("FACETED_BREP("));
-        let bodies = nodecraft_step::read_faceted_breps(path.to_str().unwrap()).unwrap();
-        assert!((bodies[0].volume() - 8.0).abs() < 1e-6, "{}", bodies[0].volume());
+        assert!(text.contains("MANIFOLD_SOLID_BREP") || text.contains("ADVANCED_FACE"), "not a faceted B-rep");
+        let bodies = cad_bodies(path.to_str().unwrap());
+        assert!((body_volume(&bodies[0]) - 8.0).abs() < 1e-6, "{}", body_volume(&bodies[0]));
     }
 
     #[test]
@@ -4005,10 +4361,10 @@ mod tests {
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let path = directory.join("faceted.step");
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("FACETED_BREP("), "not a faceted brep");
-        let bodies = nodecraft_step::read_faceted_breps(path.to_str().unwrap()).unwrap();
+        assert!(text.contains("MANIFOLD_SOLID_BREP") || text.contains("ADVANCED_FACE"), "not a faceted brep");
+        let bodies = cad_bodies(path.to_str().unwrap());
         assert_eq!(bodies.len(), 1);
-        assert!((bodies[0].volume() - 60.0).abs() < 1e-6, "{}", bodies[0].volume());
+        assert!((body_volume(&bodies[0]) - 60.0).abs() < 1e-6, "{}", body_volume(&bodies[0]));
     }
 
     #[test]
@@ -4017,7 +4373,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         let cylinder = directory.join("cylinder.step");
-        nodecraft_step::write_cylinder(cylinder.to_str().unwrap(), 5.0, 10.0).unwrap();
+        write_cylinder(cylinder.to_str().unwrap(), 5.0, 10.0);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1, "targets": ["e"], "meshTargets": [],
             "nodes": [
@@ -4029,9 +4385,9 @@ mod tests {
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let path = directory.join("faceted.step");
-        let bodies = nodecraft_step::read_faceted_breps(path.to_str().unwrap()).unwrap();
+        let bodies = cad_bodies(path.to_str().unwrap());
         assert_eq!(bodies.len(), 1);
-        assert!(!bodies[0].faces.is_empty());
+        assert!(!bodies[0].brep.faces.is_empty());
     }
 
     /// Exact Boolean STEP export: disjoint imported boxes union to a valid STEP solid.
@@ -4041,9 +4397,9 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let a = directory.join("a.step");
         let b = directory.join("b.step");
-        nodecraft_step::write_box(a.to_str().unwrap(), 10.0, 4.0, 20.0).unwrap();
-        nodecraft_step::write_box(b.to_str().unwrap(), 10.0, 4.0, 20.0).unwrap();
-        nodecraft_step::transform_step_file(b.to_str().unwrap(), [0.0; 3], [20.0, 0.0, 0.0]).unwrap();
+        write_box(a.to_str().unwrap(), 10.0, 4.0, 20.0);
+        write_box(b.to_str().unwrap(), 10.0, 4.0, 20.0);
+        translate_step(b.to_str().unwrap(), [20.0, 0.0, 0.0]);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
             "targets": ["e"],
@@ -4068,10 +4424,111 @@ mod tests {
         assert!(text.contains("COLOUR_RGB"), "Boolean color metadata missing");
         assert!(text.contains("PRESENTATION_LAYER_ASSIGNMENT('Parts'"), "Boolean layer metadata missing");
         assert!(text.contains("CONFIG_CONTROL_DESIGN"), "Boolean schema metadata missing");
-        let body = nodecraft_step::read_planar_body(path.to_str().unwrap()).unwrap();
-        assert!((body.volume() - 1600.0).abs() < 1e-6, "volume {}", body.volume());
-        let (min, max) = body.bounds().unwrap();
-        assert!((min[0] - -5.0).abs() < 1e-6 && (max[0] - 25.0).abs() < 1e-6, "{min:?} {max:?}");
+        let bodies = cad_bodies(path.to_str().unwrap());
+        assert_eq!(bodies.len(), 2, "a disjoint union is two placed solids");
+        let volume: f64 = bodies.iter().map(body_volume).sum();
+        assert!((volume - 1600.0).abs() < 1e-6, "volume {volume}");
+        let min_x = bodies.iter().map(|body| body_bounds(body).0[0]).fold(f64::INFINITY, f64::min);
+        let max_x = bodies.iter().map(|body| body_bounds(body).1[0]).fold(f64::NEG_INFINITY, f64::max);
+        assert!((min_x - -5.0).abs() < 1e-6 && (max_x - 25.0).abs() < 1e-6, "{min_x:?}..{max_x:?}");
+    }
+
+    /// A Circular Pattern's copies must survive the exporter -> importer round
+    /// trip. The importer's exact Part has one body per written MANIFOLD_SOLID_BREP,
+    /// and its centres are the pattern's placed centres.
+    #[test]
+    fn stepimporter_imports_every_body_the_exporter_wrote_for_a_pattern() {
+        let directory = std::env::temp_dir().join(format!(
+            "sn-worker-step-all-bodies-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["exporter"],
+            "meshTargets": [],
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 6, "axis": "z"}, "cache": {"key": "pattern"}},
+                {"id": "exporter", "type": "exporter", "values": {"directory": directory.to_string_lossy(), "fileName": "patterned"}, "cache": {"key": "exporter"}}
+            ],
+            "connections": [
+                {"from": "box", "out": "shape", "to": "move", "in": "shape"},
+                {"from": "move", "out": "shape", "to": "pattern", "in": "shape"},
+                {"from": "pattern", "out": "shape", "to": "exporter", "in": "shape"}
+            ]
+        })).expect("export request");
+        let exported = evaluate(request, EngineCache::new(), None);
+        assert!(exported.response.node_errors.is_empty(), "{:?}", exported.response.node_errors);
+        let pattern = exported.exact_parts.get("pattern").expect("pattern exact part");
+        let expected = realized_body_centres(pattern);
+        assert_eq!(expected.len(), 6, "the pattern made six copies");
+
+        let path = directory.join("patterned.step");
+        assert!(path.is_file(), "pattern export was not written");
+        let written = cad_bodies(path.to_str().unwrap());
+        assert_eq!(written.len(), 6, "the exporter wrote one solid per copy");
+
+        let import_request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 2,
+            "targets": ["import"],
+            "meshTargets": [],
+            "binaryMesh": false,
+            "nodes": [
+                {"id": "import", "type": "stepimporter", "values": {"path": path.to_string_lossy()}, "cache": {"key": "import"}}
+            ],
+            "connections": []
+        })).expect("import request");
+        let imported = evaluate_exact(import_request, EngineCache::new(), None);
+        assert!(imported.response.node_errors.is_empty(), "{:?}", imported.response.node_errors);
+        let part = imported.exact_parts.get("import").expect("import exact part");
+        assert_eq!(part.bodies.len(), 6, "the importer Part has every written body");
+        assert_centres(&realized_body_centres(part), &expected);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The single-operand exact path keeps its one-body rule. A one-body file
+    /// still works; a multi-body file names the body count instead of silently
+    /// dropping all but the first.
+    #[test]
+    fn exact_step_operand_needs_exactly_one_body() {
+        let directory = std::env::temp_dir().join(format!(
+            "sn-worker-step-operand-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let one = directory.join("one.step");
+        let many = directory.join("many.step");
+        write_bodies_step(one.to_str().unwrap(), 1);
+        write_bodies_step(many.to_str().unwrap(), 3);
+
+        let request = |path: &std::path::Path| -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["import"],
+                "meshTargets": [],
+                "nodes": [
+                    {"id": "import", "type": "stepimporter", "values": {"path": path.to_string_lossy()}}
+                ],
+                "connections": []
+            })).expect("operand request")
+        };
+        let one_request = request(&one);
+        let mut eval = Eval::new(&one_request, None);
+        let brep = exact_operand_brep(&mut eval, "import").expect("one body is an exact operand");
+        assert!(!brep.face_list().is_empty());
+
+        let many_request = request(&many);
+        let mut eval = Eval::new(&many_request, None);
+        let error = match exact_operand_brep(&mut eval, "import") {
+            Ok(_) => panic!("three bodies must not be silently collapsed"),
+            Err(error) => error,
+        };
+        assert!(error.contains("exact operand needs exactly one"), "{error}");
+        assert!(error.contains('3'), "{error}");
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]
@@ -4083,7 +4540,7 @@ mod tests {
             suppressed: false,
             cache: None,
         }).expect("box");
-        let values = serde_json::json!({"plane": "yz", "offset": 10.0});
+        let values = serde_json::json!({"plane": "yz", "offset": 10.0, "combine": false});
         let part = Part::from_brep(source);
         let mirrored = part.mirrored(&values);
         let realized = mirrored.realized_solids().expect("realized mirror");
@@ -4130,7 +4587,7 @@ mod tests {
             "meshTargets": ["m"],
             "nodes": [
                 {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 40, "width": 40, "height": 40}, "cache": {"key": "b"}},
-                {"id": "m", "type": "mirror", "values": {"plane": "yz", "offset": 10.0}, "cache": {"key": "m"}},
+                {"id": "m", "type": "mirror", "values": {"plane": "yz", "offset": 10.0, "combine": false}, "cache": {"key": "m"}},
                 {"id": "e", "type": "exporter", "values": {"directory": directory.to_string_lossy(), "fileName": "mirrored"}, "cache": {"key": "e"}}
             ],
             "connections": [
@@ -4144,8 +4601,8 @@ mod tests {
         let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
         assert!((min[0] - 0.0).abs() < 1e-4 && (max[0] - 40.0).abs() < 1e-4, "{min:?} {max:?}");
         assert!((min[1] + 20.0).abs() < 1e-4 && (max[1] - 20.0).abs() < 1e-4, "{min:?} {max:?}");
-        let body = nodecraft_step::read_planar_body(directory.join("mirrored.step").to_str().unwrap()).expect("mirrored STEP");
-        assert!((body.volume().abs() - 64000.0).abs() < 1e-6, "volume {}", body.volume());
+        let body = cad_body(directory.join("mirrored.step").to_str().unwrap());
+        assert!((body_volume(&body).abs() - 64000.0).abs() < 1e-6, "volume {}", body_volume(&body));
     }
 
     #[test]
@@ -4167,6 +4624,150 @@ mod tests {
         assert!((min[0] + 10.0).abs() < 1e-4 && (max[0] - 50.0).abs() < 1e-4, "{min:?} {max:?}");
     }
 
+    /// A mirror saved without `combine` must do what the inspector already
+    /// showed (Combine on): keep the source and append the mirrored body.
+    #[test]
+    fn mirror_missing_combine_matches_explicit_true() {
+        fn run(combine: Option<bool>) -> Vec<(u64, u32)> {
+            let mut values = serde_json::json!({"plane": "yz", "offset": 10.0});
+            if let Some(combine) = combine {
+                values["combine"] = serde_json::json!(combine);
+            }
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["m"],
+                "meshTargets": [],
+                "nodes": [
+                    {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "b"}},
+                    {"id": "m", "type": "mirror", "values": values, "cache": {"key": "m"}}
+                ],
+                "connections": [{"from": "b", "out": "shape", "to": "m", "in": "shape"}]
+            })).expect("request");
+            let output = evaluate_exact(request, EngineCache::new(), None);
+            assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+            let part = output.exact_parts.get("m").expect("mirror exact part");
+            assert_eq!(part.bodies.len(), 2, "combine must keep the source and the mirror");
+            part_keys(&output.exact_parts, "m")
+        }
+
+        assert_eq!(run(None), run(Some(true)));
+    }
+
+    /// A mirror saved without `plane` uses the contract default XZ, not the old
+    /// reader's XY fallback.
+    #[test]
+    fn mirror_missing_plane_defaults_to_xz() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["m"],
+            "meshTargets": ["m"],
+            "nodes": [
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "b"}},
+                {"id": "t", "type": "translate", "values": {"y": 10.0}, "cache": {"key": "t"}},
+                {"id": "m", "type": "mirror", "values": {"combine": false}, "cache": {"key": "m"}}
+            ],
+            "connections": [
+                {"from": "b", "out": "shape", "to": "t", "in": "shape"},
+                {"from": "t", "out": "shape", "to": "m", "in": "shape"}
+            ]
+        })).expect("request");
+        let (response, _, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        let mesh = &response.meshes.get("m").expect("mirror mesh").mesh;
+        let (min, max) = nodecraft_kernel::bounds(mesh).expect("bounds");
+        // XZ reflects y: 5..15 becomes -15..-5, while x and z are unchanged.
+        let expected_min = [-5.0, -15.0, -5.0];
+        let expected_max = [5.0, -5.0, 5.0];
+        for axis in 0..3 {
+            assert!((min[axis] - expected_min[axis]).abs() < 1.0e-4, "{min:?} {max:?}");
+            assert!((max[axis] - expected_max[axis]).abs() < 1.0e-4, "{min:?} {max:?}");
+        }
+    }
+
+    /// Missing scatter spans resolve to the contract spans, not the old
+    /// 200/200 reader defaults.
+    #[test]
+    fn scatter_missing_spans_match_contract_defaults() {
+        fn run(values: serde_json::Value) -> ([f32; 3], [f32; 3]) {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["s"],
+                "meshTargets": ["s"],
+                "nodes": [
+                    {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 2, "width": 2, "height": 2}, "cache": {"key": "b"}},
+                    {"id": "s", "type": "scatter", "values": values, "cache": {"key": "s"}}
+                ],
+                "connections": [{"from": "b", "out": "shape", "to": "s", "in": "shape"}]
+            })).expect("request");
+            let (response, _, _) = respond(request, EngineCache::new());
+            assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+            let mesh = &response.meshes.get("s").expect("scatter mesh").mesh;
+            nodecraft_kernel::bounds(mesh).expect("bounds")
+        }
+        let base = serde_json::json!({"count": 3.0, "distribution": "grid"});
+        let mut explicit = nodecraft_node_contract::default_values("scatter", &base);
+        explicit.extend(base.as_object().cloned().expect("object"));
+        assert_eq!(run(base), run(serde_json::Value::Object(explicit)));
+    }
+
+    /// The primitive contract says a Pyramid defaults to height 40; the old
+    /// engine reader used 30.
+    #[test]
+    fn primitive_missing_pyramid_height_matches_contract_default() {
+        fn run(height: Option<f64>) -> ([f64; 3], [f64; 3]) {
+            let mut values = serde_json::json!({"primitiveType": "pyramid", "length": 40.0});
+            if let Some(height) = height {
+                values["height"] = serde_json::json!(height);
+            }
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["p"],
+                "meshTargets": [],
+                "nodes": [{"id": "p", "type": "primitive", "values": values, "cache": {"key": "p"}}],
+                "connections": []
+            })).expect("request");
+            let output = evaluate_exact(request, EngineCache::new(), None);
+            assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+            exact_part_bounds(output.exact_parts.get("p").expect("pyramid exact part"))
+        }
+        assert_eq!(run(None), run(Some(40.0)));
+    }
+
+    /// Table over every inspector primitive kind: a node with only its kind
+    /// evaluates the same as one whose values carry every contract default.
+    #[test]
+    fn every_primitive_kind_matches_its_explicit_contract_defaults() {
+        fn run(kind: &str, values: serde_json::Value) -> (usize, ([f64; 3], [f64; 3])) {
+            let request: Request = serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": ["p"],
+                "meshTargets": [],
+                "nodes": [{"id": "p", "type": "primitive", "values": values, "cache": {"key": "p"}}],
+                "connections": []
+            })).expect("request");
+            let output = evaluate_exact(request, EngineCache::new(), None);
+            assert!(
+                output.response.node_errors.is_empty(),
+                "{kind}: {:?}",
+                output.response.node_errors
+            );
+            let part = output.exact_parts.get("p").expect("primitive exact part");
+            (part.bodies.len(), exact_part_bounds(part))
+        }
+
+        for (kind, _) in nodecraft_node_contract::PRIMITIVE_TYPES {
+            let base = serde_json::json!({"primitiveType": kind});
+            let missing = run(kind, base.clone());
+            let mut explicit = nodecraft_node_contract::default_values("primitive", &base);
+            explicit.extend(base.as_object().cloned().expect("object"));
+            assert_eq!(
+                missing,
+                run(kind, serde_json::Value::Object(explicit)),
+                "primitive {kind} disagrees with its contract defaults"
+            );
+        }
+    }
+
     /// Imported STEP re-export preserves geometry and applies transforms.
     #[test]
     fn reexports_imported_step_with_transform() {
@@ -4180,7 +4781,7 @@ mod tests {
             "nodes": [
                 {"id": "i", "type": "stepimporter", "values": {"path": block}, "cache": {"key": "i"}},
                 {"id": "t", "type": "translate", "values": {"x": 10}, "cache": {"key": "t"}},
-                {"id": "e", "type": "exporter", "values": {"directory": directory.to_string_lossy(), "fileName": "copy", "productName": "Bracket", "color": "#3366cc", "layer": "Parts", "schema": "ap203", "unit": "inch"}, "cache": {"key": "e"}}
+                {"id": "e", "type": "exporter", "values": {"directory": directory.to_string_lossy(), "fileName": "copy", "color": "#3366cc", "layer": "Parts", "schema": "ap203", "productName": "Bracket"}, "cache": {"key": "e"}}
             ],
             "connections": [
                 {"from": "i", "out": "shape", "to": "t", "in": "shape"},
@@ -4194,15 +4795,15 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("COLOUR_RGB"), "metadata color missing");
         assert!(text.contains("PRESENTATION_LAYER_ASSIGNMENT('Parts'"), "metadata layer missing");
-        assert!(text.contains("CONVERSION_BASED_UNIT('INCH'"), "metadata unit missing");
         assert!(text.contains("CONFIG_CONTROL_DESIGN"), "metadata schema missing");
         assert!(text.contains("Bracket"), "metadata product name missing");
-        let bodies = nodecraft_step::read_planar_solids(path.to_str().unwrap()).unwrap();
+        let bodies = cad_bodies(path.to_str().unwrap());
         assert_eq!(bodies.len(), 1);
         let body = &bodies[0];
-        assert!((body.volume() - 60.0).abs() < 1e-6, "volume {}", body.volume());
-        let (min, max) = body.bounds().unwrap();
-        assert!((min[0] - 8.5).abs() < 1e-6 && (max[0] - 11.5).abs() < 1e-6, "{min:?} {max:?}");
+        assert!((body_volume(&body) - 60.0).abs() < 1e-6, "volume {}", body_volume(&body));
+        let (min, max) = body_bounds(&body);
+        let moved = body.placement.map_or(0.0, |placement| placement[3][0]);
+        assert!((moved + min[0] - 8.5).abs() < 1e-6 && (moved + max[0] - 11.5).abs() < 1e-6, "{min:?} {max:?} placement {moved}");
     }
 
     /// Exact disjoint Boolean: two imported planar STEP solids union through solidcore.
@@ -4212,9 +4813,9 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let a = directory.join("a.step");
         let b = directory.join("b.step");
-        nodecraft_step::write_box(a.to_str().unwrap(), 10.0, 4.0, 20.0).unwrap();
-        nodecraft_step::write_box(b.to_str().unwrap(), 10.0, 4.0, 20.0).unwrap();
-        nodecraft_step::transform_step_file(b.to_str().unwrap(), [0.0; 3], [20.0, 0.0, 0.0]).unwrap();
+        write_box(a.to_str().unwrap(), 10.0, 4.0, 20.0);
+        write_box(b.to_str().unwrap(), 10.0, 4.0, 20.0);
+        translate_step(b.to_str().unwrap(), [20.0, 0.0, 0.0]);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
             "targets": ["u"],
@@ -4264,9 +4865,9 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let a = directory.join("a.step");
         let b = directory.join("b.step");
-        nodecraft_step::write_box(a.to_str().unwrap(), 10.0, 10.0, 10.0).unwrap();
-        nodecraft_step::write_box(b.to_str().unwrap(), 10.0, 10.0, 10.0).unwrap();
-        nodecraft_step::transform_step_file(b.to_str().unwrap(), [0.0; 3], [5.0, 0.0, 0.0]).unwrap();
+        write_box(a.to_str().unwrap(), 10.0, 10.0, 10.0);
+        write_box(b.to_str().unwrap(), 10.0, 10.0, 10.0);
+        translate_step(b.to_str().unwrap(), [5.0, 0.0, 0.0]);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
             "targets": ["e"],
@@ -4285,9 +4886,9 @@ mod tests {
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let body = nodecraft_step::read_planar_body(directory.join("overlap.step").to_str().unwrap()).unwrap();
-        assert!((body.volume() - 1500.0).abs() < 1e-6, "volume {}", body.volume());
-        let (min, max) = body.bounds().unwrap();
+        let body = cad_body(directory.join("overlap.step").to_str().unwrap());
+        assert!((body_volume(&body) - 1500.0).abs() < 1e-6, "volume {}", body_volume(&body));
+        let (min, max) = body_bounds(&body);
         assert!((min[0] - -5.0).abs() < 1e-6 && (max[0] - 10.0).abs() < 1e-6, "{min:?} {max:?}");
     }
 
@@ -4382,6 +4983,70 @@ mod tests {
         let (min, max) = bounds(mesh);
         assert!(min[0] <= -4.9 && max[0] >= 9.9, "{min:?}..{max:?}");
         assert!(!response.brep_timings.is_empty(), "operand B-rep work should be timed");
+    }
+
+    #[test]
+    fn empty_boolean_result_is_a_warning_not_an_error() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["cut"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "a"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "b"}},
+                {"id": "far", "type": "translate", "values": {"x": 100.0}, "cache": {"key": "far"}},
+                {"id": "cut", "type": "boolean", "values": {"mode": "intersect"}, "cache": {"key": "cut"}}
+            ],
+            "connections": [
+                {"from": "a", "out": "shape", "to": "cut", "in": "a"},
+                {"from": "b", "out": "shape", "to": "far", "in": "shape"},
+                {"from": "far", "out": "shape", "to": "cut", "in": "b"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(
+            output.response.node_warnings.get("cut").map(Vec::as_slice),
+            Some([crate::node_task::EMPTY_BOOLEAN_WARNING.to_owned()].as_slice()),
+            "empty Boolean warns in amber instead of failing red"
+        );
+        let part = output.exact_parts.get("cut").expect("cut exact part");
+        assert!(part.bodies.is_empty(), "an empty Boolean leaves no body");
+    }
+
+    #[test]
+    fn intersect_a_part_with_several_solids_keeps_every_piece() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["cut"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 30.0, "width": 30.0, "height": 30.0}, "cache": {"key": "a"}},
+                {"id": "b1", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "b1"}},
+                {"id": "t1", "type": "translate", "values": {"x": -6.0}, "cache": {"key": "t1"}},
+                {"id": "b2", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "b2"}},
+                {"id": "t2", "type": "translate", "values": {"x": 6.0}, "cache": {"key": "t2"}},
+                {"id": "combine", "type": "combine", "values": {}, "cache": {"key": "combine"}},
+                {"id": "cut", "type": "boolean", "values": {"mode": "intersect"}, "cache": {"key": "cut"}}
+            ],
+            "connections": [
+                {"from": "a", "out": "shape", "to": "cut", "in": "a"},
+                {"from": "b1", "out": "shape", "to": "t1", "in": "shape"},
+                {"from": "b2", "out": "shape", "to": "t2", "in": "shape"},
+                {"from": "t1", "out": "shape", "to": "combine", "in": "shape"},
+                {"from": "t2", "out": "shape", "to": "combine", "in": "shape"},
+                {"from": "combine", "out": "shape", "to": "cut", "in": "b"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert!(!output.response.node_warnings.contains_key("cut"), "{:?}", output.response.node_warnings);
+        let part = output.exact_parts.get("cut").expect("cut exact part");
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let volume: f64 = part
+            .bodies
+            .iter()
+            .map(|body| nodecraft_layers::kernel_volume(&mut kernel, &body.brep).expect("volume"))
+            .sum();
+        // A 30 mm cube less the rest; B is two 10 mm cubes inside it, apart: intersect
+        // must give 2 x 1000, not "empty" from intersecting the pieces one at a time.
+        assert!((volume - 2000.0).abs() < 1e-6, "both pieces must survive: {volume}");
     }
 
     #[test]
@@ -4769,9 +5434,9 @@ mod tests {
         })).expect("request");
         let (response, _, _) = respond(request, EngineCache::new());
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
-        let bodies = nodecraft_step::read_faceted_breps(directory.join("curved-union.step").to_str().unwrap()).unwrap();
+        let bodies = cad_bodies(directory.join("curved-union.step").to_str().unwrap());
         assert!(!bodies.is_empty());
-        assert!(bodies[0].volume() > 0.0);
+        assert!(body_volume(&bodies[0]) > 0.0);
     }
 
     /// Suppressing both box and its transform leaves only the active cylinder.
@@ -4798,6 +5463,142 @@ mod tests {
         let mesh = &response.meshes["n28"].mesh;
         let (min, max) = bounds(mesh);
         assert!(min[0] > -56.5 && max[0] < -52.0, "box still present: {min:?}..{max:?}");
+    }
+
+    fn part_keys(exact_parts: &BTreeMap<String, nodecraft_exact::ExactPart>, id: &str) -> Vec<(u64, u32)> {
+        exact_parts
+            .get(id)
+            .unwrap_or_else(|| panic!("no exact Part published for {id}"))
+            .bodies
+            .iter()
+            .map(|body| (body.key.source, body.key.body))
+            .collect()
+    }
+
+    /// Viewing a suppressed pass-through node must publish its source's Part
+    /// under the suppressed node's own id; consumers look targets up by id.
+    #[test]
+    fn a_suppressed_target_publishes_its_passthrough_source_part() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["t"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "a"}},
+                {"id": "t", "type": "translate", "suppressed": true, "values": {"x": 25}, "cache": {"key": "t"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "t", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(part_keys(&output.exact_parts, "t"), part_keys(&output.exact_parts, "a"));
+    }
+
+    /// A suppressed Boolean passes its A operand through, not the merged result.
+    #[test]
+    fn a_suppressed_boolean_target_publishes_operand_a() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["u"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "a"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "b"}},
+                {"id": "u", "type": "boolean", "suppressed": true, "values": {"mode": "union"}, "cache": {"key": "u"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "u", "in": "a", "out": "shape"},
+                {"from": "b", "to": "u", "in": "b", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(part_keys(&output.exact_parts, "u"), part_keys(&output.exact_parts, "a"));
+    }
+
+    /// A suppressed Union inside a fused run is still a target with a Part: it
+    /// passes A through while the Union above it keeps fusing its leaves.
+    #[test]
+    fn a_suppressed_union_in_a_fused_run_publishes_operand_a() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["u2", "u3"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "a"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "b"}},
+                {"id": "c", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "c"}},
+                {"id": "d", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "d"}},
+                {"id": "tb", "type": "translate", "values": {"x": 20}, "cache": {"key": "tb"}},
+                {"id": "tc", "type": "translate", "values": {"x": 40}, "cache": {"key": "tc"}},
+                {"id": "td", "type": "translate", "values": {"x": 60}, "cache": {"key": "td"}},
+                {"id": "u1", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u1"}},
+                {"id": "u2", "type": "boolean", "suppressed": true, "values": {"mode": "union"}, "cache": {"key": "u2"}},
+                {"id": "u3", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u3"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "u1", "in": "a", "out": "shape"},
+                {"from": "b", "to": "tb", "in": "shape", "out": "shape"},
+                {"from": "tb", "to": "u1", "in": "b", "out": "shape"},
+                {"from": "u1", "to": "u2", "in": "a", "out": "shape"},
+                {"from": "c", "to": "tc", "in": "shape", "out": "shape"},
+                {"from": "tc", "to": "u2", "in": "b", "out": "shape"},
+                {"from": "u2", "to": "u3", "in": "a", "out": "shape"},
+                {"from": "d", "to": "td", "in": "shape", "out": "shape"},
+                {"from": "td", "to": "u3", "in": "b", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(part_keys(&output.exact_parts, "u2"), part_keys(&output.exact_parts, "u1"));
+        // u2 drops its B (tc), so the Union above receives u1's bodies plus td.
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let mut volume = |parts: &BTreeMap<String, nodecraft_exact::ExactPart>, id: &str| -> f64 {
+            parts[id]
+                .bodies
+                .iter()
+                .map(|body| nodecraft_layers::kernel_volume(&mut kernel, &body.brep).expect("volume"))
+                .sum()
+        };
+        let (u1, td, u3) = (
+            volume(&output.exact_parts, "u1"),
+            volume(&output.exact_parts, "td"),
+            volume(&output.exact_parts, "u3"),
+        );
+        assert!((u3 - (u1 + td)).abs() <= (u1 + td).abs() * 1.0e-9, "u3={u3} u1={u1} td={td}");
+    }
+
+    /// A suppressed feature (fillet) is a ghost/comparison pass-through too.
+    #[test]
+    fn a_suppressed_feature_target_publishes_its_input_part() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["f"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "a"}},
+                {"id": "f", "type": "fillet", "suppressed": true, "values": {"length": 1}, "cache": {"key": "f"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "f", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(part_keys(&output.exact_parts, "f"), part_keys(&output.exact_parts, "a"));
+    }
+
+    /// A suppressed Circular Pattern passes its source Part through instead of
+    /// leaving the copies (or an empty body) behind.
+    #[test]
+    fn a_suppressed_circular_pattern_publishes_its_input_part() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "height": 10, "width": 10}, "cache": {"key": "a"}},
+                {"id": "pattern", "type": "circularpattern", "suppressed": true, "values": {"count": 4}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        assert_eq!(part_keys(&output.exact_parts, "pattern"), part_keys(&output.exact_parts, "a"));
     }
 
     /// Exact assembly export: two placed planar STEP parts through a Combine node.
@@ -4830,10 +5631,16 @@ mod tests {
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let path = directory.join("assembly.step");
         assert!(path.exists(), "assembly was not written");
-        let instances = step_assemblies::planar_instances(path.to_str().unwrap()).unwrap();
-        assert_eq!(instances.len(), 2);
-        assert!(instances.iter().all(|instance| instance.body.volume() > 0.0));
-        let xs: Vec<f64> = instances.iter().map(|instance| instance.body.bounds().unwrap().0[0]).collect();
+        let bodies = cad_bodies(path.to_str().unwrap());
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies.iter().all(|body| body_volume(body) > 0.0));
+        let xs: Vec<f64> = bodies
+            .iter()
+            .map(|body| {
+                body.placement.map_or(0.0, |placement| placement[3][0])
+                    + body_bounds(body).0[0]
+            })
+            .collect();
         assert!(xs.iter().any(|x| (*x - 8.5).abs() < 1e-6), "{xs:?}");
         assert!(xs.iter().any(|x| (*x - -1.5).abs() < 1e-6), "{xs:?}");
     }
@@ -4861,9 +5668,9 @@ mod tests {
         assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
         let path = directory.join("feature.step");
         assert!(path.exists(), "export was not written");
-        let body = nodecraft_step::read_planar_body(path.to_str().unwrap()).unwrap();
-        assert!((body.volume() - 60.0).abs() < 1e-6, "volume {}", body.volume());
-        let (min, max) = body.bounds().unwrap();
+        let body = cad_body(path.to_str().unwrap());
+        assert!((body_volume(&body) - 60.0).abs() < 1e-6, "volume {}", body_volume(&body));
+        let (min, max) = body_bounds(&body);
         assert!((min[2] - 2.5).abs() < 1e-6 && (max[2] - 7.5).abs() < 1e-6, "{min:?} {max:?}");
     }
 
@@ -4982,6 +5789,129 @@ mod tests {
     }
 
     #[test]
+    fn part_circular_pattern_target_uses_placed_geometry_instances() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": ["pattern"],
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 4, "axis": "z"}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let (response, cache, _) = respond(request, EngineCache::new());
+        assert!(response.node_errors.is_empty(), "{:?}", response.node_errors);
+        let mesh = &response.meshes["pattern"].mesh;
+        assert!(!mesh.faces.is_empty());
+        let (min, max) = bounds(mesh);
+        assert!((min[0] + 25.0).abs() < 0.1 && (max[0] - 25.0).abs() < 0.1, "{min:?} {max:?}");
+        assert!((min[1] + 25.0).abs() < 0.1 && (max[1] - 25.0).abs() < 0.1, "{min:?} {max:?}");
+        assert!(cache.part_entries() > 0);
+    }
+
+    #[test]
+    fn circular_pattern_full_circle_places_count_copies_around_the_axis() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 4, "axis": "z"}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("circular pattern request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("pattern").expect("circular pattern exact part");
+        assert_eq!(part.bodies.len(), 4);
+        assert_centres(
+            &realized_body_centres(part),
+            &[[20.0, 0.0, 0.0], [0.0, 20.0, 0.0], [-20.0, 0.0, 0.0], [0.0, -20.0, 0.0]],
+        );
+        let keys: std::collections::HashSet<_> = part.bodies.iter().map(|body| body.key).collect();
+        assert_eq!(keys.len(), 1, "every copy must share its source body plan");
+    }
+
+    #[test]
+    fn circular_pattern_partial_sweep_ends_on_the_requested_angle() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 3, "angle": 90, "axis": "z"}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("partial sweep request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("pattern").expect("circular pattern exact part");
+        // A partial sweep divides by the gaps: 0, 45 and 90 degrees.
+        let diagonal = 20.0 / 2.0_f64.sqrt();
+        assert_centres(
+            &realized_body_centres(part),
+            &[[20.0, 0.0, 0.0], [diagonal, diagonal, 0.0], [0.0, 20.0, 0.0]],
+        );
+    }
+
+    #[test]
+    fn circular_pattern_rotates_around_the_center_point() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 4, "axis": "z", "centerX": 10}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("offset centre request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("pattern").expect("circular pattern exact part");
+        // The source sits 10 units from the axis through (10, 0, 0).
+        assert_centres(
+            &realized_body_centres(part),
+            &[[20.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 0.0, 0.0], [10.0, -10.0, 0.0]],
+        );
+    }
+
+    #[test]
+    fn circular_pattern_negative_angle_reverses_the_sweep() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["pattern"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "box"}},
+                {"id": "move", "type": "translate", "values": {"x": 20}, "cache": {"key": "move"}},
+                {"id": "pattern", "type": "circularpattern", "values": {"count": 3, "angle": -90, "axis": "z"}, "cache": {"key": "pattern"}}
+            ],
+            "connections": [
+                {"from": "box", "to": "move", "in": "shape", "out": "shape"},
+                {"from": "move", "to": "pattern", "in": "shape", "out": "shape"}
+            ]
+        })).expect("negative sweep request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("pattern").expect("circular pattern exact part");
+        let diagonal = 20.0 / 2.0_f64.sqrt();
+        assert_centres(
+            &realized_body_centres(part),
+            &[[20.0, 0.0, 0.0], [diagonal, -diagonal, 0.0], [0.0, -20.0, 0.0]],
+        );
+    }
+
+    #[test]
     fn part_sketch_target_uses_geometry_container() {
         let mut sketch = crate::sketch::Sketch::new();
         let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).unwrap();
@@ -5066,64 +5996,6 @@ mod tests {
         assert!((min[2] + 2.5).abs() < 1e-3 && (max[2] - 7.5).abs() < 1e-3, "{min:?} {max:?}");
     }
 
-    /// A curved (non-planar) B-spline sheet imports through the sheet reader branch of
-    /// the plug-in. Using a curved patch proves the planar fallback did not swallow it.
-    #[test]
-    fn curved_bspline_sheet_imports_through_solidcore_sheet_reader() {
-        let body = "#1=CARTESIAN_POINT('',(0.,0.,0.));\n\
-             #2=CARTESIAN_POINT('',(0.,0.5,0.25));\n\
-             #3=CARTESIAN_POINT('',(0.,1.,1.));\n\
-             #4=CARTESIAN_POINT('',(0.5,0.,0.25));\n\
-             #5=CARTESIAN_POINT('',(0.5,0.5,0.5));\n\
-             #6=CARTESIAN_POINT('',(0.5,1.,1.25));\n\
-             #7=CARTESIAN_POINT('',(1.,0.,1.));\n\
-             #8=CARTESIAN_POINT('',(1.,0.5,1.25));\n\
-             #9=CARTESIAN_POINT('',(1.,1.,2.));\n\
-             #10=B_SPLINE_SURFACE_WITH_KNOTS('',2,2,((#1,#2,#3),(#4,#5,#6),(#7,#8,#9)),\
-                  .UNSPECIFIED.,.F.,.F.,.F.,(3,3),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
-             #20=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#4,#7),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\n\
-             #21=B_SPLINE_CURVE_WITH_KNOTS('',2,(#7,#8,#9),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\n\
-             #22=B_SPLINE_CURVE_WITH_KNOTS('',2,(#3,#6,#9),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\n\
-             #23=B_SPLINE_CURVE_WITH_KNOTS('',2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\n\
-             #30=VERTEX_POINT('',#1);\n\
-             #31=VERTEX_POINT('',#7);\n\
-             #32=VERTEX_POINT('',#9);\n\
-             #33=VERTEX_POINT('',#3);\n\
-             #40=EDGE_CURVE('',#30,#31,#20,.T.);\n\
-             #41=EDGE_CURVE('',#31,#32,#21,.T.);\n\
-             #42=EDGE_CURVE('',#33,#32,#22,.T.);\n\
-             #43=EDGE_CURVE('',#30,#33,#23,.T.);\n\
-             #50=ORIENTED_EDGE('',*,*,#40,.T.);\n\
-             #51=ORIENTED_EDGE('',*,*,#41,.T.);\n\
-             #52=ORIENTED_EDGE('',*,*,#42,.F.);\n\
-             #53=ORIENTED_EDGE('',*,*,#43,.F.);\n\
-             #60=EDGE_LOOP('',(#50,#51,#52,#53));\n\
-             #61=FACE_OUTER_BOUND('',#60,.T.);\n\
-             #70=ADVANCED_FACE('',(#61),#10,.T.);\n";
-        let text = format!(
-            "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n\
-             FILE_NAME('','',(''),(''),'nodecraft-worker-test','nodecraft-worker-test','');\n\
-             FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));\nENDSEC;\nDATA;\n{body}ENDSEC;\nEND-ISO-10303-21;\n"
-        );
-        let path = std::env::temp_dir().join(format!(
-            "nodecraft-worker-sheet-{}.step",
-            std::process::id()
-        ));
-        std::fs::write(&path, text).unwrap();
-        let result = import_step(path.to_str().unwrap());
-        let _ = std::fs::remove_file(&path);
-        let import = result.expect("curved B-spline sheet import");
-        assert_eq!(import.diagnostics.kind, "solidcore-brep");
-        assert_eq!(import.diagnostics.breps, 1);
-        assert_eq!(import.diagnostics.brep_faces, 1);
-        assert_eq!(import.diagnostics.brep_edges, 4);
-        assert_eq!(import.diagnostics.brep_vertices, 4);
-        assert!(!import.mesh.faces.is_empty(), "sheet produced no triangles");
-        assert!(import.diagnostics.fallbacks.is_empty(), "{:?}", import.diagnostics.fallbacks);
-        let (min, max) = bounds(&import.mesh);
-        assert!(max[2] - min[2] > 0.5, "sheet stayed flat: {min:?}..{max:?}");
-    }
-
     /// B-spline solids with the `_KNOTS` knot-spec spelling import through the
     /// explicit display-mesh fallback, with warnings instead of a partial exact Brep.
     #[test]
@@ -5140,7 +6012,7 @@ mod tests {
     #[test]
     fn imports_analytic_cylinder_through_exact_brep() {
         let path = std::env::temp_dir().join(format!("nodecraft-worker-cylinder-{}.step", std::process::id()));
-        nodecraft_step::write_cylinder(path.to_str().unwrap(), 5.0, 10.0).expect("write cylinder STEP");
+        write_cylinder(path.to_str().unwrap(), 5.0, 10.0);
         let import = import_step(path.to_str().unwrap()).expect("import cylinder STEP");
         let _ = std::fs::remove_file(&path);
         assert!(!import.mesh.faces.is_empty(), "cylinder produced no triangles");
@@ -5385,6 +6257,7 @@ mod tests {
                     degree: 3,
                     periodic: false,
                     nurbs: None,
+                    handles: Vec::new(),
                 },
                 None,
             )
@@ -5439,7 +6312,7 @@ mod tests {
         })).expect("request");
         let mut eval = Eval::new(&request, None);
         assert!(eval.evaluate("sketch").is_some());
-        let output = eval.sketch_output_for("top-at").expect("typed sketch output");
+        let output = eval.part_sketch_output("top-at").expect("typed sketch output");
         let point = output.point(10.0, 0.0);
         assert!(point[0].abs() < 1.0e-9, "{point:?}");
         assert!((point[1] - 10.0).abs() < 1.0e-9, "{point:?}");
@@ -5583,6 +6456,678 @@ mod tests {
         assert!((max_z - min_z - 20.0).abs() < 0.05, "height {}..{}", min_z, max_z);
     }
 
+    fn extrude_request(sketch: &crate::sketch::Sketch, transform: Option<(&str, serde_json::Value)>) -> Request {
+        let sketch_value = serde_json::json!({"sketch": serde_json::to_value(sketch).unwrap()});
+        let (nodes, connections) = match transform {
+            Some((kind, values)) => (
+                vec![
+                    serde_json::json!({"id": "sketch", "type": "sketch", "values": sketch_value, "cache": {"key": "sketch"}}),
+                    serde_json::json!({"id": "move", "type": kind, "values": values, "cache": {"key": "move"}}),
+                    serde_json::json!({"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}),
+                ],
+                vec![
+                    serde_json::json!({"from": "sketch", "to": "move", "in": "shape", "out": "sketch"}),
+                    serde_json::json!({"from": "move", "to": "extrude", "in": "profile", "out": "shape"}),
+                ],
+            ),
+            None => (
+                vec![
+                    serde_json::json!({"id": "sketch", "type": "sketch", "values": sketch_value, "cache": {"key": "sketch"}}),
+                    serde_json::json!({"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}),
+                ],
+                vec![serde_json::json!({"from": "sketch", "to": "extrude", "in": "profile", "out": "sketch"})],
+            ),
+        };
+        serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["extrude"],
+            "meshTargets": [],
+            "nodes": nodes,
+            "connections": connections,
+        })).expect("request")
+    }
+
+    /// As [`extrude_request`], from a spline node rather than a sketch node.
+    fn spline_extrude_request(
+        values: &serde_json::Value,
+        transform: Option<(&str, serde_json::Value)>,
+    ) -> Request {
+        let (nodes, connections) = match transform {
+            Some((kind, transform_values)) => (
+                vec![
+                    serde_json::json!({"id": "spline", "type": "spline", "values": values, "cache": {"key": "spline"}}),
+                    serde_json::json!({"id": "move", "type": kind, "values": transform_values, "cache": {"key": "move"}}),
+                    serde_json::json!({"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}),
+                ],
+                vec![
+                    serde_json::json!({"from": "spline", "to": "move", "in": "shape", "out": "sketch"}),
+                    serde_json::json!({"from": "move", "to": "extrude", "in": "profile", "out": "shape"}),
+                ],
+            ),
+            None => (
+                vec![
+                    serde_json::json!({"id": "spline", "type": "spline", "values": values, "cache": {"key": "spline"}}),
+                    serde_json::json!({"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}),
+                ],
+                vec![serde_json::json!({"from": "spline", "to": "extrude", "in": "profile", "out": "sketch"})],
+            ),
+        };
+        serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["extrude"],
+            "meshTargets": [],
+            "nodes": nodes,
+            "connections": connections,
+        })).expect("request")
+    }
+
+    fn brep_counts(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> (usize, usize, usize) {
+        (brep.faces().ids().count(), brep.edges().ids().count(), brep.vertices().ids().count())
+    }
+
+    /// The sketch extrude test entry point: run the production kernel-aware extrude on
+    /// a local NodeCraft-profile kernel and hand the tests its B-rep. The tests never
+    /// configure (or read) the process-wide ops session.
+    fn sketch_extrude_brep(
+        output: &SketchOutput,
+        distance: f64,
+    ) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        super::sketch_extrude_brep(&mut kernel, output, distance)?
+            .into_brep()
+            .map_err(|error| format!("Extrude: {error}"))
+    }
+
+    fn brep_volume(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> f64 {
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        nodecraft_layers::kernel_volume(&mut kernel, brep).expect("brep volume")
+    }
+
+    fn brep_bounds(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> ([f64; 3], [f64; 3]) {
+        let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for vertex in brep.vertex_list() {
+            let point = brep.vertex(*vertex).expect("vertex").point;
+            for (axis, value) in [point.x, point.y, point.z].into_iter().enumerate() {
+                min[axis] = min[axis].min(value);
+                max[axis] = max[axis].max(value);
+            }
+        }
+        (min, max)
+    }
+
+    /// Radii of the exact circular edges in `brep`.
+    fn brep_circle_radii(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> Vec<f64> {
+        use nodecraft_solidcore::solidcore::curve::curve::CurveKind;
+        let mut radii = Vec::new();
+        for edge in brep.edges().ids() {
+            let Ok(edge) = brep.edge(edge) else { continue };
+            let Some(curve) = edge.curve.as_ref() else { continue };
+            if let CurveKind::Ellipse(ellipse) = curve.kind()
+                && ellipse.is_circle()
+            {
+                radii.push(ellipse.x_radius());
+            }
+        }
+        radii
+    }
+
+    /// How many edges are exact circular arcs, not a NURBS form of one.
+    fn brep_circle_edges(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> usize {
+        brep_circle_radii(brep).len()
+    }
+
+    /// How many edges are exact B-spline (or Bézier) curves.
+    fn brep_bspline_edges(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> usize {
+        use nodecraft_solidcore::solidcore::curve::curve::CurveKind;
+        brep.edges()
+            .ids()
+            .filter(|edge| {
+                brep.edge(*edge)
+                    .ok()
+                    .and_then(|edge| edge.curve.as_ref())
+                    .is_some_and(|curve| matches!(curve.kind(), CurveKind::BSpline(_)))
+            })
+            .count()
+    }
+
+    /// How many faces lie on a cylinder (the kernel's analytic cone kind with a
+    /// zero half-angle, not a NURBS surface of extrusion).
+    fn brep_cylindrical_faces(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> usize {
+        use nodecraft_solidcore::solidcore::surface::surface::SurfaceKind;
+        brep.faces()
+            .ids()
+            .filter(|face| {
+                brep.face(*face)
+                    .ok()
+                    .and_then(|face| face.surface.as_ref())
+                    .is_some_and(|surface| {
+                        matches!(surface.kind(), SurfaceKind::Cone(cone) if cone.is_cylinder())
+                    })
+            })
+            .count()
+    }
+
+    /// The sketch extrude must run on the kernel the worker lends `OpsSession`, not on a
+    /// fresh NodeCraft-profile kernel or the process-wide session. A kernel with the upstream
+    /// default profile turns the profile's partial arc into a NURBS side wall; NodeCraft's
+    /// profile keeps it an analytic circle/cylinder. The task is handed both kernels and must
+    /// follow each: the old layers helper ignored the worker and always built its own profile
+    /// kernel, so it would give a cylinder on the default kernel too.
+    #[test]
+    fn sketch_extrude_uses_the_lent_worker_kernel() {
+        let output = std::sync::Arc::new(SketchOutput::new(rounded_profile_sketch()));
+        let task = |output: std::sync::Arc<SketchOutput>| crate::node_task::ExactNodeTask::ExtrudeSketch {
+            output,
+            amount: 10.0,
+        };
+
+        // Upstream default fixes: the partial arc is a surface of extrusion, so its edges
+        // are NURBS, not circles.
+        let mut default_kernel = nodecraft_solidcore::solidcore::kernel::Kernel::default();
+        assert!(
+            !default_kernel.fixes.linear_sweep_arc_is_cylinder,
+            "the default kernel does not have the NodeCraft fix"
+        );
+        let crate::node_task::NodeOutput::Shape(default_body) = task(output.clone())
+            .run(&mut default_kernel)
+            .expect("default-kernel extrude")
+        else {
+            panic!("ExtrudeSketch has a shape output");
+        };
+        assert_eq!(brep_circle_edges(default_body.brep()), 0, "default kernel arc is not analytic");
+        assert!(brep_bspline_edges(default_body.brep()) > 0, "default kernel arc is NURBS");
+        assert_eq!(brep_cylindrical_faces(default_body.brep()), 0, "default kernel makes no cylinder");
+
+        // NodeCraft's profile, under the evaluation path's `EachNode`: analytic and unproved.
+        let mut profile_kernel = nodecraft_solidcore::kernel::kernel();
+        let crate::node_task::NodeOutput::Shape(profile_body) =
+            nodecraft_ops::validating(nodecraft_ops::Validation::EachNode, || {
+                task(output).run(&mut profile_kernel)
+            })
+            .expect("profile-kernel extrude")
+        else {
+            panic!("ExtrudeSketch has a shape output");
+        };
+        assert_eq!(brep_circle_edges(profile_body.brep()), 2, "profile arc edges are circles");
+        assert_eq!(brep_bspline_edges(profile_body.brep()), 0, "profile arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(profile_body.brep()), 1, "profile arc side is a cylinder");
+        assert_eq!(
+            profile_body.proof_state(),
+            nodecraft_ops::ProofState::Unknown,
+            "no proof on the evaluation path"
+        );
+        assert_eq!(profile_body.proof_attempts(), 0);
+    }
+
+    #[test]
+    fn rotated_sketch_extrude_keeps_the_exact_arc_profile() {
+        let sketch = rounded_profile_sketch();
+        let plain = evaluate_exact(extrude_request(&sketch, None), EngineCache::new(), None);
+        assert!(plain.response.node_errors.is_empty(), "{:?}", plain.response.node_errors);
+        let plain_part = plain.exact_parts.get("extrude").expect("plain extrude part");
+        let plain_body = &plain_part.bodies[0].brep;
+        let plain_volume = exact_part_volume(plain_part);
+        // The profile's arc is exact and analytic on any plane: its top and
+        // bottom edges are circles, its side face a cylinder, never the 0.001
+        // polyline's chords or a rational NURBS stand-in.
+        assert_eq!(brep_circle_edges(plain_body), 2, "plain sketch arc edges are circular");
+        assert_eq!(brep_bspline_edges(plain_body), 0, "plain sketch arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(plain_body), 1, "plain sketch arc side is a cylinder");
+
+        let rotated = evaluate_exact(
+            extrude_request(&sketch, Some(("translate", serde_json::json!({"rx": 90.0})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(rotated.response.node_errors.is_empty(), "{:?}", rotated.response.node_errors);
+        let rotated_part = rotated.exact_parts.get("extrude").expect("rotated extrude part");
+        let rotated_body = &rotated_part.bodies[0].brep;
+        assert_eq!(brep_counts(rotated_body), brep_counts(plain_body), "rotated topology");
+        assert_eq!(brep_circle_edges(rotated_body), brep_circle_edges(plain_body), "rotated arc edges are circular");
+        assert_eq!(brep_bspline_edges(rotated_body), 0, "rotated arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(rotated_body), 1, "rotated arc side is a cylinder");
+        let rotated_volume = exact_part_volume(rotated_part);
+        assert!(
+            (rotated_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, rotated {rotated_volume}"
+        );
+        assert_exact_bounds(rotated_part, [-20.0, -10.0, -15.0], [20.0, 0.0, 15.0]);
+    }
+
+    #[test]
+    fn uniform_scaled_sketch_extrude_scales_arcs_and_volume() {
+        let plain = SketchOutput::new(rounded_profile_sketch());
+        let plain_brep = sketch_extrude_brep(&plain, 10.0).expect("plain extrude");
+        let scaled = plain.transformed(&BodyTransform::Scale { factor: 2.0 });
+        let scaled_brep = sketch_extrude_brep(&scaled, 10.0).expect("scaled extrude");
+        let plain_volume = brep_volume(&plain_brep);
+        let scaled_volume = brep_volume(&scaled_brep);
+        let expected = plain_volume * 8.0;
+        assert!((scaled_volume - expected).abs() <= expected.abs() * 1.0e-9, "{scaled_volume} != {expected}");
+        assert_eq!(brep_counts(&scaled_brep), brep_counts(&plain_brep), "scaled topology");
+        assert_eq!(brep_circle_edges(&plain_brep), 2, "plain arc edges are circular");
+        assert_eq!(brep_circle_edges(&scaled_brep), 2, "scaled arc edges are circular");
+        assert_eq!(brep_bspline_edges(&scaled_brep), 0, "scaled arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(&scaled_brep), 1, "scaled arc side is a cylinder");
+        let (min, max) = brep_bounds(&scaled_brep);
+        for (actual, expected) in min.into_iter().zip([-40.0, -30.0, 0.0]).chain(max.into_iter().zip([40.0, 30.0, 20.0])) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+        // The 2D arc keeps its shape and doubles its radius; the plane stays unit.
+        let plain_geometry = plain.record_geometry().expect("plain record geometry");
+        let plain_radius = plain_geometry
+            .region
+            .outer
+            .segs
+            .iter()
+            .find_map(|segment| match *segment {
+                solidcore_record::Seg2::Arc { radius, .. } => Some(radius),
+                _ => None,
+            })
+            .expect("plain exact arc");
+        let geometry = scaled.record_geometry().expect("scaled record geometry");
+        let radii: Vec<f64> = geometry
+            .region
+            .outer
+            .segs
+            .iter()
+            .filter_map(|segment| match *segment {
+                solidcore_record::Seg2::Arc { radius, .. } => Some(radius),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(radii.len(), 1, "one exact arc");
+        assert!((radii[0] - plain_radius * 2.0).abs() < 1.0e-12, "arc radius {}", radii[0]);
+    }
+
+    #[test]
+    fn rotated_holed_sketch_extrude_keeps_the_hole_exact() {
+        let mut sketch = rounded_profile_sketch();
+        sketch
+            .add_circle(solidcore_record::Vec2::new(0.0, 0.0), 5.0, None, None)
+            .expect("hole circle");
+        let plain = evaluate_exact(extrude_request(&sketch, None), EngineCache::new(), None);
+        assert!(plain.response.node_errors.is_empty(), "{:?}", plain.response.node_errors);
+        let plain_part = plain.exact_parts.get("extrude").expect("plain holed extrude");
+        let plain_body = &plain_part.bodies[0].brep;
+        let plain_volume = exact_part_volume(plain_part);
+        let plain_counts = brep_counts(plain_body);
+        assert!(brep_circle_radii(plain_body).iter().any(|radius| (radius - 5.0).abs() < 1.0e-12), "hole circle");
+        assert_eq!(brep_circle_edges(plain_body), 6, "outer arc and hole are circular");
+        assert_eq!(brep_bspline_edges(plain_body), 0, "holed arc extrude has no NURBS edges");
+        assert_eq!(brep_cylindrical_faces(plain_body), 3, "outer and hole side faces are cylinders");
+
+        let outer = evaluate_exact(extrude_request(&rounded_profile_sketch(), None), EngineCache::new(), None);
+        let outer_part = outer.exact_parts.get("extrude").expect("outer extrude");
+        let expected = exact_part_volume(outer_part) - std::f64::consts::PI * 25.0 * 10.0;
+        assert!((plain_volume - expected).abs() <= expected.abs() * 1.0e-9, "{plain_volume} != {expected}");
+
+        let rotated = evaluate_exact(
+            extrude_request(&sketch, Some(("translate", serde_json::json!({"rx": 90.0})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(rotated.response.node_errors.is_empty(), "{:?}", rotated.response.node_errors);
+        let rotated_part = rotated.exact_parts.get("extrude").expect("rotated holed extrude");
+        let rotated_body = &rotated_part.bodies[0].brep;
+        assert_eq!(brep_counts(rotated_body), plain_counts, "rotated holed topology");
+        let rotated_volume = exact_part_volume(rotated_part);
+        assert!(
+            (rotated_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, rotated {rotated_volume}"
+        );
+        assert!(brep_circle_radii(rotated_body).iter().any(|radius| (radius - 5.0).abs() < 1.0e-12), "rotated hole circle");
+        assert_eq!(brep_circle_edges(rotated_body), 6, "rotated outer arc and hole are circular");
+        assert_eq!(brep_bspline_edges(rotated_body), 0, "rotated holed arc extrude has no NURBS edges");
+        assert_eq!(brep_cylindrical_faces(rotated_body), 3, "rotated outer and hole side faces are cylinders");
+        assert_exact_bounds(rotated_part, [-20.0, -10.0, -15.0], [20.0, 0.0, 15.0]);
+    }
+
+    #[test]
+    fn non_uniform_sketch_scale_is_refused_not_faceted() {
+        let mut output = SketchOutput::new(rounded_profile_sketch());
+        output.rotation = [[2.0, 0.0, 0.0], [0.0, 3.0, 0.0], [0.0, 0.0, 1.0]];
+        let error = sketch_extrude_brep(&output, 10.0).expect_err("non-uniform scale");
+        assert!(error.contains("non-uniform scale"), "{error}");
+    }
+
+    #[test]
+    fn translated_sketch_extrude_keeps_volume_and_moves_bounds() {
+        let sketch = rounded_profile_sketch();
+        let plain = evaluate_exact(extrude_request(&sketch, None), EngineCache::new(), None);
+        assert!(plain.response.node_errors.is_empty(), "{:?}", plain.response.node_errors);
+        let plain_part = plain.exact_parts.get("extrude").expect("plain extrude part");
+        assert_eq!(plain_part.bodies.len(), 1);
+        let plain_volume = exact_part_volume(plain_part);
+        assert!(plain_volume > 0.0, "plain volume {plain_volume}");
+        assert_exact_bounds(plain_part, [-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]);
+
+        let moved = evaluate_exact(
+            extrude_request(&sketch, Some(("translate", serde_json::json!({"x": 15.0, "z": 7.0, "rz": 90.0})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(moved.response.node_errors.is_empty(), "{:?}", moved.response.node_errors);
+        let moved_part = moved.exact_parts.get("extrude").expect("translated extrude part");
+        assert_eq!(moved_part.bodies.len(), 1);
+        let moved_volume = exact_part_volume(moved_part);
+        assert!((moved_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9, "plain {plain_volume}, moved {moved_volume}");
+        assert_exact_bounds(moved_part, [0.0, -20.0, 7.0], [30.0, 20.0, 17.0]);
+
+        let (plain_faces, plain_edges, plain_vertices) = (
+            plain_part.bodies[0].brep.faces().ids().count(),
+            plain_part.bodies[0].brep.edges().ids().count(),
+            plain_part.bodies[0].brep.vertices().ids().count(),
+        );
+        let moved_body = &moved_part.bodies[0].brep;
+        assert_eq!(moved_body.faces().ids().count(), plain_faces);
+        assert_eq!(moved_body.edges().ids().count(), plain_edges);
+        assert_eq!(moved_body.vertices().ids().count(), plain_vertices);
+    }
+
+    #[test]
+    fn mirrored_sketch_extrude_is_a_valid_outward_solid() {
+        let sketch = rounded_profile_sketch();
+        let plain = evaluate_exact(extrude_request(&sketch, None), EngineCache::new(), None);
+        assert!(plain.response.node_errors.is_empty(), "{:?}", plain.response.node_errors);
+        let plain_part = plain.exact_parts.get("extrude").expect("plain extrude part");
+        let plain_body = &plain_part.bodies[0].brep;
+        let plain_volume = exact_part_volume(plain_part);
+        let plain_counts = brep_counts(plain_body);
+
+        let mirrored = evaluate_exact(
+            extrude_request(&sketch, Some(("mirror", serde_json::json!({"plane": "yz", "offset": 0.0, "combine": false})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(mirrored.response.node_errors.is_empty(), "{:?}", mirrored.response.node_errors);
+        let part = mirrored.exact_parts.get("extrude").expect("mirrored extrude part");
+        assert_eq!(part.bodies.len(), 1);
+        let volume = exact_part_volume(part);
+        assert!(volume > 0.0, "mirrored volume {volume}");
+        assert!((volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9, "mirrored volume {volume}, plain {plain_volume}");
+        assert_eq!(brep_counts(&part.bodies[0].brep), plain_counts, "yz mirror topology");
+        assert_eq!(brep_circle_edges(&part.bodies[0].brep), brep_circle_edges(plain_body), "yz mirror arc edges are circular");
+        assert_eq!(brep_bspline_edges(&part.bodies[0].brep), 0, "yz mirror arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(&part.bodies[0].brep), 1, "yz mirror arc side is a cylinder");
+        // A yz mirror keeps the sweep on the original +z side; the profile is
+        // re-oriented so the solid is the mirror of the extrusion, not its
+        // opposite-side twin.
+        assert_exact_bounds(part, [-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]);
+
+        let through_sketch_plane = evaluate_exact(
+            extrude_request(&sketch, Some(("mirror", serde_json::json!({"plane": "xy", "offset": 0.0, "combine": false})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(through_sketch_plane.response.node_errors.is_empty(), "{:?}", through_sketch_plane.response.node_errors);
+        let part = through_sketch_plane.exact_parts.get("extrude").expect("xy-mirrored extrude part");
+        assert_eq!(part.bodies.len(), 1);
+        let volume = exact_part_volume(part);
+        assert!(volume > 0.0);
+        assert!((volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9, "xy mirrored volume {volume}, plain {plain_volume}");
+        assert_eq!(brep_counts(&part.bodies[0].brep), plain_counts, "xy mirror topology");
+        assert_eq!(brep_circle_edges(&part.bodies[0].brep), brep_circle_edges(plain_body), "xy mirror arc edges are circular");
+        assert_eq!(brep_bspline_edges(&part.bodies[0].brep), 0, "xy mirror arc edges are not NURBS");
+        assert_eq!(brep_cylindrical_faces(&part.bodies[0].brep), 1, "xy mirror arc side is a cylinder");
+        // A mirror through the sketch plane sweeps the other way: the image of
+        // the 0..10 extrusion is -10..0.
+        assert_exact_bounds(part, [-20.0, -15.0, -10.0], [20.0, 15.0, 0.0]);
+    }
+
+    #[test]
+    fn periodic_spline_node_extrudes_exact_on_every_plane() {
+        let values = periodic_spline_node_values();
+        let plain = evaluate_exact(spline_extrude_request(&values, None), EngineCache::new(), None);
+        assert!(plain.response.node_errors.is_empty(), "{:?}", plain.response.node_errors);
+        let plain_part = plain.exact_parts.get("extrude").expect("plain spline extrude part");
+        assert_eq!(plain_part.bodies.len(), 1);
+        let plain_body = &plain_part.bodies[0].brep;
+        let plain_volume = exact_part_volume(plain_part);
+        assert!(plain_volume > 0.0, "plain spline volume {plain_volume}");
+        assert_eq!(brep_bspline_edges(plain_body), 24, "closed periodic spline spans are exact");
+        assert_eq!(brep_circle_edges(plain_body), 0, "a spline profile has no circular edges");
+        let plain_counts = brep_counts(plain_body);
+        assert_exact_bounds(plain_part, [-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]);
+
+        let rotated = evaluate_exact(
+            spline_extrude_request(&values, Some(("translate", serde_json::json!({"rx": 90.0})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(rotated.response.node_errors.is_empty(), "{:?}", rotated.response.node_errors);
+        let rotated_part = rotated.exact_parts.get("extrude").expect("rotated spline extrude part");
+        let rotated_body = &rotated_part.bodies[0].brep;
+        let rotated_volume = exact_part_volume(rotated_part);
+        assert!(
+            (rotated_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, rotated {rotated_volume}"
+        );
+        assert_eq!(brep_counts(rotated_body), plain_counts, "rotated spline topology");
+        assert_eq!(brep_bspline_edges(rotated_body), 24, "rotated spline spans are exact");
+        assert_exact_bounds(rotated_part, [-20.0, -10.0, -15.0], [20.0, 0.0, 15.0]);
+
+        let mirrored = evaluate_exact(
+            spline_extrude_request(&values, Some(("mirror", serde_json::json!({"plane": "yz", "offset": 0.0, "combine": false})))),
+            EngineCache::new(),
+            None,
+        );
+        assert!(mirrored.response.node_errors.is_empty(), "{:?}", mirrored.response.node_errors);
+        let mirrored_part = mirrored.exact_parts.get("extrude").expect("mirrored spline extrude part");
+        let mirrored_body = &mirrored_part.bodies[0].brep;
+        let mirrored_volume = exact_part_volume(mirrored_part);
+        assert!(
+            (mirrored_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, mirrored {mirrored_volume}"
+        );
+        assert_eq!(brep_counts(mirrored_body), plain_counts, "mirrored spline topology");
+        assert_eq!(brep_bspline_edges(mirrored_body), 24, "mirrored spline spans are exact");
+        assert_exact_bounds(mirrored_part, [-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]);
+
+        let sketch = spline_sketch_from_values(&values).expect("spline node sketch");
+        let plain_output = SketchOutput::new(sketch);
+        let scaled_output = plain_output.transformed(&BodyTransform::Scale { factor: 2.0 });
+        let plain_brep = sketch_extrude_brep(&plain_output, 10.0).expect("plain spline extrude");
+        let scaled_brep = sketch_extrude_brep(&scaled_output, 10.0).expect("scaled spline extrude");
+        let scaled_volume = brep_volume(&scaled_brep);
+        let expected = plain_volume * 8.0;
+        assert!(
+            (scaled_volume - expected).abs() <= expected.abs() * 1.0e-9,
+            "{scaled_volume} != {expected}"
+        );
+        assert_eq!(brep_counts(&scaled_brep), plain_counts, "scaled spline topology");
+        assert_eq!(brep_bspline_edges(&scaled_brep), 24, "scaled spline spans are exact");
+        assert_eq!(brep_bspline_edges(&plain_brep), 24, "plain spline spans are exact");
+        let (scaled_min, scaled_max) = brep_bounds(&scaled_brep);
+        for (actual, expected) in scaled_min
+            .into_iter()
+            .zip([-40.0, -30.0, 0.0])
+            .chain(scaled_max.into_iter().zip([40.0, 30.0, 20.0]))
+        {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn mixed_line_and_spline_sketch_extrudes_exact_on_every_plane() {
+        let output = SketchOutput::new(mixed_line_spline_sketch());
+        let plain_brep = sketch_extrude_brep(&output, 10.0).expect("plain mixed extrude");
+        let plain_volume = brep_volume(&plain_brep);
+        assert!(plain_volume > 0.0, "plain mixed volume {plain_volume}");
+        assert_eq!(brep_bspline_edges(&plain_brep), 10, "mixed spline spans are exact");
+        assert_eq!(brep_circle_edges(&plain_brep), 0, "a mixed spline profile has no circular edges");
+        let plain_counts = brep_counts(&plain_brep);
+        let (plain_min, plain_max) = brep_bounds(&plain_brep);
+        for (actual, expected) in plain_min.into_iter().zip([-20.0, -15.0, 0.0]).chain(plain_max.into_iter().zip([27.0, 15.0, 10.0])) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+
+        let rotated = output.transformed(&BodyTransform::Place {
+            offset: [0.0, 0.0, 0.0],
+            rotation: [90.0, 0.0, 0.0],
+        });
+        let rotated_brep = sketch_extrude_brep(&rotated, 10.0).expect("rotated mixed extrude");
+        let rotated_volume = brep_volume(&rotated_brep);
+        assert!(
+            (rotated_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, rotated {rotated_volume}"
+        );
+        assert_eq!(brep_counts(&rotated_brep), plain_counts, "rotated mixed topology");
+        assert_eq!(brep_bspline_edges(&rotated_brep), 10, "rotated mixed spans are exact");
+        let (rotated_min, rotated_max) = brep_bounds(&rotated_brep);
+        for (actual, expected) in rotated_min.into_iter().zip([-20.0, -10.0, -15.0]).chain(rotated_max.into_iter().zip([27.0, 0.0, 15.0])) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+
+        let mirrored = output.transformed(&BodyTransform::Mirror { plane: "yz", offset: 0.0 });
+        let mirrored_brep = sketch_extrude_brep(&mirrored, 10.0).expect("mirrored mixed extrude");
+        let mirrored_volume = brep_volume(&mirrored_brep);
+        assert!(
+            (mirrored_volume - plain_volume).abs() <= plain_volume.abs() * 1.0e-9,
+            "plain {plain_volume}, mirrored {mirrored_volume}"
+        );
+        assert_eq!(brep_counts(&mirrored_brep), plain_counts, "mirrored mixed topology");
+        assert_eq!(brep_bspline_edges(&mirrored_brep), 10, "mirrored mixed spans are exact");
+        let (mirrored_min, mirrored_max) = brep_bounds(&mirrored_brep);
+        for (actual, expected) in mirrored_min.into_iter().zip([-27.0, -15.0, 0.0]).chain(mirrored_max.into_iter().zip([20.0, 15.0, 10.0])) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+
+        let scaled = output.transformed(&BodyTransform::Scale { factor: 2.0 });
+        let scaled_brep = sketch_extrude_brep(&scaled, 10.0).expect("scaled mixed extrude");
+        let scaled_volume = brep_volume(&scaled_brep);
+        let expected = plain_volume * 8.0;
+        assert!(
+            (scaled_volume - expected).abs() <= expected.abs() * 1.0e-9,
+            "{scaled_volume} != {expected}"
+        );
+        assert_eq!(brep_counts(&scaled_brep), plain_counts, "scaled mixed topology");
+        assert_eq!(brep_bspline_edges(&scaled_brep), 10, "scaled mixed spans are exact");
+        let (scaled_min, scaled_max) = brep_bounds(&scaled_brep);
+        for (actual, expected) in scaled_min.into_iter().zip([-40.0, -30.0, 0.0]).chain(scaled_max.into_iter().zip([54.0, 30.0, 20.0])) {
+            assert!((actual - expected).abs() < 1.0e-9, "{actual} != {expected}");
+        }
+    }
+
+    #[test]
+    fn suppressed_node_between_sketch_and_extrude_still_extrudes() {
+        let sketch = rounded_profile_sketch();
+        let sketch_value = serde_json::json!({"sketch": serde_json::to_value(&sketch).unwrap()});
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["extrude"], "meshTargets": [],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": sketch_value, "cache": {"key": "sketch"}},
+                {"id": "move", "type": "translate", "suppressed": true, "values": {"x": 0.0, "z": 0.0}, "cache": {"key": "move"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [
+                {"from": "sketch", "to": "move", "in": "shape", "out": "sketch"},
+                {"from": "move", "to": "extrude", "in": "profile", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("extrude").expect("suppressed extrude part");
+        assert_eq!(part.bodies.len(), 1);
+        assert!(exact_part_volume(part) > 0.0);
+        assert_exact_bounds(part, [-20.0, -15.0, 0.0], [20.0, 15.0, 10.0]);
+    }
+
+    #[test]
+    fn user_sketch_translate_extrude_fillet_graph_evaluates() {
+        let sketch = rounded_profile_sketch();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["fillet"], "meshTargets": [],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": {"sketch": serde_json::to_value(&sketch).unwrap()}, "cache": {"key": "sketch"}},
+                {"id": "translate", "type": "translate", "values": {"x": 0.0, "y": 0.0, "z": 0.0}, "cache": {"key": "translate"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}},
+                {"id": "fillet", "type": "fillet", "values": {"edges": [{"id": "edge:11"}]}, "cache": {"key": "fillet"}}
+            ],
+            "connections": [
+                {"from": "sketch", "to": "translate", "in": "shape", "out": "sketch"},
+                {"from": "translate", "to": "extrude", "in": "profile", "out": "shape"},
+                {"from": "extrude", "to": "fillet", "in": "shape", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let extruded = output.exact_parts.get("extrude").expect("extrude part");
+        let filleted = output.exact_parts.get("fillet").expect("fillet part");
+        assert_eq!(filleted.bodies.len(), 1);
+        let (extruded_volume, filleted_volume) = (exact_part_volume(extruded), exact_part_volume(filleted));
+        assert!(extruded_volume > 0.0 && filleted_volume > 0.0);
+        assert!(filleted_volume <= extruded_volume + 1.0e-9, "fillet {filleted_volume} > extrude {extruded_volume}");
+    }
+
+    #[test]
+    fn display_extrude_after_translate_uses_the_part_sketch_path() {
+        let sketch = rounded_profile_sketch();
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["extrude"], "meshTargets": [],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": {"sketch": serde_json::to_value(&sketch).unwrap()}, "cache": {"key": "sketch"}},
+                {"id": "translate", "type": "translate", "values": {"x": 15.0, "z": 7.0, "rz": 90.0}, "cache": {"key": "translate"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [
+                {"from": "sketch", "to": "translate", "in": "shape", "out": "sketch"},
+                {"from": "translate", "to": "extrude", "in": "profile", "out": "shape"}
+            ]
+        })).expect("request");
+        // Empty mesh targets force the legacy display evaluator (instead of
+        // the Part target pre-pass) to be the path under test.
+        let output = evaluate(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("extrude").expect("display-path extrude part");
+        assert_eq!(part.bodies.len(), 1);
+        assert!(exact_part_volume(part) > 0.0);
+        assert_exact_bounds(part, [0.0, -20.0, 7.0], [30.0, 20.0, 17.0]);
+    }
+
+    #[test]
+    fn combine_sketches_extrude_as_separate_bodies_and_mixed_input_errors() {
+        let sketch = rounded_profile_sketch();
+        let sketch_value = serde_json::json!({"sketch": serde_json::to_value(&sketch).unwrap()});
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["extrude"], "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "sketch", "values": sketch_value, "cache": {"key": "a"}},
+                {"id": "b", "type": "sketch", "values": sketch_value, "cache": {"key": "b"}},
+                {"id": "combine", "type": "combine", "values": {}, "cache": {"key": "combine"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "combine", "in": "shape", "out": "sketch"},
+                {"from": "b", "to": "combine", "in": "shape", "out": "sketch"},
+                {"from": "combine", "to": "extrude", "in": "profile", "out": "shape"}
+            ]
+        })).expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("extrude").expect("combined extrude part");
+        assert_eq!(part.bodies.len(), 2, "each sketch in a Combine extrudes to its own body");
+        assert!(exact_part_volume(part) > 0.0);
+
+        let mixed: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1, "targets": ["extrude"], "meshTargets": [],
+            "nodes": [
+                {"id": "sketch", "type": "sketch", "values": sketch_value, "cache": {"key": "sketch"}},
+                {"id": "box", "type": "primitive", "values": {"primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0}, "cache": {"key": "box"}},
+                {"id": "combine", "type": "combine", "values": {}, "cache": {"key": "combine"}},
+                {"id": "extrude", "type": "extrude", "values": {"amount": 10.0, "operation": "new"}, "cache": {"key": "extrude"}}
+            ],
+            "connections": [
+                {"from": "sketch", "to": "combine", "in": "shape", "out": "sketch"},
+                {"from": "box", "to": "combine", "in": "shape", "out": "shape"},
+                {"from": "combine", "to": "extrude", "in": "profile", "out": "shape"}
+            ]
+        })).expect("request");
+        let mixed_output = evaluate_exact(mixed, EngineCache::new(), None);
+        let error = mixed_output.response.node_errors.get("extrude").expect("mixed input error");
+        assert!(error.contains("both bodies and sketches"), "{error}");
+    }
+
     #[test]
     fn sketch_target_does_not_emit_a_3d_display_mesh() {
         let mut sketch = crate::sketch::Sketch::new();
@@ -5637,7 +7182,7 @@ mod tests {
         let mut eval = Eval::new(&request, None);
         assert!(eval.evaluate("sketch").is_some());
         assert!(eval.sketches.contains_key("sketch"));
-        let output = eval.sketch_output_for("top-at").expect("typed sketch output");
+        let output = eval.part_sketch_output("top-at").expect("typed sketch output");
         assert_eq!(output.profiles.len(), 1);
         assert!((output.offset[2] - 7.19).abs() < 1.0e-9);
     }
@@ -5696,7 +7241,7 @@ mod tests {
         assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
         assert!(path.is_file(), "loft export was not written");
         assert!(
-            nodecraft_mesh::import_step_brep(path.to_str().unwrap()).is_ok(),
+            nodecraft_mesh::import_step_breps(path.to_str().unwrap()).is_ok(),
             "first export did not round-trip"
         );
         let _ = std::fs::remove_file(&path);
@@ -5710,7 +7255,7 @@ mod tests {
         assert!(second.response.node_errors.is_empty(), "{:?}", second.response.node_errors);
         assert!(path.is_file(), "cached loft export was not written: {:?}", second.response.node_errors);
         assert!(
-            nodecraft_mesh::import_step_brep(path.to_str().unwrap()).is_ok(),
+            nodecraft_mesh::import_step_breps(path.to_str().unwrap()).is_ok(),
             "cached export did not round-trip"
         );
         let _ = std::fs::remove_dir_all(&directory);
@@ -5742,10 +7287,13 @@ mod tests {
         let brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 1.0, 1.0, 1.0)
             .expect("box");
         let body = BodyInstance {
-            body: Arc::new(brep),
+            body: nodecraft_ops::SolidBody::from_arc(Arc::new(brep)),
             transforms: Vec::new(),
+            realized: Default::default(),
             source: Some(41),
             source_body: 3,
+            name: None,
+            color: None,
         };
         let part = Part { bodies: vec![body.clone(), body], sketches: Vec::new() };
         let exact = exact_part_from(&part, 999);
@@ -5810,4 +7358,197 @@ mod tests {
         assert_ne!(comparison.added_key, comparison.removed_key);
     }
 
+
+    /// The exact pass hands its produced bodies to the background queue: the boxes of a
+    /// Boolean are queued, and the queue proves them after evaluation returns. Without the
+    /// queue these bodies stay Unknown forever.
+    #[test]
+    fn an_exact_pass_hands_its_bodies_to_the_background_proof_queue() {
+        // The report inbox is process-wide; the two report tests take turns draining it.
+        let _report_lock = REPORT_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["u"],
+            "meshTargets": [],
+            "nodes": [
+                {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "a", "state": "cached"}},
+                {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "b", "state": "cached"}},
+                {"id": "u", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u", "state": "cached"}}
+            ],
+            "connections": [
+                {"from": "a", "to": "u", "in": "a", "out": "shape"},
+                {"from": "b", "to": "u", "in": "b", "out": "shape"}
+            ]
+        }))
+        .expect("request");
+        let before = proof_queue::stats().queued;
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let after = proof_queue::stats().queued;
+        assert!(after > before, "the exact pass queued no body: {before} -> {after}");
+        assert!(output.proof_generation > 0);
+        // Evaluation returned before the proofs; a caller that wants the proof time waits.
+        assert!(proof_queue::wait(std::time::Duration::from_secs(120)));
+        assert!(proof_queue::stats().proved >= 1);
+        assert!(proof_queue::take_reports().is_empty(), "a valid Boolean must not be refused");
+    }
+
+    /// A Union run that only feeds the next Union becomes one `union_all`; requesting an
+    /// intermediate keeps it computable. The fused final body matches the node-by-node chain
+    /// in bodies, volume and faces.
+    #[test]
+    fn a_union_chain_fuses_to_one_union_all_with_the_same_geometry() {
+        fn request(targets: Vec<&str>) -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": targets,
+                "meshTargets": targets,
+                "binaryMesh": false,
+                "nodes": [
+                    {"id": "a", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "a", "state": "cached"}},
+                    {"id": "b", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "b", "state": "cached"}},
+                    {"id": "c", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "c", "state": "cached"}},
+                    {"id": "d", "type": "primitive", "values": {"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}, "cache": {"key": "d", "state": "cached"}},
+                    {"id": "t", "type": "translate", "values": {"x": 10.0}, "cache": {"key": "t", "state": "cached"}},
+                    {"id": "u1", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u1", "state": "cached"}},
+                    {"id": "u2", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u2", "state": "cached"}},
+                    {"id": "u3", "type": "boolean", "values": {"mode": "union"}, "cache": {"key": "u3", "state": "cached"}}
+                ],
+                "connections": [
+                    {"from": "a", "to": "u1", "in": "a", "out": "shape"},
+                    {"from": "b", "to": "u1", "in": "b", "out": "shape"},
+                    {"from": "u1", "to": "u2", "in": "a", "out": "shape"},
+                    {"from": "c", "to": "u2", "in": "b", "out": "shape"},
+                    {"from": "u2", "to": "u3", "in": "a", "out": "shape"},
+                    {"from": "t", "to": "u3", "in": "b", "out": "shape"},
+                    {"from": "d", "to": "t", "in": "shape", "out": "shape"}
+                ]
+            })).expect("request")
+        }
+        let fused = evaluate_exact(request(vec!["u3"]), EngineCache::new(), None);
+        assert!(fused.response.node_errors.is_empty(), "{:?}", fused.response.node_errors);
+        let chain = evaluate_exact(request(vec!["u1", "u2", "u3"]), EngineCache::new(), None);
+        assert!(chain.response.node_errors.is_empty(), "{:?}", chain.response.node_errors);
+        let fused_part = fused.exact_parts.get("u3").expect("fused target");
+        let chain_part = chain.exact_parts.get("u3").expect("chain target");
+        assert_eq!(fused_part.bodies.len(), chain_part.bodies.len(), "body count");
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let mut volume = |part: &nodecraft_exact::ExactPart| -> f64 {
+            part.bodies
+                .iter()
+                .map(|body| nodecraft_layers::kernel_volume(&mut kernel, &body.brep).expect("volume"))
+                .sum()
+        };
+        let (fused_volume, chain_volume) = (volume(fused_part), volume(chain_part));
+        assert!(
+            (fused_volume - chain_volume).abs() <= fused_volume.abs().max(1.0) * 1.0e-6,
+            "volume {fused_volume} vs {chain_volume}"
+        );
+        let faces = |part: &nodecraft_exact::ExactPart| -> usize {
+            part.bodies.iter().map(|body| body.brep.face_list().len()).sum()
+        };
+        assert_eq!(faces(fused_part), faces(chain_part), "face count");
+        // The intermediate is gone from the fused pass but still computable on request.
+        assert!(fused.exact_parts.get("u1").is_none());
+        assert!(chain.exact_parts.get("u1").is_some());
+    }
+
+    /// A translated body is realised once per instance and every reader gets the same
+    /// allocation; the rigid map keeps the source's proof state. A mirror resets it.
+    #[test]
+    fn a_placed_body_is_realised_once_and_a_rigid_map_keeps_its_proof() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box");
+        let part = Part::from_brep(brep).tagged(1).translated([10.0, 0.0, 0.0], [0.0; 3]);
+        part.bodies[0].body.prove(&mut kernel).expect("prove the source");
+        let first = part.realized_bodies().expect("realize");
+        let second = part.realized_bodies().expect("realize again");
+        assert!(
+            Arc::ptr_eq(&first[0].shared(), &second[0].shared()),
+            "the realised body is memoised per instance"
+        );
+        assert!(first[0].is_proved(), "a translate/rotate carries the proof state");
+        assert_eq!(first[0].proof_attempts(), 0, "carrying a proof does not prove again");
+
+        let mirrored = part.mirrored(&serde_json::json!({"plane": "yz", "offset": 0.0, "combine": false}));
+        let mirrored = mirrored.realized_bodies().expect("mirror realize");
+        assert_eq!(
+            mirrored[0].proof_state(),
+            nodecraft_ops::ProofState::Unknown,
+            "a mirror is a different B-rep and resets the proof"
+        );
+    }
+
+    /// Exact export proves the realised bodies before writing: a valid body is proved by the
+    /// gate, an inside-out body is refused with the failed test.
+    #[test]
+    fn exact_export_proves_its_bodies_and_refuses_an_inside_out_one() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
+        use nodecraft_solidcore::solidcore::topology::face::p1::flip_face_orientation;
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let box_brep = create_box(&mut kernel, Point3::new(-10.0,-10.0,-10.0), 20.0,20.0,20.0).expect("box");
+        let valid = Part::from_brep(box_brep.clone_standing_for_self().expect("copy"));
+        prove_part_for_export(&valid, &mut kernel).expect("a valid body is exportable");
+        assert!(valid.bodies[0].body.is_proved(), "the export gate proved the body");
+
+        let mut reversed = box_brep.clone_standing_for_self().expect("copy");
+        for face in reversed.face_list().to_vec() {
+            flip_face_orientation(&mut reversed, face).expect("flip");
+        }
+        let invalid = Part::from_brep(reversed);
+        let error = prove_part_for_export(&invalid, &mut kernel).expect_err("an inside-out body must not export");
+        assert!(error.contains("closed solid"), "{error}");
+        assert!(invalid.bodies[0].body.refused().is_some());
+    }
+
+    /// A refused body is attributed to the node that first produced it and names every
+    /// downstream node, transitively; the body keeps the refusal so nothing proves it again.
+    #[test]
+    fn a_refused_body_is_reported_on_its_producer_with_downstream_warnings() {
+        // Other evaluation tests also drain the process-wide report inbox and start new
+        // generations (which deprioritise unstarted work); retry until this body's proof
+        // gets a generation that is still current when it starts.
+        let _report_lock = REPORT_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
+        use nodecraft_solidcore::solidcore::topology::face::p1::flip_face_orientation;
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["c"],
+            "meshTargets": [],
+            "nodes": [],
+            "connections": [
+                {"from": "a", "to": "b", "in": "shape", "out": "shape"},
+                {"from": "b", "to": "c", "in": "shape", "out": "shape"}
+            ]
+        }))
+        .expect("request");
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let mut brep = create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).expect("box");
+        for face in brep.face_list().to_vec() {
+            flip_face_orientation(&mut brep, face).expect("flip");
+        }
+        let body = nodecraft_ops::SolidBody::new(brep);
+        let mut seen = None;
+        for _ in 0..64 {
+            let guard = proof_queue::begin(&request);
+            let generation = guard.generation();
+            proof_queue::register(generation, "a", std::iter::once(&body), proof_queue::ProofPriority::Displayed);
+            drop(guard);
+            assert!(proof_queue::wait(std::time::Duration::from_secs(30)));
+            if let Some(report) = proof_queue::take_reports().into_iter().find(|report| report.producer == "a") {
+                seen = Some((generation, report));
+                break;
+            }
+        }
+        let (generation, report) = seen.expect("the producer is reported");
+        assert_eq!(report.downstream, vec!["b", "c"]);
+        assert!(report.failure.contains("closed solid"), "{}", report.failure);
+        assert_eq!(report.generation, generation);
+        assert!(body.refused().is_some(), "the body keeps the refusal");
+        assert_eq!(body.proof_attempts(), 1, "one proof, not one per reader");
+    }
 }

@@ -40,13 +40,9 @@
 //!
 //! # STEP export
 //!
-//! [`planar_brep_to_step_brep`] and [`planar_brep_to_planar_body`] bridge a planar,
-//! polygonal B-rep (in particular an exact extrude result) to the neutral forms written
-//! by `nodecraft-step`; [`write_planar_brep_step`] writes that chain as AP214 STEP and
-//! [`write_exact_extrude_step`] extrudes and writes in one call. Only line-bounded
-//! planar faces are representable — curved profile extrusions are rejected with
-//! [`ExtrudeError::ExportUnsupported`] and need an analytic/NURBS writer. The worker
-//! still needs a feature node that calls this API; see `NOTES.md`.
+//! This crate returns solidcore B-reps. STEP is written by `nodecraft-step`'s CADIR
+//! exporter, which accepts any exact B-rep, so there is no separate planar STEP bridge
+//! here.
 //!
 //! # Example
 //!
@@ -89,13 +85,6 @@ use solidcore::sweep::api_brep::{
 use solidcore::topology::face::p2 as face_p2;
 use solidcore::{Brep, EdgeId, FaceId, SolidError};
 use nodecraft_protocol::Mesh;
-
-mod export;
-pub use export::{
-    ExportableExtrude, extrude_planar_face_exact_for_export, planar_brep_to_planar_body,
-    planar_brep_to_step_brep, write_exact_extrude_step, write_planar_brep_step,
-};
-pub use nodecraft_step::{PlanarBody, StepBrep};
 
 /// Distance below which two consecutive loop samples are treated as one point.
 const POINT_EPSILON: f64 = 1.0e-9;
@@ -161,17 +150,6 @@ pub enum ExtrudeError {
     },
     /// The profile curve list is empty.
     EmptyProfile,
-    /// The planar STEP export cannot represent this B-rep (curved geometry, unwired
-    /// face records, no faces, ...).
-    ExportUnsupported {
-        /// What is not representable.
-        why: String,
-    },
-    /// STEP export (neutral topology conversion or file write) failed.
-    Export {
-        /// The writer's message.
-        message: String,
-    },
     /// The preview mesh outgrew the protocol's `u32` index space.
     PreviewOverflow,
 }
@@ -221,10 +199,6 @@ impl fmt::Display for ExtrudeError {
                 "face {face:?} has {loops} boundary loops; the exact extrude takes one chain"
             ),
             Self::EmptyProfile => write!(f, "profile has no curves"),
-            Self::ExportUnsupported { why } => {
-                write!(f, "planar STEP export cannot represent this B-rep: {why}")
-            }
-            Self::Export { message } => write!(f, "STEP export failed: {message}"),
             Self::PreviewOverflow => write!(f, "preview mesh exceeds the u32 index space"),
         }
     }
@@ -828,6 +802,8 @@ fn sweep_edges(
         orient_profile_perpendicular_to_path: false,
         move_to_profile: true,
         profile_at_path_start: false,
+        // A translational sweep ignores it; the direct frame is the upstream behaviour.
+        up: None,
     };
     create_curve_sweep_from_edges(k, &edges, Some(&path), None, None, Some(&options))
         .map(|sweep| sweep.brep)

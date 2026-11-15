@@ -78,6 +78,7 @@ impl TessellationPool {
             let shared = Arc::clone(&shared);
             let worker = std::thread::Builder::new()
                 .name(format!("nodecraft-tessellation-{index}"))
+                .stack_size(nodecraft_kernel_profile::KERNEL_THREAD_STACK)
                 .spawn(move || {
                     let mut kernel: Kernel = crate::nodecraft_solidcore_kernel();
                     let mut generation = 0;
@@ -95,6 +96,7 @@ impl TessellationPool {
                             });
                             continue;
                         }
+                        let started = std::time::Instant::now();
                         let outcome = catch_unwind(AssertUnwindSafe(|| {
                             let tolerance = f64::from_bits(work.request.key.tolerance_bits);
                             let mut brep = work
@@ -144,6 +146,12 @@ impl TessellationPool {
                                 Err("tessellation worker panicked".into())
                             }
                         };
+                        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                            eprintln!(
+                                "[pool] tess wall_ms={:.2}",
+                                started.elapsed().as_secs_f64() * 1000.0
+                            );
+                        }
                         let _ = work.result.send(MeshResult {
                             key: work.request.key,
                             revision: work.request.revision,

@@ -76,7 +76,7 @@ fn show(kind: FileDialogKind) -> FileDialogResult {
             .set_file_name(suggested_name)
             .save_file(),
         FileDialogKind::OpenStepFile => rfd::FileDialog::new()
-            .add_filter("STEP model", &["step", "stp"])
+            .add_filter("CAD model", &["step", "stp", "fcstd", "3dm"])
             .pick_file(),
         FileDialogKind::ChooseDirectory => rfd::FileDialog::new().pick_folder(),
     };

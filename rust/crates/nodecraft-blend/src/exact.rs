@@ -48,32 +48,11 @@ use solidcore::topology::Brep;
 
 use crate::edge::EdgeSelection;
 use crate::error::BlendError;
-use crate::missing::{CHAMFER_API, EXECUTIVE, FILLET_API, LAW_CONTINUITY, PORT_UNITS};
 use crate::treatment::{Continuity, CornerTurn, EdgeMode, EdgeTreatment};
-
-/// The upstream calls an exact (B-rep) treatment of `mode` still needs.
-#[must_use]
-pub fn missing_calls(mode: EdgeMode, continuity: Continuity) -> Vec<&'static str> {
-    let mut calls: Vec<&'static str> = match mode {
-        EdgeMode::Chamfer => CHAMFER_API.to_vec(),
-        EdgeMode::Fillet => FILLET_API.to_vec(),
-    };
-    if continuity != Continuity::Circular {
-        calls.extend_from_slice(LAW_CONTINUITY);
-    }
-    calls.extend_from_slice(EXECUTIVE);
-    calls
-}
-
-/// The solidcore port units that own those calls.
-#[must_use]
-pub const fn port_units() -> &'static [&'static str] {
-    PORT_UNITS
-}
 
 /// Reject a fillet result that the upstream validity checker does not accept.
 /// The report text is the kernel's own; do not reduce it to a status number.
-fn validate_result(kernel: &mut Kernel, brep: &Brep) -> Result<(), String> {
+pub(crate) fn validate_result(kernel: &mut Kernel, brep: &Brep) -> Result<(), String> {
     // Full topology validation is a debug/test invariant. Release previews and
     // edits rely on the upstream operation's own validity contract; opt back in
     // with NODECRAFT_VALIDATE_RESULTS=1 when diagnosing a model.
@@ -82,7 +61,9 @@ fn validate_result(kernel: &mut Kernel, brep: &Brep) -> Result<(), String> {
     {
         return Ok(());
     }
-    let report = nodecraft_layers::check_kernel_brep(kernel, brep)?;
+    let report = nodecraft_ops::OpsSession::new(kernel)
+        .check(brep, nodecraft_ops::CheckLevel::Geometry)
+        .map_err(|error| format!("fillet result check: {error}"))?;
     if report.is_valid() {
         Ok(())
     } else {
@@ -100,7 +81,7 @@ pub fn fillet_brep_exact(brep: &Brep, values: &serde_json::Value) -> Result<Brep
 }
 
 /// [`fillet_brep_exact`] on a caller-owned (worker) kernel.
-fn mark_made_blend_faces(
+pub(crate) fn mark_made_blend_faces(
     kernel: &nodecraft_solidcore::solidcore::kernel::Kernel,
     result: &mut nodecraft_solidcore::solidcore::topology::Brep,
 ) -> Result<(), String> {
@@ -129,11 +110,11 @@ fn mark_made_blend_faces(
         .map_err(|error| error.to_string())
 }
 
-pub fn fillet_brep_exact_with_kernel(
+pub fn fillet_brep_exact_with_kernel_warned(
     kernel: &mut Kernel,
     brep: &Brep,
     values: &serde_json::Value,
-) -> Result<Brep, String> {
+) -> Result<crate::ops_blend::Blended, String> {
     let treatment = EdgeTreatment::from_node_values(values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     treatment
@@ -155,16 +136,33 @@ pub fn fillet_brep_exact_with_kernel(
     // is one continuous curve. Parasolid-style edge treatment follows that
     // tangent run; without it a one-edge pick rounds only one segment and
     // leaves a visible gap.
-    let tangent_chain = values
-        .get("tangentChain")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(true);
+    let tangent_chain = nodecraft_node_contract::resolve_bool("fillet", values, "tangentChain")
+        .expect("tangentChain is a contract field");
     let primary = if tangent_chain {
         crate::edge::tangent_chain(kernel, brep, &primary, 0.5_f64.to_radians())
             .map_err(|error| nodecraft_solidcore::error::user_message(error))?
     } else {
         primary
     };
+    if treatment.continuity != Continuity::G3 {
+        use nodecraft_ops::CornerTurn as Turn;
+        let kind = match treatment.continuity {
+            Continuity::Circular => nodecraft_ops::OpsBlend::Round(match treatment.corner_turn {
+                CornerTurn::Mitre => Turn::Mitre,
+                CornerTurn::Swept => Turn::Swept,
+            }),
+            Continuity::G2 => nodecraft_ops::OpsBlend::Curvature,
+            Continuity::G3 => unreachable!(),
+        };
+        let edges: Vec<_> = primary.iter().map(|selection| selection.edge).collect();
+        let result = nodecraft_ops::OpsSession::new(kernel)
+            .blend(brep, &edges, treatment.length, kind)
+            .map_err(|error| error.to_string())?;
+        validate_result(kernel, &result.brep)?;
+        return Ok(crate::ops_blend::Blended { brep: result.brep, warnings: result.warnings });
+    }
+    // G3 has no solidcore-ops section; it keeps the direct kernel call.
+
     // Where three or more rounded edges meet, the direct path leaves a Mitre
     // corner (with a cusp). Use the kernel's set-back corner session so the
     // corner is closed by a patch instead.
@@ -175,84 +173,27 @@ pub fn fillet_brep_exact_with_kernel(
         validate_result(kernel, &result)?;
         let mut result = result;
         mark_made_blend_faces(kernel, &mut result)?;
-        return Ok(result);
+        return Ok(crate::ops_blend::Blended { brep: result, warnings: Vec::new() });
     }
     // A refused edge is an upstream modelling refusal, not permission to round
     // a subset. Returning the error keeps the node from silently showing a
     // partial fillet around a join.
     // A swept corner is a session setting, so it needs the fuller ops blend path
     // even when the direct constant-radius call would succeed.
-    let result = if treatment.corner_turn == CornerTurn::Swept {
-        fillet_selection_ops(kernel, brep, &primary, &treatment)?
-    } else {
-        match fillet_selection(kernel, brep, &primary, &treatment) {
-            Ok(result) => result,
-            Err(error) if error.contains("status 1001") => {
-                match fillet_selection_ops(kernel, brep, &primary, &treatment) {
-                    Ok(result) => result,
-                    Err(ops_error) => return Err(format!("{error}; ops blend: {ops_error}")),
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    };
+    let result = fillet_selection(kernel, brep, &primary, &treatment)?;
     validate_result(kernel, &result)?;
     let mut result = result;
     mark_made_blend_faces(kernel, &mut result)?;
-    Ok(result)
+    Ok(crate::ops_blend::Blended { brep: result, warnings: Vec::new() })
 }
 
-/// Route the same round through `solidcore-ops::blend`, which drives the kernel's
-/// full fillet session (corners and setbacks) rather than the direct `fillet_edges`
-/// shortcut.
-fn fillet_selection_ops(
+/// Fillet without returning warnings.
+pub fn fillet_brep_exact_with_kernel(
     kernel: &mut Kernel,
     brep: &Brep,
-    selections: &[crate::EdgeSelection],
-    treatment: &EdgeTreatment,
+    values: &serde_json::Value,
 ) -> Result<Brep, String> {
-    use solidcore_ops::blend::{Blend, Corners, Turn, blend_ordered};
-    let mut working = solidcore::topology::brep::p3::brep_copy(kernel, brep)
-        .map_err(|error| format!("{error:?}"))?;
-    let (record, _) = solidcore_convert::brep::to_record(kernel, &mut working)
-        .map_err(|error| format!("{error:?}"))?;
-    let (body, order) =
-        solidcore_ops::Body::from_record(&record, true).map_err(|error| error.to_string())?;
-    let mut edges = Vec::with_capacity(selections.len());
-    for selection in selections {
-        edges.push(
-            order
-                .edges
-                .iter()
-                .position(|edge| *edge == selection.edge)
-                .ok_or_else(|| "selected edge is missing from the record order".to_owned())?,
-        );
-    }
-    let kind = match treatment.continuity {
-        Continuity::Circular => Blend::Round,
-        Continuity::G2 => Blend::Curvature,
-        Continuity::G3 => return Err("G3 needs the direct fillet path".into()),
-    };
-    let turn = match treatment.corner_turn {
-        CornerTurn::Mitre => Turn::Mitre,
-        CornerTurn::Swept => Turn::Swept,
-    };
-    if let Err(error) = blend_ordered(
-        &body,
-        &order,
-        kind,
-        &edges,
-        &[treatment.length],
-        &[],
-        Corners::Filled,
-        turn,
-    ) {
-        return Err(error.to_string());
-    }
-    let (record, _) = body.to_record().map_err(|error| error.to_string())?;
-    let (result, _) = solidcore_convert::brep::to_kernel(kernel, &record, true)
-        .map_err(|error| format!("{error:?}"))?;
-    Ok(result)
+    fillet_brep_exact_with_kernel_warned(kernel, brep, values).map(|blended| blended.brep)
 }
 
 fn fillet_selection(
@@ -299,73 +240,6 @@ fn fillet_selection(
         }
     })?;
     Ok(result)
-}
-
-/// Exact B-rep chamfer/fillet of the selected edges.
-///
-/// Returns the missing solidcore API as [`BlendError::Unsupported`] at the locked
-/// revision; the signature is the one the worker will call once the executive is
-/// ported, so the surrounding plumbing does not change.
-pub fn apply_edge_treatment_brep(
-    _kernel: &Kernel,
-    _brep: &Brep,
-    selections: &[EdgeSelection],
-    treatment: &EdgeTreatment,
-) -> Result<Brep, BlendError> {
-    treatment.validate()?;
-    if selections.is_empty() {
-        return Err(BlendError::InvalidInput(
-            "an exact edge treatment needs at least one selected edge".into(),
-        ));
-    }
-    let feature: &'static str = match (treatment.mode, treatment.continuity) {
-        (EdgeMode::Chamfer, _) => "exact chamfer",
-        (EdgeMode::Fillet, Continuity::Circular) => "exact circular fillet (G1)",
-        (EdgeMode::Fillet, Continuity::G2) => "exact fillet G2",
-        (EdgeMode::Fillet, Continuity::G3) => "exact fillet G3",
-    };
-    let reason = format!(
-        "solidcore has no ported SM_API edge-treatment entry point; the ported \
-         blend::fillet_executive::p3 slice needs an ExecutiveAccess adapter and \
-         CreateFilletCorners/SetFilletParameters/DoFilleting are still unported. \
-         Use the mesh preview (apply_edge_treatment) until {} lands.",
-        PORT_UNITS.join(", ")
-    );
-    Err(BlendError::missing_api(
-        feature,
-        reason,
-        missing_calls(treatment.mode, treatment.continuity),
-    ))
-}
-
-/// Exact circular chamfer of the selected edges; see [`apply_edge_treatment_brep`].
-pub fn chamfer_brep(
-    kernel: &Kernel,
-    brep: &Brep,
-    selections: &[EdgeSelection],
-    treatment: &EdgeTreatment,
-) -> Result<Brep, BlendError> {
-    if treatment.mode != EdgeMode::Chamfer {
-        return Err(BlendError::InvalidInput(
-            "chamfer_brep called with a fillet treatment".into(),
-        ));
-    }
-    apply_edge_treatment_brep(kernel, brep, selections, treatment)
-}
-
-/// Exact fillet of the selected edges; see [`apply_edge_treatment_brep`].
-pub fn fillet_brep(
-    kernel: &Kernel,
-    brep: &Brep,
-    selections: &[EdgeSelection],
-    treatment: &EdgeTreatment,
-) -> Result<Brep, BlendError> {
-    if treatment.mode != EdgeMode::Fillet {
-        return Err(BlendError::InvalidInput(
-            "fillet_brep called with a chamfer treatment".into(),
-        ));
-    }
-    apply_edge_treatment_brep(kernel, brep, selections, treatment)
 }
 
 #[cfg(test)]
@@ -438,21 +312,6 @@ mod exact_fillet_tests {
     }
 
     #[test]
-    fn ops_blend_rounds_a_box_edge() {
-        let (mut kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
-        let selection = crate::edge_selections(&kernel, &brep).expect("edges")[0].clone();
-        let treatment = EdgeTreatment {
-            mode: EdgeMode::Fillet,
-            continuity: Continuity::Circular,
-            length: 2.0,
-            ..EdgeTreatment::default()
-        };
-        let result =
-            fillet_selection_ops(&mut kernel, &brep, &[selection], &treatment).expect("ops blend");
-        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&result).expect("manifold"));
-    }
-
-    #[test]
     fn exact_circular_fillet_of_a_box_is_a_closed_solid() {
         let (_kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
         let values = serde_json::json!({
@@ -467,4 +326,65 @@ mod exact_fillet_tests {
         );
         assert!(!filleted.faces().is_empty());
     }
+    #[test]
+    fn node_fillet_keeps_look_colour_and_leaves_the_round_uncoloured() {
+        use solidcore::geom::attribute::{Attribute, Behavior};
+        use solidcore::geom::vector3d::Vec3;
+        let (kernel, mut brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let faces: Vec<_> = brep.faces().ids().collect();
+        for face in &faces {
+            brep.add_attribute(
+                solidcore::EntityRef::Face(*face),
+                Attribute::color(100, Vec3::new(1.0, 0.0, 0.0), Behavior::Copy),
+            )
+            .expect("colour");
+        }
+        let values = serde_json::json!({
+            "mode": "fillet",
+            "continuity": "",
+            "length": 2.0,
+            "edges": [{"ordinal": 0}]
+        });
+        let filleted = fillet_brep_exact(&brep, &values).expect("fillet");
+        let coloured = filleted
+            .faces()
+            .iter()
+            .filter(|(face, _)| filleted.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some())
+            .count();
+        assert_eq!(coloured, 6, "the six box faces keep their colour");
+        let marked = solidcore::blend::definition_check::blend_face_marks(&filleted)
+            .expect("marks")
+            .first()
+            .expect("made round")
+            .face;
+        assert!(
+            filleted
+                .find_attribute(solidcore::EntityRef::Face(marked), 100)
+                .is_none(),
+            "the made round must be uncoloured"
+        );
+    }
+
+    #[test]
+    fn second_node_fillet_resolves_an_edge_on_the_new_body() {
+        let (kernel, brep) = crate::box_brep(40.0, 30.0, 20.0).expect("box");
+        let first = serde_json::json!({
+            "mode": "fillet", "continuity": "", "length": 2.0, "edges": [{"ordinal": 0}]
+        });
+        let once = fillet_brep_exact(&brep, &first).expect("first fillet");
+        let selections = crate::edge_selections(&kernel, &once).expect("edges");
+        let edge = selections.iter().find(|selection| selection.edge == once.edge_list()[0])
+            .or_else(|| selections.first())
+            .expect("edge on the new body")
+            .clone();
+        let second = serde_json::json!({
+            "mode": "fillet",
+            "continuity": "",
+            "length": 1.0,
+            "edges": [{"center": edge.midpoint}]
+        });
+        let twice = fillet_brep_exact(&once, &second).expect("second fillet");
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&twice).expect("manifold"));
+    }
+
 }

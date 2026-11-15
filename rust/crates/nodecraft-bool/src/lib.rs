@@ -132,15 +132,16 @@ pub fn is_unported_error(message: &str) -> bool {
 /// A message from solidcore (non-finite or non-positive dimensions, or an unported
 /// constructor dependency).
 pub fn box_brep_at(origin: [f64; 3], length: f64, width: f64, height: f64) -> Result<Brep, String> {
-    let mut kernel = nodecraft_kernel_profile::kernel();
-    api::create_box(
-        &mut kernel,
-        Point3::new(origin[0], origin[1], origin[2]),
-        length,
-        width,
-        height,
-    )
-    .map_err(|error| map_error("solidcore create_box", &error))
+    with_wrapper_kernel(|kernel| {
+        api::create_box(
+            kernel,
+            Point3::new(origin[0], origin[1], origin[2]),
+            length,
+            width,
+            height,
+        )
+        .map_err(|error| map_error("solidcore create_box", &error))
+    })
 }
 
 /// [`box_brep_at`] with the box's lower-left corner at the origin.
@@ -149,6 +150,22 @@ pub fn box_brep_at(origin: [f64; 3], length: f64, width: f64, height: f64) -> Re
 ///
 /// A message from solidcore (non-finite or non-positive dimensions, or an unported
 /// constructor dependency).
+thread_local! {
+    /// One long-lived wrapper kernel for callers that do not own a worker
+    /// kernel. Reusing it keeps memoised surfaces and tessellation warm.
+    static WRAPPER_KERNEL: std::cell::RefCell<Option<Kernel>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_wrapper_kernel<T>(
+    f: impl FnOnce(&mut Kernel) -> Result<T, String>,
+) -> Result<T, String> {
+    WRAPPER_KERNEL.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let kernel = slot.get_or_insert_with(nodecraft_kernel_profile::kernel);
+        f(kernel)
+    })
+}
+
 pub fn box_brep(length: f64, width: f64, height: f64) -> Result<Brep, String> {
     box_brep_at([0.0, 0.0, 0.0], length, width, height)
 }
@@ -226,8 +243,7 @@ pub fn boolean_lists_batched(
 }
 
 pub fn boolean_breps(op: BooleanOp, a: Brep, b: Brep) -> Result<Brep, String> {
-    let mut kernel = nodecraft_kernel_profile::kernel();
-    boolean_breps_with_kernel(&mut kernel, op, a, b)
+    with_wrapper_kernel(|kernel| boolean_breps_with_kernel(kernel, op, a, b))
 }
 
 /// Boolean B-rep operation using the caller's kernel.
@@ -268,18 +284,19 @@ pub fn display_mesh(brep: &Brep) -> Result<Mesh, String> {
     if brep.faces().len() == 0 {
         return Err("display tessellation produced no triangles".into());
     }
-    let mut kernel = nodecraft_kernel_profile::kernel();
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("display copy: {error}"))?;
-    let mut mesh = nodecraft_layers::tessellate_kernel(&mut kernel, &mut copy, 0.05)
-        .map_err(|error| format!("solidcore-tess display mesh: {error}"))?
-        .mesh;
-    if mesh.faces.is_empty() {
-        return Err("display tessellation produced no triangles".into());
-    }
-    mesh.lightweight = true;
-    Ok(mesh)
+    with_wrapper_kernel(|kernel| {
+        let mut copy = brep
+            .clone_standing_for_self()
+            .map_err(|error| format!("display copy: {error}"))?;
+        let mut mesh = nodecraft_layers::tessellate_kernel(kernel, &mut copy, 0.05)
+            .map_err(|error| format!("solidcore-tess display mesh: {error}"))?
+            .mesh;
+        if mesh.faces.is_empty() {
+            return Err("display tessellation produced no triangles".into());
+        }
+        mesh.lightweight = true;
+        Ok(mesh)
+    })
 }
 
 /// [`boolean_breps`] followed by [`display_mesh`].
@@ -291,8 +308,7 @@ pub fn display_mesh(brep: &Brep) -> Result<Mesh, String> {
 ///
 /// The Boolean error, or a display-tessellation error.
 pub fn boolean_mesh(op: BooleanOp, a: Brep, b: Brep) -> Result<Mesh, String> {
-    let mut kernel = nodecraft_kernel_profile::kernel();
-    let brep = boolean_with_kernel(&mut kernel, op, a, b)?;
+    let brep = with_wrapper_kernel(|kernel| boolean_with_kernel(kernel, op, a, b))?;
     display_mesh(&brep)
 }
 
@@ -633,8 +649,7 @@ pub fn shell_brep_with_options(
     options: ShellOptions,
     openings: &[FaceId],
 ) -> Result<Brep, String> {
-    let mut kernel = nodecraft_kernel_profile::kernel();
-    shell_brep_with_options_with_kernel(&mut kernel, brep, options, openings)
+    with_wrapper_kernel(|kernel| shell_brep_with_options_with_kernel(kernel, brep, options, openings))
 }
 
 /// [`shell_brep_with_options`] on a caller-owned (worker) kernel.
@@ -713,7 +728,7 @@ mod tests {
             key_of: &|entity| original_key_of(entity).key,
         };
         solidcore::mass::integrator::properties::brep_volume(
-            &Kernel::default(),
+            &nodecraft_kernel_profile::kernel(),
             &mut copy,
             1.0e-6,
             &attributes,
@@ -872,7 +887,7 @@ mod tests {
     #[test]
     fn boolean_construction_succeeds_before_the_manifold_intersection_fails() {
         use solidcore::boolean::merge::p3::{BooleanDriver, DependencyMerge};
-        let mut kernel = Kernel::default();
+        let mut kernel = nodecraft_kernel_profile::kernel();
         let mut primary = Some(box_brep(10.0, 10.0, 10.0).expect("box A"));
         let mut other = Some(box_brep(10.0, 10.0, 10.0).expect("box B"));
         let mut driver = DependencyMerge::default();
@@ -941,7 +956,7 @@ mod tests {
     #[test]
     fn shrink_geometry_symbol_is_ported_despite_the_shell_marker() {
         let mut brep = box_brep(10.0, 10.0, 10.0).expect("box");
-        solidcore::topology::brep::p4::shrink_geometry(&Kernel::default(), &mut brep)
+        solidcore::topology::brep::p4::shrink_geometry(&nodecraft_kernel_profile::kernel(), &mut brep)
             .expect("SmBrep::ShrinkGeometry is ported");
         assert_eq!(brep.faces().len(), 6);
     }
@@ -1012,7 +1027,7 @@ mod tests {
             key_of: &original_key_of,
         };
         let copied = solidcore::topology::brep::p3::copy_brep(
-            &mut Kernel::default(),
+            &mut nodecraft_kernel_profile::kernel(),
             &mut env,
             &source,
             &original_key_of,

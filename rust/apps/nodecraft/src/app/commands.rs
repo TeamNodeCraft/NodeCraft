@@ -69,6 +69,11 @@ pub(super) struct CommandManager;
 impl CommandManager {
     /// Consume every bound shortcut and return the commands that fired.
     pub(super) fn poll(&self, ctx: &egui::Context) -> Vec<AppCommand> {
+        // Do not steal document shortcuts from text fields or other widgets
+        // that own keyboard input.
+        if ctx.egui_wants_keyboard_input() {
+            return Vec::new();
+        }
         let mut commands = Vec::new();
         for command in AppCommand::ALL {
             if ctx.input_mut(|input| input.consume_shortcut(&command.shortcut())) {

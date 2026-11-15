@@ -473,7 +473,7 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
     match node.node_type.as_str() {
         "solid" | "primitive" => primitive_specs(node),
         "stepimporter" => vec![
-            text("path", "STEP path", ""),
+            text("path", "CAD path", ""),
             switch("heal", "Heal", true),
         ],
         "exporter" => vec![
@@ -710,10 +710,11 @@ pub fn node_title(node: &GraphNode) -> String {
                 other => title_case(other),
             }
         }
-        "stepimporter" => "Import STEP".to_owned(),
+        "stepimporter" => "Import CAD".to_owned(),
         "surfaceloft" => "Surface Loft".to_owned(),
         "exporter" => "Export STEP".to_owned(),
         "translate" => "Transform".to_owned(),
+        "circularpattern" => "Circular Pattern".to_owned(),
         "group" => "Graph".to_owned(),
         "graph" => "Graph".to_owned(),
         "offsetfaces" => "Offset Faces".to_owned(),
@@ -759,6 +760,7 @@ pub fn node_badge(node: &GraphNode) -> String {
         "extrude" => "Operation",
         "chamfer" | "fillet" | "shell" | "look" => "Feature",
         "scatter" => "Generator",
+        "circularpattern" => "Pattern",
         _ => "Node",
     }
     .to_owned()
@@ -766,7 +768,7 @@ pub fn node_badge(node: &GraphNode) -> String {
 
 fn section_title(node: &GraphNode) -> &'static str {
     match node.node_type.as_str() {
-        "stepimporter" => "STEP FILE",
+        "stepimporter" => "CAD FILE",
         "exporter" => "OUTPUT FILE",
         "translate" => "TRANSFORM",
         "boolean" | "fuse" => "OPERATION",
@@ -781,6 +783,7 @@ fn section_title(node: &GraphNode) -> &'static str {
         "shell" => "SHELL",
         "mirror" => "MIRROR",
         "scatter" => "SCATTER",
+        "circularpattern" => "CIRCULAR PATTERN",
         "group" => "GRAPH",
         "graph" => "GRAPH",
         "offsetfaces" => "OFFSET",
@@ -791,7 +794,7 @@ fn section_title(node: &GraphNode) -> &'static str {
 
 fn node_description(node: &GraphNode) -> Option<String> {
     let text = match node.node_type.as_str() {
-        "stepimporter" => "Imports STEP solids and surfaces from AP203, AP214 or AP242 Part 21 files. Requires a local .step/.stp file.".to_owned(),
+        "stepimporter" => "Imports CAD solids with cadmpeg: STEP (AP203/AP214/AP242), FreeCAD .FCStd and Rhino .3dm are detected from the file contents.".to_owned(),
         "exporter" => "Writes the connected shape to a STEP file on disk.".to_owned(),
         "translate" => "Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo.".to_owned(),
         "solid" | "primitive" => "Creates a parametric primitive solid. Dimensions are in model units.".to_owned(),
@@ -813,6 +816,7 @@ fn node_description(node: &GraphNode) -> Option<String> {
         "offsetfaces" => "Moves the selected faces along their normals.".to_owned(),
         "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
         "scatter" => "Repeats a shape across a seeded area.".to_owned(),
+        "circularpattern" => "Repeats a shape around an axis.".to_owned(),
         "group" => {
             let count = node
                 .values
@@ -1150,7 +1154,7 @@ fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         let changed = ui
             .add_sized(
                 [path_width, 26.0],
-                egui::TextEdit::singleline(&mut path).hint_text("Path to .step or .stp"),
+                egui::TextEdit::singleline(&mut path).hint_text("Path to .step, .stp, .FCStd or .3dm"),
             )
             .changed();
         if changed {
