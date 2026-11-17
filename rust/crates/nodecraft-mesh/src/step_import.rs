@@ -15,9 +15,28 @@
 //! colour; a body the kernel refuses is a per-body warning, not a failed file.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use nodecraft_protocol::Mesh;
 use nodecraft_step::{CadBody, CadFailure};
+
+/// Every successful file decode performed by this crate.
+///
+/// This is test-visible so the engine can assert that one STEP import decodes
+/// the file once for both its display mesh and its exact bodies. It is always
+/// on: one relaxed atomic add per decode is noise beside cadmpeg's work.
+static STEP_DECODES: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of STEP/CAD file decodes since the last [`reset_step_decode_count`].
+#[must_use]
+pub fn step_decode_count() -> usize {
+    STEP_DECODES.load(Ordering::Relaxed)
+}
+
+/// Reset the decode counter to zero.
+pub fn reset_step_decode_count() {
+    STEP_DECODES.store(0, Ordering::Relaxed);
+}
 
 /// Diagnostics for one `stepimporter` evaluation.
 #[derive(Debug, Clone, Default)]
@@ -112,6 +131,15 @@ pub struct StepBrepImport {
     pub warnings: Vec<String>,
 }
 
+/// One file decoded once for both display and exact consumers.
+#[derive(Debug, Default)]
+pub struct StepImportWithBreps {
+    /// The merged display mesh and its diagnostics.
+    pub display: StepImport,
+    /// The exact kernel bodies and the import's warnings.
+    pub breps: StepBrepImport,
+}
+
 /// The records one file's cadmpeg decode produced.
 #[derive(Debug, Clone, Default)]
 struct StepModel {
@@ -132,6 +160,7 @@ struct StepModel {
 fn read_step_model(path: &str) -> Result<StepModel, String> {
     let bytes = std::fs::read(path).map_err(|error| format!("{path}: {error}"))?;
     let import = nodecraft_step::read_cad(&bytes, path)?;
+    STEP_DECODES.fetch_add(1, Ordering::Relaxed);
     Ok(StepModel {
         file_name: import.file_name,
         format: import.format,
@@ -199,11 +228,48 @@ pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
     merged
 }
 
+/// Read and decode one file, wrapping the error with the path and rejecting a
+/// decode that produced no bodies.
+fn read_model(path: &str) -> Result<StepModel, String> {
+    let model = read_step_model(path).map_err(|error| {
+        if error.starts_with(path) {
+            error
+        } else {
+            format!("{path}: {error}")
+        }
+    })?;
+    if model.bodies.is_empty() {
+        let refused = model
+            .failures
+            .first()
+            .map(|failure| {
+                format!(
+                    " ({} region {}: {})",
+                    failure.id, failure.region, failure.message
+                )
+            })
+            .or_else(|| model.warnings.first().cloned())
+            .unwrap_or_default();
+        return Err(format!("{path}: cadmpeg found no B-rep bodies{refused}"));
+    }
+    Ok(model)
+}
+
 /// Imports a CAD file through cadmpeg and builds display meshes.
 ///
-/// The display budget is the same one the STEP reader used: a large file starts with a
-/// coarser viewport tolerance and is re-imported until its triangle count fits.
+/// The file is decoded once; the display budget then re-meshes that same model
+/// with a coarser viewport tolerance until its triangle count fits.
 pub fn import_step(path: &str) -> Result<StepImport, String> {
+    let model = read_model(path)?;
+    mesh_step_model(path, &model)
+}
+
+/// Mesh a decoded model under the display budget.
+///
+/// A large file starts with a coarser viewport tolerance and is re-meshed until
+/// its triangle count fits. The model is already decoded, so retries never read
+/// or decode the file again.
+fn mesh_step_model(path: &str, model: &StepModel) -> Result<StepImport, String> {
     let requested = crate::display_tolerance();
     let large = std::fs::metadata(path)
         .map(|metadata| metadata.len() >= 400_000)
@@ -224,7 +290,7 @@ pub fn import_step(path: &str) -> Result<StepImport, String> {
     loop {
         attempts += 1;
         crate::set_display_tolerance(Some(requested * coarsen));
-        let result = import_step_inner(path);
+        let result = import_bodies(path, model);
         crate::set_display_tolerance(Some(requested));
         if let Ok(import) = &result
             && import.diagnostics.kind == "assembly"
@@ -247,29 +313,16 @@ pub fn import_step(path: &str) -> Result<StepImport, String> {
     }
 }
 
-fn import_step_inner(path: &str) -> Result<StepImport, String> {
-    let model = read_step_model(path).map_err(|error| {
-        if error.starts_with(path) {
-            error
-        } else {
-            format!("{path}: {error}")
-        }
-    })?;
-    if model.bodies.is_empty() {
-        let refused = model
-            .failures
-            .first()
-            .map(|failure| {
-                format!(
-                    " ({} region {}: {})",
-                    failure.id, failure.region, failure.message
-                )
-            })
-            .or_else(|| model.warnings.first().cloned())
-            .unwrap_or_default();
-        return Err(format!("{path}: cadmpeg found no B-rep bodies{refused}"));
-    }
-    import_bodies(path, &model)
+/// Decode one file once for both its display mesh and its exact bodies.
+///
+/// This is the import route for consumers that need both halves: it avoids the
+/// second full cadmpeg decode that separate [`import_step`] and
+/// [`import_step_breps`] calls would perform.
+pub fn import_step_with_breps(path: &str) -> Result<StepImportWithBreps, String> {
+    let model = read_model(path)?;
+    let display = mesh_step_model(path, &model)?;
+    let breps = breps_from_model(path, &model)?;
+    Ok(StepImportWithBreps { display, breps })
 }
 
 fn import_bodies(path: &str, model: &StepModel) -> Result<StepImport, String> {
@@ -565,21 +618,17 @@ fn transform_mesh(mesh: &mut Mesh, rows: &[[f64; 4]; 4]) {
 /// A body that the kernel refuses becomes a warning naming the body; the other
 /// bodies still import. The call errors only when no body converts.
 pub fn import_step_breps(path: &str) -> Result<StepBrepImport, String> {
-    let model = read_step_model(path)?;
-    if model.bodies.is_empty() {
-        let refused = model
-            .failures
-            .first()
-            .map(|failure| {
-                format!(
-                    " ({} region {}: {})",
-                    failure.id, failure.region, failure.message
-                )
-            })
-            .or_else(|| model.warnings.first().cloned())
-            .unwrap_or_default();
-        return Err(format!("{path}: cadmpeg found no B-rep bodies{refused}"));
-    }
+    let model = read_model(path)?;
+    breps_from_model(path, &model)
+}
+
+/// Convert every CADIR body of a decoded model to a kernel B-rep.
+///
+/// Each body keeps its CADIR name and colour, and its placement is applied
+/// exactly as the display mesher applies it. A body that the kernel refuses
+/// becomes a warning naming the body; the other bodies still import. The call
+/// errors only when no body converts.
+fn breps_from_model(path: &str, model: &StepModel) -> Result<StepBrepImport, String> {
     let mut warnings = failure_warnings(&model.failures);
     warnings.extend(model.warnings.iter().cloned());
     warnings.extend(model.bodies.iter().flat_map(|body| {
@@ -748,6 +797,32 @@ mod tests {
         assert_eq!(import.diagnostics.brep_faces, 6);
         let (volume, _) = mesh_volume_area(&import.mesh);
         assert!(volume.abs() > 0.0, "volume {volume}");
+    }
+
+    /// The combined import returns the display mesh and the exact bodies from
+    /// the same decoded model.
+    #[test]
+    fn combined_import_returns_display_mesh_and_exact_bodies() {
+        let Some(path) = repository("STEP_TEST_TESS/r1c1_box.step") else {
+            eprintln!(
+                "skipping combined_import_returns_display_mesh_and_exact_bodies: fixture not present"
+            );
+            return;
+        };
+        let import = import_step_with_breps(path.to_str().unwrap()).expect("combined STEP import");
+        assert_eq!(import.display.diagnostics.bodies, 1);
+        assert_eq!(import.display.diagnostics.brep_faces, 6);
+        assert!(!import.display.mesh.faces.is_empty());
+        assert_eq!(import.breps.bodies.len(), 1);
+        assert_eq!(
+            import.breps.bodies[0].name,
+            import.display.diagnostics.body_names[0]
+        );
+        assert!(
+            import.breps.warnings.is_empty(),
+            "{:?}",
+            import.breps.warnings
+        );
     }
 
     #[test]

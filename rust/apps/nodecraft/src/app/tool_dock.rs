@@ -2,6 +2,8 @@
 
 use super::*;
 use nodecraft_dock::{DockItem, DockMetrics, DockStyle, paint_background};
+use nodecraft_node_contract::{DockSection, NodeMetadata, PrimitiveMetadata};
+use std::sync::OnceLock;
 
 const TOOL_METRICS: DockMetrics = DockMetrics::DEFAULT;
 
@@ -140,78 +142,115 @@ impl ToolSection {
     }
 
     fn groups(self) -> &'static [ToolGroup] {
-        const SKETCH: &[ToolItem] = &[
-            ToolItem { label: "Sketch", node_type: "sketch", primitive: None , submenu: None },
-            ToolItem { label: "Spline", node_type: "spline", primitive: None , submenu: None },
-        ];
-        const SOLIDS: &[ToolItem] = &[
-            ToolItem { label: "Box", node_type: "solid", primitive: Some("box") , submenu: None },
-            ToolItem { label: "Sphere", node_type: "solid", primitive: Some("sphere") , submenu: None },
-            ToolItem { label: "Cylinder", node_type: "solid", primitive: Some("cylinder") , submenu: None },
-            ToolItem { label: "Cone", node_type: "solid", primitive: Some("cone") , submenu: None },
-            ToolItem { label: "Torus", node_type: "solid", primitive: Some("torus") , submenu: None },
-            ToolItem { label: "Pyramid", node_type: "solid", primitive: Some("pyramid") , submenu: None },
-            ToolItem { label: "Wedge", node_type: "solid", primitive: Some("wedge") , submenu: None },
-            ToolItem { label: "Partial Sphere", node_type: "solid", primitive: Some("partialSphere") , submenu: None },
-            ToolItem { label: "Partial Torus", node_type: "solid", primitive: Some("partialTorus") , submenu: None },
-        ];
-        const FEATURES: &[ToolItem] = &[
-            ToolItem { label: "Extrude", node_type: "extrude", primitive: None , submenu: None },
-            ToolItem { label: "Loft", node_type: "loft", primitive: None , submenu: None },
-            ToolItem { label: "Surface Loft", node_type: "surfaceloft", primitive: None , submenu: None },
-        ];
-        const MODIFY: &[ToolItem] = &[
-            ToolItem { label: "Transform", node_type: "translate", primitive: None , submenu: None },
-            ToolItem { label: "Chamfer", node_type: "chamfer", primitive: None , submenu: None },
-            ToolItem { label: "Fillet", node_type: "fillet", primitive: None , submenu: None },
-            ToolItem { label: "Shell", node_type: "shell", primitive: None , submenu: None },
-            ToolItem { label: "Offset Faces", node_type: "offsetfaces", primitive: None , submenu: None },
-        ];
-        const BOOLEAN: &[ToolItem] = &[ToolItem { label: "Boolean", node_type: "boolean", primitive: None , submenu: None }];
-        const PATTERN: &[ToolItem] = &[
-            ToolItem { label: "Mirror", node_type: "mirror", primitive: None , submenu: None },
-            ToolItem { label: "Circular Pattern", node_type: "circularpattern", primitive: None , submenu: None },
-            ToolItem { label: "Scatter", node_type: "scatter", primitive: None , submenu: None },
-        ];
-        const ORGANISE: &[ToolItem] = &[
-            ToolItem { label: "Combine to Part", node_type: "combine", primitive: None , submenu: None },
-            ToolItem { label: "Graph", node_type: "graph", primitive: None , submenu: None },
-            ToolItem { label: "Look", node_type: "look", primitive: None , submenu: None },
-        ];
-        const IO: &[ToolItem] = &[
-            ToolItem { label: "Import CAD", node_type: "stepimporter", primitive: None , submenu: None },
-            ToolItem { label: "Linked Part", node_type: "linkedpart", primitive: None , submenu: None },
-            ToolItem { label: "Export STEP", node_type: "exporter", primitive: None , submenu: None },
-        ];
-        // One default Solid entry; the primitive variants live behind its
-        // split-menu chevron so the flyout stays compact.
-        const SOLID: &[ToolItem] = &[ToolItem {
-            label: "Solid",
-            node_type: "solid",
-            primitive: Some("box"),
-            submenu: Some(SOLIDS),
-        }];
-        const CREATE: &[ToolGroup] = &[
-            ToolGroup { heading: Some("Sketch"), tools: SKETCH },
-            ToolGroup { heading: None, tools: SOLID },
-            ToolGroup { heading: Some("Features"), tools: FEATURES },
-        ];
-        const MODIFY_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: MODIFY }];
-        const BOOLEAN_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: BOOLEAN }];
-        const PATTERN_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: PATTERN }];
-        const ORGANISE_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: ORGANISE }];
-        const ANIMATE_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: &[] }];
-        const IO_GROUPS: &[ToolGroup] = &[ToolGroup { heading: None, tools: IO }];
-        match self {
-            Self::Create => CREATE,
-            Self::Modify => MODIFY_GROUPS,
-            Self::Boolean => BOOLEAN_GROUPS,
-            Self::Pattern => PATTERN_GROUPS,
-            Self::Organise => ORGANISE_GROUPS,
-            Self::Animate => ANIMATE_GROUPS,
-            Self::Io => IO_GROUPS,
-        }
+        let section = match self {
+            Self::Create => DockSection::Create,
+            Self::Modify => DockSection::Modify,
+            Self::Boolean => DockSection::Boolean,
+            Self::Pattern => DockSection::Pattern,
+            Self::Organise => DockSection::Organise,
+            Self::Animate => DockSection::Animate,
+            Self::Io => DockSection::Io,
+        };
+        section_groups(section)
     }
+}
+
+/// One entry the dock builds from the contract metadata table.
+struct BuiltSection {
+    section: DockSection,
+    groups: Vec<ToolGroup>,
+}
+
+fn section_groups(section: DockSection) -> &'static [ToolGroup] {
+    static SECTIONS: OnceLock<Vec<BuiltSection>> = OnceLock::new();
+    SECTIONS
+        .get_or_init(build_sections)
+        .iter()
+        .find(|built| built.section == section)
+        .map_or(&[], |built| built.groups.as_slice())
+}
+
+fn build_sections() -> Vec<BuiltSection> {
+    const SECTIONS: [DockSection; 7] = [
+        DockSection::Create,
+        DockSection::Modify,
+        DockSection::Boolean,
+        DockSection::Pattern,
+        DockSection::Organise,
+        DockSection::Animate,
+        DockSection::Io,
+    ];
+    SECTIONS
+        .into_iter()
+        .map(|section| {
+            let mut groups: Vec<(u16, &'static str, Vec<&'static NodeMetadata>)> = Vec::new();
+            for metadata in nodecraft_node_contract::metadata_rows() {
+                let Some(dock) = metadata.dock else { continue };
+                if dock.section != section {
+                    continue;
+                }
+                match groups.iter_mut().find(|(_, heading, _)| *heading == dock.group) {
+                    Some((order, _, rows)) => {
+                        *order = (*order).min(dock.order);
+                        rows.push(metadata);
+                    }
+                    None => groups.push((dock.order, dock.group, vec![metadata])),
+                }
+            }
+            groups.sort_by_key(|(order, _, _)| *order);
+            let groups: Vec<ToolGroup> = groups
+                .into_iter()
+                .map(|(_, heading, mut rows)| {
+                    rows.sort_by_key(|metadata| {
+                        metadata.dock.map_or(0, |dock| dock.order)
+                    });
+                    let tools: Vec<ToolItem> = rows.into_iter().map(tool_item).collect();
+                    let tools: &'static [ToolItem] = Box::leak(tools.into_boxed_slice());
+                    ToolGroup {
+                        heading: (!heading.is_empty()).then_some(heading),
+                        tools,
+                    }
+                })
+                .collect();
+            BuiltSection {
+                section,
+                groups: if groups.is_empty() {
+                    vec![ToolGroup { heading: None, tools: &[] }]
+                } else {
+                    groups
+                },
+            }
+        })
+        .collect()
+}
+
+fn tool_item(metadata: &'static NodeMetadata) -> ToolItem {
+    let dock = metadata.dock.expect("tool_item is called for dock rows only");
+    ToolItem {
+        label: metadata.dock_label,
+        node_type: metadata.node_type,
+        primitive: dock.primitive,
+        submenu: dock.split.then(solid_variants),
+    }
+}
+
+fn solid_variants() -> &'static [ToolItem] {
+    static VARIANTS: OnceLock<&'static [ToolItem]> = OnceLock::new();
+    *VARIANTS.get_or_init(|| {
+        let mut primitives: Vec<&PrimitiveMetadata> =
+            nodecraft_node_contract::PRIMITIVE_METADATA.iter().collect();
+        primitives.sort_by_key(|primitive| primitive.dock_order);
+        let variants: Vec<ToolItem> = primitives
+            .into_iter()
+            .map(|primitive| ToolItem {
+                label: primitive.dock_label,
+                node_type: "solid",
+                primitive: Some(primitive.kind),
+                submenu: None,
+            })
+            .collect();
+        Box::leak(variants.into_boxed_slice())
+    })
 }
 
 
@@ -1080,5 +1119,77 @@ mod tests {
         assert!(variants.iter().any(|tool| tool.label == "Sphere"));
         assert!(variants.iter().any(|tool| tool.label == "Partial Torus"));
         assert!(top_level.iter().all(|label| *label != "Sphere"));
+    }
+
+    /// Pin every dock section/group/item (and the Solid submenu) before the
+    /// entries move into the contract table. The move must leave this unchanged.
+    #[test]
+    fn tool_dock_order_and_labels_are_pinned() {
+        fn shape(section: ToolSection) -> Vec<(Option<&'static str>, Vec<&'static str>)> {
+            section
+                .groups()
+                .iter()
+                .map(|group| {
+                    (
+                        group.heading,
+                        group.tools.iter().map(|tool| tool.label).collect(),
+                    )
+                })
+                .collect()
+        }
+
+        assert_eq!(
+            shape(ToolSection::Create),
+            vec![
+                (Some("Sketch"), vec!["Sketch", "Spline"]),
+                (None, vec!["Solid"]),
+                (Some("Features"), vec!["Extrude", "Loft", "Surface Loft"]),
+            ],
+        );
+        assert_eq!(
+            shape(ToolSection::Modify),
+            vec![(None, vec!["Transform", "Chamfer", "Fillet", "Shell", "Offset Faces"])],
+        );
+        assert_eq!(shape(ToolSection::Boolean), vec![(None, vec!["Boolean"])]);
+        assert_eq!(
+            shape(ToolSection::Pattern),
+            vec![(None, vec!["Mirror", "Circular Pattern", "Scatter"])],
+        );
+        assert_eq!(
+            shape(ToolSection::Organise),
+            vec![(None, vec!["Combine to Part", "Graph", "Look"])],
+        );
+        assert_eq!(shape(ToolSection::Animate), vec![(None, vec![])]);
+        assert_eq!(
+            shape(ToolSection::Io),
+            vec![(None, vec!["Import CAD", "Linked Part", "Export STEP"])],
+        );
+
+        let solid = ToolSection::Create
+            .groups()
+            .iter()
+            .flat_map(|group| group.tools.iter())
+            .find(|tool| tool.label == "Solid")
+            .expect("Solid split item");
+        let variants: Vec<&str> = solid
+            .submenu
+            .expect("Solid submenu")
+            .iter()
+            .map(|tool| tool.label)
+            .collect();
+        assert_eq!(
+            variants,
+            vec![
+                "Box",
+                "Sphere",
+                "Cylinder",
+                "Cone",
+                "Torus",
+                "Pyramid",
+                "Wedge",
+                "Partial Sphere",
+                "Partial Torus",
+            ],
+        );
     }
 }

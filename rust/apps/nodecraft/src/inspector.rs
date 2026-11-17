@@ -8,7 +8,7 @@ use crate::ui_shape;
 use serde_json::Value;
 use nodecraft_session::GraphNode;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Change {
     pub field: String,
     pub value: Value,
@@ -42,6 +42,12 @@ pub struct Output {
     pub make_local: bool,
     /// Resize the body input/output ports of an inline graph.
     pub graph_ports: Option<(usize, usize)>,
+    /// Re-import the selected importer's changed source.
+    pub reload_source: bool,
+    /// Pick a replacement for a missing CAD original.
+    pub locate_import: bool,
+    /// Save the embedded copy beside the document and re-link the importer.
+    pub save_import_copy: bool,
 }
 
 /// Paint the inspector reset control at an exact header rect. This is separate
@@ -294,7 +300,14 @@ fn topology_references(
     });
 }
 
-fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+/// Whether a spline shows its control points. The contract owns the default;
+/// this is the one read used by the point list label and any future reader.
+fn spline_control_points(node: &GraphNode) -> bool {
+    nodecraft_node_contract::resolve_bool("spline", &node.values, "control")
+        .expect("spline.control is a contract switch")
+}
+
+fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) -> Vec<IndexedVectorRow> {
     let theme = crate::theme::get();
     let mut points: Vec<(f64, f64)> = node
         .values
@@ -311,7 +324,7 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                 .collect()
         })
         .unwrap_or_default();
-    let control = node.values.get("control").and_then(Value::as_bool).unwrap_or(false);
+    let control = spline_control_points(node);
     ui.label(
         egui::RichText::new(if control { "CONTROL POINTS" } else { "FIT POINTS" })
             .size(9.0)
@@ -319,58 +332,42 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     );
     let mut changed = false;
     let mut remove = None;
+    let row_count = points.len();
+    let mut laid_out = Vec::with_capacity(row_count);
     for (index, (x, y)) in points.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("{}.", index + 1))
-                    .size(10.0)
-                    .color(theme.with_alpha(theme.muted, 220)),
-            );
-            let x_id = egui::Id::new(("spline-x", &node.id, index));
-            let x_response = ui.add(
+        let mut row_changed = false;
+        let row = indexed_vector_row(ui, index, row_count, 2, "Remove point", |ui, field, width| {
+            let (value, axis, prefix, id) = match field {
+                0 => (&mut *x, "x", "X ", egui::Id::new(("spline-x", &node.id, index))),
+                1 => (&mut *y, "y", "Y ", egui::Id::new(("spline-y", &node.id, index))),
+                _ => unreachable!("a spline point has exactly two values"),
+            };
+            let expression_key = format!("points.{index}.{axis}");
+            let response = ui.add_sized(
+                [width, FIELD_ROW_HEIGHT],
                 crate::expression_input::number_drag(
                     ui,
-                    x,
+                    value,
                     nodecraft_node_contract::NumberKind::Length,
                     0.5,
                     2,
-                    x_id,
-                    node.expressions
-                        .get(&format!("points.{index}.x"))
-                        .map(String::as_str),
+                    id,
+                    node.expressions.get(&expression_key).map(String::as_str),
                 )
                 .range(-10000.0..=10000.0)
-                .prefix("X "),
+                .prefix(prefix),
             );
-            crate::expression_input::remember_rect(x_id, x_response.rect);
-            if let Some(expression) = crate::expression_input::take_expression_change(x_id) {
-                output.expressions.push((format!("points.{index}.x"), expression));
+            crate::expression_input::remember_rect(id, response.rect);
+            if let Some(expression) = crate::expression_input::take_expression_change(id) {
+                output.expressions.push((expression_key, expression));
             }
-            let y_id = egui::Id::new(("spline-y", &node.id, index));
-            let y_response = ui.add(
-                crate::expression_input::number_drag(
-                    ui,
-                    y,
-                    nodecraft_node_contract::NumberKind::Length,
-                    0.5,
-                    2,
-                    y_id,
-                    node.expressions
-                        .get(&format!("points.{index}.y"))
-                        .map(String::as_str),
-                )
-                .range(-10000.0..=10000.0)
-                .prefix("Y "),
-            );
-            crate::expression_input::remember_rect(y_id, y_response.rect);
-            if let Some(expression) = crate::expression_input::take_expression_change(y_id) {
-                output.expressions.push((format!("points.{index}.y"), expression));
-            }
-            if ui.small_button("×").on_hover_text("Remove point").clicked() {
-                remove = Some(index);
-            }
-            changed |= x_response.changed() || y_response.changed();
+            row_changed |= response.changed();
         });
+        changed |= row_changed;
+        if row.remove.clicked() {
+            remove = Some(index);
+        }
+        laid_out.push(row);
     }
     if let Some(index) = remove {
         if points.len() > 2 {
@@ -392,6 +389,7 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         );
         output.changes.push(Change { field: "points".to_owned(), value });
     }
+    laid_out
 }
 
 fn parse_look_color(text: &str) -> Option<egui::Color32> {
@@ -567,13 +565,165 @@ fn field_row(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui, f32)) {
     ui.add_space(FIELD_ROW_GAP);
 }
 
-/// Right-align a switch inside the shared control column.
-fn field_switch(ui: &mut Ui, value: &mut bool) -> egui::Response {
-    ui.with_layout(
-        egui::Layout::right_to_left(egui::Align::Center),
-        |ui| crate::widgets::switch(ui, value),
+/// The laid-out columns of one indexed vector row. `fields` are the value cells
+/// (X, Y, …) and `remove` is the remove button; both use the same padded content
+/// width as `field_row`, so they line up with every other inspector control.
+struct IndexedVectorRow {
+    // Production only needs the remove response; the headless layout test reads
+    // these rects to pin the columns. The test covers this exception.
+    #[allow(dead_code)]
+    index: egui::Rect,
+    #[allow(dead_code)]
+    fields: Vec<egui::Rect>,
+    remove: Response,
+}
+
+/// Width of the right-aligned index column. The widest index is measured from
+/// the same 10 pt face the label uses, with room for at least two digits so the
+/// column does not resize as points are added or removed.
+fn indexed_vector_index_width(ui: &Ui, rows: usize) -> f32 {
+    let widest = format!("{}.", rows.max(99));
+    ui.painter()
+        .layout_no_wrap(
+            widest,
+            egui::FontId::proportional(10.0),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x
+}
+
+/// One inspector row for an indexed vector list: a fixed index column, `fields`
+/// equal-width value cells, then the remove button on the padded content edge.
+/// Callers add their own widgets through `add_field`; every value cell is handed
+/// the same width so no field sizes itself from its text.
+fn indexed_vector_row(
+    ui: &mut Ui,
+    index: usize,
+    rows: usize,
+    fields: usize,
+    remove_hint: &str,
+    mut add_field: impl FnMut(&mut Ui, usize, f32),
+) -> IndexedVectorRow {
+    let content_width = ui.available_width();
+    let index_width = indexed_vector_index_width(ui, rows);
+    // A remove button is square at the row height, leaving the rest of the
+    // content width to the equal value cells.
+    let remove_width = FIELD_ROW_HEIGHT;
+    let field_width = ((content_width
+        - index_width
+        - remove_width
+        - FIELD_COLUMN_GAP * (fields + 1) as f32)
+        / fields.max(1) as f32)
+        .max(1.0);
+    let theme = crate::theme::get();
+    let mut index_rect = egui::Rect::ZERO;
+    let mut field_rects = Vec::with_capacity(fields);
+    let mut remove = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = FIELD_COLUMN_GAP;
+        ui.set_height(FIELD_ROW_HEIGHT);
+        index_rect = ui
+            .allocate_ui_with_layout(
+                egui::vec2(index_width, FIELD_ROW_HEIGHT),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_width(index_width);
+                    ui.label(
+                        egui::RichText::new(format!("{}.", index + 1))
+                            .size(10.0)
+                            .color(theme.with_alpha(theme.muted, 220)),
+                    );
+                },
+            )
+            .response
+            .rect;
+        for field in 0..fields {
+            let response = ui.allocate_ui_with_layout(
+                egui::vec2(field_width, FIELD_ROW_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(field_width);
+                    ui.spacing_mut().interact_size.y = FIELD_ROW_HEIGHT;
+                    add_field(ui, field, field_width);
+                },
+            );
+            field_rects.push(response.response.rect);
+        }
+        remove = Some(
+            ui.allocate_ui_with_layout(
+                egui::vec2(remove_width, FIELD_ROW_HEIGHT),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_width(remove_width);
+                    ui.small_button("×").on_hover_text(remove_hint)
+                },
+            )
+            .inner,
+        );
+    });
+    ui.add_space(FIELD_ROW_GAP);
+    IndexedVectorRow {
+        index: index_rect,
+        fields: field_rects,
+        remove: remove.expect("an indexed vector row always lays out its remove button"),
+    }
+}
+
+/// Lay out one boolean row: the switch only needs its own width, so the label
+/// gets the rest of the row minus the column gap. The switch is right-aligned
+/// on the same edge as every other inspector control. Returns the label and
+/// switch responses; `field_switch_row` exposes the switch response to callers.
+/// `tooltip` replaces the label's default hover text when a row needs help text.
+fn field_switch_row_layout(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut bool,
+    tooltip: Option<&str>,
+) -> (Response, Response) {
+    let switch_width = crate::widgets::SWITCH_SIZE.x;
+    let label_width = (ui.available_width() - switch_width - FIELD_COLUMN_GAP).max(0.0);
+    let mut label_response = None;
+    let mut switch_response = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = FIELD_COLUMN_GAP;
+        ui.set_height(FIELD_ROW_HEIGHT);
+        ui.allocate_ui_with_layout(
+            egui::vec2(label_width, FIELD_ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.set_width(label_width);
+                label_response = Some(
+                    ui.add(egui::Label::new(label).truncate())
+                        .on_hover_text(tooltip.unwrap_or(label)),
+                );
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(switch_width, FIELD_ROW_HEIGHT),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                ui.set_width(switch_width);
+                ui.spacing_mut().interact_size.y = FIELD_ROW_HEIGHT;
+                switch_response = Some(crate::widgets::switch(ui, value));
+            },
+        );
+    });
+    ui.add_space(FIELD_ROW_GAP);
+    (
+        label_response.expect("a switch row always lays out its label"),
+        switch_response.expect("a switch row always lays out its switch"),
     )
-    .inner
+}
+
+/// One boolean inspector row. See `field_switch_row_layout` for the geometry.
+fn field_switch_row(
+    ui: &mut Ui,
+    label: &str,
+    value: &mut bool,
+    tooltip: Option<&str>,
+) -> Response {
+    field_switch_row_layout(ui, label, value, tooltip).1
 }
 
 fn draw_choice(ui: &mut Ui, key: &str, value: &mut String, choices: &[(&str, &str)], width: f32) -> bool {
@@ -694,40 +844,22 @@ fn draw_number(
 }
 
 pub fn node_title(node: &GraphNode) -> String {
-    match node.node_type.as_str() {
-        "solid" | "primitive" => {
-            let kind = node.values.get("primitiveType").and_then(Value::as_str).unwrap_or("box");
-            match kind {
-                "box" => "Box".to_owned(),
-                "cylinder" => "Cylinder".to_owned(),
-                "cone" => "Cone".to_owned(),
-                "sphere" => "Sphere".to_owned(),
-                "torus" => "Torus".to_owned(),
-                "wedge" => "Wedge".to_owned(),
-                "pyramid" => "Pyramid".to_owned(),
-                "partialSphere" => "Partial sphere".to_owned(),
-                "partialTorus" => "Partial torus".to_owned(),
-                other => title_case(other),
-            }
-        }
-        "stepimporter" => "Import CAD".to_owned(),
-        "surfaceloft" => "Surface Loft".to_owned(),
-        "exporter" => "Export STEP".to_owned(),
-        "translate" => "Transform".to_owned(),
-        "circularpattern" => "Circular Pattern".to_owned(),
-        "group" => "Graph".to_owned(),
-        "graph" => "Graph".to_owned(),
-        "offsetfaces" => "Offset Faces".to_owned(),
-        "groupinput" => "Graph Input".to_owned(),
-        "groupoutput" => "Graph Output".to_owned(),
-        "boolean" => "Boolean".to_owned(),
-        "combine" => "Combine to Part".to_owned(),
-        "fuse" => "Fuse".to_owned(),
-        "chamfer" => "Chamfer".to_owned(),
-        "fillet" => "Fillet".to_owned(),
-        "look" => "Look".to_owned(),
-        other => title_case(&other.replace(['_', '-'], " ")),
+    let metadata = nodecraft_node_contract::metadata(&node.node_type);
+    if metadata.is_some_and(|metadata| {
+        metadata.icon_kind == nodecraft_node_contract::IconKind::Primitive
+    }) {
+        let kind = node
+            .values
+            .get("primitiveType")
+            .and_then(Value::as_str)
+            .unwrap_or("box");
+        return nodecraft_node_contract::primitive_label(kind)
+            .map_or_else(|| title_case(kind), str::to_owned);
     }
+    if let Some(metadata) = metadata {
+        return metadata.label.to_owned();
+    }
+    title_case(&node.node_type.replace(['_', '-'], " "))
 }
 
 fn title_case(text: &str) -> String {
@@ -744,105 +876,18 @@ fn title_case(text: &str) -> String {
 }
 
 pub fn node_badge(node: &GraphNode) -> String {
-    match node.node_type.as_str() {
-        "stepimporter" => "Import",
-        "exporter" | "linkedpart" => "Output",
-        "group" => "Graph",
-        "graph" => "Graph",
-        "offsetfaces" => "Feature",
-        "groupinput" | "groupoutput" => "Interface",
-        "translate" => "Transform",
-        "boolean" | "fuse" => "Boolean",
-        "combine" => "Part",
-        "solid" | "primitive" => "Solid",
-        "sketch" => "Sketch",
-        "spline" => "Curve",
-        "extrude" => "Operation",
-        "chamfer" | "fillet" | "shell" | "look" => "Feature",
-        "scatter" => "Generator",
-        "circularpattern" => "Pattern",
-        _ => "Node",
-    }
-    .to_owned()
+    nodecraft_node_contract::metadata(&node.node_type)
+        .map_or("Node", |metadata| metadata.category)
+        .to_owned()
 }
 
 fn section_title(node: &GraphNode) -> &'static str {
-    match node.node_type.as_str() {
-        "stepimporter" => "CAD FILE",
-        "exporter" => "OUTPUT FILE",
-        "translate" => "TRANSFORM",
-        "boolean" | "fuse" => "OPERATION",
-        "combine" => "SHAPES",
-        "solid" | "primitive" => "PARAMETERS",
-        "sketch" => "SKETCH",
-        "spline" => "SPLINE",
-        "extrude" => "EXTRUSION",
-        "chamfer" => "CHAMFER",
-        "fillet" => "FILLET",
-        "look" => "LOOK",
-        "shell" => "SHELL",
-        "mirror" => "MIRROR",
-        "scatter" => "SCATTER",
-        "circularpattern" => "CIRCULAR PATTERN",
-        "group" => "GRAPH",
-        "graph" => "GRAPH",
-        "offsetfaces" => "OFFSET",
-        "groupinput" | "groupoutput" => "GRAPH INTERFACE",
-        _ => "VALUES",
-    }
+    nodecraft_node_contract::metadata(&node.node_type)
+        .map_or("VALUES", |metadata| metadata.section)
 }
 
 fn node_description(node: &GraphNode) -> Option<String> {
-    let text = match node.node_type.as_str() {
-        "stepimporter" => "Imports CAD solids with cadmpeg: STEP (AP203/AP214/AP242), FreeCAD .FCStd and Rhino .3dm are detected from the file contents.".to_owned(),
-        "exporter" => "Writes the connected shape to a STEP file on disk.".to_owned(),
-        "translate" => "Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo.".to_owned(),
-        "solid" | "primitive" => "Creates a parametric primitive solid. Dimensions are in model units.".to_owned(),
-        "boolean" | "fuse" => {
-            let mode = node.values.get("mode").and_then(Value::as_str).unwrap_or("union");
-            match mode {
-                "subtract" => "A minus B: removes the second shape from the first.".to_owned(),
-                "subtract-reverse" => "B minus A: removes the first shape from the second.".to_owned(),
-                "intersect" => "Shared volume of both input shapes.".to_owned(),
-                _ => "Combines both input shapes into one result.".to_owned(),
-            }
-        }
-        "combine" => "Collects every connected shape into a single Part.".to_owned(),
-        "mirror" => "Reflects the incoming shape across a world plane.".to_owned(),
-        "chamfer" => "Cuts selected edges of the incoming shape.".to_owned(),
-        "fillet" => "Rounds selected edges of the incoming shape.".to_owned(),
-        "look" => "Applies a colour to every body in the incoming Part. The geometry is unchanged.".to_owned(),
-        "shell" => "Hollows the incoming shape by removing selected faces.".to_owned(),
-        "offsetfaces" => "Moves the selected faces along their normals.".to_owned(),
-        "extrude" => "Extrudes a sketch profile by the given amount.".to_owned(),
-        "scatter" => "Repeats a shape across a seeded area.".to_owned(),
-        "circularpattern" => "Repeats a shape around an axis.".to_owned(),
-        "group" => {
-            let count = node
-                .values
-                .get("nodes")
-                .and_then(Value::as_array)
-                .map_or(0, |nodes| {
-                    nodes
-                        .iter()
-                        .filter(|node| {
-                            !matches!(
-                                node.get("type").and_then(Value::as_str),
-                                Some("groupinput" | "groupoutput")
-                            )
-                        })
-                        .count()
-                });
-            let inputs = node.values.get("inputs").and_then(Value::as_array).map_or(0, Vec::len);
-            let outputs = node.values.get("outputs").and_then(Value::as_array).map_or(0, Vec::len);
-            format!(
-                "Graph with {count} child node(s), {inputs} input port(s) and {outputs} output port(s). \
-                 It is flattened into the parent graph during evaluation."
-            )
-        }
-        _ => return None,
-    };
-    Some(text)
+    nodecraft_node_contract::description(&node.node_type, &node.values)
 }
 
 fn graph_port_count(node: &GraphNode, field: &str) -> usize {
@@ -1145,7 +1190,147 @@ fn step_schema(ui: &Ui, path: &str) -> Option<String> {
     schema
 }
 
-fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
+fn step_import_field(key: &str) -> &'static nodecraft_node_contract::NodeFieldSpec {
+    nodecraft_node_contract::field_spec("stepimporter", &Value::Null, key)
+        .unwrap_or_else(|| panic!("stepimporter.{key} is a contract field"))
+}
+
+/// The one rule for the path-dependent controls: an importer with no path has
+/// nothing to point at, embed or watch, so those controls are disabled together.
+fn import_controls_enabled(path: &str) -> bool {
+    !path.is_empty()
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{} KB", (bytes + KB / 2) / KB)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    }
+}
+
+/// The short date shown for an embedded copy, e.g. `16 Nov`. The stored value
+/// is UTC ISO-8601; only its date part matters here. `None` keeps callers from
+/// inventing a date for older records.
+fn short_embedded_date(embedded_at: &str) -> Option<String> {
+    let date = embedded_at.split('T').next()?;
+    let mut parts = date.split('-');
+    let _year = parts.next()?;
+    let month: usize = parts.next()?.parse().ok()?;
+    let day: u32 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&month) || day == 0 {
+        return None;
+    }
+    Some(format!("{day} {}", MONTHS[month - 1]))
+}
+
+fn embedded_copy_status_text(copy: &nodecraft_engine::import_io::EmbeddedCopyStatus) -> String {
+    let mut details = format!("{}, {}", copy.file_name, human_size(copy.byte_length));
+    if let Some(date) = copy.embedded_at.as_deref().and_then(short_embedded_date) {
+        details.push_str(&format!(", embedded {date}"));
+    }
+    format!("Original not found \u{2014} using embedded copy ({details})")
+}
+
+/// One inspector action button with the same geometry and colours as Choose….
+fn import_action_button(ui: &mut Ui, label: &str, width: f32) -> Response {
+    let theme = crate::theme::get();
+    ui_shape::button(
+        ui,
+        label,
+        width,
+        26.0,
+        theme.color(theme.control),
+        egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
+        theme.color(theme.text),
+    )
+}
+
+/// Draw the engine-status line directly under the path field, plus the actions
+/// that make sense for it. This never stats or hashes a file itself.
+fn import_status_fields(
+    ui: &mut Ui,
+    status: &nodecraft_engine::import_io::ImportStatus,
+    output: &mut Output,
+) {
+    use nodecraft_engine::import_io::ImportStatus;
+    let theme = crate::theme::get();
+    match status {
+        ImportStatus::Available { kind, path } => {
+            let modifier = if *kind == nodecraft_engine::import_io::ImportSourceKind::Alternate {
+                " (alternate path)"
+            } else {
+                ""
+            };
+            ui.label(
+                egui::RichText::new(format!("{}{modifier}", path.display()))
+                    .size(10.5)
+                    .color(theme.color(theme.muted)),
+            );
+        }
+        ImportStatus::Ingested { copy, .. } => {
+            ui.label(
+                egui::RichText::new(embedded_copy_status_text(copy))
+                    .size(10.5)
+                    .color(theme.color(theme.node_warning)),
+            );
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                if import_action_button(
+                    ui,
+                    nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL,
+                    74.0,
+                )
+                .clicked()
+                {
+                    output.locate_import = true;
+                }
+                if import_action_button(
+                    ui,
+                    nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL,
+                    116.0,
+                )
+                .clicked()
+                {
+                    output.save_import_copy = true;
+                }
+            });
+        }
+        ImportStatus::Missing { path } => {
+            ui.label(
+                egui::RichText::new(format!("Original not found: {}", path.display()))
+                    .size(10.5)
+                    .color(theme.color(theme.node_error)),
+            );
+            if import_action_button(
+                ui,
+                nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL,
+                74.0,
+            )
+            .clicked()
+            {
+                output.locate_import = true;
+            }
+        }
+    }
+}
+
+fn step_import_fields(
+    ui: &mut Ui,
+    node: &GraphNode,
+    output: &mut Output,
+    document_directory: Option<&std::path::Path>,
+    source_changed: bool,
+    import_status: Option<&nodecraft_engine::import_io::ImportStatus>,
+) {
     let theme = crate::theme::get();
     let mut path = node.values.get("path").and_then(Value::as_str).unwrap_or_default().to_owned();
     ui.horizontal(|ui| {
@@ -1175,27 +1360,137 @@ fn step_import_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             output.choose_file = true;
         }
     });
-    if !path.is_empty() {
-        if let Some(schema) = step_schema(ui, &path) {
-            let protocol = nodecraft_step::application_protocol(&schema).unwrap_or("Other");
+    // An unconfigured importer is neutral, not an error: point at the next
+    // action in the same muted style as the other secondary source notes.
+    if path.is_empty() {
+        ui.label(
+            egui::RichText::new("Choose a CAD file")
+                .size(10.5)
+                .color(theme.color(theme.muted)),
+        );
+    }
+    // The path-dependent controls share one enabled rule: no path, no source to
+    // point at, embed or watch. Heal stays available.
+    let controls_enabled = import_controls_enabled(&path);
+    if let Some(status) = import_status {
+        import_status_fields(ui, status, output);
+    }
+    if !path.is_empty()
+        && let Some(schema) = step_schema(ui, &path)
+    {
+        let protocol = nodecraft_step::application_protocol(&schema).unwrap_or("Other");
+        ui.label(
+            egui::RichText::new(format!("{protocol} · {schema}"))
+                .size(11.0)
+                .color(theme.color(theme.muted)),
+        )
+        .on_hover_text(
+            "Supported: AP203/AP214/AP242 Part 21 B-rep import. \n\
+             AP242 PMI/GD&T, tessellated geometry and STEP XML (Part 28) are not yet supported.",
+        );
+    }
+    if source_changed {
+        ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(format!("{protocol} · {schema}"))
+                egui::RichText::new("Source changed")
                     .size(11.0)
-                    .color(theme.color(theme.muted)),
-            )
-            .on_hover_text(
-                "Supported: AP203/AP214/AP242 Part 21 B-rep import. \n\
-                 AP242 PMI/GD&T, tessellated geometry and STEP XML (Part 28) are not yet supported.",
+                    .color(theme.color(theme.node_warning)),
             );
-        }
+            if ui_shape::button(
+                ui,
+                "Reload?",
+                66.0,
+                26.0,
+                theme.color(theme.control),
+                egui::Stroke::new(1.0, theme.with_alpha(theme.border, 190)),
+                theme.color(theme.text),
+            )
+            .clicked()
+            {
+                output.reload_source = true;
+            }
+        });
+    }
+    let path_mode = step_import_field("pathMode");
+    let path_mode_choices = match path_mode.kind {
+        nodecraft_node_contract::FieldKind::Choice(choices) => choices,
+        _ => unreachable!("stepimporter.pathMode is a choice field"),
+    };
+    let mut mode = nodecraft_engine::import_io::path_mode(&node.values).to_owned();
+    let mut selected_mode = None;
+    ui.add_enabled_ui(controls_enabled, |ui| {
+        field_row(ui, path_mode.label, |ui, control_width| {
+            if draw_choice(
+                ui,
+                path_mode.key,
+                &mut mode,
+                path_mode_choices,
+                control_width,
+            ) {
+                selected_mode = Some(mode.clone());
+            }
+        });
+    });
+    if let Some(mode) = selected_mode
+        && let Some((path, relative, warning)) =
+            nodecraft_engine::import_io::switch_path_mode(
+                &node.values,
+                &mode,
+                document_directory,
+            )
+    {
+        output.changes.push(Change { field: "pathMode".to_owned(), value: Value::String(mode.clone()) });
+        output.changes.push(Change { field: "path".to_owned(), value: Value::String(path) });
+        output.changes.push(Change {
+            field: "relativePath".to_owned(),
+            value: Value::String(relative.unwrap_or_default()),
+        });
+        output.changes.push(Change {
+            field: "pathWarning".to_owned(),
+            value: Value::String(warning.unwrap_or_default()),
+        });
+    }
+    let mut ingest = nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "ingest")
+        .unwrap_or(false);
+    let ingest_changed = ui
+        .add_enabled_ui(controls_enabled, |ui| {
+            field_switch_row(
+                ui,
+                step_import_field("ingest").label,
+                &mut ingest,
+                Some("Save a copy of the CAD file inside this document, used if the original goes missing."),
+            )
+        })
+        .inner
+        .changed();
+    if ingest_changed {
+        output.changes.push(Change { field: "ingest".to_owned(), value: Value::Bool(ingest) });
+    }
+    let mut watch = nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "watch")
+        .unwrap_or(false);
+    let watch_tooltip = if ingest {
+        "Re-import automatically when the CAD file changes on disk, and update the embedded copy."
+    } else {
+        "Re-import automatically when the CAD file changes on disk."
+    };
+    let watch_changed = ui
+        .add_enabled_ui(controls_enabled, |ui| {
+            field_switch_row(
+                ui,
+                step_import_field("watch").label,
+                &mut watch,
+                Some(watch_tooltip),
+            )
+        })
+        .inner
+        .changed();
+    if watch_changed {
+        output.changes.push(Change { field: "watch".to_owned(), value: Value::Bool(watch) });
     }
     let mut heal = node.values.get("heal").and_then(Value::as_bool).unwrap_or(true);
-    field_row(ui, "Heal imported B-rep", |ui, _| {
-        if field_switch(ui, &mut heal).changed() {
-            output.changes.push(Change { field: "heal".to_owned(), value: Value::Bool(heal) });
-        }
-    });
-    let _ = theme;
+    if field_switch_row(ui, "Heal imported B-rep", &mut heal, None).changed() {
+        output.changes.push(Change { field: "heal".to_owned(), value: Value::Bool(heal) });
+    }
 }
 
 fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
@@ -1266,14 +1561,12 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
         });
     });
 
-    field_row(ui, "Overwrite", |ui, _| {
-        if field_switch(ui, &mut overwrite).changed() {
-            output.changes.push(Change {
-                field: "overwrite".to_owned(),
-                value: Value::Bool(overwrite),
-            });
-        }
-    });
+    if field_switch_row(ui, "Overwrite", &mut overwrite, None).changed() {
+        output.changes.push(Change {
+            field: "overwrite".to_owned(),
+            value: Value::Bool(overwrite),
+        });
+    }
     let _ = theme;
 }
 
@@ -1337,6 +1630,9 @@ pub fn show(
     sketch_editing: bool,
     editable_ports: bool,
     editable_root_ports: bool,
+    document_directory: Option<&std::path::Path>,
+    source_changed: bool,
+    import_status: Option<&nodecraft_engine::import_io::ImportStatus>,
 ) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
@@ -1351,7 +1647,7 @@ pub fn show(
             );
         }
         section_label(ui, section_title(node));
-        step_import_fields(ui, node, &mut output);
+        step_import_fields(ui, node, &mut output, document_directory, source_changed, import_status);
     } else if node.node_type == "linkedpart" {
         section_label(ui, section_title(node));
         linked_part_fields(ui, node, &mut output);
@@ -1398,7 +1694,7 @@ pub fn show(
             ui.add_space(8.0);
         }
         if node.node_type == "spline" {
-            spline_points(ui, node, &mut output);
+            let _ = spline_points(ui, node, &mut output);
             ui.add_space(6.0);
         }
         if node.node_type == "surfaceloft" {
@@ -1457,57 +1753,59 @@ pub fn show(
         for spec in &specs {
             let mut value = current_value(node, spec);
             let mut changed = false;
-            field_row(ui, &spec.label, |ui, control_width| match &spec.widget {
-                Widget::Text => {
-                    let mut text = value.as_str().unwrap_or_default().to_owned();
-                    if ui
-                        .add_sized(
-                            [control_width, FIELD_ROW_HEIGHT],
-                            egui::TextEdit::singleline(&mut text),
-                        )
-                        .changed()
-                    {
-                        value = Value::String(text);
-                        changed = true;
-                    }
+            if matches!(&spec.widget, Widget::Switch) {
+                let mut enabled = value.as_bool().unwrap_or(false);
+                if field_switch_row(ui, &spec.label, &mut enabled, None).changed() {
+                    value = Value::Bool(enabled);
+                    changed = true;
                 }
-                Widget::Switch => {
-                    let mut enabled = value.as_bool().unwrap_or(false);
-                    if field_switch(ui, &mut enabled).changed() {
-                        value = Value::Bool(enabled);
-                        changed = true;
+            } else {
+                field_row(ui, &spec.label, |ui, control_width| match &spec.widget {
+                    Widget::Text => {
+                        let mut text = value.as_str().unwrap_or_default().to_owned();
+                        if ui
+                            .add_sized(
+                                [control_width, FIELD_ROW_HEIGHT],
+                                egui::TextEdit::singleline(&mut text),
+                            )
+                            .changed()
+                        {
+                            value = Value::String(text);
+                            changed = true;
+                        }
                     }
-                }
-                Widget::Number { min, max, step, kind } => {
-                    let mut number = value.as_f64().unwrap_or(0.0);
-                    let field_id = egui::Id::new(("inspector-number", &node.id, &spec.key));
-                    let stored_expression = node.expressions.get(&spec.key).map(String::as_str);
-                    let (number_changed, expression_change) = draw_number(
-                        ui,
-                        &mut number,
-                        *step,
-                        *min,
-                        *max,
-                        *kind,
-                        field_id,
-                        stored_expression,
-                    );
-                    if number_changed {
-                        value = Value::from(number);
-                        changed = true;
+                    Widget::Switch => unreachable!("switch rows use field_switch_row"),
+                    Widget::Number { min, max, step, kind } => {
+                        let mut number = value.as_f64().unwrap_or(0.0);
+                        let field_id = egui::Id::new(("inspector-number", &node.id, &spec.key));
+                        let stored_expression = node.expressions.get(&spec.key).map(String::as_str);
+                        let (number_changed, expression_change) = draw_number(
+                            ui,
+                            &mut number,
+                            *step,
+                            *min,
+                            *max,
+                            *kind,
+                            field_id,
+                            stored_expression,
+                        );
+                        if number_changed {
+                            value = Value::from(number);
+                            changed = true;
+                        }
+                        if let Some(expression) = expression_change {
+                            output.expressions.push((spec.key.clone(), expression));
+                        }
                     }
-                    if let Some(expression) = expression_change {
-                        output.expressions.push((spec.key.clone(), expression));
+                    Widget::Choice(choices) => {
+                        let mut selected = value.as_str().unwrap_or_default().to_owned();
+                        if draw_choice(ui, &spec.key, &mut selected, choices, control_width) {
+                            value = Value::String(selected);
+                            changed = true;
+                        }
                     }
-                }
-                Widget::Choice(choices) => {
-                    let mut selected = value.as_str().unwrap_or_default().to_owned();
-                    if draw_choice(ui, &spec.key, &mut selected, choices, control_width) {
-                        value = Value::String(selected);
-                        changed = true;
-                    }
-                }
-            });
+                });
+            }
             if changed {
                 output.changes.push(Change { field: spec.key.clone(), value });
             }
@@ -1540,6 +1838,454 @@ mod tests {
             x: 0.0,
             y: 0.0,
         }
+    }
+
+    #[test]
+    fn switch_rows_leave_the_label_the_rest_of_the_row() {
+        // The default inspector panel is 280 px wide with 16 px insets on each
+        // side, so a field row gets 248 px.
+        const CONTENT_WIDTH: f32 = 248.0;
+        let ctx = egui::Context::default();
+        let mut value = false;
+        let mut labels = Vec::new();
+        let mut switch_right = None;
+        let mut control_right = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(CONTENT_WIDTH, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(CONTENT_WIDTH);
+                for label in ["Auto-reload", "Embed file"] {
+                    let (label_response, switch_response) =
+                        field_switch_row_layout(ui, label, &mut value, None);
+                    let galley = ui.painter().layout_no_wrap(
+                        label.to_owned(),
+                        egui::TextStyle::Body.resolve(ui.style()),
+                        ui.visuals().text_color(),
+                    );
+                    labels.push((label, label_response.rect.width(), galley.size().x));
+                    switch_right = Some(switch_response.rect.right());
+                }
+                field_row(ui, "Path", |ui, _| {
+                    control_right = Some(ui.max_rect().right());
+                });
+            },
+        );
+        output.textures_delta.clear();
+        let switch_right = switch_right.expect("switch laid out");
+        let control_right = control_right.expect("control laid out");
+        assert_eq!(
+            switch_right, control_right,
+            "a switch shares the right edge of the popup/control column"
+        );
+        for (label, available, needed) in labels {
+            assert!(
+                available >= needed,
+                "{label:?} label has {available} px but needs {needed} px"
+            );
+        }
+    }
+
+    #[test]
+    fn spline_point_rows_fill_and_share_the_inspector_columns() {
+        // The default inspector panel is 280 px wide with 16 px insets on each
+        // side, so the padded content width is 248 px.
+        const CONTENT_WIDTH: f32 = 248.0;
+        const ROWS: usize = 9;
+        let ctx = egui::Context::default();
+        let points: Vec<Value> = (0..ROWS)
+            .map(|index| {
+                serde_json::json!({
+                    "x": -205.33 + index as f64,
+                    "y": 50.4 - index as f64,
+                })
+            })
+            .collect();
+        let node = node("spline", serde_json::json!({ "points": points }));
+        let mut output = Output::default();
+        let mut rows = Vec::new();
+        let mut popup_right = None;
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(CONTENT_WIDTH, 1200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(CONTENT_WIDTH);
+                rows = spline_points(ui, &node, &mut output);
+                let mut value = "a".to_owned();
+                field_row(ui, "Popup", |ui, width| {
+                    draw_choice(ui, "test-popup", &mut value, &[("a", "A")], width);
+                    popup_right = Some(ui.max_rect().right());
+                });
+            },
+        );
+        frame.textures_delta.clear();
+
+        assert_eq!(rows.len(), ROWS, "every point should lay out one row");
+        let first = &rows[0];
+        assert_eq!(first.fields.len(), 2, "a point row has X and Y fields");
+        let popup_right = popup_right.expect("the popup row laid out");
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.index.width(), first.index.width(), "row {index} index width");
+            assert_eq!(row.index.right(), first.index.right(), "row {index} index right");
+            assert_eq!(
+                row.fields[0].left(),
+                first.fields[0].left(),
+                "row {index} X left"
+            );
+            assert_eq!(
+                row.fields[0].right(),
+                first.fields[0].right(),
+                "row {index} X right"
+            );
+            assert_eq!(
+                row.fields[1].left(),
+                first.fields[1].left(),
+                "row {index} Y left"
+            );
+            assert_eq!(
+                row.fields[1].right(),
+                first.fields[1].right(),
+                "row {index} Y right"
+            );
+            assert_eq!(
+                row.fields[0].width(),
+                row.fields[1].width(),
+                "row {index} X/Y widths"
+            );
+            assert_eq!(
+                row.remove.rect.right(),
+                popup_right,
+                "row {index} remove button shares the padded content edge"
+            );
+        }
+    }
+
+    #[test]
+    fn import_cad_rows_read_their_labels_from_the_contract() {
+        assert_eq!(step_import_field("pathMode").label, "Path");
+        assert_eq!(step_import_field("ingest").label, "Embed file");
+        assert_eq!(step_import_field("watch").label, "Auto-reload");
+        assert_eq!(
+            step_import_field("pathMode").kind,
+            nodecraft_node_contract::FieldKind::Choice(&[
+                ("relative", "Relative"),
+                ("absolute", "Full path"),
+            ])
+        );
+    }
+
+    fn import_frame_texts(frame: &egui::FullOutput) -> Vec<String> {
+        fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(shape) => texts.push(shape.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &frame.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// Click inside the source controls at a known right-column x. The inspector
+    /// lays switches out on the same right edge as the popup, so x = 225 lands on
+    /// both without depending on their individual widths.
+    fn click_import_control(ctx: &egui::Context, node: &GraphNode, y: f32) -> Vec<Change> {
+        let at = egui::pos2(225.0, y);
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(248.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        input.events.push(egui::Event::PointerMoved(at));
+        input.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        });
+        let mut output = Output::default();
+        let mut frame = ctx.run_ui(input, |ui| {
+            ui.set_width(248.0);
+            step_import_fields(ui, node, &mut output, None, false, None);
+        });
+        frame.textures_delta.clear();
+        output.changes
+    }
+
+    #[test]
+    fn empty_path_disables_the_source_controls_and_clicks_do_not_change_them() {
+        assert!(!import_controls_enabled(""));
+        assert!(import_controls_enabled("part.step"));
+        let ctx = egui::Context::default();
+        let node = node("stepimporter", serde_json::json!({ "path": "" }));
+        let mut changes = Vec::new();
+        // Cover the whole inspector: Path popup, Embed file, Auto-reload and Heal
+        // all live in the right column. Only the three source controls are
+        // asserted; Heal intentionally stays enabled.
+        for step in 0..150 {
+            changes.extend(click_import_control(&ctx, &node, step as f32 * 4.0));
+        }
+        assert!(
+            !changes.iter().any(|change| {
+                matches!(change.field.as_str(), "pathMode" | "ingest" | "watch")
+            }),
+            "disabled source controls must not emit changes: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn empty_path_shows_the_choose_a_cad_file_hint() {
+        let ctx = egui::Context::default();
+        let empty = node("stepimporter", serde_json::json!({ "path": "" }));
+        let mut output = Output::default();
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                step_import_fields(ui, &empty, &mut output, None, false, None);
+            },
+        );
+        let texts = import_frame_texts(&frame);
+        frame.textures_delta.clear();
+        assert!(
+            texts.iter().any(|text| text == "Choose a CAD file"),
+            "empty path hint missing, got {texts:?}"
+        );
+
+        let configured = node("stepimporter", serde_json::json!({ "path": "part.step" }));
+        let mut output = Output::default();
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                step_import_fields(ui, &configured, &mut output, None, false, None);
+            },
+        );
+        let texts = import_frame_texts(&frame);
+        frame.textures_delta.clear();
+        assert!(
+            !texts.iter().any(|text| text == "Choose a CAD file"),
+            "the hint is only for an unconfigured importer, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn a_path_enables_the_source_controls() {
+        let ctx = egui::Context::default();
+        let node = node(
+            "stepimporter",
+            serde_json::json!({ "path": "part.step", "pathMode": "relative" }),
+        );
+        let mut changes = Vec::new();
+        // The switch rows sit below the path field and the Path popup row.
+        for step in 0..35 {
+            changes.extend(click_import_control(&ctx, &node, 55.0 + step as f32 * 2.0));
+        }
+        assert!(
+            changes
+                .iter()
+                .any(|change| matches!(change.field.as_str(), "ingest" | "watch")),
+            "enabled switches should emit their change: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn ingested_copy_status_names_the_copy_and_offers_both_actions() {
+        use nodecraft_engine::import_io::{EmbeddedCopyStatus, ImportStatus};
+        let copy = EmbeddedCopyStatus {
+            file_name: "bracket.step".into(),
+            byte_length: 18 * 1024,
+            embedded_at: Some("2026-11-16T09:30:00Z".into()),
+        };
+        let status = ImportStatus::Ingested {
+            missing: std::path::PathBuf::from("/models/bracket.step"),
+            copy,
+        };
+        let node = node(
+            "stepimporter",
+            serde_json::json!({
+                "path": "/models/bracket.step",
+                "pathMode": "absolute",
+                "ingest": true,
+                "ingestHash": "abc",
+            }),
+        );
+        let ctx = egui::Context::default();
+        let mut output = Output::default();
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                step_import_fields(ui, &node, &mut output, None, false, Some(&status));
+            },
+        );
+        let texts = import_frame_texts(&frame);
+        frame.textures_delta.clear();
+        assert!(
+            texts.iter().any(|text| text.contains(
+                "Original not found \u{2014} using embedded copy (bracket.step, 18 KB, embedded 16 Nov)"
+            )),
+            "warning status line missing, got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
+            "Locate… button missing, got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
+            "Save copy as… button missing, got {texts:?}"
+        );
+        assert_eq!(
+            embedded_copy_status_text(&EmbeddedCopyStatus {
+                file_name: "bracket.step".into(),
+                byte_length: 18 * 1024,
+                embedded_at: None,
+            }),
+            "Original not found \u{2014} using embedded copy (bracket.step, 18 KB)",
+            "a record without embeddedAt omits the date"
+        );
+    }
+
+    #[test]
+    fn missing_copy_status_uses_the_error_line_and_only_offers_locate() {
+        use nodecraft_engine::import_io::ImportStatus;
+        let status = ImportStatus::Missing {
+            path: std::path::PathBuf::from("/models/bracket.step"),
+        };
+        let node = node(
+            "stepimporter",
+            serde_json::json!({ "path": "/models/bracket.step", "pathMode": "absolute" }),
+        );
+        let ctx = egui::Context::default();
+        let mut output = Output::default();
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                step_import_fields(ui, &node, &mut output, None, false, Some(&status));
+            },
+        );
+        let texts = import_frame_texts(&frame);
+        frame.textures_delta.clear();
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.contains("Original not found: /models/bracket.step")),
+            "error status line missing, got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
+            "Locate… button missing, got {texts:?}"
+        );
+        assert!(
+            !texts
+                .iter()
+                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
+            "Save copy as… needs an embedded copy: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn old_document_with_an_absolute_path_shows_full_path_without_a_change() {
+        let ctx = egui::Context::default();
+        let node = node(
+            "stepimporter",
+            serde_json::json!({ "path": "/models/old/part.step" }),
+        );
+        let mut inspector = Output::default();
+        let mut frame = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                step_import_fields(ui, &node, &mut inspector, None, false, None);
+            },
+        );
+        assert!(
+            inspector.changes.is_empty(),
+            "showing a derived path mode must not emit a change"
+        );
+
+        fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(shape) => texts.push(shape.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        collect(shape, texts);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for clipped in &frame.shapes {
+            collect(&clipped.shape, &mut texts);
+        }
+        frame.textures_delta.clear();
+        assert!(
+            texts.iter().any(|text| text == "Full path"),
+            "the path popup should show Full path, got {texts:?}"
+        );
     }
 
     #[test]
@@ -1650,6 +2396,47 @@ mod tests {
     }
 
     #[test]
+    fn spline_control_points_use_the_contract_default() {
+        // The contract default for spline.control is false. This pins the
+        // resolver path; the promoted contract-defaults-only rule flags a
+        // private values.get(...).as_bool().unwrap_or(false) instead.
+        let missing = node("spline", serde_json::json!({}));
+        assert!(!spline_control_points(&missing));
+        assert_eq!(
+            spline_control_points(&missing),
+            nodecraft_node_contract::resolve_bool("spline", &missing.values, "control")
+                .expect("spline.control is a contract switch")
+        );
+        assert!(spline_control_points(&node(
+            "spline",
+            serde_json::json!({"control": true})
+        )));
+        assert!(!spline_control_points(&node(
+            "spline",
+            serde_json::json!({"control": false})
+        )));
+    }
+
+    #[test]
+    fn boolean_description_reads_mode_through_the_contract() {
+        assert_eq!(
+            node_description(&node("boolean", serde_json::json!({}))).as_deref(),
+            Some("Combines both input shapes into one result.")
+        );
+        // The contract accepts the legacy `operation`/`op` aliases. A private
+        // values.get("mode") read would fall back to union here.
+        assert_eq!(
+            node_description(&node("boolean", serde_json::json!({"operation": "subtract"})))
+                .as_deref(),
+            Some("A minus B: removes the second shape from the first.")
+        );
+        assert_eq!(
+            node_description(&node("fuse", serde_json::json!({"op": "intersect"}))).as_deref(),
+            Some("Shared volume of both input shapes.")
+        );
+    }
+
+    #[test]
     fn reset_values_restores_settings_but_preserves_asset_data() {
         let look = GraphNode { expressions: Default::default(),
             id: "look".into(),
@@ -1687,6 +2474,216 @@ mod tests {
         let reset = reset_values(&fillet);
         assert!(reset.iter().any(|change| change.field == "edges"
             && change.value == serde_json::json!([])));
+    }
+
+    /// Pin the inspector metadata map before it moves into the contract table.
+    /// The expected values are the ones this file produced before the move.
+    #[test]
+    fn inspector_metadata_map_is_pinned() {
+        let cases: &[(&str, Value, &str, &str, &str, Option<&str>)] = &[
+            (
+                "primitive",
+                serde_json::json!({"primitiveType": "box"}),
+                "Box",
+                "Solid",
+                "PARAMETERS",
+                Some("Creates a parametric primitive solid. Dimensions are in model units."),
+            ),
+            (
+                "solid",
+                serde_json::json!({"primitiveType": "cylinder"}),
+                "Cylinder",
+                "Solid",
+                "PARAMETERS",
+                Some("Creates a parametric primitive solid. Dimensions are in model units."),
+            ),
+            (
+                "primitive",
+                serde_json::json!({"primitiveType": "partialSphere"}),
+                "Partial sphere",
+                "Solid",
+                "PARAMETERS",
+                Some("Creates a parametric primitive solid. Dimensions are in model units."),
+            ),
+            (
+                "stepimporter",
+                serde_json::json!({}),
+                "Import CAD",
+                "Import",
+                "CAD FILE",
+                Some("Imports CAD solids with cadmpeg: STEP (AP203/AP214/AP242), FreeCAD .FCStd and Rhino .3dm are detected from the file contents."),
+            ),
+            (
+                "exporter",
+                serde_json::json!({}),
+                "Export STEP",
+                "Output",
+                "OUTPUT FILE",
+                Some("Writes the connected shape to a STEP file on disk."),
+            ),
+            (
+                "translate",
+                serde_json::json!({}),
+                "Transform",
+                "Transform",
+                "TRANSFORM",
+                Some("Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo."),
+            ),
+            ("surfaceloft", serde_json::json!({}), "Surface Loft", "Node", "VALUES", None),
+            (
+                "circularpattern",
+                serde_json::json!({}),
+                "Circular Pattern",
+                "Pattern",
+                "CIRCULAR PATTERN",
+                Some("Repeats a shape around an axis."),
+            ),
+            (
+                "group",
+                serde_json::json!({
+                    "nodes": [{"type": "box"}, {"type": "groupinput"}, {"type": "groupoutput"}],
+                    "inputs": [{"name": "in"}],
+                    "outputs": []
+                }),
+                "Graph",
+                "Graph",
+                "GRAPH",
+                Some("Graph with 1 child node(s), 1 input port(s) and 0 output port(s). It is flattened into the parent graph during evaluation."),
+            ),
+            ("graph", serde_json::json!({}), "Graph", "Graph", "GRAPH", None),
+            (
+                "offsetfaces",
+                serde_json::json!({}),
+                "Offset Faces",
+                "Feature",
+                "OFFSET",
+                Some("Moves the selected faces along their normals."),
+            ),
+            ("groupinput", serde_json::json!({}), "Graph Input", "Interface", "GRAPH INTERFACE", None),
+            ("groupoutput", serde_json::json!({}), "Graph Output", "Interface", "GRAPH INTERFACE", None),
+            (
+                "boolean",
+                serde_json::json!({}),
+                "Boolean",
+                "Boolean",
+                "OPERATION",
+                Some("Combines both input shapes into one result."),
+            ),
+            (
+                "boolean",
+                serde_json::json!({"mode": "subtract"}),
+                "Boolean",
+                "Boolean",
+                "OPERATION",
+                Some("A minus B: removes the second shape from the first."),
+            ),
+            (
+                "boolean",
+                serde_json::json!({"mode": "subtract-reverse"}),
+                "Boolean",
+                "Boolean",
+                "OPERATION",
+                Some("B minus A: removes the first shape from the second."),
+            ),
+            (
+                "boolean",
+                serde_json::json!({"mode": "intersect"}),
+                "Boolean",
+                "Boolean",
+                "OPERATION",
+                Some("Shared volume of both input shapes."),
+            ),
+            (
+                "fuse",
+                serde_json::json!({"op": "intersect"}),
+                "Fuse",
+                "Boolean",
+                "OPERATION",
+                Some("Shared volume of both input shapes."),
+            ),
+            (
+                "combine",
+                serde_json::json!({}),
+                "Combine to Part",
+                "Part",
+                "SHAPES",
+                Some("Collects every connected shape into a single Part."),
+            ),
+            (
+                "chamfer",
+                serde_json::json!({}),
+                "Chamfer",
+                "Feature",
+                "CHAMFER",
+                Some("Cuts selected edges of the incoming shape."),
+            ),
+            (
+                "fillet",
+                serde_json::json!({}),
+                "Fillet",
+                "Feature",
+                "FILLET",
+                Some("Rounds selected edges of the incoming shape."),
+            ),
+            (
+                "look",
+                serde_json::json!({}),
+                "Look",
+                "Feature",
+                "LOOK",
+                Some("Applies a colour to every body in the incoming Part. The geometry is unchanged."),
+            ),
+            (
+                "shell",
+                serde_json::json!({}),
+                "Shell",
+                "Feature",
+                "SHELL",
+                Some("Hollows the incoming shape by removing selected faces."),
+            ),
+            (
+                "mirror",
+                serde_json::json!({}),
+                "Mirror",
+                "Node",
+                "MIRROR",
+                Some("Reflects the incoming shape across a world plane."),
+            ),
+            (
+                "scatter",
+                serde_json::json!({}),
+                "Scatter",
+                "Generator",
+                "SCATTER",
+                Some("Repeats a shape across a seeded area."),
+            ),
+            ("sketch", serde_json::json!({}), "Sketch", "Sketch", "SKETCH", None),
+            ("spline", serde_json::json!({}), "Spline", "Curve", "SPLINE", None),
+            (
+                "extrude",
+                serde_json::json!({}),
+                "Extrude",
+                "Operation",
+                "EXTRUSION",
+                Some("Extrudes a sketch profile by the given amount."),
+            ),
+            ("loft", serde_json::json!({}), "Loft", "Node", "VALUES", None),
+            ("linkedpart", serde_json::json!({}), "Linkedpart", "Output", "VALUES", None),
+            ("time", serde_json::json!({}), "Time", "Node", "VALUES", None),
+            ("sceneTransform", serde_json::json!({}), "SceneTransform", "Node", "VALUES", None),
+            ("not-a-node", serde_json::json!({}), "Not A Node", "Node", "VALUES", None),
+        ];
+        for (node_type, values, title, badge, section, description) in cases {
+            let node = node(node_type, values.clone());
+            assert_eq!(node_title(&node), *title, "{node_type} title");
+            assert_eq!(node_badge(&node), *badge, "{node_type} badge");
+            assert_eq!(section_title(&node), *section, "{node_type} section");
+            assert_eq!(
+                node_description(&node).as_deref(),
+                *description,
+                "{node_type} description",
+            );
+        }
     }
 
 }

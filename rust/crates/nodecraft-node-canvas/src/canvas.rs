@@ -295,6 +295,10 @@ pub struct NodeEditor {
     activity_fade_in: Duration,
     activity_hold: Duration,
     activity_fade_out: Duration,
+    /// Stable clock origin for glow activity timestamps sent to the shader.
+    clock_start: Instant,
+    #[cfg(test)]
+    last_glow_key: Option<u64>,
 }
 
 impl Default for NodeEditor {
@@ -351,6 +355,9 @@ impl Default for NodeEditor {
             // Activity must remain visible after a very fast node completes.
             activity_hold: Duration::from_millis(500),
             activity_fade_out: Duration::from_millis(40),
+            clock_start: Instant::now(),
+            #[cfg(test)]
+            last_glow_key: None,
         }
     }
 }
@@ -944,7 +951,6 @@ impl NodeEditor {
                 .iter()
                 .map(|node| (node.id.as_str(), node))
                 .collect();
-            let radius = glow_radius(self.zoom);
             let accent = self.theme.f32(self.theme.node_activity);
             for (id, activity) in &self.activity {
                 if self.error_nodes.contains(id) { continue; }
@@ -958,31 +964,57 @@ impl NodeEditor {
                     self.activity_fade_out,
                 );
                 if strength > 0.0 {
-                    shape_glow(&mut activity_glows, graph_rect(node), accent, 3.0, strength, radius);
+                    let start_ms = milliseconds_since(self.clock_start, activity.started);
+                    let end_ms = activity
+                        .ended
+                        .map_or(-1.0, |ended| milliseconds_since(self.clock_start, ended));
+                    shape_glow(
+                        &mut activity_glows,
+                        graph_rect(node),
+                        accent,
+                        3.0,
+                        1.0,
+                        1.0,
+                        Some((start_ms, end_ms)),
+                    );
                 }
             }
-            // Selection glow is dynamic too: zooming changes its screen-space
-            // radius but must not rebuild every card's shape instances.
+            // Selection glow is dynamic, but only through the uniform envelope;
+            // its instances are the card rect and do not change with zoom.
             for id in selected_nodes {
                 if self.error_nodes.contains(id) { continue; }
                 if let Some(node) = nodes.get(id.as_str()) {
-                    shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, radius);
+                    shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, 1.0, None);
                 }
             }
         }
         if !self.warning_nodes.is_empty() {
-            let radius = glow_radius(self.zoom);
             for id in &self.warning_nodes {
                 if let Some(node) = document.nodes.iter().find(|node| &node.id == id) {
-                    shape_glow(&mut activity_glows, graph_rect(node), self.theme.f32(self.theme.node_warning), 3.0, 0.7, radius);
+                    shape_glow(
+                        &mut activity_glows,
+                        graph_rect(node),
+                        self.theme.f32(self.theme.node_warning),
+                        4.0,
+                        0.7,
+                        1.0,
+                        None,
+                    );
                 }
             }
         }
         if !self.error_nodes.is_empty() {
-            let radius = glow_radius(self.zoom);
             for id in &self.error_nodes {
                 if let Some(node) = document.nodes.iter().find(|node| &node.id == id) {
-                    shape_glow(&mut activity_glows, graph_rect(node), self.theme.f32(self.theme.node_error), 4.0, 1.0, radius * 1.25);
+                    shape_glow(
+                        &mut activity_glows,
+                        graph_rect(node),
+                        self.theme.f32(self.theme.node_error),
+                        5.0,
+                        1.0,
+                        1.25,
+                        None,
+                    );
                 }
             }
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -999,7 +1031,8 @@ impl NodeEditor {
         let mut divider_active = false;
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>, f32)> = Vec::new();
-        let mut key = geometry_key_for(self.cable_routing, document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        let base_key = geometry_key_for(self.cable_routing, document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        let mut key = base_key;
         if !node_fades.is_empty() {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1009,6 +1042,20 @@ impl NodeEditor {
                 alpha.to_bits().hash(&mut hasher);
             }
             key = hasher.finish();
+        }
+        // Glow bytes depend on geometry/selection (already in base_key) plus the
+        // activity/warning/error state. They deliberately exclude node fades,
+        // camera transforms and the per-frame animation clock.
+        let glow_key = glow_key_for(
+            base_key,
+            &self.warning_nodes,
+            &self.error_nodes,
+            &self.activity,
+            self.clock_start,
+        );
+        #[cfg(test)]
+        {
+            self.last_glow_key = Some(glow_key);
         }
         if self.geometry_key != Some(key) {
             if self.gpu_ready {
@@ -1037,6 +1084,7 @@ impl NodeEditor {
         let ppp = ctx.pixels_per_point();
         let mut draw = NodeDraw {
             geometry_key: key,
+            glow_key,
             geometry,
             shapes,
             glows: activity_glows,
@@ -1058,6 +1106,11 @@ impl NodeEditor {
             // smoothness/vertex-cost tradeoff.
             curve_resolution: 1.5,
             glow: [glow, 0.0, 0.0, 0.0],
+            glow_radius: glow_radius(self.zoom),
+            glow_time_ms: milliseconds_since(self.clock_start, now),
+            activity_fade_in_ms: self.activity_fade_in.as_secs_f64() as f32 * 1000.0,
+            activity_hold_ms: self.activity_hold.as_secs_f64() as f32 * 1000.0,
+            activity_fade_out_ms: self.activity_fade_out.as_secs_f64() as f32 * 1000.0,
             texts: Vec::new(),
         };
         
@@ -2542,66 +2595,31 @@ fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
     svg
 }
 
-fn primitive_icon(primitive: &str) -> &'static str {
-    match primitive {
-        "sphere" | "partialSphere" => "sphere",
-        "cylinder" => "cylinder",
-        "torus" | "partialTorus" => "torus",
-        "cone" => "cone",
-        "pyramid" => "pyramid",
-        "wedge" => "wedge",
-        _ => "box",
-    }
-}
-
 fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]) {
-    let primitive = node
-        .values
-        .get("primitiveType")
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
-    let name = match node.node_type.as_str() {
-        "loft" => "loft",
-        "surfaceloft" => "surfaceloft",
-        "extrude" => "extrude",
-        "sketch" => "sketch",
-        "spline" => "spline",
-        "chamfer" => "chamfer",
-        "fillet" => "fillet",
-        "look" => "look",
-        "shell" => "shell",
-        "offsetfaces" => "offsetfaces",
-        "solid" | "primitive" => primitive_icon(primitive),
-        "box" => "box",
-        "cylinder" => "cylinder",
-        "cone" => "cone",
-        "wedge" => "wedge",
-        "sphere" => "sphere",
-        "torus" => "torus",
-        "translate" => "translate",
-        "mirror" => "mirror",
-        "boolean" | "fuse" => match node
+    let Some(metadata) = nodecraft_node_contract::metadata(&node.node_type) else {
+        return (
+            "box",
+            include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"),
+        );
+    };
+    let name = match metadata.icon_kind {
+        nodecraft_node_contract::IconKind::Static => metadata.icon,
+        nodecraft_node_contract::IconKind::Primitive => node
             .values
-            .get("mode")
-            .or_else(|| node.values.get("operation"))
-            .or_else(|| node.values.get("op"))
+            .get("primitiveType")
             .and_then(|value| value.as_str())
-            .unwrap_or("union")
-        {
-            "intersect" | "intersection" => "intersection",
-            "subtract-reverse" | "subtract-b-a" => "subtract-reverse",
-            "subtract" | "difference" | "subtract-a-b" => "subtract",
-            _ => "union",
-        },
-        "combine" => "combine",
-        "graph" => "graph",
-        "group" => "group",
-        "scatter" => "scatter",
-        "circularpattern" => "circular-pattern",
-        "exporter" => "export",
-        "stepimporter" => "import",
-        "linkedpart" => "linked",
-        _ => "box",
+            .and_then(nodecraft_node_contract::primitive_metadata)
+            .map_or(metadata.icon, |primitive| primitive.icon),
+        nodecraft_node_contract::IconKind::BooleanMode => {
+            let mode = node
+                .values
+                .get("mode")
+                .or_else(|| node.values.get("operation"))
+                .or_else(|| node.values.get("op"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("union");
+            nodecraft_node_contract::boolean_icon(mode)
+        }
     };
     let bytes: &'static [u8] = match name {
         "box" => include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"),
@@ -2641,38 +2659,7 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
 }
 
 fn node_title(node_type: &str) -> &'static str {
-    match node_type {
-        "solid" | "primitive" => "Solid",
-        "sketch" => "Sketch",
-        "spline" => "Spline",
-        "extrude" => "Extrude",
-        "chamfer" => "Chamfer",
-        "fillet" => "Fillet",
-        "look" => "Look",
-        "shell" => "Shell",
-        "box" => "Box",
-        "cylinder" => "Cylinder",
-        "cone" => "Cone",
-        "sphere" => "Sphere",
-        "torus" => "Torus",
-        "wedge" => "Wedge",
-        "translate" => "Transform",
-        "scatter" => "Scatter",
-        "circularpattern" => "Circular Pattern",
-        "combine" => "Combine to Part",
-        "fuse" | "boolean" => "Boolean",
-        "linkedpart" => "Linked Part",
-        "stepimporter" => "Import STEP",
-        "exporter" => "Export STEP",
-        "loft" => "Loft",
-        "surfaceloft" => "Surface Loft",
-        "mirror" => "Mirror",
-        "graph" => "Graph",
-        "group" => "Graph",
-        "groupinput" => "Graph Input",
-        "groupoutput" => "Graph Output",
-        _ => "Node",
-    }
+    nodecraft_node_contract::metadata(node_type).map_or("Node", |metadata| metadata.card_label)
 }
 
 fn node_inputs<'a>(node: &'a nodecraft_session::GraphNode) -> Cow<'a, [&'a str]> {
@@ -3290,6 +3277,41 @@ fn geometry_key_for(
     hasher.finish()
 }
 
+/// Key for the glow instance buffer. Reuses the geometry/selection key and adds
+/// only the state that is unique to glows. Activity timestamps are part of the
+/// key because they are part of the bytes; the animation clock itself is not,
+/// so fading never re-uploads. Camera/zoom are not inputs at all.
+fn glow_key_for(
+    geometry_key: u64,
+    warning_nodes: &HashSet<String>,
+    error_nodes: &HashSet<String>,
+    activity: &HashMap<String, ActivityGlow>,
+    clock_start: Instant,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    geometry_key.hash(&mut hasher);
+    let mut warnings: Vec<&str> = warning_nodes.iter().map(String::as_str).collect();
+    warnings.sort_unstable();
+    warnings.hash(&mut hasher);
+    let mut errors: Vec<&str> = error_nodes.iter().map(String::as_str).collect();
+    errors.sort_unstable();
+    errors.hash(&mut hasher);
+    let mut active: Vec<(&str, u32, Option<u32>)> = activity
+        .iter()
+        .map(|(id, glow)| {
+            (
+                id.as_str(),
+                milliseconds_since(clock_start, glow.started).to_bits(),
+                glow.ended
+                    .map(|ended| milliseconds_since(clock_start, ended).to_bits()),
+            )
+        })
+        .collect();
+    active.sort_unstable();
+    active.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn build_geometry(
     document: &GraphDocument,
     selected: &HashSet<String>,
@@ -3404,22 +3426,33 @@ fn glow_radius(zoom: f32) -> f32 {
     (18.0 / zoom.max(0.01)).max(24.0)
 }
 
+/// Convert an activity timestamp to the same millisecond clock the glow shader
+/// receives through the uniform. The key hashes this exact representation, so
+/// a timestamp change always invalidates the uploaded instance bytes.
+fn milliseconds_since(clock_start: Instant, instant: Instant) -> f32 {
+    instant.saturating_duration_since(clock_start).as_secs_f64() as f32 * 1000.0
+}
+
 fn shape_glow(
     out: &mut Vec<ShapeInstance>,
     rect: Rect,
     color: [f32; 4],
     kind: f32,
     intensity: f32,
-    radius: f32,
+    radius_scale: f32,
+    activity_ms: Option<(f32, f32)>,
 ) {
-    let glow = radius;
+    // The instance stores the card rect; the shader expands it by the uniform
+    // glow radius. That keeps the bytes independent of zoom and animation.
+    let (start_ms, end_ms) = activity_ms.unwrap_or((0.0, -1.0));
     out.push(ShapeInstance {
         center: [rect.center().x, rect.center().y],
-        size: [rect.width() + glow * 2.0, rect.height() + glow * 2.0],
+        size: [rect.width(), rect.height()],
         fill: [color[0], color[1], color[2], 0.55],
-        stroke: [0.0, 0.0, 0.0, intensity],
-        radius: 26.0 + glow,
-        stroke_width: glow,
+        // rg: activity timestamps, b: radius scale, a: static intensity.
+        stroke: [start_ms, end_ms, radius_scale, intensity],
+        radius: 26.0,
+        stroke_width: 0.0,
         kind,
         _pad: 0.0,
     });
@@ -4624,17 +4657,39 @@ mod tests {
     }
 
     #[test]
-    fn glow_instances_are_larger_and_centered_on_the_card() {
+    fn glow_instances_store_the_card_and_uniform_radius() {
         let rect = Rect::from_min_size(Pos2::new(40.0, 60.0), Vec2::new(220.0, 104.0));
         let mut glows = Vec::new();
-        shape_glow(&mut glows, rect, [0.2, 0.4, 0.9, 1.0], 2.0, 0.5, glow_radius(1.0));
+        shape_glow(&mut glows, rect, [0.2, 0.4, 0.9, 1.0], 2.0, 0.5, 1.0, None);
         assert_eq!(glows.len(), 1);
         let glow = &glows[0];
         assert_eq!(glow.kind, 2.0);
-        assert!(glow.size[0] > rect.width() && glow.size[1] > rect.height());
+        // The shader expands by glow_radius from the uniform, so the instance
+        // stays the card rect at every zoom.
+        assert_eq!(glow.size, [rect.width(), rect.height()]);
         assert!((glow.center[0] - rect.center().x).abs() < 1e-6);
         assert!((glow.center[1] - rect.center().y).abs() < 1e-6);
         assert!((glow.stroke[3] - 0.5).abs() < 1e-6);
+        assert!((glow.stroke[2] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn glow_activity_bytes_carry_timestamps_not_per_frame_intensity() {
+        let rect = Rect::from_min_size(Pos2::new(40.0, 60.0), Vec2::new(220.0, 104.0));
+        let mut glows = Vec::new();
+        shape_glow(
+            &mut glows,
+            rect,
+            [0.2, 0.4, 0.9, 1.0],
+            3.0,
+            1.0,
+            1.0,
+            Some((125.0, -1.0)),
+        );
+        let glow = &glows[0];
+        assert_eq!(glow.stroke[0], 125.0, "start timestamp");
+        assert_eq!(glow.stroke[1], -1.0, "still-running sentinel");
+        assert_eq!(glow.stroke[3], 1.0, "static intensity");
     }
 
     #[test]
@@ -4979,7 +5034,13 @@ mod tests {
             ("partialTorus", "torus"),
             ("wedge", "wedge"),
         ] {
-            assert_eq!(primitive_icon(primitive), expected, "icon for {primitive}");
+            assert_eq!(
+                nodecraft_node_contract::primitive_metadata(primitive)
+                    .expect("primitive metadata")
+                    .icon,
+                expected,
+                "icon for {primitive}",
+            );
         }
     }
 
@@ -5006,6 +5067,67 @@ mod tests {
     }
 
     #[test]
+    fn glow_key_ignores_camera_and_tracks_selection_and_warning_state() {
+        use nodecraft_session::GraphDocument;
+        let mut document = GraphDocument::new("glow-key");
+        document.nodes = vec![node_at(10.0, 20.0)];
+        let context = egui::Context::default();
+        let mut editor = NodeEditor::default();
+        editor.set_gpu_ready_for_test(true);
+        editor.set_theme(crate::theme::CanvasTheme::default());
+        let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(900.0, 700.0));
+        let selected = HashSet::new();
+        let selected_connections = HashSet::new();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(viewport);
+        let frame = |editor: &mut NodeEditor, selected: &HashSet<String>| {
+            let mut output = context.run_ui(input.clone(), |ui| {
+                editor.show(
+                    ui.ctx(),
+                    viewport,
+                    &document,
+                    selected,
+                    &selected_connections,
+                    None,
+                    None,
+                );
+            });
+            output.textures_delta.clear();
+        };
+
+        // First frame fits the document; the second establishes the idle key.
+        frame(&mut editor, &selected);
+        frame(&mut editor, &selected);
+        let idle = editor.last_glow_key.expect("glow key");
+
+        editor.zoom = 2.5;
+        editor.pan += Vec2::new(40.0, -15.0);
+        frame(&mut editor, &selected);
+        assert_eq!(
+            editor.last_glow_key,
+            Some(idle),
+            "pan/zoom must not change the glow instance bytes"
+        );
+
+        let mut selected_after = HashSet::new();
+        selected_after.insert("n".to_string());
+        frame(&mut editor, &selected_after);
+        let selected_key = editor.last_glow_key.expect("selection glow key");
+        assert_ne!(
+            selected_key, idle,
+            "selection must produce new glow instance bytes"
+        );
+
+        editor.set_warning_nodes(HashSet::from(["n".to_string()]));
+        frame(&mut editor, &selected_after);
+        assert_ne!(
+            editor.last_glow_key,
+            Some(selected_key),
+            "warning state must produce new glow instance bytes"
+        );
+    }
+
+    #[test]
     fn suppression_invalidates_cached_shape_instances() {
         use nodecraft_session::{GraphDocument, GraphInterface};
         let mut node = nodecraft_session::GraphNode { expressions: Default::default(),
@@ -5028,6 +5150,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let theme = crate::theme::CanvasTheme::default();
         let selected = HashSet::new();
@@ -5304,6 +5427,84 @@ mod tests {
         assert!(xs.windows(2).all(|pair| pair[1] > pair[0]));
         assert!(xs.first().is_some_and(|x| *x > rect.min.x));
         assert!(xs.last().is_some_and(|x| *x < rect.max.x));
+    }
+
+    fn node_of(node_type: &str, values: serde_json::Value) -> nodecraft_session::GraphNode {
+        nodecraft_session::GraphNode {
+            expressions: Default::default(),
+            id: "n".into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        }
+    }
+
+    /// Pin the card metadata map before it moves into the contract table. The
+    /// expected values are the ones this file produced before the move, so the
+    /// same assertions prove the move behaviour-unchanged.
+    #[test]
+    fn card_icon_and_label_map_is_pinned() {
+        let cases = [
+            ("sketch", serde_json::json!({}), "sketch", "Sketch"),
+            ("spline", serde_json::json!({}), "spline", "Spline"),
+            ("extrude", serde_json::json!({}), "extrude", "Extrude"),
+            ("loft", serde_json::json!({}), "loft", "Loft"),
+            ("surfaceloft", serde_json::json!({}), "surfaceloft", "Surface Loft"),
+            ("chamfer", serde_json::json!({}), "chamfer", "Chamfer"),
+            ("fillet", serde_json::json!({}), "fillet", "Fillet"),
+            ("look", serde_json::json!({}), "look", "Look"),
+            ("shell", serde_json::json!({}), "shell", "Shell"),
+            ("offsetfaces", serde_json::json!({}), "offsetfaces", "Node"),
+            ("translate", serde_json::json!({}), "translate", "Transform"),
+            ("mirror", serde_json::json!({}), "mirror", "Mirror"),
+            ("combine", serde_json::json!({}), "combine", "Combine to Part"),
+            ("graph", serde_json::json!({}), "graph", "Graph"),
+            ("group", serde_json::json!({}), "group", "Graph"),
+            ("groupinput", serde_json::json!({}), "box", "Graph Input"),
+            ("groupoutput", serde_json::json!({}), "box", "Graph Output"),
+            ("scatter", serde_json::json!({}), "scatter", "Scatter"),
+            ("circularpattern", serde_json::json!({}), "circular-pattern", "Circular Pattern"),
+            ("exporter", serde_json::json!({}), "export", "Export STEP"),
+            ("stepimporter", serde_json::json!({}), "import", "Import STEP"),
+            ("linkedpart", serde_json::json!({}), "linked", "Linked Part"),
+            ("time", serde_json::json!({}), "box", "Node"),
+            ("sceneTransform", serde_json::json!({}), "box", "Node"),
+            ("box", serde_json::json!({}), "box", "Box"),
+            ("cylinder", serde_json::json!({}), "cylinder", "Cylinder"),
+            ("cone", serde_json::json!({}), "cone", "Cone"),
+            ("sphere", serde_json::json!({}), "sphere", "Sphere"),
+            ("torus", serde_json::json!({}), "torus", "Torus"),
+            ("wedge", serde_json::json!({}), "wedge", "Wedge"),
+            ("boolean", serde_json::json!({}), "union", "Boolean"),
+            ("boolean", serde_json::json!({"mode": "subtract"}), "subtract", "Boolean"),
+            ("boolean", serde_json::json!({"mode": "subtract-reverse"}), "subtract-reverse", "Boolean"),
+            ("boolean", serde_json::json!({"mode": "intersect"}), "intersection", "Boolean"),
+            ("fuse", serde_json::json!({"op": "intersect"}), "intersection", "Boolean"),
+        ];
+        for (node_type, values, icon, label) in cases {
+            let node = node_of(node_type, values.clone());
+            assert_eq!(icon_for(&node).0, icon, "{node_type} {values} icon");
+            assert_eq!(node_title(node_type), label, "{node_type} label");
+        }
+        for (kind, icon) in [
+            ("box", "box"),
+            ("sphere", "sphere"),
+            ("cylinder", "cylinder"),
+            ("cone", "cone"),
+            ("torus", "torus"),
+            ("pyramid", "pyramid"),
+            ("wedge", "wedge"),
+            ("partialSphere", "sphere"),
+            ("partialTorus", "torus"),
+        ] {
+            for node_type in ["solid", "primitive"] {
+                let node = node_of(node_type, serde_json::json!({"primitiveType": kind}));
+                assert_eq!(icon_for(&node).0, icon, "{node_type} {kind} icon");
+                assert_eq!(node_title(node_type), "Solid", "{node_type} {kind} label");
+            }
+        }
     }
 
 }

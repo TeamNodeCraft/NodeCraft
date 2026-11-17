@@ -87,7 +87,11 @@ impl Order {
     /// The order of a B-rep's own lists.
     #[must_use]
     pub fn of(brep: &Brep) -> Self {
-        Self { faces: brep.face_list().to_vec(), edges: brep.edge_list().to_vec(), vertices: brep.vertex_list().to_vec() }
+        Self {
+            faces: brep.face_list().to_vec(),
+            edges: brep.edge_list().to_vec(),
+            vertices: brep.vertex_list().to_vec(),
+        }
     }
 }
 

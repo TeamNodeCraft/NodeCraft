@@ -13,6 +13,7 @@ nodecraft-solidcore = { path = "../nodecraft-solidcore" }
 nodecraft-mesh = { path = "../nodecraft-mesh" }
 solidcore-tess = { workspace = true }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
+nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 base64 = "0.22"
 nodecraft-step = { path = "../nodecraft-step" }
 serde_json.workspace = true

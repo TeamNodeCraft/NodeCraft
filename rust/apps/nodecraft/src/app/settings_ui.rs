@@ -296,6 +296,13 @@ impl NodeCraftApp {
                                 .text("Orbit speed")
                                 .max_decimals(2),
                         );
+                        let mut display_error_px = view.display_error_px;
+                        content.add(
+                            egui::Slider::new(&mut display_error_px, 0.1..=3.0)
+                                .text("Screen error (px)")
+                                .max_decimals(2),
+                        );
+                        view.display_error_px = display_error_px;
                         crate::widgets::switch_row(&mut content, "Translucent", &mut view.translucent);
                         crate::widgets::switch_row(&mut content, "Edges", &mut view.edges);
                         crate::widgets::switch_row(&mut content, "Triangles", &mut view.triangles);

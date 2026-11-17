@@ -1,0 +1,11 @@
+[package]
+name = "nodecraft-crash"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Process-wide crash-report store and render-callback panic guard"
+publish = false
+
+[lib]
+name = "nodecraft_crash"
+path = "src/lib.rs"

@@ -6,9 +6,51 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Completed whole-document node-hash passes, process-wide.
+///
+/// A pass is O(nodes + connections) with a per-node canonical JSON encode, so a
+/// relaxed atomic increment is negligible next to the work it counts. Kept
+/// always compiled so app/bridge tests can observe that a revision reuses the
+/// session cache instead of hashing again.
+static NODE_HASH_PASSES: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// Per-thread pass count. Cargo runs tests in parallel in one process, so
+    /// the process-wide counter is not deterministic for a single test; the
+    /// thread-local counter lets a test measure only the passes it caused.
+    static THREAD_NODE_HASH_PASSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Number of completed node-hash passes in this process.
+#[must_use]
+pub fn node_hash_pass_count() -> u64 { NODE_HASH_PASSES.load(Ordering::Relaxed) }
+
+/// Reset the process-wide node-hash pass counter.
+pub fn reset_node_hash_pass_count() { NODE_HASH_PASSES.store(0, Ordering::Relaxed); }
+
+/// Number of completed node-hash passes on the current thread.
+///
+/// Use this (with [`reset_thread_node_hash_pass_count`]) in a test that needs
+/// an exact count while other tests hash on other threads.
+#[must_use]
+pub fn thread_node_hash_pass_count() -> u64 { THREAD_NODE_HASH_PASSES.with(Cell::get) }
+
+/// Reset the current thread's node-hash pass counter.
+pub fn reset_thread_node_hash_pass_count() {
+    THREAD_NODE_HASH_PASSES.with(|passes| passes.set(0));
+}
+
+fn record_hash_pass() {
+    NODE_HASH_PASSES.fetch_add(1, Ordering::Relaxed);
+    THREAD_NODE_HASH_PASSES.with(|passes| passes.set(passes.get().saturating_add(1)));
+}
 
 mod defaults;
 pub mod flat;
@@ -130,6 +172,11 @@ pub struct GraphDocument {
     /// Additional reusable definitions stored in this document.
     #[serde(default)]
     pub definitions: Vec<GraphDefinition>,
+    /// Self-contained ingested CAD sources, one per distinct content hash.
+    /// This is a top-level section so the JSON stays readable and a record is
+    /// never duplicated inside node values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingested_sources: Vec<nodecraft_protocol::IngestRecord>,
 }
 
 fn default_root_definition() -> GraphDefinition {
@@ -166,6 +213,7 @@ impl GraphDocument {
             id: id.into(),
             root: default_root_definition(),
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -253,6 +301,19 @@ impl GraphDocument {
     ///
     /// Positions and selection state are intentionally excluded.
     pub fn node_hashes(&self) -> Result<BTreeMap<String, ContentHash>, SessionError> {
+        self.node_hashes_with_sources(&BTreeMap::new())
+    }
+
+    /// Content hash of every node with runtime importer-source hashes folded
+    /// into the importing node's identity. `source_hashes` maps node id to the
+    /// last content the source service observed for that importer; because a
+    /// node hash already includes its upstream hashes, a changed source also
+    /// changes every descendant's identity. The map is runtime state and is
+    /// never written into a document.
+    pub fn node_hashes_with_sources(
+        &self,
+        source_hashes: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, ContentHash>, SessionError> {
         let nodes = self.node_map()?;
         let mut inputs: BTreeMap<&str, Vec<&GraphConnection>> = BTreeMap::new();
         for connection in &self.connections {
@@ -276,9 +337,13 @@ impl GraphDocument {
             let Some(node) = nodes.get(id) else { continue; };
             let mut h = Hash128::new();
             h.write(b"nodecraft-node-v1");
-            h.write(node.id.as_bytes());
-            h.write(node.node_type.as_bytes());
+            h.write_framed(node.id.as_bytes());
+            h.write_framed(node.node_type.as_bytes());
             h.write(&[u8::from(node.suppressed)]);
+            if let Some(source_hash) = source_hashes.get(id) {
+                h.write(b"source-content-v1");
+                h.write_framed(source_hash.as_bytes());
+            }
             if node.node_type == "graph" {
                 // A graph card caches its definition name for display. Names are
                 // presentation only, so exclude them from the geometry hash.
@@ -295,8 +360,8 @@ impl GraphDocument {
             let mut links = inputs.get(id).cloned().unwrap_or_default();
             links.sort_by(|a, b| (a.input.as_str(), a.from.as_str(), a.out.as_str()).cmp(&(b.input.as_str(), b.from.as_str(), b.out.as_str())));
             for link in links {
-                h.write(link.input.as_bytes());
-                h.write(link.out.as_bytes());
+                h.write_framed(link.input.as_bytes());
+                h.write_framed(link.out.as_bytes());
                 if let Some(upstream) = hashes.get(&link.from) { h.write(&upstream.0.to_le_bytes()); }
             }
             hashes.insert(id.to_string(), h.finish());
@@ -309,6 +374,7 @@ impl GraphDocument {
         if hashes.len() != nodes.len() {
             return Err(SessionError::Cycle);
         }
+        record_hash_pass();
         Ok(hashes)
     }
 
@@ -328,8 +394,8 @@ impl GraphDocument {
             }
             groups::GraphReference::External { path, definition } => {
                 out.write(b"external-definition");
-                out.write(path.as_bytes());
-                out.write(definition.as_bytes());
+                out.write_framed(path.as_bytes());
+                out.write_framed(definition.as_bytes());
                 Ok(())
             }
         }
@@ -351,19 +417,19 @@ impl GraphDocument {
         })?;
         stack.push(id.to_owned());
         out.write(b"definition-v1");
-        out.write(definition.id.as_bytes());
-        out.write(definition.kind.as_bytes());
+        out.write_framed(definition.id.as_bytes());
+        out.write_framed(definition.kind.as_bytes());
         for port in &definition.interface.inputs {
-            out.write(b"in:"); out.write(port.as_bytes());
+            out.write(b"in:"); out.write_framed(port.as_bytes());
         }
         for port in &definition.interface.outputs {
-            out.write(b"out:"); out.write(port.as_bytes());
+            out.write(b"out:"); out.write_framed(port.as_bytes());
         }
         let mut nodes: Vec<&GraphNode> = definition.nodes.iter().collect();
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
         for node in nodes {
-            out.write(node.id.as_bytes());
-            out.write(node.node_type.as_bytes());
+            out.write_framed(node.id.as_bytes());
+            out.write_framed(node.node_type.as_bytes());
             out.write(&[u8::from(node.suppressed)]);
             canonical_json(&node.values, out);
             if node.node_type == "graph" {
@@ -376,36 +442,24 @@ impl GraphDocument {
                 .cmp(&(b.from.as_str(), b.to.as_str(), b.input.as_str(), b.out.as_str()))
         });
         for connection in connections {
-            out.write(connection.from.as_bytes());
-            out.write(connection.to.as_bytes());
-            out.write(connection.input.as_bytes());
-            out.write(connection.out.as_bytes());
+            out.write_framed(connection.from.as_bytes());
+            out.write_framed(connection.to.as_bytes());
+            out.write_framed(connection.input.as_bytes());
+            out.write_framed(connection.out.as_bytes());
         }
         stack.pop();
         Ok(())
     }
 
     /// Nodes whose evaluation content changed, including all downstream nodes.
+    ///
+    /// A node's `ContentHash` already folds in its upstream hashes, so the ids
+    /// whose hash changed are exactly the changed nodes and their descendants.
     #[must_use]
     pub fn dirty_nodes(&self, previous: &Self) -> Result<Vec<String>, SessionError> {
         let previous_hashes = previous.node_hashes()?;
         let current_hashes = self.node_hashes()?;
-        let mut dirty: BTreeSet<String> = current_hashes
-            .iter()
-            .filter(|(id, hash)| previous_hashes.get(*id) != Some(*hash))
-            .map(|(id, _)| id.clone())
-            .collect();
-        let mut children: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for connection in &self.connections {
-            children.entry(connection.from.as_str()).or_default().push(connection.to.as_str());
-        }
-        let mut queue: Vec<String> = dirty.iter().cloned().collect();
-        while let Some(id) = queue.pop() {
-            for child in children.get(id.as_str()).cloned().unwrap_or_default() {
-                if dirty.insert(child.to_string()) { queue.push(child.to_string()); }
-            }
-        }
-        Ok(dirty.into_iter().collect())
+        Ok(dirty_from_hashes(&previous_hashes, &current_hashes))
     }
 }
 
@@ -484,6 +538,17 @@ pub struct Session {
     redo: Vec<HistoryEntry>,
     revision: u64,
     undo_limit: usize,
+    /// Content hashes of `present` at `revision`, computed with
+    /// `hashed_sources`. `None` when the document cannot be hashed (for example
+    /// a pre-existing cycle); revision transitions then fall back to seed dirty
+    /// sets exactly as before.
+    hashes: Option<Arc<BTreeMap<String, ContentHash>>>,
+    /// Runtime importer-source hashes the caller wants folded into the next
+    /// revision. This is not document content.
+    source_hashes: BTreeMap<String, String>,
+    /// Source hashes `hashes` was computed with, so a caller can ask for the
+    /// cache without a stale-source comparison.
+    hashed_sources: BTreeMap<String, String>,
 }
 
 impl Session {
@@ -491,11 +556,107 @@ impl Session {
     pub fn new(mut document: GraphDocument) -> Self {
         defaults::canonicalize_document(&mut document);
         let children = build_children(&document);
-        Self { present: document, children, undo: Vec::new(), redo: Vec::new(), revision: 1, undo_limit: 100 }
+        let hashes = document
+            .node_hashes_with_sources(&BTreeMap::new())
+            .ok()
+            .map(Arc::new);
+        Self {
+            present: document,
+            children,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            revision: 1,
+            undo_limit: 100,
+            hashes,
+            source_hashes: BTreeMap::new(),
+            hashed_sources: BTreeMap::new(),
+        }
     }
 
     #[must_use]
     pub fn document(&self) -> &GraphDocument { &self.present }
+
+    /// Content hashes for the current revision, computed once when that
+    /// revision was created. Reading this is an `Arc` clone, not a hash pass.
+    pub fn node_hashes(&self) -> Result<Arc<BTreeMap<String, ContentHash>>, SessionError> {
+        if let Some(hashes) = &self.hashes {
+            return Ok(Arc::clone(hashes));
+        }
+        // The revision could not be hashed (cycle/missing node). Recompute so
+        // the caller gets the real error; failed revisions are not on the hot
+        // path and this never caches a partial result.
+        self.present
+            .node_hashes_with_sources(&self.hashed_sources)
+            .map(Arc::new)
+    }
+
+    /// The cached map, only when it was computed with exactly `sources`.
+    ///
+    /// Unlike [`Self::hashes_with_sources`] this never hashes, so the app can
+    /// hand the map to the evaluation worker only on the cache-hit path.
+    #[must_use]
+    pub fn hashes_for_sources(
+        &self,
+        sources: &BTreeMap<String, String>,
+    ) -> Option<Arc<BTreeMap<String, ContentHash>>> {
+        self.hashes
+            .as_ref()
+            .filter(|_| sources == &self.hashed_sources)
+            .cloned()
+    }
+
+    /// Content hashes for the current document under `sources`.
+    ///
+    /// Returns the revision cache when the sources are the ones the revision was
+    /// hashed with. A source change is runtime state, not a document edit, so it
+    /// takes the correctness fallback of one full pass instead of pretending
+    /// the cached keys are current.
+    pub fn hashes_with_sources(
+        &self,
+        sources: &BTreeMap<String, String>,
+    ) -> Result<Arc<BTreeMap<String, ContentHash>>, SessionError> {
+        if let Some(hashes) = self.hashes_for_sources(sources) {
+            return Ok(hashes);
+        }
+        self.present
+            .node_hashes_with_sources(sources)
+            .map(Arc::new)
+    }
+
+    /// Tell the session which importer-source hashes the next revision must
+    /// fold into node identity. The cached map is deliberately left alone: the
+    /// next revision compares against the old keys, so a source change dirties
+    /// the importer and its descendants.
+    pub fn set_source_hashes(&mut self, sources: BTreeMap<String, String>) {
+        self.source_hashes = sources;
+    }
+
+    /// Runtime source hashes that the next revision will fold in.
+    #[must_use]
+    pub fn source_hashes(&self) -> &BTreeMap<String, String> { &self.source_hashes }
+
+    /// Source hashes the current revision cache was computed with.
+    #[must_use]
+    pub fn hashed_sources(&self) -> &BTreeMap<String, String> { &self.hashed_sources }
+
+    /// Add one ingested source record. Records are content-addressed: a record
+    /// with the same hash already present is a no-op. Assets are not part of a
+    /// node's content hash, so this bumps the session revision but does not
+    /// dirty any node.
+    pub fn add_ingest_record(&mut self, record: nodecraft_protocol::IngestRecord) -> bool {
+        if self
+            .present
+            .ingested_sources
+            .iter()
+            .any(|existing| existing.content_hash == record.content_hash)
+        {
+            return false;
+        }
+        self.present.ingested_sources.push(record);
+        self.revision = self.revision.wrapping_add(1);
+        true
+    }
+
     #[must_use]
     pub fn revision(&self) -> u64 { self.revision }
     #[must_use]
@@ -530,6 +691,7 @@ impl Session {
         coalesce_window: Duration,
     ) -> Result<Change, SessionError> {
         let now = Instant::now();
+        let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let mut inverse_groups: Vec<Vec<Command>> = Vec::new();
         let structural = commands.iter().any(Command::is_structural);
@@ -546,15 +708,21 @@ impl Session {
         if !effects.changed {
             return Ok(Change { revision: self.revision, dirty_nodes: Vec::new(), changed: false });
         }
+        let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
         if structural {
-            if let Err(error) = self.present.node_hashes() {
+            if let Err(error) = &current_hashes {
                 rollback_groups(&mut self.present, &inverse_groups);
                 self.children = build_children(&self.present);
-                return Err(error);
+                return Err(error.clone());
             }
             self.children = build_children(&self.present);
         }
-        let dirty_nodes = dirty_nodes_from_seeds(&self.children, &effects.seeds);
+        let dirty_nodes = identity_dirty_nodes(
+            previous_hashes.as_deref(),
+            current_hashes.as_ref().ok(),
+            &self.children,
+            &effects.seeds,
+        );
         let key = coalesce_key.map(str::to_string);
         let merge = key.as_ref().is_some_and(|key| {
             coalesce_window > Duration::ZERO
@@ -579,6 +747,8 @@ impl Session {
             if self.undo.len() > self.undo_limit { self.undo.remove(0); }
         }
         self.redo.clear();
+        self.hashed_sources.clone_from(&self.source_hashes);
+        self.hashes = current_hashes.ok().map(Arc::new);
         self.revision += 1;
         Ok(Change { revision: self.revision, dirty_nodes: cumulative_dirty, changed: true })
     }
@@ -732,6 +902,7 @@ impl Session {
     /// creating an undo entry. The revision still advances so the next evaluation
     /// sees the new content hashes.
     pub fn apply_derived_commands(&mut self, commands: &[Command]) -> Result<Change, SessionError> {
+        let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let mut applied_groups: Vec<Vec<Command>> = Vec::new();
         let structural = commands.iter().any(Command::is_structural);
@@ -748,21 +919,30 @@ impl Session {
         if !effects.changed {
             return Ok(Change { revision: self.revision, dirty_nodes: Vec::new(), changed: false });
         }
+        let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
         if structural {
-            if let Err(error) = self.present.node_hashes() {
+            if let Err(error) = &current_hashes {
                 rollback_groups(&mut self.present, &applied_groups);
                 self.children = build_children(&self.present);
-                return Err(error);
+                return Err(error.clone());
             }
             self.children = build_children(&self.present);
         }
-        let dirty_nodes = dirty_nodes_from_seeds(&self.children, &effects.seeds);
+        let dirty_nodes = identity_dirty_nodes(
+            previous_hashes.as_deref(),
+            current_hashes.as_ref().ok(),
+            &self.children,
+            &effects.seeds,
+        );
+        self.hashed_sources.clone_from(&self.source_hashes);
+        self.hashes = current_hashes.ok().map(Arc::new);
         self.revision += 1;
         Ok(Change { revision: self.revision, dirty_nodes, changed: true })
     }
 
     pub fn undo(&mut self) -> Result<Option<Change>, SessionError> {
         let Some(entry) = self.undo.pop() else { return Ok(None); };
+        let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let structural = entry.forward.iter().any(Command::is_structural);
         for group in entry.inverse_groups.iter().rev() {
@@ -771,8 +951,16 @@ impl Session {
             }
         }
         if structural { self.children = build_children(&self.present); }
-        let dirty_nodes = dirty_nodes_from_seeds(&self.children, &effects.seeds);
+        let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
+        let dirty_nodes = identity_dirty_nodes(
+            previous_hashes.as_deref(),
+            current_hashes.as_ref().ok(),
+            &self.children,
+            &effects.seeds,
+        );
         self.redo.push(entry);
+        self.hashed_sources.clone_from(&self.source_hashes);
+        self.hashes = current_hashes.ok().map(Arc::new);
         self.revision += 1;
         Ok(Some(Change { revision: self.revision, dirty_nodes, changed: true }))
     }
@@ -849,14 +1037,23 @@ impl Session {
 
     pub fn redo(&mut self) -> Result<Option<Change>, SessionError> {
         let Some(entry) = self.redo.pop() else { return Ok(None); };
+        let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let structural = entry.forward.iter().any(Command::is_structural);
         for command in &entry.forward {
             apply_one_command(&mut self.present, command, &mut effects)?;
         }
         if structural { self.children = build_children(&self.present); }
-        let dirty_nodes = dirty_nodes_from_seeds(&self.children, &effects.seeds);
+        let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
+        let dirty_nodes = identity_dirty_nodes(
+            previous_hashes.as_deref(),
+            current_hashes.as_ref().ok(),
+            &self.children,
+            &effects.seeds,
+        );
         self.undo.push(entry);
+        self.hashed_sources.clone_from(&self.source_hashes);
+        self.hashes = current_hashes.ok().map(Arc::new);
         self.revision += 1;
         Ok(Some(Change { revision: self.revision, dirty_nodes, changed: true }))
     }
@@ -1093,6 +1290,40 @@ fn build_children(document: &GraphDocument) -> BTreeMap<String, Vec<String>> {
     children
 }
 
+/// Ids whose content hash changed, or that are newly added. Removed ids are not
+/// dirty: the hash map only describes the current document, and their consumers
+/// change because the incoming-link payload changes.
+fn dirty_from_hashes(
+    previous: &BTreeMap<String, ContentHash>,
+    current: &BTreeMap<String, ContentHash>,
+) -> Vec<String> {
+    current
+        .iter()
+        .filter(|(id, hash)| previous.get(*id) != Some(*hash))
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// Identity-derived dirty set for a transaction.
+///
+/// A command seeds the edited node, but a seed is not identity: a
+/// presentation-only edit can seed a card without changing any hash. The
+/// authoritative answer is the hash diff over the whole document. The seed
+/// closure is kept only as a conservative fallback when hashing is unavailable
+/// (for example a malformed document with a pre-existing cycle), so dirty
+/// reporting never fails a transaction that otherwise succeeded.
+fn identity_dirty_nodes(
+    previous_hashes: Option<&BTreeMap<String, ContentHash>>,
+    current_hashes: Option<&BTreeMap<String, ContentHash>>,
+    children: &BTreeMap<String, Vec<String>>,
+    seeds: &BTreeSet<String>,
+) -> Vec<String> {
+    match (previous_hashes, current_hashes) {
+        (Some(previous), Some(current)) => dirty_from_hashes(previous, current),
+        _ => dirty_nodes_from_seeds(children, seeds),
+    }
+}
+
 fn dirty_nodes_from_seeds(children: &BTreeMap<String, Vec<String>>, seeds: &BTreeSet<String>) -> Vec<String> {
     if seeds.is_empty() { return Vec::new(); }
     let mut dirty: BTreeSet<String> = seeds.clone();
@@ -1117,6 +1348,19 @@ impl Hash128 {
             self.b ^= u64::from(*byte); self.b = self.b.wrapping_mul(0x100000001b3).rotate_left(7);
         }
     }
+    /// Write one variable-length field as an 8-byte little-endian length
+    /// followed by the bytes.
+    ///
+    /// Every variable-length field in this encoder must go through this
+    /// helper: writing raw bytes back to back would let different field splits
+    /// produce the same stream (for example id `"ab"` + type `"c"` versus id
+    /// `"a"` + type `"bc"`). The length prefix makes the boundary part of the
+    /// hashed input, so a sequence of framed fields is unambiguous.
+    /// Fixed-width data (flags, numeric hashes) can still use `write`.
+    fn write_framed(&mut self, bytes: &[u8]) {
+        self.write(&(bytes.len() as u64).to_le_bytes());
+        self.write(bytes);
+    }
     fn finish(self) -> ContentHash { ContentHash((u128::from(self.a) << 64) | u128::from(self.b)) }
 }
 
@@ -1124,14 +1368,14 @@ fn canonical_json(value: &Value, out: &mut Hash128) {
     match value {
         Value::Null => out.write(b"n"),
         Value::Bool(v) => out.write(if *v { b"t" } else { b"f" }),
-        Value::Number(v) => { out.write(b"#"); out.write(v.to_string().as_bytes()); }
-        Value::String(v) => { out.write(b"s"); out.write(v.as_bytes()); out.write(b"\0"); }
+        Value::Number(v) => { out.write(b"#"); out.write_framed(v.to_string().as_bytes()); }
+        Value::String(v) => { out.write(b"s"); out.write_framed(v.as_bytes()); }
         Value::Array(values) => { out.write(b"["); for value in values { canonical_json(value, out); } out.write(b"]"); }
         Value::Object(map) => {
             out.write(b"{");
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort_unstable();
-            for key in keys { out.write(key.as_bytes()); out.write(b"\0"); canonical_json(&map[key], out); }
+            for key in keys { out.write_framed(key.as_bytes()); canonical_json(&map[key], out); }
             out.write(b"}");
         }
     }
@@ -1165,6 +1409,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -1246,6 +1491,21 @@ mod tests {
         graph.connections.push(GraphConnection { from: "c".into(), to: "a".into(), input: "shape".into(), out: "shape".into() });
         assert_eq!(graph.node_hashes(), Err(SessionError::Cycle));
     }
+
+    #[test]
+    fn malformed_cycle_falls_back_to_seed_dirty_set() {
+        let mut graph = document();
+        // A pre-existing cycle makes `node_hashes` unavailable both before and
+        // after a non-structural edit, so the dirty set must fall back to the
+        // seed closure instead of failing the transaction.
+        graph.connections.push(GraphConnection { from: "c".into(), to: "a".into(), input: "shape".into(), out: "shape".into() });
+        let mut session = Session::new(graph);
+        let change = session
+            .apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: serde_json::json!(12) }])
+            .expect("edit on a malformed document");
+        assert!(change.changed);
+        assert_eq!(change.dirty_nodes, vec!["a", "b", "c"]);
+    }
 }
 
 #[cfg(test)]
@@ -1270,6 +1530,7 @@ mod transaction_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -1788,6 +2049,7 @@ mod transaction_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let graph = Session::new(graph).document().clone();
         assert_eq!(graph.nodes[0].node_type, "fillet");
@@ -1816,6 +2078,7 @@ mod transaction_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         graph = Session::new(graph).document().clone();
         assert_eq!(graph.nodes[0].values["primitiveType"], "box");

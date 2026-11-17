@@ -8,7 +8,7 @@ use crate::kernel_pool::RevisionToken;
 use nodecraft_protocol::Mesh;
 use std::sync::Arc;
 
-pub use nodecraft_display::{DisplayTransform, PlanInstance, face_colors_by_index};
+pub use nodecraft_display::{Affine3, DisplayTransform, Placement, PlanInstance, face_colors_by_index};
 
 /// Bump when the meshing algorithm changes so cached meshes are not reused.
 pub const TESSELLATION_VERSION: u32 = 1;
@@ -62,14 +62,15 @@ pub struct MeshInstance {
     pub plan_edge_ids: Vec<Option<String>>,
     /// Planner diagnostics for this body, when it was just tessellated.
     pub stats: Option<nodecraft_layers::TessStats>,
-    pub transforms: Vec<DisplayTransform>,
+    /// The body's one composed placement value.
+    pub placement: Placement,
 }
 
 /// A body sent to the tessellation worker. The tessellation worker never mutates the B-rep.
 #[derive(Clone, Debug)]
 pub struct MeshBody {
     pub brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
-    pub transforms: Vec<DisplayTransform>,
+    pub placement: Placement,
 }
 
 /// Job sent to an independent tessellation worker.
@@ -103,13 +104,7 @@ impl MeshAsset {
         let mut meshes = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
             let mut mesh = (*instance.mesh).clone();
-            for transform in &instance.transforms {
-                mesh = match transform {
-                    DisplayTransform::Place { offset, rotation } => crate::mesh_placement(&mesh, *offset, *rotation),
-                    DisplayTransform::Mirror { plane, offset } => crate::mesh_mirror(&mesh, plane, *offset),
-                    DisplayTransform::Scale { factor } => crate::mesh_scale(&mesh, *factor),
-                };
-            }
+            nodecraft_display::apply_placement(&mut mesh, &instance.placement);
             meshes.push(mesh);
         }
         if meshes.len() == 1 {
@@ -155,7 +150,10 @@ mod tests {
                 plan: None,
                 plan_edge_ids: Vec::new(),
                 stats: None,
-                transforms: vec![DisplayTransform::Place { offset: [10.0, 0.0, 0.0], rotation: [0.0; 3] }],
+                placement: Placement::identity().then(DisplayTransform::Place {
+                    offset: [10.0, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                }),
             }],
         };
         let merged = asset.merged();

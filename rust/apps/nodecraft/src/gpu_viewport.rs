@@ -3519,8 +3519,8 @@ pub struct GpuCallback {
     pub axis: AxisUniforms,
 }
 
-impl CallbackTrait for GpuCallback {
-    fn prepare(
+impl GpuCallback {
+    fn prepare_impl(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -3773,7 +3773,7 @@ impl CallbackTrait for GpuCallback {
         Vec::new()
     }
 
-    fn paint(
+    fn paint_impl(
         &self,
         info: egui::PaintCallbackInfo,
         pass: &mut wgpu::RenderPass<'static>,
@@ -3793,6 +3793,33 @@ impl CallbackTrait for GpuCallback {
         pass.set_pipeline(&scene.blit.pipeline);
         pass.set_bind_group(0, &scene.blit.bind_group, &[]);
         pass.draw(0..3, 0..1);
+    }
+}
+
+impl CallbackTrait for GpuCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        crate::crash_report::guard_render("viewport", || {
+            self.prepare_impl(device, queue, screen, encoder, resources)
+        })
+        .unwrap_or_default()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        let _ = crate::crash_report::guard_render("viewport", || {
+            self.paint_impl(info, pass, resources);
+        });
     }
 }
 
@@ -4004,9 +4031,9 @@ mod tests {
         // plane at x = 10. (M^-1)^T equals M for a reflection, so the +x
         // normal turns to -x while +z is unchanged; the sign of the normal
         // matrix's determinant stays with the placement, never dropped.
-        let model = crate::plan_math::instance_matrix(&[
+        let model = crate::plan_math::instance_matrix(&nodecraft_display::Placement::from(
             nodecraft_display::DisplayTransform::Mirror { plane: "yz", offset: 10.0 },
-        ]);
+        ));
         let normal = normal_matrix(model);
         let transformed = |vector: [f32; 3]| {
             [
@@ -4609,21 +4636,21 @@ mod tests {
     /// exactly as a combined mirror does (it clones a body instance and appends
     /// a mirror transform), so the plan's resident mesh and colouring are
     /// reused while every placement stays in the group's instance list.
-    fn shared_plan_placements() -> Vec<Vec<nodecraft_display::DisplayTransform>> {
+    fn shared_plan_placements() -> Vec<nodecraft_display::Placement> {
         vec![
-            Vec::new(),
-            vec![nodecraft_display::DisplayTransform::Place {
+            nodecraft_display::Placement::identity(),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [-20.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Place {
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [40.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Mirror {
-                plane: "yz".into(),
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Mirror {
+                plane: "yz",
                 offset: 10.0,
-            }],
+            }),
         ]
     }
 
@@ -4818,10 +4845,12 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors,
-            transforms: vec![nodecraft_display::DisplayTransform::Place {
-                offset: [x, 0.0, 0.0],
-                rotation: [0.0; 3],
-            }],
+            placement: nodecraft_display::Placement::from(
+                nodecraft_display::DisplayTransform::Place {
+                    offset: [x, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                },
+            ),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         plan.set_plans(
@@ -4926,7 +4955,7 @@ mod tests {
                 target: "test".into(),
                 plan: std::sync::Arc::clone(&shared),
                 face_colors: Vec::new(),
-                transforms: Vec::new(),
+                placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
             }],
             true,
@@ -4975,11 +5004,11 @@ mod tests {
             Some(ready),
         );
         let plan_arc = box_plan_sized(10.0);
-        let instance = |transforms| nodecraft_display::PlanInstance {
+        let instance = |placement| nodecraft_display::PlanInstance {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan_arc),
             face_colors: Vec::new(),
-            transforms,
+            placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let four = || {
@@ -4989,7 +5018,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         if immediate {
-            plan.set_plans(vec![instance(Vec::new())], true, None, 0);
+            plan.set_plans(vec![instance(nodecraft_display::Placement::identity())], true, None, 0);
             plan.prepare_chunks(device, queue);
             let state = plan.set_plans(four(), true, None, 1);
             assert_eq!(
@@ -5399,7 +5428,7 @@ mod tests {
                 target: "test".into(),
                 plan: box_plan_sized(1.0),
                 face_colors: Vec::new(),
-                transforms: Vec::new(),
+                placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
             }],
             true,

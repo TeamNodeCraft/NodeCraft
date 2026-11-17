@@ -706,7 +706,7 @@ fn plan_draw_groups(
     let mut by_plan: std::collections::HashMap<usize, usize> =
         std::collections::HashMap::new();
     for (body, instance) in plans.iter().enumerate() {
-        let matrix = instance_matrix(&instance.transforms);
+        let matrix = instance_matrix(&instance.placement);
         let matrix = extra.map_or(matrix, |extra| multiply_f32(extra, matrix));
         let plan_key = std::sync::Arc::as_ptr(&instance.plan) as usize;
         let existing = by_plan.get(&plan_key).copied().filter(|index| {
@@ -1118,7 +1118,7 @@ fn same_plan_geometry(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
         && a.iter().zip(b).all(|(old, new)| {
             old.target == new.target
                 && std::sync::Arc::ptr_eq(&old.plan, &new.plan)
-                && old.transforms == new.transforms
+                && old.placement == new.placement
         })
 }
 
@@ -1521,7 +1521,7 @@ impl PlanState {
             && self.ghost_plans.iter().zip(&plans).all(|(old, new)| {
                 old.target == new.target
                     && std::sync::Arc::ptr_eq(&old.plan, &new.plan)
-                    && old.transforms == new.transforms
+                    && old.placement == new.placement
                     && old.face_colors == new.face_colors
             });
         if same {
@@ -2005,7 +2005,7 @@ mod tests {
             target: String::new(),
             plan: std::sync::Arc::new(TessPlan::default()),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         }
     }
@@ -2013,29 +2013,29 @@ mod tests {
     #[test]
     fn draw_groups_instance_every_body_of_a_shared_plan() {
         let plan = std::sync::Arc::new(TessPlan::default());
-        let instance = |transforms| PlanInstance {
+        let instance = |placement| PlanInstance {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors: Vec::new(),
-            transforms,
+            placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
-        let transforms = vec![
-            Vec::new(),
-            vec![nodecraft_display::DisplayTransform::Place {
+        let placements = vec![
+            nodecraft_display::Placement::identity(),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [10.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Place {
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [0.0, 20.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Mirror {
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Mirror {
                 plane: "yz",
                 offset: 10.0,
-            }],
+            }),
         ];
-        let plans: Vec<PlanInstance> = transforms.iter().cloned().map(instance).collect();
+        let plans: Vec<PlanInstance> = placements.iter().cloned().map(instance).collect();
         let groups = plan_draw_groups(&plans, None);
         assert_eq!(
             groups.len(),
@@ -2052,8 +2052,8 @@ mod tests {
             "the resident mesh is shared, not duplicated",
         );
         assert_eq!(groups[0].matrices.len(), 4);
-        for (matrix, transforms) in groups[0].matrices.iter().zip(&transforms) {
-            assert_eq!(*matrix, instance_matrix(transforms));
+        for (matrix, placement) in groups[0].matrices.iter().zip(&placements) {
+            assert_eq!(*matrix, instance_matrix(placement));
         }
     }
 
@@ -2099,13 +2099,13 @@ mod tests {
         assert_eq!(groups[0].bodies, vec![0, 1, 2, 3]);
         assert_eq!(groups[0].matrices.len(), 4, "one instance per copy");
         for (matrix, instance) in groups[0].matrices.iter().zip(&planned.plans) {
-            assert_eq!(*matrix, instance_matrix(&instance.transforms));
+            assert_eq!(*matrix, instance_matrix(&instance.placement));
         }
 
         // The CPU display path turns the same transforms into edge points.
         let mut expected = Vec::new();
         for instance in &planned.plans {
-            let matrix = glam::Mat4::from_cols_array_2d(&instance_matrix(&instance.transforms));
+            let matrix = glam::Mat4::from_cols_array_2d(&instance_matrix(&instance.placement));
             for edge in &instance.plan.edges {
                 for point in edge {
                     let transformed = matrix.transform_point3(glam::Vec3::new(
@@ -2135,7 +2135,7 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors,
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let red = vec![[1.0, 0.0, 0.0]];
@@ -2162,14 +2162,14 @@ mod tests {
             target: "t".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let moved = PlanInstance {
-            transforms: vec![nodecraft_display::DisplayTransform::Place {
+            placement: nodecraft_display::Placement::from_ops([nodecraft_display::DisplayTransform::Place {
                 offset: [5.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
+            }]),
             ..base.clone()
         };
         assert!(same_plan_set(std::slice::from_ref(&base), std::slice::from_ref(&base)));
@@ -2196,7 +2196,7 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors,
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let red = [1.0, 0.0, 0.0];
@@ -2326,7 +2326,7 @@ mod tests {
             target: "test".into(),
             plan,
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         state.set_plans(vec![instance(std::sync::Arc::clone(&old))], true, None, 1);
@@ -2384,10 +2384,10 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors,
-            transforms: vec![nodecraft_display::DisplayTransform::Place {
+            placement: nodecraft_display::Placement::from_ops([nodecraft_display::DisplayTransform::Place {
                 offset: [x, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
+            }]),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let red = vec![[0.8, 0.05, 0.05]; faces];
@@ -2496,20 +2496,23 @@ mod tests {
             Some(ready),
         );
         let shared = box_plan_sized(10.0);
-        let instance = |transforms| PlanInstance {
+        let instance = |placement| PlanInstance {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors: Vec::new(),
-            transforms,
+            placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
-        let mirror = vec![nodecraft_display::DisplayTransform::Mirror {
+        let mirror = nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Mirror {
             plane: "yz",
             offset: 10.0,
-        }];
-        let one = || vec![instance(Vec::new())];
-        let two = || vec![instance(Vec::new()), instance(mirror.clone())];
-        let expected = vec![instance_matrix(&[]), instance_matrix(&mirror)];
+        });
+        let one = || vec![instance(nodecraft_display::Placement::identity())];
+        let two = || vec![instance(nodecraft_display::Placement::identity()), instance(mirror.clone())];
+        let expected = vec![
+            instance_matrix(&nodecraft_display::Placement::identity()),
+            instance_matrix(&mirror),
+        ];
         state.set_plans(two(), true, None, 2);
         state.prepare_chunks(&device, &queue);
         assert_eq!(
@@ -2562,31 +2565,31 @@ mod tests {
             Some(ready),
         );
         let shared = box_plan_sized(10.0);
-        let instance = |transforms| PlanInstance {
+        let instance = |placement| PlanInstance {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors: Vec::new(),
-            transforms,
+            placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
-        let transforms = vec![
-            Vec::new(),
-            vec![nodecraft_display::DisplayTransform::Place {
+        let placements = vec![
+            nodecraft_display::Placement::identity(),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [10.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Place {
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [0.0, 20.0, 0.0],
                 rotation: [0.0; 3],
-            }],
-            vec![nodecraft_display::DisplayTransform::Mirror {
+            }),
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Mirror {
                 plane: "yz",
                 offset: 10.0,
-            }],
+            }),
         ];
         let expected: Vec<[[f32; 4]; 4]> =
-            transforms.iter().map(|transform| instance_matrix(transform)).collect();
-        let four = || transforms.iter().cloned().map(instance).collect::<Vec<_>>();
+            placements.iter().map(instance_matrix).collect();
+        let four = || placements.iter().cloned().map(instance).collect::<Vec<_>>();
 
         // Staged activation (the first set has to upload the resident mesh).
         state.set_plans(four(), true, None, 1);
@@ -2597,7 +2600,7 @@ mod tests {
         assert_eq!(chunk_bodies(&state, 0, &device, &queue), vec![0, 1, 2, 3]);
 
         // Immediate resident commit after a one-body set.
-        state.set_plans(vec![instance(Vec::new())], true, None, 2);
+        state.set_plans(vec![instance(nodecraft_display::Placement::identity())], true, None, 2);
         state.prepare_chunks(&device, &queue);
         assert_eq!(state.set_plans(four(), true, None, 3), PlanSetState::Immediate);
         state.prepare_chunks(&device, &queue);
@@ -2634,13 +2637,13 @@ mod tests {
                 target: "scatter".into(),
                 plan: std::sync::Arc::clone(&shared),
                 face_colors: Vec::new(),
-                transforms: if body == 0 {
-                    Vec::new()
+                placement: if body == 0 {
+                    nodecraft_display::Placement::identity()
                 } else {
-                    vec![nodecraft_display::DisplayTransform::Place {
+                    nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                         offset: [body as f64 * 2.0, 0.0, 0.0],
                         rotation: [0.0; 3],
-                    }]
+                    })
                 },
                 edge_ids: std::sync::Arc::from(Vec::new()),
             })
@@ -2686,7 +2689,7 @@ mod tests {
             target: format!("snapshot-{snapshot}"),
             plan,
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         let first = box_plan_sized(10.0);
@@ -2818,7 +2821,7 @@ mod tests {
                 target: "test".into(),
                 plan,
                 face_colors: Vec::new(),
-                transforms: Vec::new(),
+                placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
             }],
             true,

@@ -30,6 +30,8 @@ nodecraft-extrude = { path = "../nodecraft-extrude" }
 nodecraft-bool = { path = "../nodecraft-bool" }
 nodecraft-blend = { path = "../nodecraft-blend" }
 solidcraft-sketch.workspace = true
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "c71236a40de9f36713194df624663a252d0f71a3" }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "47f714a339725fb7aad0c25c08f64173ccb47f2c" }
 serde_json.workspace = true
 base64 = "0.22"
+flate2 = "1.1"
+sha2 = "0.11"

@@ -76,6 +76,16 @@ pub struct ViewSettings {
     pub pan_speed: f32,
     /// Multiplier for orbit interaction speed.
     pub orbit_speed: f32,
+    /// Display tessellation error budget in screen pixels. Per-body screen-space
+    /// LOD chooses each body's tolerance from this.
+    #[serde(default = "default_display_error_px")]
+    pub display_error_px: f64,
+}
+
+/// Default screen-space display error budget, in pixels.
+#[must_use]
+pub fn default_display_error_px() -> f64 {
+    0.75
 }
 
 impl Default for ViewSettings {
@@ -94,6 +104,7 @@ impl Default for ViewSettings {
             cad_mouse: true,
             pan_speed: 1.0,
             orbit_speed: 1.0,
+            display_error_px: default_display_error_px(),
         }
     }
 }
@@ -108,6 +119,7 @@ impl ViewSettings {
             || self.zebra
             || self.ignore_look_colors
             || (self.ghost_opacity - 0.45).abs() > f32::EPSILON
+            || (self.display_error_px - default_display_error_px()).abs() > f64::EPSILON
 
     }
 }
@@ -515,6 +527,11 @@ impl Viewport {
     /// Provisional display detail for the current camera: `None` means the full
     /// plan, `Some(detail)` asks the tessellation worker for a bounded preview
     /// plan. Small bodies clamp back to full quality in the worker.
+    ///
+    /// The GPU path now gets a per-body screen-space level from
+    /// [`Self::lod_view`], so this CPU-mesh tier is retained only for the CPU
+    /// LOD path and its tests. Follow-up: remove it with that path.
+    #[allow(dead_code)]
     #[must_use]
     pub fn quality_detail(&mut self) -> Option<u8> {
         let Some(display) = self.display.as_ref() else {
@@ -1228,6 +1245,27 @@ impl Viewport {
         self.view
     }
 
+    /// Camera and viewport inputs for per-body screen-space LOD.
+    ///
+    /// `None` until the camera has been fitted and a display with a known full
+    /// viewport rect is installed. The full rect (not the visible sub-rect) is
+    /// the camera's aspect.
+    #[must_use]
+    pub fn lod_view(&self, pixels_per_point: f32) -> Option<nodecraft_display::LodView> {
+        if !self.camera_fit || self.display.is_none() {
+            return None;
+        }
+        let full = self.last_full?;
+        Some(nodecraft_display::LodView {
+            eye: self.camera.eye().into(),
+            fov_y: self.camera.fov,
+            ortho_height: self.camera.half_height() * 2.0,
+            viewport: [full.width() as f64, full.height() as f64],
+            pixels_per_point: pixels_per_point as f64,
+            error_px: self.view.display_error_px,
+        })
+    }
+
     pub fn selection_mode(&self) -> SelectionMode {
         self.selection_mode
     }
@@ -1681,7 +1719,7 @@ impl Viewport {
         let multiple_bodies = self.edit_ghost_plans.len() > 1;
         let mut edges = Vec::new();
         for (body, instance) in self.edit_ghost_plans.iter().enumerate() {
-                        let matrix = crate::plan_math::instance_matrix(&instance.transforms);
+                        let matrix = crate::plan_math::instance_matrix(&instance.placement);
             for (index, polyline) in instance.plan.edges.iter().enumerate() {
                 let points: Vec<Vec3> = polyline
                     .iter()
@@ -3543,14 +3581,14 @@ mod tests {
             target: "old-project".into(),
             plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         }];
         viewport.set_feature_ghost_plans(vec![nodecraft_display::PlanInstance {
             target: "old-ghost".into(),
             plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         }]);
         viewport.clear_document_display();
@@ -3606,7 +3644,7 @@ mod tests {
             target: "input".into(),
             plan: std::sync::Arc::new(plan),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         }];
         assert_eq!(viewport.plan_face_ids().expect("ids"), vec!["face:7"]);
@@ -3628,7 +3666,7 @@ mod tests {
             target: "input".into(),
             plan: std::sync::Arc::new(plan),
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(vec![Some("edge:0".to_owned())]),
         };
         let mut viewport = Viewport::default();

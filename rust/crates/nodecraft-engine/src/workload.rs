@@ -33,32 +33,19 @@ impl WorkloadProfile {
     }
 }
 
-fn exact_weight(node_type: &str) -> usize {
-    match node_type {
-        "solid" | "primitive" | "translate" | "mirror" | "groupinput" | "groupoutput" => 1,
-        "combine" | "sketch" | "spline" | "exporter" => 1,
-        "stepimporter" | "boolean" | "fuse" => 8,
-        "extrude" => 6,
-        "chamfer" => 8,
-        "fillet" | "shell" | "surfaceloft" => 12,
-        "loft" => 10,
-        "scatter" | "circularpattern" => 8,
+fn exact_weight(node: &Node) -> usize {
+    if let Some(builtin) = crate::nodes::find(&node.node_type) {
+        return builtin.exact_weight(crate::nodes::NodeView::from(node));
+    }
+    match node.node_type.as_str() {
+        "groupinput" | "groupoutput" => 1,
         _ => 2,
     }
 }
 
 fn mesh_bodies(node: &Node) -> usize {
-    match node.node_type.as_str() {
-        "scatter" | "circularpattern" => crate::contract_number(
-            &node.node_type,
-            &node.values,
-            "count",
-        )
-        .round()
-        .clamp(1.0, 5000.0) as usize,
-        "solid" | "primitive" | "stepimporter" => 1,
-        _ => 0,
-    }
+    crate::nodes::find(&node.node_type)
+        .map_or(0, |builtin| builtin.mesh_bodies(crate::nodes::NodeView::from(node)))
 }
 
 /// Profile the closure of `request.targets`.
@@ -87,7 +74,7 @@ pub fn profile_request(request: &Request) -> WorkloadProfile {
     let mut estimated_mesh_bodies = 0;
     for id in &closure {
         let node = by_id[id];
-        exact_units += exact_weight(&node.node_type);
+        exact_units += exact_weight(node);
         estimated_mesh_bodies += mesh_bodies(node);
     }
 
@@ -209,7 +196,7 @@ mod tests {
     fn circular_pattern_estimates_count_bodies_from_the_contract() {
         let mut pattern = node("pattern", "circularpattern");
         pattern.values = json!({"count": 4.0});
-        assert_eq!(exact_weight("circularpattern"), 8);
+        assert_eq!(exact_weight(&pattern), 8);
         let explicit = profile_flat(&[pattern.clone()], &[], &["pattern".into()]);
         assert_eq!(explicit.mesh_bodies, 4);
 

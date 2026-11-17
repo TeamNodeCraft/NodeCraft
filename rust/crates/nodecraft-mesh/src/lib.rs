@@ -12,8 +12,9 @@ use nodecraft_protocol::Mesh;
 pub mod step_import;
 
 pub use step_import::{
-    StepBrepBody, StepBrepImport, StepDiagnostics, StepImport, import_step, import_step_breps,
-    merge_meshes,
+    StepBrepBody, StepBrepImport, StepDiagnostics, StepImport, StepImportWithBreps, import_step,
+    import_step_breps, import_step_with_breps, merge_meshes, reset_step_decode_count,
+    step_decode_count,
 };
 
 thread_local! {

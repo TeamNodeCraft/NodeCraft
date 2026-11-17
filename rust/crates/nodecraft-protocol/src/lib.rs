@@ -5,6 +5,33 @@ use std::collections::BTreeMap;
 
 fn default_run_exporters() -> bool { true }
 
+/// One self-contained CAD source stored inside a `.nodecraft` document.
+///
+/// The bytes are compressed with flate2 and base64-encoded so the document
+/// stays valid JSON. `content_hash` is the sha256 hex digest of the original
+/// (uncompressed) bytes; one record exists per distinct hash and importers
+/// reference it by hash.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IngestRecord {
+    /// Version of this record's payload encoding.
+    pub schema_version: u32,
+    /// Original file name, for diagnostics and a useful fallback label.
+    pub file_name: String,
+    /// Original (uncompressed) byte length.
+    pub byte_length: u64,
+    /// sha256 hex digest of the original bytes.
+    pub content_hash: String,
+    /// Payload codec; currently `flate2+base64`.
+    pub compression: String,
+    /// When this copy was embedded, as a UTC ISO-8601 instant. Older documents
+    /// and records have no timestamp; they stay valid and simply omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_at: Option<String>,
+    /// Compressed bytes, base64-encoded.
+    pub data: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {

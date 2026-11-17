@@ -47,11 +47,155 @@ pub fn load(path: &Path) -> Result<GraphDocument, String> {
     Ok(document)
 }
 
+/// Rewrite an importer's stored path for the file it is about to be saved
+/// beside, and record a warning when a relative form is impossible.
+///
+/// A document saved before the path-mode fields existed has no `pathMode`, and
+/// is deliberately left exactly as stored: the derived mode is for display and
+/// resolution, not permission to rewrite the document. New nodes write
+/// `pathMode` explicitly, which opts them into normalization.
+fn rewrite_import_node(node: &mut crate::GraphNode, directory: &Path) {
+    // Only an explicitly stored mode opts a node into normalization. Legacy
+    // documents keep their exact fields even though `path_mode` derives a mode
+    // for the inspector and resolution.
+    if node.values.get(nodecraft_engine::import_io::PATH_MODE_KEY).is_none() {
+        return;
+    }
+    let mode = nodecraft_engine::import_io::path_mode(&node.values);
+    let Some(stored) = node.values.get("path").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    if stored.is_empty() {
+        return;
+    }
+    let stored_path = Path::new(stored);
+    let absolute = if stored_path.is_absolute() {
+        stored_path.to_path_buf()
+    } else {
+        directory.join(stored_path)
+    };
+    let relative = nodecraft_engine::import_io::document_relative(&absolute, directory);
+    if mode == "absolute" {
+        match relative {
+            Some(relative) => {
+                node.values["relativePath"] =
+                    serde_json::Value::String(relative.to_string_lossy().into_owned());
+            }
+            None => {
+                node.values.as_object_mut().map(|values| values.remove("relativePath"));
+            }
+        }
+        node.values.as_object_mut().map(|values| values.remove("pathWarning"));
+    } else if let Some(relative) = relative {
+        node.values["path"] = serde_json::Value::String(relative.to_string_lossy().into_owned());
+        let object = node.values.as_object_mut().expect("importer values object");
+        object.remove("relativePath");
+        object.remove("pathWarning");
+    } else {
+        node.values["path"] = serde_json::Value::String(absolute.to_string_lossy().into_owned());
+        node.values["pathWarning"] = serde_json::Value::String(format!(
+            "Stored an absolute path because \u{201c}{}\u{201d} is outside the document folder, so it cannot be made relative.",
+            absolute.display()
+        ));
+    }
+}
+
+fn prepare_nodes(nodes: &mut [crate::GraphNode], directory: &Path) {
+    for node in nodes {
+        if nodecraft_node_contract::import_source_node(&node.node_type) {
+            rewrite_import_node(node, directory);
+        }
+    }
+}
+
+/// The commands that bring a live session to the same normalized importer
+/// paths the save writes. Uses derived commands, so saving does not add undo
+/// steps or reorder history.
+pub fn import_path_commands(document: &GraphDocument, path: &Path) -> Vec<crate::Command> {
+    let Some(directory) = path.parent() else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for node in &document.root.nodes {
+        let mut rewritten = node.clone();
+        rewrite_import_node(&mut rewritten, directory);
+        if rewritten.values == node.values {
+            continue;
+        }
+        let before = node.values.as_object();
+        let after = rewritten.values.as_object();
+        if let Some(before) = before {
+            for key in before.keys() {
+                if !after.is_some_and(|after| after.contains_key(key)) {
+                    commands.push(crate::Command::RemoveValue {
+                        node: node.id.clone(),
+                        field: key.clone(),
+                    });
+                }
+            }
+        }
+        if let Some(after) = after {
+            for (key, value) in after {
+                if before.and_then(|before| before.get(key)) != Some(value) {
+                    commands.push(crate::Command::SetValue {
+                        node: node.id.clone(),
+                        field: key.clone(),
+                        value: value.clone(),
+                    });
+                }
+            }
+        }
+    }
+    for definition in &document.definitions {
+        let mut rewritten = definition.clone();
+        for node in &mut rewritten.nodes {
+            rewrite_import_node(node, directory);
+        }
+        if rewritten != *definition {
+            commands.push(crate::Command::SetDefinition { definition: rewritten });
+        }
+    }
+    commands
+}
+
+/// Apply the save-time importer path normalization and drop unreferenced
+/// ingested records. Public so the app can keep its live document in sync with
+/// what it is about to write.
+pub fn prepare_document_for_save(document: &mut GraphDocument, path: &Path) {
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    prepare_nodes(&mut document.root.nodes, directory);
+    for definition in &mut document.definitions {
+        prepare_nodes(&mut definition.nodes, directory);
+    }
+    let referenced: std::collections::BTreeSet<String> = document
+        .root
+        .nodes
+        .iter()
+        .chain(document.definitions.iter().flat_map(|definition| definition.nodes.iter()))
+        .filter_map(|node| {
+            node.values
+                .get("ingestHash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    document.ingested_sources.retain(|record| {
+        referenced.contains(&record.content_hash)
+    });
+    let mut seen = std::collections::BTreeSet::new();
+    document.ingested_sources.retain(|record| {
+        seen.insert(record.content_hash.clone())
+    });
+}
+
 /// Writes a document atomically. The temp file lives beside the target so the final
 /// rename stays on one filesystem.
 pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> {
     let mut document = document.clone();
     canonicalize_all(&mut document);
+    prepare_document_for_save(&mut document, path);
     document
         .validate_definitions()
         .and_then(|()| document.node_hashes())
@@ -64,10 +208,19 @@ pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> 
 pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &GraphDocument) -> Result<(), String> {
     let mut canonical = document.clone();
     for node in &mut canonical.nodes { canonicalize_node(node); }
+    prepare_document_for_save(&mut canonical, path);
     canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     value["root"] = serde_json::to_value(&canonical.root).map_err(|error| error.to_string())?;
     value["definitions"] = serde_json::to_value(&canonical.definitions).map_err(|error| error.to_string())?;
     value["schemaVersion"] = serde_json::json!(canonical.schema_version);
+    if canonical.ingested_sources.is_empty() {
+        if let Some(object) = value.as_object_mut() {
+            object.remove("ingestedSources");
+        }
+    } else {
+        value["ingestedSources"] = serde_json::to_value(&canonical.ingested_sources)
+            .map_err(|error| error.to_string())?;
+    }
     save_value_atomic(path, value)
 }
 
@@ -387,6 +540,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -428,6 +582,7 @@ mod tests {
                 interface: GraphInterface { inputs: vec!["shape".into()], outputs: vec!["shape".into()] },
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         save_atomic(&external_path, &external).expect("save external");
         let mut root = GraphDocument::new("external-root");
@@ -633,6 +788,166 @@ mod tests {
         document.nodes[0].x = 42.0;
         store.publish_document("child", &document);
         assert_eq!(store.get("child").expect("document").nodes[0].x, 42.0);
+    }
+
+    #[test]
+    fn old_importer_documents_keep_their_existing_fields() {
+        let dir = test_dir();
+        let path = dir.join("old.nodecraft");
+        let old_path = dir.join("model.step").display().to_string();
+        let legacy = serde_json::json!({
+            "schemaVersion": 1,
+            "id": "legacy",
+            "root": {
+                "id": "root",
+                "name": "Root",
+                "kind": "graph",
+                "nodes": [{
+                    "id": "s",
+                    "type": "stepimporter",
+                    "values": {"path": old_path, "heal": true},
+                    "suppressed": false,
+                    "x": 0.0,
+                    "y": 0.0
+                }],
+                "connections": [],
+                "interface": {"inputs": [], "outputs": []}
+            },
+            "definitions": []
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).expect("write");
+        let loaded = load(&path).expect("load old document");
+        let node = &loaded.nodes[0];
+        assert_eq!(node.values["path"], old_path);
+        assert!(node.values.get("pathMode").is_none(), "load must not add pathMode");
+        assert!(node.values.get("ingest").is_none(), "load must not add ingest");
+        assert!(node.values.get("watch").is_none(), "load must not add watch");
+        assert!(loaded.ingested_sources.is_empty());
+
+        let saved = dir.join("saved-old.nodecraft");
+        save_atomic(&saved, &loaded).expect("save old document");
+        let text = std::fs::read_to_string(&saved).expect("read saved");
+        assert!(!text.contains("pathMode"), "old document grew a pathMode field:\n{text}");
+        assert!(!text.contains("ingestedSources"), "old document grew an ingest section:\n{text}");
+        assert!(text.contains(&old_path), "old absolute path must be preserved");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn saving_rewrites_relative_importers_and_preserves_absolute_mode() {
+        let dir = test_dir();
+        let source = dir.join("model.step");
+        std::fs::write(&source, b"not parsed by this test").unwrap();
+        let path = dir.join("part.nodecraft");
+
+        let mut relative = GraphDocument::new("relative");
+        relative.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "s".into(),
+            node_type: "stepimporter".into(),
+            values: json!({
+                "path": source.display().to_string(),
+                "pathMode": "relative",
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        save_atomic(&path, &relative).expect("save relative");
+        let loaded = load(&path).expect("load relative");
+        assert_eq!(loaded.nodes[0].values["path"], "model.step");
+
+        let mut absolute = GraphDocument::new("absolute");
+        absolute.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "s".into(),
+            node_type: "stepimporter".into(),
+            values: json!({
+                "path": source.display().to_string(),
+                "pathMode": "absolute",
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        let absolute_path = dir.join("absolute.nodecraft");
+        save_atomic(&absolute_path, &absolute).expect("save absolute");
+        let loaded = load(&absolute_path).expect("load absolute");
+        assert_eq!(loaded.nodes[0].values["path"], source.display().to_string());
+        assert_eq!(loaded.nodes[0].values["relativePath"], "model.step");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn save_normalization_commands_update_the_live_session() {
+        let dir = std::env::temp_dir().join(format!(
+            "sn-save-commands-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("part.nodecraft");
+        let source = dir.join("model.step");
+        let mut document = GraphDocument::new("normalize");
+        document.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "s".into(),
+            node_type: "stepimporter".into(),
+            values: json!({
+                "path": source.display().to_string(),
+                "pathMode": "relative",
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        let commands = import_path_commands(&document, &path);
+        assert!(
+            commands.iter().any(|command| matches!(
+                command,
+                crate::Command::SetValue { field, value, .. }
+                    if field == "path" && value == "model.step"
+            )),
+            "{commands:?}"
+        );
+        let mut session = Session::new(document);
+        session.apply_derived_commands(&commands).expect("normalize");
+        assert_eq!(session.document().nodes[0].values["path"], "model.step");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ingested_sources_round_trip_deduplicate_and_drop_unreferenced() {
+        let dir = test_dir();
+        let path = dir.join("ingest.nodecraft");
+        let used = nodecraft_engine::import_io::ingest_record("used.step", b"used bytes").expect("record");
+        let unused = nodecraft_engine::import_io::ingest_record("unused.step", b"unused bytes").expect("record");
+        let mut document = GraphDocument::new("ingest");
+        document.ingested_sources = vec![used.clone(), used.clone(), unused];
+        document.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "s".into(),
+            node_type: "stepimporter".into(),
+            values: json!({
+                "path": "used.step",
+                "pathMode": "relative",
+                "ingest": true,
+                "ingestHash": used.content_hash,
+            }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        save_atomic(&path, &document).expect("save ingest");
+        let loaded = load(&path).expect("load ingest");
+        assert_eq!(loaded.ingested_sources, vec![used.clone()], "only one referenced record survives");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(text.contains("\"ingestedSources\""), "records live in one top-level section:\n{text}");
+        assert_eq!(
+            nodecraft_engine::import_io::decode_ingest_record(&loaded.ingested_sources[0]).expect("decode"),
+            b"used bytes"
+        );
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

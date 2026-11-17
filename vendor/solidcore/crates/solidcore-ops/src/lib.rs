@@ -32,6 +32,7 @@
 #![cfg_attr(not(test), deny(clippy::float_arithmetic))]
 
 pub mod affine;
+pub mod axial_section;
 pub mod blend;
 pub mod blend_definition;
 pub mod blend_surface;
@@ -50,14 +51,18 @@ pub mod curve_knots;
 pub mod curve_plane;
 pub mod cylinder_wall;
 pub mod error;
+pub mod export_geometry;
 pub mod extend;
 pub mod face_surface;
 pub mod file;
+pub mod import_geometry;
+pub mod joint_turn;
 pub mod label;
 pub mod measure;
 pub mod network;
 pub mod offset;
 pub mod order;
+pub mod path_export;
 pub mod pcurve;
 pub mod prism;
 pub mod provenance;
@@ -72,6 +77,7 @@ pub mod sweep;
 pub mod tangent;
 pub mod trim;
 pub mod untrim;
+pub mod vertex_meet;
 
 pub use blend::{
     band_room, blend, blend_ordered, carried_faces, carried_faces_ordered, chamfer_sides,
@@ -80,7 +86,6 @@ pub use blend::{
     ChamferCorner, ChamferSecond, Corners, EndRoom, Hole, HoleEdge, Room, SetBack, Turn,
 };
 pub use body::{make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, TurnedOver};
-pub use session::Validation;
 pub use boolean::BooleanOp;
 pub use check::{CheckLevel, CheckReport};
 pub use contact::Gap;
@@ -89,11 +94,13 @@ pub use error::{
     Unsoundness,
 };
 pub use measure::{
-    point_distance, Distance, EdgePoint, EdgeRayPoint, FaceCentroid, GapSample,
-    MassPropertiesEstimate, Normal, PointClass, SquareFaceLevel,
+    point_distance, points_meet, Distance, EdgeCurve, EdgePoint, EdgeRayPoint, FaceCentroid,
+    FaceRayHit, GapSample, MassPropertiesEstimate, MembersClosest, Normal, PointClass, RayEntity,
+    RayHit, SquareFaceLevel,
 };
 pub use offset::{draft, offset_faces, offset_sheet, shell, thicken};
 pub use order::Order;
+pub use session::Validation;
 pub use step_assembly::{placed_bodies, PlacedBody};
 
 #[cfg(test)]

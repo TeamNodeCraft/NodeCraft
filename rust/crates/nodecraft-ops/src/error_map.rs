@@ -354,6 +354,12 @@ pub(crate) fn map_error(error: OpsError) -> SessionError {
                 ))
             }
         }
+
+        // The certificate ran out of the work it is allowed, not out of room: no size fits
+        // better, so the way out is a smaller or simpler blend, not a different fit.
+        OpsError::BlendNotCertified { halvings, stations } => SessionError::Invalid(format!(
+            "SolidCore could not certify the blend's surface within its tolerance in the work allowed ({halvings} spans halved, {stations} stations). This is a kernel work-budget limit on this geometry, not a size that does not fit; try a slightly smaller blend, or fewer edges at once."
+        )),
     }
 }
 
@@ -610,6 +616,7 @@ mod tests {
                 phrase: "the blend's section meets no face".to_owned(),
             },
             OpsError::BlendFailed { class: ErrorKind::StageFailed, status: 1001, phrase: String::new() },
+            OpsError::BlendNotCertified { halvings: 3, stations: 9 },
         ];
         for error in errors {
             assert_readable(error);

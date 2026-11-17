@@ -129,11 +129,6 @@ pub(crate) enum ExactNodeTask {
         output: std::sync::Arc<crate::SketchOutput>,
         amount: f64,
     },
-    Translate {
-        brep: Brep,
-        offset: [f64; 3],
-        rotation: [f64; 3],
-    },
     Fillet {
         body: SolidBody,
         values: serde_json::Value,
@@ -176,20 +171,13 @@ pub(crate) enum ExactNodeTask {
         faces: Vec<usize>,
         distance: f64,
     },
-    Look {
-        brep: std::sync::Arc<Brep>,
-        colour: [f64; 3],
-    },
     LookMany {
         breps: Vec<std::sync::Arc<Brep>>,
         colour: [f64; 3],
     },
     Realize {
         body: SolidBody,
-        transforms: Vec<crate::BodyTransform>,
-    },
-    ImportStep {
-        path: String,
+        placement: nodecraft_exact::Placement,
     },
     FaceLoft {
         bottom: Brep,
@@ -197,20 +185,6 @@ pub(crate) enum ExactNodeTask {
         ruled: bool,
         cap_ends: bool,
     },
-}
-
-/// Import one CAD file as a multi-body Part through the single exact import
-/// route. Warnings name every refused body; the Part keeps the bodies that
-/// converted, in CADIR order and with their names and colours.
-pub(crate) fn import_step_part(path: &str) -> Result<TaskResult, String> {
-    let import = nodecraft_mesh::import_step_breps(path)?;
-    let (part, color_warnings) = crate::Part::from_imported(import.bodies);
-    let mut warnings = import.warnings;
-    warnings.extend(color_warnings);
-    Ok(TaskResult {
-        output: NodeOutput::Part(std::sync::Arc::new(part)),
-        warnings,
-    })
 }
 
 impl ExactNodeTask {
@@ -223,12 +197,8 @@ impl ExactNodeTask {
 
     pub(crate) fn run(self, kernel: &mut Kernel) -> Result<NodeOutput, String> {
         match self {
-            Self::Primitive(node) => crate::primitive_brep_with_kernel(kernel, &node)
+            Self::Primitive(node) => crate::nodes::primitive_brep_with_kernel(kernel, &node)
                 .map(|brep| NodeOutput::Shape(SolidBody::new(brep))),
-            Self::Translate { mut brep, offset, rotation } => {
-                crate::apply_brep_placement_with_kernel(kernel, &mut brep, offset, rotation)?;
-                Ok(NodeOutput::Shape(SolidBody::new(brep)))
-            }
             Self::ExtrudeSketch { output, amount } => {
                 crate::sketch_extrude_brep(kernel, &output, amount).map(NodeOutput::Shape)
             }
@@ -315,12 +285,6 @@ impl ExactNodeTask {
                     .map_err(|error| format!("Offset Faces: {error}"))?;
                 Ok(NodeOutput::Shape(SolidBody::new(result.brep)))
             }
-            Self::Look { brep, colour } => {
-                let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, &brep)
-                    .map_err(|error| error.to_string())?;
-                crate::look::apply_look_color(&mut brep, colour)?;
-                Ok(NodeOutput::Shape(SolidBody::new(brep)))
-            }
             Self::LookMany { breps, colour } => {
                 let mut out = Vec::with_capacity(breps.len());
                 for brep in breps {
@@ -331,25 +295,11 @@ impl ExactNodeTask {
                 }
                 Ok(NodeOutput::Shapes(out))
             }
-            Self::Realize { body, transforms } => {
+            Self::Realize { body, placement } => {
                 let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, body.brep())
                     .map_err(|error| error.to_string())?;
-                for transform in &transforms {
-                    match transform {
-                        crate::BodyTransform::Place { offset, rotation } => {
-                            crate::apply_brep_placement_with_kernel(kernel, &mut brep, *offset, *rotation)?;
-                        }
-                        crate::BodyTransform::Mirror { plane, offset } => {
-                            let values = serde_json::json!({"plane": plane, "offset": offset});
-                            crate::mirror_brep_with_kernel(kernel, &mut brep, &values)?;
-                        }
-                        crate::BodyTransform::Scale { factor } => crate::scale_brep(&mut brep, *factor)?,
-                    }
-                }
+                nodecraft_exact::realize_brep(kernel, &mut brep, &placement)?;
                 Ok(NodeOutput::Shape(SolidBody::new(brep)))
-            }
-            Self::ImportStep { path } => {
-                import_step_part(&path).map(|result| result.output)
             }
             Self::FaceLoft { bottom, top, ruled, cap_ends } => {
                 crate::loft_breps(kernel, bottom, top, ruled, cap_ends)
@@ -559,7 +509,6 @@ impl ExactNodeTask {
     /// is empty); every other task is delegated to `run` and has no warnings.
     fn run_warned(self, kernel: &mut Kernel) -> Result<TaskResult, String> {
         match self {
-            Self::ImportStep { path } => import_step_part(&path),
             Self::Fillet { body, values } => {
                 let (brep, warnings) = run_edge_session(kernel, &body, &values)?;
                 Ok(TaskResult {
@@ -692,7 +641,7 @@ mod tests {
     #[test]
     fn primitive_task_matches_direct_primitive() {
         let node = primitive(20.0);
-        let direct = crate::primitive_brep(&node).expect("direct");
+        let direct = crate::nodes::primitive_brep(&node).expect("direct");
         let task = exact_via_pool(node, 7);
         let task = task.into_shape().expect("shape output");
         assert_eq!(direct.face_list().len(), task.brep().face_list().len());
@@ -722,7 +671,7 @@ mod tests {
     #[test]
     fn intersect_with_empty_b_is_empty_and_warns() {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let a = vec![SolidBody::new(crate::primitive_brep(&primitive(10.0)).expect("box A"))];
+        let a = vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
         let (results, warnings) =
             boolean_solids(&mut kernel, &a, &[], nodecraft_bool::BooleanOp::Intersection)
                 .expect("intersect with empty B");
@@ -733,7 +682,7 @@ mod tests {
     #[test]
     fn subtract_with_empty_b_keeps_a() {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let a = vec![SolidBody::new(crate::primitive_brep(&primitive(10.0)).expect("box A"))];
+        let a = vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
         let (results, warnings) =
             boolean_solids(&mut kernel, &a, &[], nodecraft_bool::BooleanOp::Difference)
                 .expect("subtract with empty B");
@@ -771,8 +720,8 @@ mod tests {
     #[test]
     fn engine_evaluation_leaves_the_output_proof_to_the_background_queue() {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let a = SolidBody::new(crate::primitive_brep(&primitive(10.0)).expect("box A"));
-        let b = SolidBody::new(crate::primitive_brep(&primitive(10.0)).expect("box B"));
+        let a = SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"));
+        let b = SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box B"));
         let task = ExactNodeTask::Boolean {
             op: nodecraft_bool::BooleanOp::Union,
             a: vec![a],

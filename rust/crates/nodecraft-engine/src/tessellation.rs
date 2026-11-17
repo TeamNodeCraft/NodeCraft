@@ -135,7 +135,7 @@ impl TessellationPool {
                                             plan: Some(plan),
                                             plan_edge_ids: edge_ids,
                                             stats: Some(stats),
-                                            transforms: work.request.body.transforms,
+                                            placement: work.request.body.placement,
                                         }],
                                     })
                                 }

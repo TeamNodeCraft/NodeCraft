@@ -4,7 +4,9 @@
 //! downstream breakpoint must be placed through every downstream transform and
 //! edits must be mapped back through the inverse chain.
 
-use crate::{GraphConnection, GraphDocument, GraphNode};
+use nodecraft_protocol::Connection;
+
+use crate::{GraphDocument, GraphNode};
 
 /// Read a contract field through the contract resolver. The panic path is a
 /// programming error: every call below names a field the contract defines.
@@ -22,173 +24,133 @@ fn contract_text<'a>(
         .unwrap_or_else(|| panic!("node contract has no text field {node_type}.{key}"))
 }
 
-fn contract_bool(node_type: &str, values: &serde_json::Value, key: &str) -> bool {
-    nodecraft_node_contract::resolve_bool(node_type, values, key)
-        .unwrap_or_else(|| panic!("node contract has no switch field {node_type}.{key}"))
+/// The contract-resolved fields of a Translate node.
+///
+/// Geometry placement (`Affine3::from_translate`), the viewport gizmo, and the
+/// edit ghost all read these six numbers through this one helper. Keeping the
+/// resolution here means a missing field takes the same contract default in the
+/// viewport that it takes in the engine and session.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TranslateValues {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub rx: f64,
+    pub ry: f64,
+    pub rz: f64,
 }
 
-/// Row-major affine transform: `p' = M * [x, y, z, 1]`.
-#[derive(Clone, Copy, Debug)]
-pub struct Affine3 {
-    m: [[f64; 4]; 4],
+/// Resolve a Translate node's fields through the node contract.
+#[must_use]
+pub fn translate_values(values: &serde_json::Value) -> TranslateValues {
+    TranslateValues {
+        x: contract_number("translate", values, "x"),
+        y: contract_number("translate", values, "y"),
+        z: contract_number("translate", values, "z"),
+        rx: contract_number("translate", values, "rx"),
+        ry: contract_number("translate", values, "ry"),
+        rz: contract_number("translate", values, "rz"),
+    }
 }
+
+/// The gizmo's affine placement value.
+///
+/// A thin view over [`nodecraft_exact::Affine3`]: composition, inversion and
+/// point mapping are the one implementation in `nodecraft-exact`, not a second
+/// gizmo copy. The constructors below only resolve the node contract's fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Affine3(nodecraft_exact::Affine3);
 
 impl Affine3 {
     pub fn identity() -> Self {
-        Self {
-            m: [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
+        Self(nodecraft_exact::Affine3::IDENTITY)
     }
 
     /// Rotation only, matching the mesh/BRep rotation order.
     pub fn rotation(values: &serde_json::Value) -> Self {
-        let value = |key: &str| contract_number("translate", values, key);
-        let (rx, ry, rz) = (value("rx").to_radians(), value("ry").to_radians(), value("rz").to_radians());
-        let (sx, cx) = rx.sin_cos();
-        let (sy, cy) = ry.sin_cos();
-        let (sz, cz) = rz.sin_cos();
-        let x_axis = [cy * cz, cy * sz, -sy];
-        let y_axis = [sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy];
-        let z_axis = [
-            x_axis[1] * y_axis[2] - x_axis[2] * y_axis[1],
-            x_axis[2] * y_axis[0] - x_axis[0] * y_axis[2],
-            x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0],
-        ];
-        Self {
-            m: [
-                [x_axis[0], y_axis[0], z_axis[0], 0.0],
-                [x_axis[1], y_axis[1], z_axis[1], 0.0],
-                [x_axis[2], y_axis[2], z_axis[2], 0.0],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
+        let translate = translate_values(values);
+        Self(nodecraft_exact::Affine3::from_rotation([
+            translate.rx,
+            translate.ry,
+            translate.rz,
+        ]))
     }
 
     /// Translation after X/Y/Z rotation, matching the mesh and BRep transform paths.
     /// `space` only changes the manipulator frame; it never changes geometry.
     pub fn from_translate(values: &serde_json::Value) -> Self {
-        let value = |key: &str| contract_number("translate", values, key);
-        let mut result = Self::rotation(values);
-        result.m[0][3] = value("x");
-        result.m[1][3] = value("y");
-        result.m[2][3] = value("z");
-        result
+        let translate = translate_values(values);
+        Self(nodecraft_exact::Affine3::from_place(
+            [translate.x, translate.y, translate.z],
+            [translate.rx, translate.ry, translate.rz],
+        ))
     }
 
     pub fn from_mirror(values: &serde_json::Value) -> Self {
         let plane = contract_text("mirror", values, "plane");
         let offset = contract_number("mirror", values, "offset");
-        let mut m = Self::identity().m;
-        match plane.as_ref() {
-            "xy" => { m[2][2] = -1.0; m[2][3] = 2.0 * offset; }
-            "yz" => { m[0][0] = -1.0; m[0][3] = 2.0 * offset; }
-            _ => { m[1][1] = -1.0; m[1][3] = 2.0 * offset; }
-        }
-        Self { m }
+        Self(nodecraft_exact::Affine3::from_mirror(plane.as_ref(), offset))
     }
 
     pub fn from_node(node: &GraphNode) -> Option<Self> {
-        match node.node_type.as_str() {
-            "translate" => Some(Self::from_translate(&node.values)),
-            "mirror" => Some(Self::from_mirror(&node.values)),
-            _ => None,
+        let view = nodecraft_engine::nodes::NodeView::new(
+            &node.id,
+            &node.node_type,
+            &node.values,
+            node.suppressed,
+        );
+        match nodecraft_engine::nodes::transform_role(view)? {
+            nodecraft_engine::nodes::TransformRole::Translate => {
+                Some(Self::from_translate(&node.values))
+            }
+            nodecraft_engine::nodes::TransformRole::Mirror => {
+                Some(Self::from_mirror(&node.values))
+            }
         }
     }
 
     /// `self` applied after `other`.
     pub fn compose(self, other: Self) -> Self {
-        let mut m = [[0.0; 4]; 4];
-        for row in 0..4 {
-            for column in 0..4 {
-                m[row][column] = (0..4).map(|k| self.m[row][k] * other.m[k][column]).sum();
-            }
-        }
-        Self { m }
+        Self(self.0.compose(other.0))
     }
 
     pub fn apply_point(self, point: [f64; 3]) -> [f64; 3] {
-        [
-            self.m[0][0] * point[0] + self.m[0][1] * point[1] + self.m[0][2] * point[2] + self.m[0][3],
-            self.m[1][0] * point[0] + self.m[1][1] * point[1] + self.m[1][2] * point[2] + self.m[1][3],
-            self.m[2][0] * point[0] + self.m[2][1] * point[1] + self.m[2][2] * point[2] + self.m[2][3],
-        ]
+        self.0.apply_point(point)
     }
 
     pub fn apply_vector(self, vector: [f64; 3]) -> [f64; 3] {
-        [
-            self.m[0][0] * vector[0] + self.m[0][1] * vector[1] + self.m[0][2] * vector[2],
-            self.m[1][0] * vector[0] + self.m[1][1] * vector[1] + self.m[1][2] * vector[2],
-            self.m[2][0] * vector[0] + self.m[2][1] * vector[1] + self.m[2][2] * vector[2],
-        ]
+        self.0.apply_vector(vector)
     }
 
     pub fn inverse_linear(self) -> [[f64; 3]; 3] {
-        let inverse = self.inverse();
-        [
-            [inverse.m[0][0], inverse.m[0][1], inverse.m[0][2]],
-            [inverse.m[1][0], inverse.m[1][1], inverse.m[1][2]],
-            [inverse.m[2][0], inverse.m[2][1], inverse.m[2][2]],
-        ]
+        self.0.inverse_linear()
     }
 
     /// Inverse of a rigid/reflected affine transform.
     pub fn inverse(self) -> Self {
-        let r = [
-            [self.m[0][0], self.m[0][1], self.m[0][2]],
-            [self.m[1][0], self.m[1][1], self.m[1][2]],
-            [self.m[2][0], self.m[2][1], self.m[2][2]],
-        ];
-        let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
-            - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
-            + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
-        let inv_det = 1.0 / det;
-        let inv = [
-            [
-                (r[1][1] * r[2][2] - r[1][2] * r[2][1]) * inv_det,
-                (r[0][2] * r[2][1] - r[0][1] * r[2][2]) * inv_det,
-                (r[0][1] * r[1][2] - r[0][2] * r[1][1]) * inv_det,
-            ],
-            [
-                (r[1][2] * r[2][0] - r[1][0] * r[2][2]) * inv_det,
-                (r[0][0] * r[2][2] - r[0][2] * r[2][0]) * inv_det,
-                (r[0][2] * r[1][0] - r[0][0] * r[1][2]) * inv_det,
-            ],
-            [
-                (r[1][0] * r[2][1] - r[1][1] * r[2][0]) * inv_det,
-                (r[0][1] * r[2][0] - r[0][0] * r[2][1]) * inv_det,
-                (r[0][0] * r[1][1] - r[0][1] * r[1][0]) * inv_det,
-            ],
-        ];
-        let t = [self.m[0][3], self.m[1][3], self.m[2][3]];
-        let it = [
-            -(inv[0][0] * t[0] + inv[0][1] * t[1] + inv[0][2] * t[2]),
-            -(inv[1][0] * t[0] + inv[1][1] * t[1] + inv[1][2] * t[2]),
-            -(inv[2][0] * t[0] + inv[2][1] * t[1] + inv[2][2] * t[2]),
-        ];
-        Self {
-            m: [
-                [inv[0][0], inv[0][1], inv[0][2], it[0]],
-                [inv[1][0], inv[1][1], inv[1][2], it[1]],
-                [inv[2][0], inv[2][1], inv[2][2], it[2]],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-        }
+        Self(self.0.inverse())
     }
 
     /// Column-major `[[f32; 4]; 4]` for GPU uploads (WGSL `mat4x4<f32>` layout).
     pub fn to_column_major_f32(self) -> [[f32; 4]; 4] {
-        let mut out = [[0.0f32; 4]; 4];
-        for row in 0..4 {
-            for column in 0..4 {
-                out[column][row] = self.m[row][column] as f32;
-            }
-        }
-        out
+        self.0.to_column_major_f32()
+    }
+
+    /// The shared placement value, for consumers that take it directly.
+    pub fn placement(self) -> nodecraft_exact::Placement {
+        nodecraft_exact::Placement::from_matrix(self.0)
+    }
+}
+
+impl From<nodecraft_exact::Affine3> for Affine3 {
+    fn from(matrix: nodecraft_exact::Affine3) -> Self {
+        Self(matrix)
+    }
+}
+
+impl From<Affine3> for nodecraft_exact::Affine3 {
+    fn from(value: Affine3) -> Self {
+        value.0
     }
 }
 
@@ -241,24 +203,37 @@ pub fn preview_body_scope(
     if !descendants.contains(target) {
         return None;
     }
-    if selected != target {
-        let merges_operands = document
-            .nodes
-            .iter()
-            .find(|node| node.id == target)
-            .is_some_and(|node| matches!(node.node_type.as_str(), "boolean" | "fuse"))
-            && document
-                .connections
-                .iter()
-                .filter(|link| link.to == target)
-                .map(|link| link.input.as_str())
-                .collect::<std::collections::HashSet<_>>()
-                .is_superset(&["a", "b"].into_iter().collect());
-        if merges_operands {
-            // Both operands are unioned into one result body; provenance is
-            // lost inside it. A drag on one branch cannot move only its own
-            // geometry, so there is no display-scoped fast preview; the caller
-            // lets evaluation produce the new body.
+    // The registry owns which nodes merge operands and how. The protocol
+    // connection shape keeps the engine's declaration independent of the
+    // session's document types.
+    let registry_connections: Vec<Connection> = document
+        .connections
+        .iter()
+        .map(|link| Connection {
+            from: link.from.clone(),
+            to: link.to.clone(),
+            input: link.input.clone(),
+            out: link.out.clone(),
+        })
+        .collect();
+    if selected != target
+        && let Some(node) = document.nodes.iter().find(|node| node.id == target)
+    {
+        let view = nodecraft_engine::nodes::NodeView::new(
+            &node.id,
+            &node.node_type,
+            &node.values,
+            node.suppressed,
+        );
+        // Asking about the target itself: only the selected upstream branch is
+        // attributed to the edit, so a node that merges a second operand loses
+        // provenance. A drag on one branch cannot move only its own geometry;
+        // there is no display-scoped fast preview, so the caller lets evaluation
+        // produce the new body.
+        let affected = std::collections::HashSet::from([selected.to_owned()]);
+        if nodecraft_engine::nodes::merge_provenance(view, &registry_connections, &affected)
+            == nodecraft_engine::nodes::MergeProvenance::LosesProvenance
+        {
             return None;
         }
     }
@@ -268,9 +243,34 @@ pub fn preview_body_scope(
         // caller must not move the whole breakpoint mesh here.
         return Some(PreviewBodyScope::Unknown);
     };
+    // A merge node downstream of the edit produced one body from both
+    // operands. If any operand is outside the edit's downstream branch, that
+    // body contains geometry the drag cannot attribute to the edit, so the
+    // preview must not move it as a whole. The registry decides which nodes
+    // merge and which ports carry the operands; the session only supplies the
+    // affected set.
+    let merge_loses_provenance = |marker: &str| -> bool {
+        if marker == selected || !descendants.contains(marker) {
+            return false;
+        }
+        let Some(node) = document.nodes.iter().find(|node| node.id == marker) else {
+            return false;
+        };
+        let view = nodecraft_engine::nodes::NodeView::new(
+            &node.id,
+            &node.node_type,
+            &node.values,
+            node.suppressed,
+        );
+        nodecraft_engine::nodes::merge_provenance(view, &registry_connections, &descendants)
+            == nodecraft_engine::nodes::MergeProvenance::LosesProvenance
+    };
     let mut prefixes = Vec::new();
     let mut all_affected = !layout.is_empty();
     for (index, marker) in layout.iter().enumerate() {
+        if merge_loses_provenance(marker) {
+            return Some(PreviewBodyScope::Unknown);
+        }
         if ancestors.contains(marker) || descendants.contains(marker) {
             prefixes.push(format!("body:{index}:"));
         } else {
@@ -294,83 +294,26 @@ fn part_body_layout(document: &GraphDocument, target: &str) -> Option<Vec<String
     if node.suppressed {
         return None;
     }
-    let source = |inputs: &[&str]| -> Option<&GraphConnection> {
-        document
+    if nodecraft_engine::nodes::handles(&node.node_type) {
+        // The registry owns the layout rule. Pass every connected input port
+        // with its upstream layout, in connection order, so Combine can flatten
+        // its operands and one-input nodes can repeat or transform the source.
+        let view = nodecraft_engine::nodes::NodeView::new(
+            &node.id,
+            &node.node_type,
+            &node.values,
+            node.suppressed,
+        );
+        let inputs = document
             .connections
             .iter()
-            .find(|link| link.to == target && inputs.contains(&link.input.as_str()))
-    };
-    let layout = match node.node_type.as_str() {
-        "solid" | "primitive" | "stepimporter" => vec![target.to_owned()],
-        "translate" => part_body_layout(document, &source(&["shape"])?.from)?,
-        "mirror" => {
-            let source_layout = part_body_layout(document, &source(&["shape"])?.from)?;
-            if mirror_combines(&node.values) {
-                let mut combined = source_layout.clone();
-                combined.extend(source_layout);
-                combined
-            } else {
-                source_layout
-            }
-        }
-        "combine" => {
-            let mut layout = Vec::new();
-            for link in document
-                .connections
-                .iter()
-                .filter(|link| link.to == target && link.input == "shape")
-            {
-                layout.extend(part_body_layout(document, &link.from)?);
-            }
-            layout
-        }
-        "boolean" | "fuse" => {
-            let a = source(&["a"]).map(|link| link.from.clone());
-            let b = source(&["b"]).map(|link| link.from.clone());
-            match (a, b) {
-                // Both operands are unioned into one result body; provenance is
-                // lost inside it, so the body moves as a whole.
-                (Some(_), Some(_)) => vec![target.to_owned()],
-                (Some(a), None) => part_body_layout(document, &a)?,
-                (None, Some(b)) => part_body_layout(document, &b)?,
-                (None, None) => return None,
-            }
-        }
-        "extrude" | "loft" | "surfaceloft" => vec![target.to_owned()],
-        "shell" => {
-            // One shelled body per input body, in the same order.
-            part_body_layout(document, &source(&["shape"])?.from)?
-        }
-        "chamfer" | "fillet" => {
-            let source_layout = part_body_layout(document, &source(&["shape"])?.from)?;
-            let has_edges = node
-                .values
-                .get("edges")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|edges| !edges.is_empty());
-            if has_edges {
-                vec![target.to_owned()]
-            } else {
-                source_layout
-            }
-        }
-        "scatter" | "circularpattern" => {
-            let source_layout = part_body_layout(document, &source(&["shape"])?.from)?;
-            let count = contract_number(&node.node_type, &node.values, "count")
-                .round()
-                .clamp(1.0, 5000.0) as usize;
-            let mut layout = Vec::with_capacity(source_layout.len() * count);
-            for _ in 0..count {
-                layout.extend(source_layout.iter().cloned());
-            }
-            layout
-        }
-        // Sketches/splines contribute no bodies (their curves are appended after
-        // the bodies as separate display instances).
-        "sketch" | "spline" => Vec::new(),
-        _ => return None,
-    };
-    Some(layout)
+            .filter(|link| link.to == target)
+            .map(|link| Some((link.input.as_str(), part_body_layout(document, &link.from)?)))
+            .collect::<Option<Vec<_>>>()?;
+        return nodecraft_engine::nodes::body_layout(view, &inputs);
+    }
+    // Every Part display type is served by the registry.
+    None
 }
 
 /// Whether the engine builds this target's display mesh on the exact Part path:
@@ -395,11 +338,6 @@ fn part_display_chain(document: &GraphDocument, target: &str) -> bool {
     true
 }
 
-/// Mirror value that enables `merge(mesh, mirrored)` in the display evaluator.
-fn mirror_combines(values: &serde_json::Value) -> bool {
-    contract_bool("mirror", values, "combine")
-}
-
 /// Whether a node turns one input body into several displayed copies.
 ///
 /// A drag preview has a single affine, so it cannot follow every copy. The
@@ -409,11 +347,13 @@ fn mirror_combines(values: &serde_json::Value) -> bool {
 /// A non-combining Mirror is not a repeater: its only displayed body is the
 /// reflected copy, so its placement still belongs in the chain.
 fn repeats_input_bodies(node: &GraphNode) -> bool {
-    match node.node_type.as_str() {
-        "mirror" => mirror_combines(&node.values),
-        "scatter" | "circularpattern" => true,
-        _ => false,
-    }
+    let view = nodecraft_engine::nodes::NodeView::new(
+        &node.id,
+        &node.node_type,
+        &node.values,
+        node.suppressed,
+    );
+    nodecraft_engine::nodes::repeats_input_bodies(view)
 }
 
 /// World-space transform that carries display geometry evaluated with the
@@ -509,7 +449,8 @@ fn unique_document_path(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GraphConnection, GraphDocument, GraphNode};
+
+use crate::{GraphConnection, GraphDocument, GraphNode};
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
         GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x: 0.0, y: 0.0 }
@@ -524,6 +465,35 @@ mod tests {
         let translate = Affine3::from_translate(&serde_json::json!({"x": 10.0, "y": 0.0, "z": 0.0}));
         assert_eq!(translate.apply_point([0.0, 0.0, 0.0]), [10.0, 0.0, 0.0]);
         assert_eq!(translate.inverse().apply_point([10.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn translate_values_use_contract_defaults_when_fields_are_missing() {
+        let missing = serde_json::json!({});
+        let translate = translate_values(&missing);
+        assert_eq!(
+            translate,
+            TranslateValues { x: 0.0, y: 0.0, z: 0.0, rx: 0.0, ry: 0.0, rz: 0.0 }
+        );
+        // All six Translate defaults are 0.0, so the contract default is
+        // observably equal to the old private fallback. Pin the resolver path
+        // itself: the frame, placement and gizmo all consume this helper, and
+        // the promoted contract-defaults-only rule rejects the old read.
+        for key in ["x", "y", "z", "rx", "ry", "rz"] {
+            assert_eq!(
+                nodecraft_node_contract::resolve_number("translate", &missing, key),
+                Some(0.0),
+                "translate.{key}"
+            );
+        }
+        assert_eq!(Affine3::from_translate(&missing).apply_point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        let explicit = serde_json::json!({
+            "x": 2.0, "y": 3.0, "z": 4.0, "rx": 5.0, "ry": 6.0, "rz": 7.0
+        });
+        assert_eq!(
+            translate_values(&explicit),
+            TranslateValues { x: 2.0, y: 3.0, z: 4.0, rx: 5.0, ry: 6.0, rz: 7.0 }
+        );
     }
 
     #[test]
@@ -730,6 +700,83 @@ mod tests {
         );
     }
 
+    /// The Boolean merge rule lives in the registry, not in the session. Both
+    /// operands lose the target's provenance; a one-operand pass-through keeps
+    /// the source layout and previews the source body.
+    #[test]
+    fn preview_scope_uses_the_registry_merge_rule() {
+        let mut document = GraphDocument::new("registry-merge");
+        document.nodes = vec![
+            node("box", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("move", "translate", serde_json::json!({"x": 10.0})),
+            node("sphere", "primitive", serde_json::json!({"primitiveType": "sphere"})),
+            node("boolean", "boolean", serde_json::json!({"mode": "union"})),
+        ];
+        document.connections = vec![
+            link("box", "move"),
+            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
+            GraphConnection { from: "sphere".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+        ];
+        let boolean = document.nodes.iter().find(|node| node.id == "boolean").expect("boolean");
+        let view = nodecraft_engine::nodes::NodeView::new(
+            &boolean.id,
+            &boolean.node_type,
+            &boolean.values,
+            boolean.suppressed,
+        );
+        let connections: Vec<nodecraft_protocol::Connection> = document
+            .connections
+            .iter()
+            .map(|link| nodecraft_protocol::Connection {
+                from: link.from.clone(),
+                to: link.to.clone(),
+                input: link.input.clone(),
+                out: link.out.clone(),
+            })
+            .collect();
+        let affected: std::collections::HashSet<String> =
+            ["move".to_owned()].into_iter().collect();
+        assert_eq!(
+            nodecraft_engine::nodes::merge_provenance(view, &connections, &affected),
+            nodecraft_engine::nodes::MergeProvenance::LosesProvenance,
+        );
+        assert_eq!(preview_body_scope(&document, "move", "boolean"), None);
+
+        // B is missing: the Boolean is the one-operand pass-through and the
+        // source body keeps its own layout.
+        let mut one_document = document.clone();
+        one_document.connections.retain(|link| !(link.to == "boolean" && link.input == "b"));
+        let one_boolean = one_document
+            .nodes
+            .iter()
+            .find(|node| node.id == "boolean")
+            .expect("boolean");
+        let one_view = nodecraft_engine::nodes::NodeView::new(
+            &one_boolean.id,
+            &one_boolean.node_type,
+            &one_boolean.values,
+            one_boolean.suppressed,
+        );
+        let one_operand: Vec<nodecraft_protocol::Connection> = one_document
+            .connections
+            .iter()
+            .map(|link| nodecraft_protocol::Connection {
+                from: link.from.clone(),
+                to: link.to.clone(),
+                input: link.input.clone(),
+                out: link.out.clone(),
+            })
+            .collect();
+        assert_eq!(
+            nodecraft_engine::nodes::merge_provenance(one_view, &one_operand, &affected),
+            nodecraft_engine::nodes::MergeProvenance::Preserved,
+        );
+        assert_eq!(
+            preview_body_scope(&one_document, "move", "boolean"),
+            Some(PreviewBodyScope::All),
+        );
+    }
+
     #[test]
     fn preview_scope_isolates_the_connected_combine_branch() {
         let document = combine_graph(0);
@@ -873,6 +920,94 @@ mod tests {
         assert_eq!(part_body_layout(&document, "mirror"), Some(vec!["box".to_owned()]));
     }
 
+    /// Fillet follows its source layout until edges are selected, then the
+    /// blend is one new body. The rule lives on the node; this pins it through
+    /// the registry.
+    #[test]
+    fn fillet_body_layout_is_the_source_until_edges_are_selected() {
+        assert!(nodecraft_engine::nodes::handles("fillet"));
+        let mut document = GraphDocument::new("fillet-layout");
+        document.nodes = vec![
+            node("box", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("fillet", "fillet", serde_json::json!({})),
+        ];
+        document.connections = vec![link("box", "fillet")];
+        assert_eq!(part_body_layout(&document, "fillet"), Some(vec!["box".to_owned()]));
+
+        document.nodes[1].values = serde_json::json!({"edges": [{"ordinal": 0}]});
+        assert_eq!(part_body_layout(&document, "fillet"), Some(vec!["fillet".to_owned()]));
+    }
+
+    /// Chamfer follows its source layout until edges are selected, then the
+    /// bevel is one new body. The rule lives on the node; this pins it through
+    /// the registry.
+    #[test]
+    fn chamfer_body_layout_is_the_source_until_edges_are_selected() {
+        assert!(nodecraft_engine::nodes::handles("chamfer"));
+        let mut document = GraphDocument::new("chamfer-layout");
+        document.nodes = vec![
+            node("box", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("chamfer", "chamfer", serde_json::json!({})),
+        ];
+        document.connections = vec![link("box", "chamfer")];
+        assert_eq!(part_body_layout(&document, "chamfer"), Some(vec!["box".to_owned()]));
+
+        document.nodes[1].values = serde_json::json!({"edges": [{"ordinal": 0}]});
+        assert_eq!(part_body_layout(&document, "chamfer"), Some(vec!["chamfer".to_owned()]));
+    }
+
+    /// A multi-body shell keeps the source layout: one shelled body per input
+    /// body, in the same order. The rule lives on the node; this pins it
+    /// through the registry.
+    #[test]
+    fn shell_body_layout_is_the_source_layout() {
+        assert!(nodecraft_engine::nodes::handles("shell"));
+        let mut document = GraphDocument::new("shell-layout");
+        document.nodes = vec![
+            node("big", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("small", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("part", "combine", serde_json::json!({})),
+            node("shell", "shell", serde_json::json!({"thickness": 1.0})),
+        ];
+        document.connections = vec![
+            link("big", "part"),
+            link("small", "part"),
+            link("part", "shell"),
+        ];
+        assert_eq!(
+            part_body_layout(&document, "shell"),
+            Some(vec!["big".to_owned(), "small".to_owned()]),
+        );
+    }
+
+    /// Offset Faces keeps the source layout: it replaces edited bodies in
+    /// place. This is the reviewer's decision, and before the port the node had
+    /// no layout arm, so the session could not reproduce its Part.
+    #[test]
+    fn offset_faces_body_layout_is_the_source_layout() {
+        assert!(nodecraft_engine::nodes::handles("offsetfaces"));
+        let mut document = GraphDocument::new("offset-faces-layout");
+        document.nodes = vec![
+            node("big", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("small", "primitive", serde_json::json!({"primitiveType": "box"})),
+            node("part", "combine", serde_json::json!({})),
+            node(
+                "offset",
+                "offsetfaces",
+                serde_json::json!({"distance": 1.0, "faces": [{"id": "body:1:face:1"}]}),
+            ),
+        ];
+        document.connections = vec![
+            link("big", "part"),
+            link("small", "part"),
+            link("part", "offset"),
+        ];
+        assert_eq!(
+            part_body_layout(&document, "offset"),
+            Some(vec!["big".to_owned(), "small".to_owned()]),
+        );
+    }
+
     /// A mirror with no saved plane reflects through XZ, the contract default.
     #[test]
     fn mirror_missing_plane_uses_the_xz_transform() {
@@ -899,6 +1034,7 @@ mod tests {
     /// two-body source with three copies has six display bodies.
     #[test]
     fn circular_pattern_body_layout_repeats_the_source_count_times() {
+        assert!(nodecraft_engine::nodes::handles("circularpattern"));
         let mut document = GraphDocument::new("circular-pattern-layout");
         document.nodes = vec![
             node("box", "primitive", serde_json::json!({"primitiveType": "box"})),

@@ -124,6 +124,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 

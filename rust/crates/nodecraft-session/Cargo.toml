@@ -12,6 +12,7 @@ path = "src/lib.rs"
 serde = { workspace = true }
 serde_json.workspace = true
 nodecraft-engine = { path = "../nodecraft-engine", default-features = false }
+nodecraft-exact = { path = "../nodecraft-exact" }
 nodecraft-protocol = { path = "../nodecraft-protocol" }
 nodecraft-display = { path = "../nodecraft-display" }
 nodecraft-node-contract = { path = "../nodecraft-node-contract" }

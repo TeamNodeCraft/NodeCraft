@@ -158,15 +158,73 @@ pub(super) fn submit_exact_snapshot(
         revision,
         snapshot_id: revision,
         quality: display_quality(submission.quality),
+        body_quality: Default::default(),
+        body_priority: Vec::new(),
         feature_ghost: submission.feature_ghost,
         snapshot,
     });
     true
 }
 
+/// Runtime importer-source hashes for `document`, keyed by node id.
+///
+/// Shared by the evaluation key/job and by the session-setup paths in `app.rs`
+/// so both sides fold exactly the same source state into a revision.
+pub(super) fn source_hashes(
+    changes: &crate::source_service::ChangeTracker,
+    document: &GraphDocument,
+) -> std::collections::BTreeMap<String, String> {
+    document
+        .nodes
+        .iter()
+        .filter(|node| nodecraft_node_contract::import_source_node(&node.node_type))
+        .filter_map(|node| {
+            changes
+                .hash(&document.id, &node.id)
+                .map(|hash| (node.id.clone(), hash.to_owned()))
+        })
+        .collect()
+}
+
 impl NodeCraftApp {
     pub(super) fn evaluate(&mut self) {
         self.evaluate_with_cache_policy(false, false);
+    }
+
+    /// The active document's folder and ingested sources, passed to every
+    /// evaluation so relative importer paths resolve in one place.
+    pub(super) fn active_document_directory(&self) -> Option<PathBuf> {
+        self.tabs
+            .get(self.active_tab)
+            .and_then(|tab| tab.path.clone())
+            .or_else(|| self.path.clone())
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    /// Runtime source content hashes for `document`'s importers, keyed by node
+    /// id. They come from the ChangeTracker/source service and never live in the
+    /// document; the evaluation request folds them into cache identity.
+    pub(super) fn source_hashes(
+        &self,
+        document: &GraphDocument,
+    ) -> std::collections::BTreeMap<String, String> {
+        source_hashes(&self.source_changes, document)
+    }
+
+    fn import_context(&self, document: &GraphDocument) -> nodecraft_engine::ImportContext {
+        self.import_context_with(document, self.source_hashes(document))
+    }
+
+    fn import_context_with(
+        &self,
+        document: &GraphDocument,
+        source_hashes: std::collections::BTreeMap<String, String>,
+    ) -> nodecraft_engine::ImportContext {
+        nodecraft_engine::ImportContext::new(
+            self.active_document_directory(),
+            document.ingested_sources.clone(),
+        )
+        .with_source_hashes(source_hashes)
     }
 
     fn linked_documents(&self) -> std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>> {
@@ -339,6 +397,9 @@ impl NodeCraftApp {
                 .is_some_and(|node| matches!(node.node_type.as_str(), "fillet" | "chamfer"))
         });
         let linked_documents = self.linked_documents();
+        // Source hashes are runtime state and belong to this evaluation's
+        // identity, exactly like the linked-document digest below.
+        let source_hashes = self.source_hashes(eval_document);
         let key = ExactKey::new(
             self.session_generation,
             eval_document_id,
@@ -349,6 +410,7 @@ impl NodeCraftApp {
             edit_preview.clone(),
             feature_ghost,
             run_exporters,
+            &source_hashes,
             &linked_documents,
         );
         let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
@@ -400,6 +462,21 @@ impl NodeCraftApp {
         // The incoming document is needed for the worker job; clone it before
         // touching evaluation state so the session borrow ends first.
         let job_document = eval_document.clone();
+        // Reuse the session's revision cache only when the worker's flat graph
+        // is guaranteed to be this exact document: no definition-body binding,
+        // no linked documents, and no inline graph/group/linkedpart expansion.
+        // The worker re-checks the flat node/connection counts before using it.
+        let session_hashes = if binding.is_none()
+            && linked_documents.is_empty()
+            && !job_document.nodes.iter().any(|node| {
+                matches!(node.node_type.as_str(), "group" | "graph" | "linkedpart")
+            })
+        {
+            session.hashes_for_sources(&source_hashes)
+        } else {
+            None
+        };
+        let imports = self.import_context_with(&job_document, source_hashes);
         self.refresh_diagnostics();
         self.eval_next = self.eval_next.wrapping_add(1);
         let id = self.eval_next;
@@ -456,6 +533,10 @@ impl NodeCraftApp {
                 document_id,
                 linked_documents,
                 document: job_document,
+                imports,
+                // Session revision hashes for `document` when it is the exact
+                // graph the worker will request; `None` asks the bridge to hash.
+                session_hashes,
                 selected: evaluation_selection,
                 comparison,
                 ghost_input,
@@ -478,6 +559,11 @@ pub(super) struct EvalJob {
     document_id: String,
     linked_documents: std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>>,
     document: GraphDocument,
+    imports: nodecraft_engine::ImportContext,
+    /// Content hashes of the session revision this job evaluates. Present only
+    /// when the job document is the session document and no flattening can
+    /// change the worker's graph; the bridge otherwise hashes the flat graph.
+    session_hashes: Option<std::sync::Arc<std::collections::BTreeMap<String, nodecraft_session::ContentHash>>>,
     selected: Option<String>,
     comparison: Option<(String, String)>,
     ghost_input: Option<String>,
@@ -499,6 +585,7 @@ pub(super) struct ValidationJob {
     document_id: String,
     linked_documents: std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>>,
     document: std::sync::Arc<GraphDocument>,
+    imports: nodecraft_engine::ImportContext,
     target: String,
     /// The same exact identity the app records for this request. One identity
     /// decides both app bookkeeping and worker supersession.
@@ -597,7 +684,8 @@ pub(super) fn merge_diagnostics(
 /// result even when its document id, revision and target all match. The
 /// revision is the session's content revision, so any edit changes the key.
 /// Linked-document content is folded into [`Self::linked_digest`] because it
-/// lives outside the active session's revision.
+/// lives outside the active session's revision, and runtime importer-source
+/// hashes are folded into [`Self::source_digest`] for the same reason.
 ///
 /// One key type serves every exact producer and consumer: the per-tab result
 /// cache, the display quality tier, validation requests and the worker. Do not
@@ -616,6 +704,7 @@ pub(super) struct ExactKey {
     feature_ghost: bool,
     run_exporters: bool,
     linked_digest: u64,
+    source_digest: u64,
 }
 
 impl ExactKey {
@@ -630,6 +719,7 @@ impl ExactKey {
         edit_preview: Option<String>,
         feature_ghost: bool,
         run_exporters: bool,
+        source_hashes: &std::collections::BTreeMap<String, String>,
         linked_documents: &std::collections::BTreeMap<PathBuf, GraphDocument>,
     ) -> Self {
         Self {
@@ -643,6 +733,7 @@ impl ExactKey {
             feature_ghost,
             run_exporters,
             linked_digest: linked_digest(linked_documents),
+            source_digest: source_digest(source_hashes),
         }
     }
 
@@ -664,7 +755,22 @@ impl ExactKey {
         self.session_generation == other.session_generation
             && self.revision == other.revision
             && self.linked_digest == other.linked_digest
+            && self.source_digest == other.source_digest
     }
+}
+
+/// Content identity of the runtime importer-source hashes an evaluation saw.
+/// They are outside the document revision, exactly like linked documents.
+fn source_digest(hashes: &std::collections::BTreeMap<String, String>) -> u64 {
+    if hashes.is_empty() {
+        return 0;
+    }
+    let mut hasher = DefaultHasher::new();
+    for (id, hash) in hashes {
+        id.hash(&mut hasher);
+        hash.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Content identity of the linked documents a graph expands. Linked parts are
@@ -742,6 +848,41 @@ pub(super) struct DisplaySnapshot {
     pub target: String,
     pub feature_ghost: bool,
     pub snapshot: std::sync::Arc<nodecraft_display::service::ExactSnapshot>,
+}
+
+/// Display-space bounds for every body in one exact snapshot.
+///
+/// A body key can appear more than once when one source is placed several
+/// times. Keep the instance with the smaller radius so a shared body is
+/// planned at the finest level any placement needs.
+pub(super) fn lod_bounds_for_snapshot(
+    snapshot: &nodecraft_display::service::ExactSnapshot,
+) -> std::collections::BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds> {
+    let mut bounds: std::collections::BTreeMap<
+        nodecraft_display::BodyKey,
+        nodecraft_display::BodyBounds,
+    > = std::collections::BTreeMap::new();
+    let parts = snapshot
+        .breakpoint
+        .values()
+        .chain(snapshot.overlays.iter().map(|overlay| overlay.part.as_ref()));
+    for part in parts {
+        for body in &part.bodies {
+            let Some(local) = nodecraft_display::body_bounds(&body.brep) else { continue };
+            let placed = local.placed(&body.placement);
+            match bounds.entry(body.key) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    if placed.radius < entry.get().radius {
+                        entry.insert(placed);
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(placed);
+                }
+            }
+        }
+    }
+    bounds
 }
 
 /// Position of one display frame in the order the viewer shows geometry.
@@ -837,7 +978,7 @@ pub(super) fn build_display(
 fn display_quality(preview_detail: Option<u8>) -> nodecraft_display::DisplayQuality {
     match preview_detail {
         Some(detail) => nodecraft_display::DisplayQuality::Preview(detail),
-        None => nodecraft_display::DisplayQuality::Full(0.35),
+        None => nodecraft_display::default_quality(),
     }
 }
 
@@ -1017,7 +1158,7 @@ impl EvalWorker {
                 let mut cache = state.cache;
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     nodecraft_engine::kernel_pool::with_current_token(|| {
-                        engine_bridge::evaluate_flat_exact(
+                        engine_bridge::evaluate_flat_exact_with_imports(
                             flat.document(),
                             job.target.clone(),
                             cache,
@@ -1029,6 +1170,7 @@ impl EvalWorker {
                             &[],
                             None,
                             false,
+                            &job.imports,
                         )
                     })
                 }));
@@ -1132,8 +1274,17 @@ impl EvalWorker {
                     let _ = progress_tx.send((job.id, job.tab_id, event));
                 };
                 let mut cache = state.cache;
+                // The session map is only valid for the exact document it was
+                // computed from. Flattening is a clone for a graph with no
+                // linked/inline expansion, so require the same node and
+                // connection counts; otherwise the bridge hashes its own flat
+                // document (one pass, correctness first).
+                let session_hashes = job.session_hashes.as_deref().filter(|_| {
+                    flat.document().nodes.len() == job.document.nodes.len()
+                        && flat.document().connections.len() == job.document.connections.len()
+                });
                 let exact_outcome = catch_unwind(AssertUnwindSafe(|| {
-                    nodecraft_engine::kernel_pool::with_current_token(|| engine_bridge::evaluate_flat_exact(
+                    nodecraft_engine::kernel_pool::with_current_token(|| engine_bridge::evaluate_flat_exact_with_imports_and_hashes(
                         flat.document(),
                         target.clone().unwrap_or_default(),
                         cache,
@@ -1145,6 +1296,8 @@ impl EvalWorker {
                         &[],
                         job.edit_preview.as_deref(),
                         job.clear_cache,
+                        &job.imports,
+                        session_hashes,
                     ))
                 }));
                 let exact = match exact_outcome {
@@ -1198,54 +1351,10 @@ impl EvalWorker {
                         continue;
                     }
                 };
-                let evaluation_target = target.clone().unwrap_or_default();
                 if job.run_exporters {
-                    let exporter = job
-                        .document
-                        .nodes
-                        .iter()
-                        .find(|node| node.node_type == "exporter" && node.id == evaluation_target)
-                        .or_else(|| job.document.nodes.iter().rev().find(|node| node.node_type == "exporter"));
-                    if let Some(exporter) = exporter {
-                        let input = job
-                            .document
-                            .connections
-                            .iter()
-                            .find(|link| link.to == exporter.id && link.input == "shape")
-                            .map(|link| link.from.clone());
-                        let result = (|| -> Result<(), String> {
-                            let input = input.ok_or("Export node has no shape input")?;
-                            // The exact pass proved the exporter's bodies (blocking);
-                            // a refusal is an error and must not write a file.
-                            if let Some(error) = evaluation
-                                .node_errors
-                                .get(&exporter.id)
-                                .or_else(|| evaluation.node_errors.get(&input))
-                            {
-                                return Err(error.clone());
-                            }
-                            let part = evaluation.exact_parts.get(&input).ok_or("Export input has no exact Part")?;
-                            let directory = exporter.values.get("directory").and_then(serde_json::Value::as_str).unwrap_or("");
-                            let root = std::env::var("NODECRAFT_PROJECT_ROOT").unwrap_or_else(|_| ".".into());
-                            let mut output = if directory.is_empty() {
-                                std::path::PathBuf::from(&root).join("output")
-                            } else {
-                                std::path::PathBuf::from(directory)
-                            };
-                            if output.is_relative() { output = std::path::PathBuf::from(&root).join(output); }
-                            let stem = exporter.values.get("fileName").and_then(serde_json::Value::as_str).unwrap_or("model").trim_end_matches(".step").trim();
-                            let stem = if stem.is_empty() { "model" } else { stem };
-                            std::fs::create_dir_all(&output).map_err(|error| error.to_string())?;
-                            nodecraft_display::export_step(part, &output.join(format!("{stem}.step")), &exporter.values)
-                        })();
-                        evaluation.target = exporter.id.clone();
-                        evaluation.exact_parts.clear();
-                        evaluation.error = result.err();
-                        state.cache = cache;
-                        states.insert(job.document_id.clone(), state);
-                        if result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
-                        continue 'jobs;
-                    }
+                    // The engine runs the exporter's effect once and records
+                    // any write/proof error on the exporter node. The app must
+                    // not write a second copy.
                     evaluation.exact_parts.clear();
                     state.cache = cache;
                     states.insert(job.document_id.clone(), state);
@@ -1454,6 +1563,12 @@ impl NodeCraftApp {
             &mut self.quality_display,
         );
         if submitted {
+            // A new exact snapshot invalidates the installed per-body levels
+            // and their cached bounds. The next update recomputes both against
+            // the new snapshot and its camera.
+            self.lod_levels.clear();
+            self.lod_bounds = None;
+            self.lod_view = None;
             self.egui_ctx.request_repaint();
         }
     }
@@ -1505,6 +1620,8 @@ impl NodeCraftApp {
         revision: u64,
     ) -> Vec<ValidationJob> {
         let Some(document) = document else { return Vec::new() };
+        let source_hashes = self.source_hashes(&document);
+        let imports = self.import_context_with(&document, source_hashes.clone());
         let mut jobs = Vec::new();
         for target in targets {
             let key = ExactKey::new(
@@ -1517,6 +1634,7 @@ impl NodeCraftApp {
                 None,
                 false,
                 false,
+                &source_hashes,
                 linked_documents,
             );
             let body_target = binding
@@ -1559,6 +1677,7 @@ impl NodeCraftApp {
                 document_id: document_id.to_owned(),
                 linked_documents: std::sync::Arc::clone(linked_documents),
                 document: std::sync::Arc::clone(&document),
+                imports: imports.clone(),
                 target: target.clone(),
                 key,
                 token: nodecraft_engine::kernel_pool::RevisionToken::new(),
@@ -1572,7 +1691,7 @@ impl NodeCraftApp {
     /// selected validation targets. Validation may only change node_errors and
     /// node_warnings (the canvas error glow); it must not touch status,
     /// progress, activity, last_exact or display state.
-    fn refresh_diagnostics(&mut self) {
+    pub(super) fn refresh_diagnostics(&mut self) {
         let (errors, warnings) = merge_diagnostics(
             &self.base_node_errors,
             &self.base_node_warnings,
@@ -1583,8 +1702,13 @@ impl NodeCraftApp {
         self.node_error_messages = errors;
         self.node_warnings = warnings;
         self.node_editor.set_error_nodes(self.node_errors.clone());
-        self.node_editor
-            .set_warning_nodes(self.node_warnings.keys().cloned().collect());
+        let mut warning_nodes: HashSet<String> = self.node_warnings.keys().cloned().collect();
+        if let Some(document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone())
+            && let Some(changed) = self.source_changes.changed(&document_id)
+        {
+            warning_nodes.extend(changed.iter().cloned());
+        }
+        self.node_editor.set_warning_nodes(warning_nodes);
     }
 
     /// Apply a display frame. Owns viewport geometry and overlays only; node and
@@ -1595,7 +1719,7 @@ impl NodeCraftApp {
         target: &str,
         _feature_ghost: bool,
         force_preserve_camera: bool,
-    ) {
+    ) -> bool {
         let apply_started = std::time::Instant::now();
         let applied = DisplayOrder::of(frame);
         // The viewer shows one exact snapshot. A frame planned from an older
@@ -1611,7 +1735,7 @@ impl NodeCraftApp {
                     self.display_snapshot.as_ref().map(|snapshot| snapshot.id).unwrap_or(0),
                 );
             }
-            return;
+            return false;
         }
         // An explicit breakpoint activation is a request to see this target's
         // current geometry. It frames the camera even when the target was
@@ -1647,7 +1771,7 @@ impl NodeCraftApp {
                 retire_preview,
             );
             self.egui_ctx.request_repaint();
-            return;
+            return false;
         };
         let mut plans = planned.plans.clone();
         for plan in &mut plans {
@@ -1815,6 +1939,7 @@ impl NodeCraftApp {
             _feature_ghost,
         ));
         self.egui_ctx.request_repaint();
+        true
     }
 
     /// Apply a quality-tier frame without an evaluation request. This touches
@@ -1839,12 +1964,20 @@ impl NodeCraftApp {
         if let Some(error) = &frame.error {
             self.display_error = Some(error.clone());
             self.status = format!("Display failed: {error}");
+            // Let the next update retry the per-body levels instead of
+            // treating the failed level set as installed.
+            self.lod_view = None;
             self.egui_ctx.request_repaint();
             return;
         }
         let started = std::time::Instant::now();
-        self.apply_display_frame(&frame, &target, feature_ghost, false);
-        self.last_display_us = Some((frame.plan_us, started.elapsed().as_micros() as u64));
+        if self.apply_display_frame(&frame, &target, feature_ghost, false) {
+            self.last_display_us = Some((frame.plan_us, started.elapsed().as_micros() as u64));
+        } else {
+            // A stale or unapplicable frame did not install its plans. Recompute
+            // the view level on the next frame so the request retries.
+            self.lod_view = None;
+        }
     }
 
     /// Poll the display service for the exact pre-pass's frame.
@@ -2102,6 +2235,7 @@ mod tests {
             false,
             false,
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -2112,6 +2246,8 @@ mod tests {
             document_id: "worker-test".to_owned(),
             linked_documents: Default::default(),
             document: box_document(),
+            imports: Default::default(),
+            session_hashes: None,
             selected: Some("p".to_owned()),
             comparison: None,
             ghost_input: None,
@@ -2140,6 +2276,7 @@ mod tests {
             document_id: "worker-test".to_owned(),
             linked_documents: Default::default(),
             document: std::sync::Arc::new(document),
+            imports: Default::default(),
             target: target.to_owned(),
             key: key_at(target, revision),
             token: nodecraft_engine::kernel_pool::RevisionToken::new(),

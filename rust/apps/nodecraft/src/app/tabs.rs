@@ -134,6 +134,7 @@ impl NodeCraftApp {
                 interface: nodecraft_session::GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let tab_id = self.next_tab_id;
         let source_tab = self.tabs.get(self.active_tab).cloned();
@@ -294,6 +295,7 @@ impl NodeCraftApp {
                 connections: definition.connections.clone(),
             },
             definitions: projection_definitions,
+            ingested_sources: Vec::new(),
         };
         let tab_id = self.next_tab_id;
         self.open_session(
@@ -363,6 +365,7 @@ impl NodeCraftApp {
                 Some(Command::SetValue { node: meta.group_id.clone(), field: (*field).to_owned(), value })
             })
             .collect();
+        set_session_source_hashes(&self.source_changes, &mut parent);
         if parent.apply_commands(&commands).is_ok() {
             let _ = self.documents.set_session(meta.view.document_id.clone(), parent);
         }
@@ -499,17 +502,31 @@ impl NodeCraftApp {
 
     pub(super) fn finish_save_document(&mut self, path: PathBuf) {
         let path = normalize_document_path(path);
-        let Some(session) = self.session.clone() else {
+        let Some(mut session) = self.session.clone() else {
             self.error = Some("No document loaded to save".to_owned());
             self.status = "Save failed".to_owned();
             return;
         };
+        // Keep the live session on the same normalized paths the save writes,
+        // so the inspector, watcher and evaluation see the relative form
+        // immediately after a save or save-as.
+        let commands = nodecraft_session::store::import_path_commands(session.document(), &path);
+        set_session_source_hashes(&self.source_changes, &mut session);
+        if !commands.is_empty()
+            && let Err(error) = session.apply_derived_commands(&commands)
+        {
+            self.error = Some(error.to_string());
+            self.status = "Save failed".to_owned();
+            return;
+        }
         if let Err(error) = nodecraft_session::store::save_atomic(&path, session.document()) {
             self.error = Some(error);
             self.status = "Save failed".to_owned();
             return;
         }
         self.path = Some(path.clone());
+        self.active_session_revision = session.revision();
+        self.session = Some(session.clone());
         self.remember_document(&path);
         if let Some(tab) = self.tabs.get(self.active_tab) {
             let document_id = tab.document_id.clone();
@@ -517,6 +534,7 @@ impl NodeCraftApp {
             self.documents.set_path(&document_id, &path);
         }
         self.save_active_tab();
+        self.sync_source_watches();
         self.status = format!("Saved {}", path.display());
         self.error = None;
     }
@@ -573,8 +591,17 @@ impl NodeCraftApp {
                     if open_linked_part {
                         self.open_linked_part_document(&node);
                     }
+                    if field == "path" {
+                        self.request_ingest_if_enabled(&node);
+                    }
                     self.evaluate();
                 }
+            }
+            (DialogAction::LocateImportSource { node }, FileDialogResult::Chosen(path)) => {
+                self.apply_located_import_path(&node, &path);
+            }
+            (DialogAction::SaveImportCopy { node }, FileDialogResult::Chosen(path)) => {
+                self.request_save_import_copy(&node, &path);
             }
             (_, FileDialogResult::Cancelled) => {}
         }
@@ -643,6 +670,7 @@ impl NodeCraftApp {
                     connections: definition.connections.clone(),
                 },
                 definitions,
+                ingested_sources: Vec::new(),
             }))
         } else {
             self.documents.session(&document_id).cloned()
@@ -1103,6 +1131,7 @@ impl NodeCraftApp {
             self.selected_connections.clear();
             self.viewer_breakpoint = None;
             self.new_blank();
+            self.sync_source_watches();
             return;
         }
         if closing_active {
@@ -1114,6 +1143,7 @@ impl NodeCraftApp {
         } else if index < self.active_tab {
             self.active_tab -= 1;
         }
+        self.sync_source_watches();
     }
 
     /// Replace the graph in the active tab without opening another tab.
@@ -1292,6 +1322,8 @@ impl NodeCraftApp {
         self.layout_animation = None;
         self.node_position_animation = None;
         self.evaluate();
+        self.check_importer_sources();
+        self.sync_source_watches();
     }
 
     pub(super) fn activate_tab(&mut self, index: usize) {
@@ -1307,6 +1339,7 @@ impl NodeCraftApp {
         if self.mesh.is_none() && self.session.is_some() {
             self.evaluate();
         }
+        self.check_importer_sources();
     }
 
 }

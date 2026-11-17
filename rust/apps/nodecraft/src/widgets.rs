@@ -2,19 +2,38 @@
 
 use egui::{Response, Sense, Ui, Vec2};
 
+/// The macOS switch's intrinsic size. Inspector rows reserve exactly this much
+/// width for it so the label can use the rest of the row.
+pub const SWITCH_SIZE: Vec2 = Vec2::new(34.0, 18.0);
+
 /// A macOS-style switch: a pill track with a sliding knob.
+///
+/// When its `Ui` is disabled (inside `ui.add_enabled_ui(false, ..)`), the switch
+/// paints a muted track/knob and ignores clicks. This is the one disabled look
+/// every switch row uses.
 pub fn switch(ui: &mut Ui, value: &mut bool) -> Response {
     let theme = crate::theme::get();
-    let desired = Vec2::new(34.0, 18.0);
-    let (rect, mut response) = ui.allocate_exact_size(desired, Sense::click());
-    response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() {
-        *value = !*value;
-        response.mark_changed();
+    let enabled = ui.is_enabled();
+    let (rect, mut response) = ui.allocate_exact_size(SWITCH_SIZE, Sense::click());
+    if enabled {
+        response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked() {
+            *value = !*value;
+            response.mark_changed();
+        }
     }
     let t = if *value { 1.0 } else { 0.0 };
-    let track = theme.color(theme.control).lerp_to_gamma(theme.color(theme.accent), t);
-    let knob = theme.color(theme.text).lerp_to_gamma(theme.color(theme.control), t * 0.25);
+    let (track, knob) = if enabled {
+        (
+            theme.color(theme.control).lerp_to_gamma(theme.color(theme.accent), t),
+            theme.color(theme.text).lerp_to_gamma(theme.color(theme.control), t * 0.25),
+        )
+    } else {
+        (
+            theme.with_alpha(theme.control, 110),
+            theme.with_alpha(theme.muted, 150),
+        )
+    };
     ui.painter().rect_filled(rect, rect.height() * 0.5, track);
     let radius = rect.height() * 0.5 - 2.0;
     let center = egui::Pos2::new(

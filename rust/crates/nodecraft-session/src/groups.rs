@@ -575,6 +575,7 @@ fn expand_groups_at(
             interface: GraphInterface::default(),
         },
         definitions: Vec::new(),
+        ingested_sources: Vec::new(),
     };
     let mut known: BTreeSet<String> = out.nodes.iter().map(|node| node.id.clone()).collect();
 
@@ -668,6 +669,7 @@ fn expand_groups_at(
                     interface: GraphInterface::default(),
                 },
                 definitions: child_definitions,
+                ingested_sources: Vec::new(),
             },
             depth + 1,
             stack,
@@ -928,6 +930,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let flat = expand_groups(&document).expect("expand");
         assert!(flat.nodes.iter().all(|node| node.node_type != "group"));
@@ -970,6 +973,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let flat = expand_groups(&document).expect("expand");
         assert!(flat.connections.iter().any(|link| {
@@ -1015,6 +1019,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let flat = expand_groups(&document).expect("expand");
         assert!(flat.nodes.iter().any(|node| node.id == "g::inner::move"));
@@ -1130,6 +1135,7 @@ mod interface_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let flat = expand_groups(&document).expect("expand");
         assert!(flat.connections.iter().any(|link| link.from == "a" && link.to == "after"));

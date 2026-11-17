@@ -22,6 +22,7 @@ pub enum FileDialogKind {
     OpenDocument,
     SaveDocument { suggested_name: String },
     OpenStepFile,
+    SaveImportCopy { suggested_name: String },
     ChooseDirectory,
 }
 
@@ -78,6 +79,10 @@ fn show(kind: FileDialogKind) -> FileDialogResult {
         FileDialogKind::OpenStepFile => rfd::FileDialog::new()
             .add_filter("CAD model", &["step", "stp", "fcstd", "3dm"])
             .pick_file(),
+        FileDialogKind::SaveImportCopy { suggested_name } => rfd::FileDialog::new()
+            .add_filter("CAD model", &["step", "stp", "fcstd", "3dm"])
+            .set_file_name(suggested_name)
+            .save_file(),
         FileDialogKind::ChooseDirectory => rfd::FileDialog::new().pick_folder(),
     };
     match path {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use nodecraft_exact::ExactPart;
 
-use crate::{DisplayQuality, PlanCache, PlanInstance, PartPlans};
+use crate::{BodyKey, DisplayQuality, PlanCache, PlanInstance, PartPlans};
 
 /// Exact inputs for one display revision.
 ///
@@ -60,7 +60,14 @@ pub struct DisplayRequest {
     /// Stable id of the exact snapshot this request displays. Camera quality
     /// requests keep the snapshot id and change only quality/revision.
     pub snapshot_id: u64,
+    /// Quality for bodies without an entry in `body_quality`.
     pub quality: DisplayQuality,
+    /// Per-body quality chosen by screen-space LOD. Bodies absent here fall
+    /// back to `quality`.
+    pub body_quality: BTreeMap<BodyKey, DisplayQuality>,
+    /// Bodies in planning order, nearest first. Bodies absent here are planned
+    /// after the listed ones.
+    pub body_priority: Vec<BodyKey>,
     /// Build fillet/chamfer added-face plans for the breakpoint result.
     pub feature_ghost: bool,
     pub snapshot: Arc<ExactSnapshot>,
@@ -125,7 +132,13 @@ impl DisplayService {
         let mut frame = DisplayFrame { revision: request.revision, ..DisplayFrame::default() };
         for (target, part) in &request.snapshot.breakpoint {
             if request.feature_ghost {
-                let display = crate::mesh_part_with_features(part, request.quality, &mut self.cache)?;
+                let display = crate::mesh_part_with_features_and_qualities(
+                    part,
+                    request.quality,
+                    &request.body_quality,
+                    &request.body_priority,
+                    &mut self.cache,
+                )?;
                 frame.feature_plans = display.feature_plans;
                 frame.breakpoint.insert(
                     target.clone(),
@@ -136,7 +149,13 @@ impl DisplayService {
                 // Supply the full CPU mesh so the breakpoint is visible and
                 // editable immediately; the plans it carries become resident
                 // when the pipeline is ready.
-                let display = crate::mesh_part(part, request.quality, &mut self.cache)?;
+                let display = crate::mesh_part_with_qualities(
+                    part,
+                    request.quality,
+                    &request.body_quality,
+                    &request.body_priority,
+                    &mut self.cache,
+                )?;
                 frame.breakpoint.insert(
                     target.clone(),
                     PartPlans {
@@ -146,14 +165,26 @@ impl DisplayService {
                     },
                 );
             } else {
-                let planned = crate::plan_part(part, request.quality, &mut self.cache)?;
+                let planned = crate::plan_part_with_qualities(
+                    part,
+                    request.quality,
+                    &request.body_quality,
+                    &request.body_priority,
+                    &mut self.cache,
+                )?;
                 if gpu_plans_supported(&planned.plans) {
                     frame.breakpoint.insert(target.clone(), planned);
                 } else {
                     // A pole face or oversized dispatch cannot run through the
                     // GPU planner. Use the CPU object path for this target; an
                     // empty plan set disables plan rendering for the frame.
-                    let display = crate::mesh_part(part, request.quality, &mut self.cache)?;
+                    let display = crate::mesh_part_with_qualities(
+                        part,
+                        request.quality,
+                        &request.body_quality,
+                        &request.body_priority,
+                        &mut self.cache,
+                    )?;
                     frame.breakpoint.insert(
                         target.clone(),
                         PartPlans { plans: Vec::new(), stats: display.stats, edge_mesh: display.mesh },
@@ -163,7 +194,13 @@ impl DisplayService {
         }
         for overlay in &request.snapshot.overlays {
             let overlay_started = std::time::Instant::now();
-            let display = crate::mesh_part(overlay.part.as_ref(), request.quality, &mut self.cache)?;
+            let display = crate::mesh_part_with_qualities(
+                overlay.part.as_ref(),
+                request.quality,
+                &request.body_quality,
+                &request.body_priority,
+                &mut self.cache,
+            )?;
             if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
                 eprintln!(
                     "[display {}] overlay {:?} {}ms",
@@ -230,6 +267,8 @@ mod tests {
                 revision: 7,
                 snapshot_id: 7,
                 quality: DisplayQuality::Full(0.35),
+                body_quality: BTreeMap::new(),
+                body_priority: Vec::new(),
                 feature_ghost: false,
                 snapshot: Arc::new(snapshot),
             })
@@ -252,10 +291,9 @@ mod tests {
     fn placed(part: &ExactPart, offsets: [[f64; 3]; 2]) -> ExactPart {
         let mut placed = part.clone();
         for (body, offset) in placed.bodies.iter_mut().zip(offsets) {
-            body.transforms = vec![nodecraft_exact::DisplayTransform::Place {
-                offset,
-                rotation: [0.0; 3],
-            }];
+            body.placement = nodecraft_exact::Placement::from(
+                nodecraft_exact::DisplayTransform::Place { offset, rotation: [0.0; 3] },
+            );
         }
         placed
     }
@@ -265,6 +303,8 @@ mod tests {
             revision,
             snapshot_id: revision,
             quality: DisplayQuality::Full(0.35),
+            body_quality: BTreeMap::new(),
+            body_priority: Vec::new(),
             feature_ghost: false,
             snapshot: Arc::new(ExactSnapshot {
                 breakpoint: BTreeMap::from([(target.to_owned(), part)]),
@@ -302,17 +342,11 @@ mod tests {
             second.breakpoint["look"]
                 .plans
                 .iter()
-                .map(|plan| plan.transforms.clone())
+                .map(|plan| *plan.placement.matrix())
                 .collect::<Vec<_>>(),
             vec![
-                vec![nodecraft_exact::DisplayTransform::Place {
-                    offset: [40.0, 0.0, 0.0],
-                    rotation: [0.0; 3],
-                }],
-                vec![nodecraft_exact::DisplayTransform::Place {
-                    offset: [70.0, 0.0, 0.0],
-                    rotation: [0.0; 3],
-                }],
+                nodecraft_exact::Affine3::from_place([40.0, 0.0, 0.0], [0.0; 3]),
+                nodecraft_exact::Affine3::from_place([70.0, 0.0, 0.0], [0.0; 3]),
             ],
         );
     }
@@ -338,6 +372,50 @@ mod tests {
     }
 
     #[test]
+    fn small_zoom_change_reuses_unchanged_body_plans() {
+        let part = two_body_part();
+        let fine = nodecraft_exact::BodyKey::new(1, 0);
+        let other = nodecraft_exact::BodyKey::new(2, 0);
+        let mut service = DisplayService::new(8);
+        let mut first = request("look", part.clone(), 1);
+        first.body_quality = BTreeMap::from([
+            (fine, DisplayQuality::Full(0.1)),
+            (other, DisplayQuality::Full(0.2)),
+        ]);
+        let first = service.plan(&first).expect("first level set");
+        let hits_after_first = service.cache.hits();
+        assert_eq!(hits_after_first, 0, "the first level set is a miss");
+
+        // A small zoom changes only one body's rung. The other body's plan must
+        // come straight from the cache.
+        let mut second = request("look", part, 2);
+        second.body_quality = BTreeMap::from([
+            (fine, DisplayQuality::Full(0.1)),
+            (other, DisplayQuality::Full(0.4)),
+        ]);
+        let second = service.plan(&second).expect("second level set");
+        assert!(
+            service.cache.hits() > hits_after_first,
+            "the unchanged body must reuse its cached plan",
+        );
+        assert_eq!(service.cache.len(), 3, "one plan per body and level");
+        assert!(
+            Arc::ptr_eq(
+                &first.breakpoint["look"].plans[0].plan,
+                &second.breakpoint["look"].plans[0].plan,
+            ),
+            "the body whose level did not change must reuse its plan",
+        );
+        assert!(
+            !Arc::ptr_eq(
+                &first.breakpoint["look"].plans[1].plan,
+                &second.breakpoint["look"].plans[1].plan,
+            ),
+            "the body whose level changed must be re-planned",
+        );
+    }
+
+    #[test]
     fn plans_without_a_surface_are_not_sent_to_the_gpu() {
         let plan = std::sync::Arc::new(solidcore_tess::TessPlan {
             faces: vec![solidcore_tess::FacePlan::default()],
@@ -347,7 +425,7 @@ mod tests {
             target: "x".into(),
             plan,
             face_colors: Vec::new(),
-            transforms: Vec::new(),
+            placement: nodecraft_exact::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
         };
         assert!(!gpu_plans_supported(&[instance]));
@@ -364,6 +442,8 @@ mod tests {
             revision: 11,
             snapshot_id: 11,
             quality: DisplayQuality::Full(0.35),
+            body_quality: BTreeMap::new(),
+            body_priority: Vec::new(),
             feature_ghost: false,
             snapshot: Arc::new(snapshot),
         });

@@ -20,10 +20,10 @@ The sketch line-type icons under
 The public snapshot vendors the SolidCore crates NodeCraft builds under
 `vendor/solidcore/`. They come from the `solidcore/` subtree of
 <https://github.com/tangency-labs/solidcraft> at revision
-`c71236a40de9f36713194df624663a252d0f71a3` plus NodeCraft patches: see patches/
+`47f714a339725fb7aad0c25c08f64173ccb47f2c` plus NodeCraft patches: see patches/
 (`patches/solidcore-ops-seam.patch`). Those patches add the NodeCraft ops seam
-and the `solidcore-cadir` crate (with the `solidcore-step::assembly` stage) from
-SolidCraft PR 16906, which is not in the pinned revision.
+and the `solidcore-cadir` crate from SolidCraft PR 16906, which is not in the
+pinned revision; its `solidcore-step::assembly` stage is upstream now.
 
 SolidCore is licensed under the Apache License, Version 2.0. Copyright (c) 2026
 The solidcore contributors. It is a Rust port of the SMLib and SM_API components

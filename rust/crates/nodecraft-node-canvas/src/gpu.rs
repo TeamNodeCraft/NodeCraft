@@ -117,6 +117,10 @@ pub struct NodeText {
 
 pub struct NodeDraw {
     pub geometry_key: u64,
+    /// Identifies the glow instance bytes. It includes the geometry key plus the
+    /// selection/activity/warning/error state that produces each glow, but not
+    /// per-frame animation or camera state: those travel in the uniform.
+    pub glow_key: u64,
     pub geometry: Option<Arc<NodeGeometry>>,
     pub shapes: Option<Arc<Vec<ShapeInstance>>>,
     pub glows: Vec<ShapeInstance>,
@@ -130,7 +134,18 @@ pub struct NodeDraw {
     pub clip_radius: f32,
     pub ppp: f32,
     pub curve_resolution: f32,
+    /// Selection-pulse envelope. The per-node glow shapes read this through the
+    /// uniform so an idle selection does not re-upload instance bytes per frame.
     pub glow: [f32; 4],
+    /// Graph-space glow radius for the current zoom. It is a uniform so zooming
+    /// changes the halo size without rebuilding the glow instance buffer.
+    pub glow_radius: f32,
+    /// Current time in milliseconds, in the same clock as the activity timestamps
+    /// encoded on the glow instances.
+    pub glow_time_ms: f32,
+    pub activity_fade_in_ms: f32,
+    pub activity_hold_ms: f32,
+    pub activity_fade_out_ms: f32,
     pub texts: Vec<NodeText>,
 }
 
@@ -141,6 +156,8 @@ struct Globals {
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
   glow: vec4<f32>,
+  // x: fade-in ms, y: hold ms, z: fade-out ms, w: current time ms.
+  activity: vec4<f32>,
 };
 
 fn inside_rounded(p: vec2<f32>) -> bool {
@@ -197,6 +214,8 @@ struct Globals {
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
   glow: vec4<f32>,
+  // x: fade-in ms, y: hold ms, z: fade-out ms, w: current time ms.
+  activity: vec4<f32>,
 };
 
 fn inside_rounded(p: vec2<f32>) -> bool {
@@ -429,6 +448,8 @@ struct Globals {
   clip_rect: vec4<f32>,
   clip_params: vec4<f32>,
   glow: vec4<f32>,
+  // x: fade-in ms, y: hold ms, z: fade-out ms, w: current time ms.
+  activity: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> globals: Globals;
 
@@ -472,6 +493,24 @@ fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
   return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// Glow activity fades are evaluated here, from immutable start/end timestamps
+// and the uniform clock, so the per-node glow bytes only change when an
+// activity event or graph/selection change does.
+fn activity_strength(start_ms: f32, end_ms: f32) -> f32 {
+  let fade_in = globals.activity.x;
+  let hold = globals.activity.y;
+  let fade_out = globals.activity.z;
+  let now_ms = globals.activity.w;
+  if (end_ms < 0.0) {
+    if (fade_in <= 0.0) { return 1.0; }
+    return clamp((now_ms - start_ms) / fade_in, 0.0, 1.0);
+  }
+  let fade_start = max(end_ms, start_ms + hold);
+  if (now_ms < fade_start) { return 1.0; }
+  if (fade_out <= 0.0) { return 0.0; }
+  return clamp(1.0 - (now_ms - fade_start) / fade_out, 0.0, 1.0);
+}
+
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: Instance) -> Out {
   let corners = array<vec2<f32>, 6>(
@@ -485,7 +524,10 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
   let scale = max(globals.screen_scale.z, 0.0001);
   // Glow falls off over its full radius, not half of a stroke; otherwise the
   // quad ends while alpha is still non-zero and the glow has a square edge.
-  let stroke_pad = select(inst.stroke_width * 0.5, inst.stroke_width, inst.kind > 1.5);
+  // The glow radius lives in the uniform (stroke.b is its per-kind scale), so
+  // zooming does not rewrite the instance buffer.
+  let glow_radius = globals.glow.y * max(inst.stroke.b, 0.0);
+  let stroke_pad = select(inst.stroke_width * 0.5, glow_radius, inst.kind > 1.5);
   let pad = 2.5 / scale + stroke_pad;
   let local = half_size + vec2<f32>(pad);
   let graph = inst.center + corners[vi] * local;
@@ -512,17 +554,24 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32, inst: In
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
   if (!inside_rounded(in.screen)) { discard; }
-  // kind == 2: analytic glow behind a card. The instance is the card rect
-  // expanded by the glow radius; stroke_width carries that radius.
+  // kind == 2: analytic glow behind a card. The instance is the card rect;
+  // the glow radius comes from the uniform, with stroke.b carrying its
+  // per-kind scale (1.25 for errors) and stroke.rg the activity timestamps.
   if (in.kind > 1.5) {
-    let glow = max(in.stroke_width, 0.001);
-    let inner_half = max(in.half_size - vec2<f32>(glow), vec2<f32>(0.5));
-    let inner_radius = max(in.radius - glow, 0.0);
+    let glow = max(globals.glow.y * max(in.stroke.b, 0.001), 0.001);
+    let inner_half = max(in.half_size, vec2<f32>(0.5));
+    let inner_radius = max(in.radius, 0.0);
     let d = sd_round_box(in.local, inner_half, inner_radius);
     let t = clamp(1.0 - d / glow, 0.0, 1.0);
     // kind 2 is the selection pulse and follows the global envelope.
-    // kind 3 is per-node activity; its strength is in stroke.a.
-    let intensity = select(globals.glow.x, in.stroke.a, in.kind > 2.5);
+    // kind 3 is per-node activity, evaluated from timestamps in the shader.
+    // kinds 4/5 are static warning/error intensity carried in stroke.a.
+    var intensity = in.stroke.a;
+    if (in.kind < 2.5) {
+      intensity = globals.glow.x;
+    } else if (in.kind < 3.5) {
+      intensity = in.stroke.a * activity_strength(in.stroke.r, in.stroke.g);
+    }
     return vec4<f32>(in.fill.rgb, in.fill.a * t * t * intensity);
   }
   var distance: f32;
@@ -556,6 +605,27 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// CPU mirror of the shared `Globals` uniform block declared by every shader
+/// above. Six `vec4`s keep Rust and WGSL alignment identical with no padding;
+/// `uniform_layout_matches_wgsl_globals` checks the field offsets against naga's
+/// reflection so the packer cannot drift from the shader again.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GlobalsUniform {
+    /// Screen width, height, graph-to-screen scale and cable curve resolution.
+    screen_scale: [f32; 4],
+    /// Screen-space pan offset; `.zw` is unused.
+    offset: [f32; 4],
+    /// Clip rect in screen pixels.
+    clip_rect: [f32; 4],
+    /// Clip corner radius in screen pixels; `.yzw` are unused.
+    clip_params: [f32; 4],
+    /// `.x`: selection-pulse envelope, `.y`: graph-space glow radius.
+    glow: [f32; 4],
+    /// `.x`: fade-in ms, `.y`: hold ms, `.z`: fade-out ms, `.w`: now ms.
+    activity: [f32; 4],
+}
+
 struct NodeRenderer {
     pipeline: wgpu::RenderPipeline,
     shape_pipeline: wgpu::RenderPipeline,
@@ -579,6 +649,7 @@ struct NodeRenderer {
     glow_buffer: Option<wgpu::Buffer>,
     glow_capacity: u64,
     glow_count: u32,
+    glow_key: Option<u64>,
     geometry_key: Option<u64>,
 }
 
@@ -615,7 +686,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
 
     let uniform = rs.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("node-lyon-globals"),
-        size: 80,
+        size: std::mem::size_of::<GlobalsUniform>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -807,6 +878,7 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
             glow_buffer: None,
             glow_capacity: 0,
             glow_count: 0,
+            glow_key: None,
             geometry_key: None,
         })));
         renderer.callback_resources.insert(Arc::new(Mutex::new(GlyphonState {
@@ -824,8 +896,15 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
 
 pub struct NodeCallback(pub NodeDraw);
 
-impl CallbackTrait for NodeCallback {
-    fn prepare(
+/// Glow instance bytes are immutable for a given key; animation and camera
+/// changes travel in the uniform. Kept as a pure decision so the regression
+/// test can exercise exactly the gate used by `prepare`.
+fn glow_should_upload(previous: Option<u64>, key: u64) -> bool {
+    previous != Some(key)
+}
+
+impl NodeCallback {
+    fn prepare_impl(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -836,30 +915,35 @@ impl CallbackTrait for NodeCallback {
         let draw = &self.0;
         let Some(renderer) = resources.get::<Arc<Mutex<NodeRenderer>>>() else { return Vec::new() };
         if let Ok(mut renderer) = renderer.lock() {
-            // Two vec4s avoid any vec2/struct padding ambiguity in WGSL uniforms.
-            let globals = [
-                screen.size_in_pixels[0].max(1) as f32,
-                screen.size_in_pixels[1].max(1) as f32,
-                draw.transform[0] * draw.ppp,
-                draw.curve_resolution,
-                draw.transform[1] * draw.ppp,
-                draw.transform[2] * draw.ppp,
-                0.0,
-                0.0,
-                draw.clip[0] * draw.ppp,
-                draw.clip[1] * draw.ppp,
-                draw.clip[2] * draw.ppp,
-                draw.clip[3] * draw.ppp,
-                draw.clip_radius * draw.ppp,
-                0.0,
-                0.0,
-                0.0,
-                draw.glow[0],
-                draw.glow[1],
-                draw.glow[2],
-                draw.glow[3],
-            ];
-            queue.write_buffer(&renderer.uniform, 0, &globals.map(f32::to_le_bytes).concat());
+            // One `GlobalsUniform` per frame; its field layout is asserted
+            // against the WGSL struct so the upload can never overrun the buffer.
+            let globals = GlobalsUniform {
+                screen_scale: [
+                    screen.size_in_pixels[0].max(1) as f32,
+                    screen.size_in_pixels[1].max(1) as f32,
+                    draw.transform[0] * draw.ppp,
+                    draw.curve_resolution,
+                ],
+                offset: [draw.transform[1] * draw.ppp, draw.transform[2] * draw.ppp, 0.0, 0.0],
+                clip_rect: [
+                    draw.clip[0] * draw.ppp,
+                    draw.clip[1] * draw.ppp,
+                    draw.clip[2] * draw.ppp,
+                    draw.clip[3] * draw.ppp,
+                ],
+                clip_params: [draw.clip_radius * draw.ppp, 0.0, 0.0, 0.0],
+                // `.y` is the graph-space glow radius; the shader expands the
+                // card rect by it, so zooming never rewrites glow instances.
+                glow: [draw.glow[0], draw.glow_radius, 0.0, 0.0],
+                // `.w` is the same clock the instance start/end timestamps use.
+                activity: [
+                    draw.activity_fade_in_ms,
+                    draw.activity_hold_ms,
+                    draw.activity_fade_out_ms,
+                    draw.glow_time_ms,
+                ],
+            };
+            queue.write_buffer(&renderer.uniform, 0, bytemuck::bytes_of(&globals));
             if let Some(geometry) = &draw.geometry {
                 if renderer.geometry_key != Some(draw.geometry_key) {
                     let vertex_bytes: &[u8] = unsafe {
@@ -912,23 +996,28 @@ impl CallbackTrait for NodeCallback {
                 }
             }
             let glow_bytes = bytemuck::cast_slice(draw.glows.as_slice());
-            if !glow_bytes.is_empty() {
-                if renderer.glow_buffer.is_none()
-                    || renderer.glow_capacity < glow_bytes.len() as u64
-                {
-                    let capacity = (glow_bytes.len() as u64).next_power_of_two().max(4096);
-                    renderer.glow_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("node-activity-glows"),
-                        size: capacity,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                    renderer.glow_capacity = capacity;
+            if glow_should_upload(renderer.glow_key, draw.glow_key) {
+                renderer.glow_key = Some(draw.glow_key);
+                if !glow_bytes.is_empty() {
+                    if renderer.glow_buffer.is_none()
+                        || renderer.glow_capacity < glow_bytes.len() as u64
+                    {
+                        let capacity = (glow_bytes.len() as u64).next_power_of_two().max(4096);
+                        renderer.glow_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                            label: Some("node-activity-glows"),
+                            size: capacity,
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            mapped_at_creation: false,
+                        }));
+                        renderer.glow_capacity = capacity;
+                    }
+                    queue.write_buffer(renderer.glow_buffer.as_ref().unwrap(), 0, glow_bytes);
+                    renderer.glow_count = draw.glows.len() as u32;
+                } else {
+                    // An empty glow list must still hide the previous frame's
+                    // instances, even though there is nothing to write.
+                    renderer.glow_count = 0;
                 }
-                queue.write_buffer(renderer.glow_buffer.as_ref().unwrap(), 0, glow_bytes);
-                renderer.glow_count = draw.glows.len() as u32;
-            } else {
-                renderer.glow_count = 0;
             }
             renderer.cable_vertex_budget = draw.cable_vertex_budget.max(6);
             if let Some(cables) = &draw.cables {
@@ -1062,7 +1151,7 @@ impl CallbackTrait for NodeCallback {
         Vec::new()
     }
 
-    fn paint(
+    fn paint_impl(
         &self,
         info: egui::PaintCallbackInfo,
         pass: &mut wgpu::RenderPass<'static>,
@@ -1120,6 +1209,33 @@ impl CallbackTrait for NodeCallback {
                 let _ = glyphon.renderer.render(&glyphon.atlas, &glyphon.viewport, pass);
             }
         }
+    }
+}
+
+impl CallbackTrait for NodeCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen: &egui_wgpu::ScreenDescriptor,
+        encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        nodecraft_crash::guard_render("node-canvas", || {
+            self.prepare_impl(device, queue, screen, encoder, resources)
+        })
+        .unwrap_or_default()
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        let _ = nodecraft_crash::guard_render("node-canvas", || {
+            self.paint_impl(info, pass, resources);
+        });
     }
 }
 
@@ -1211,5 +1327,108 @@ mod tests {
         let geometry = builder.finish();
         assert!(!geometry.vertices.is_empty());
         assert!(!geometry.indices.is_empty());
+    }
+
+    #[test]
+    fn wgsl_shaders_parse_and_validate() {
+        for (name, source) in [
+            ("solid", SHADER),
+            ("cable", CABLE_SHADER),
+            ("shape", SHAPE_SHADER),
+        ] {
+            let module = wgpu::naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name} shader failed to parse: {error}"));
+            let mut validator = wgpu::naga::valid::Validator::new(
+                wgpu::naga::valid::ValidationFlags::all(),
+                wgpu::naga::valid::Capabilities::all(),
+            );
+            validator
+                .validate(&module)
+                .unwrap_or_else(|error| panic!("{name} shader failed to validate: {error:?}"));
+        }
+    }
+
+    #[test]
+    fn uniform_layout_matches_wgsl_globals() {
+        // The CPU packer and every WGSL `Globals` block must agree on total
+        // size and field offsets. The glow commit appended two vec4s in Rust
+        // but only one in WGSL, so `write_buffer` copied 112 bytes into a
+        // 96-byte buffer and panicked on the first frame.
+        let expected = [
+            ("screen_scale", std::mem::offset_of!(GlobalsUniform, screen_scale)),
+            ("offset", std::mem::offset_of!(GlobalsUniform, offset)),
+            ("clip_rect", std::mem::offset_of!(GlobalsUniform, clip_rect)),
+            ("clip_params", std::mem::offset_of!(GlobalsUniform, clip_params)),
+            ("glow", std::mem::offset_of!(GlobalsUniform, glow)),
+            ("activity", std::mem::offset_of!(GlobalsUniform, activity)),
+        ];
+        assert_eq!(
+            std::mem::size_of::<GlobalsUniform>(),
+            6 * 16,
+            "GlobalsUniform must stay six tightly packed vec4s"
+        );
+        for (name, source) in [
+            ("solid", SHADER),
+            ("cable", CABLE_SHADER),
+            ("shape", SHAPE_SHADER),
+        ] {
+            let module = wgpu::naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name} shader failed to parse: {error}"));
+            let global = module
+                .global_variables
+                .iter()
+                .find(|(_, global)| global.name.as_deref() == Some("globals"))
+                .map(|(_, global)| global)
+                .unwrap_or_else(|| panic!("{name} shader has no `globals` uniform"));
+            let wgpu::naga::TypeInner::Struct { members, span } = &module.types[global.ty].inner
+            else {
+                panic!("{name} `globals` is not a struct");
+            };
+            assert_eq!(
+                *span as usize,
+                std::mem::size_of::<GlobalsUniform>(),
+                "{name} Globals size"
+            );
+            assert_eq!(members.len(), expected.len(), "{name} Globals field count");
+            for (member, (field, rust_offset)) in members.iter().zip(expected) {
+                assert_eq!(
+                    member.name.as_deref(),
+                    Some(field),
+                    "{name} Globals field order"
+                );
+                assert_eq!(
+                    member.offset as usize, rust_offset,
+                    "{name} Globals.{field} offset"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn glow_uploads_once_per_key_and_again_after_a_selection_change() {
+        fn prepare(previous: &mut Option<u64>, uploads: &mut u32, key: u64) {
+            if glow_should_upload(*previous, key) {
+                *previous = Some(key);
+                *uploads += 1;
+            }
+        }
+
+        let mut previous: Option<u64> = None;
+        let mut uploads = 0;
+
+        // Two frames with identical glow inputs: one upload.
+        prepare(&mut previous, &mut uploads, 11);
+        prepare(&mut previous, &mut uploads, 11);
+        assert_eq!(uploads, 1, "unchanged glow inputs must not re-upload");
+
+        // Pan/zoom changes only the uniform, so the key stays the same.
+        prepare(&mut previous, &mut uploads, 11);
+        assert_eq!(uploads, 1, "camera-only changes must not re-upload");
+
+        // A selection change produces new glow bytes and therefore a new key.
+        prepare(&mut previous, &mut uploads, 12);
+        assert_eq!(uploads, 2, "changed selection must upload again");
+        prepare(&mut previous, &mut uploads, 12);
+        assert_eq!(uploads, 2);
     }
 }

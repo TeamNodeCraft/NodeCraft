@@ -21,6 +21,9 @@ pub struct GraphRuntime {
     session: Session,
     cache: EngineCache,
     hashes: BTreeMap<String, ContentHash>,
+    /// Runtime importer-source hashes, keyed by node id. They are folded into
+    /// node identities on every evaluation but never stored in the document.
+    source_hashes: BTreeMap<String, String>,
     revision: u64,
     request_id: u64,
     view_targets: Vec<String>,
@@ -33,7 +36,14 @@ impl GraphRuntime {
     #[must_use]
     pub fn new(document: GraphDocument) -> Self {
         let hashes = document.node_hashes().unwrap_or_default();
-        Self { session: Session::new(document), cache: EngineCache::new(), hashes, revision: 1, request_id: 1, view_targets: Vec::new(), selected: None, export_targets: Vec::new(), plans: nodecraft_display::PlanCache::new(1024) }
+        Self { session: Session::new(document), cache: EngineCache::new(), hashes, source_hashes: BTreeMap::new(), revision: 1, request_id: 1, view_targets: Vec::new(), selected: None, export_targets: Vec::new(), plans: nodecraft_display::PlanCache::new(1024) }
+    }
+
+    /// Update the runtime importer-source hashes the next evaluation folds into
+    /// node cache identity. This is the same state the app's ChangeTracker
+    /// supplies through [`nodecraft_engine::ImportContext`].
+    pub fn set_source_hashes(&mut self, source_hashes: BTreeMap<String, String>) {
+        self.source_hashes = source_hashes;
     }
 
     /// Viewer targets are runtime-only view state: they are not part of the graph,
@@ -117,7 +127,7 @@ impl GraphRuntime {
         mesh_tolerance: Option<f64>,
     ) -> Result<RuntimeEvaluation, crate::SessionError> {
         let document = self.session.document().clone();
-        let current_hashes = document.node_hashes()?;
+        let current_hashes = document.node_hashes_with_sources(&self.source_hashes)?;
         let dirty: Vec<String> = current_hashes
             .iter()
             .filter(|(id, hash)| force || self.hashes.get(*id) != Some(*hash))
@@ -126,7 +136,7 @@ impl GraphRuntime {
         let mut stack = Vec::new();
         let grouped = crate::expand_groups(&document)?;
         let expanded = expand_linked_parts(&grouped, &mut stack)?;
-        let expanded_hashes = expanded.node_hashes()?;
+        let expanded_hashes = expanded.node_hashes_with_sources(&self.source_hashes)?;
         let nodes: Vec<Node> = expanded.nodes.iter().map(|node| {
             let original = document.nodes.iter().find(|original| original.id == node.id);
             let hash = original.and_then(|original| current_hashes.get(&original.id)).or_else(|| expanded_hashes.get(&node.id)).copied().unwrap_or(ContentHash(0));
@@ -266,6 +276,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -331,6 +342,7 @@ mod tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -364,6 +376,127 @@ mod tests {
         assert!(stats.hits >= 1, "upstream a should be a hit");
         assert_eq!(stats.misses, 1, "b should be recomputed");
     }
+
+    /// A reloaded source changes the importer's runtime cache identity, which
+    /// propagates to its descendants exactly like a value edit. An unrelated
+    /// branch stays cached, and the replacement STEP's bodies are what display.
+    #[test]
+    fn source_content_change_invalidates_the_importer_branch_only() {
+        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let one_body = workspace.join("tests/Sample AP203 Data Files/block.stp");
+        let six_bodies = workspace.join("samples/rust-export.step");
+        let directory = std::env::temp_dir().join(format!(
+            "sn-source-invalidation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp directory");
+        let source = directory.join("part.step");
+        std::fs::copy(&one_body, &source).expect("copy source");
+
+        let document = GraphDocument {
+            schema_version: 1,
+            id: "source".into(),
+            root: crate::GraphDefinition {
+                id: "root".into(),
+                name: "Root".into(),
+                kind: "graph".into(),
+                nodes: vec![
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "s".into(),
+                        node_type: "stepimporter".into(),
+                        values: json!({
+                            "path": source.to_string_lossy(),
+                            "pathMode": "absolute",
+                        }),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "t".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x": 5.0}),
+                        suppressed: false,
+                        x: 100.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "p".into(),
+                        node_type: "primitive".into(),
+                        values: json!({"primitiveType": "box", "length": 10, "width": 10, "height": 10}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 100.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "u".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x": 2.0}),
+                        suppressed: false,
+                        x: 100.0,
+                        y: 100.0,
+                    },
+                ],
+                connections: vec![
+                    GraphConnection {
+                        from: "s".into(),
+                        to: "t".into(),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    },
+                    GraphConnection {
+                        from: "p".into(),
+                        to: "u".into(),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    },
+                ],
+                interface: GraphInterface::default(),
+            },
+            definitions: Vec::new(),
+            ingested_sources: Vec::new(),
+        };
+
+        let mut runtime = GraphRuntime::new(document);
+        let source_hash = |path: &std::path::Path| {
+            nodecraft_engine::import_io::hash_file(path).expect("hash source")
+        };
+        runtime.set_source_hashes(
+            [("s".to_owned(), source_hash(&source))].into_iter().collect(),
+        );
+        let targets = vec!["t".to_owned(), "u".to_owned()];
+        let first = runtime.evaluate(&targets, None).expect("first");
+        assert_eq!(
+            first.output.exact_parts.get("t").expect("importer branch").bodies.len(),
+            1,
+            "block.stp is one body"
+        );
+
+        std::fs::copy(&six_bodies, &source).expect("replace source");
+        runtime.set_source_hashes(
+            [("s".to_owned(), source_hash(&source))].into_iter().collect(),
+        );
+        let second = runtime.evaluate(&targets, None).expect("reload");
+        assert_eq!(
+            second.dirty_nodes,
+            vec!["s".to_owned(), "t".to_owned()],
+            "only the importer and its descendant are dirty"
+        );
+        assert_eq!(
+            second.output.exact_parts.get("t").expect("reimported branch").bodies.len(),
+            6,
+            "the reloaded STEP's bodies must be used"
+        );
+        let stats = second.output.response.cache_stats.as_ref().expect("stats");
+        assert!(stats.misses >= 2, "importer and descendant recompute");
+        assert!(stats.hits >= 2, "unrelated branch stays cached: {stats:?}");
+        std::fs::remove_dir_all(directory).ok();
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +522,7 @@ mod command_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -452,6 +586,7 @@ mod command_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         crate::store::save_atomic(&a_path, &linked("a", &b_path)).unwrap();
         crate::store::save_atomic(&b_path, &linked("b", &a_path)).unwrap();
@@ -478,6 +613,7 @@ mod command_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         crate::store::save_atomic(&path, &linked).expect("save linked");
         let document = GraphDocument {
@@ -495,6 +631,7 @@ mod command_tests {
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let mut runtime = GraphRuntime::new(document);
         let result = runtime.evaluate(&["t".into()], None).expect("linked evaluation");

@@ -55,7 +55,7 @@ use crate::p21::{Entity, Exchange, Param};
 use crate::read::{R, Reader};
 use crate::units;
 
-mod swept;
+pub(crate) mod swept;
 
 /// Tolerance (mm) when the file states no uncertainty.
 pub const DEFAULT_TOLERANCE: f64 = 1e-3;
@@ -355,6 +355,43 @@ pub fn tolerance(context: &units::Context) -> f64 {
     context.uncertainty.unwrap_or(DEFAULT_TOLERANCE).clamp(MIN_TOLERANCE, MAX_FIT_TOLERANCE)
 }
 
+/// A solid's tolerance over its shortest edge between two vertices, at most: SMLib takes an edge
+/// shorter than half its tolerance for no edge at all, and two edges closer than it for one.
+///
+/// Those rules ask only for a factor below 1; a quarter is measured, not derived. In a file of
+/// 96 solids, two with a shortest edge of 3.4 um fail the full check at a half (SmFace Test #34,
+/// partially coincident edges, twice each) and at 0.9, and are valid at a quarter.
+const FEATURE_MARGIN: f64 = 0.25;
+
+/// The tolerance a solid read at `stated` should have been read at instead, when it has
+/// features the stated one cannot tell apart: [`FEATURE_MARGIN`] of the shortest distance
+/// between the two vertices of an edge. `None` when `stated` already resolves every edge.
+///
+/// A file's uncertainty is one number for everything in it, and exporters write a round one
+/// (Fusion: 0.01 mm) beside geometry far finer (edges of 0.2 to 10 um in the same file). Taken
+/// as the solid's tolerance, such edges read as zero-length edges, coincident edges and loops
+/// that turn the wrong way, and the kernel refuses every operation on the solid.
+fn feature_tolerance(brep: &Brep, stated: f64) -> Option<f64> {
+    let mut shortest = f64::INFINITY;
+    for e in &brep.edges {
+        let [a, b] = e.vertices;
+        if a == b {
+            continue;
+        }
+        let (Some(p), Some(q)) = (brep.vertices.get(a as usize), brep.vertices.get(b as usize)) else { continue };
+        let d = v3(p.point).dist(v3(q.point));
+        if d > 0.0 && d < shortest {
+            shortest = d;
+        }
+    }
+    // An edge as long as the stated tolerance or longer is one that tolerance tells apart.
+    if shortest >= stated {
+        return None;
+    }
+    let fine = (FEATURE_MARGIN * shortest).max(MIN_TOLERANCE);
+    (fine < stated).then_some(fine)
+}
+
 fn read_with<'a>(
     ex: &'a Exchange,
     reader: &mut Reader<'a>,
@@ -365,9 +402,47 @@ fn read_with<'a>(
     left_out: &HashSet<u64>,
     sheets: bool,
 ) -> R<Solid> {
+    let stated = tolerance(&context);
+    let before = *budget;
+    let first = read_at(ex, reader, item, stated, budget, trims, left_out, sheets)?;
+    let Some(fine) = feature_tolerance(&first.brep, stated) else { return Ok(first) };
+    // Read again at the tolerance its own features set; the faces count against the budget once.
+    let after = *budget;
+    *budget = before;
+    match read_at(ex, reader, item, fine, budget, trims, left_out, sheets) {
+        Ok(mut solid) => {
+            solid.notes.push(format!(
+                "the file states a tolerance of {stated} mm, but the part has edges as short as {:.3e} mm: read at {fine:.3e} mm",
+                fine / FEATURE_MARGIN
+            ));
+            Ok(solid)
+        }
+        // What cannot be read finer stays as the file states it, and says why.
+        Err(why) => {
+            *budget = after;
+            let mut solid = first;
+            solid.notes.push(format!(
+                "the file states a tolerance of {stated} mm, but the part has edges as short as {:.3e} mm: reading it at {fine:.3e} mm failed ({why}), so it is read as stated",
+                fine / FEATURE_MARGIN
+            ));
+            Ok(solid)
+        }
+    }
+}
+
+fn read_at<'a>(
+    ex: &'a Exchange,
+    reader: &mut Reader<'a>,
+    item: u64,
+    tol: f64,
+    budget: &mut usize,
+    trims: Option<&dyn Trims>,
+    left_out: &HashSet<u64>,
+    sheets: bool,
+) -> R<Solid> {
     let e = entity(ex, item)?;
     let name = e.params().first().and_then(Param::as_str).unwrap_or("").to_string();
-    let mut b = Builder::new(ex, reader, tolerance(&context), budget, trims);
+    let mut b = Builder::new(ex, reader, tol, budget, trims);
     // The file's faces, edges, vertices and their geometry read into the builder.
     let (ids, kind) = item_shells(ex, item)?;
     let mut shells = Vec::with_capacity(ids.len());
@@ -377,7 +452,7 @@ fn read_with<'a>(
         skipped |= any;
         shells.push(faces);
     }
-    b.asm.finish(item, name, shells, if skipped || sheets { Kind::Open { voids: kind == Kind::Voids } } else { kind })
+    b.finish(item, name, shells, if skipped || sheets { Kind::Open { voids: kind == Kind::Voids } } else { kind })
 }
 
 /// A face of a solid read on its own ([`read_faces_with`]).
@@ -407,7 +482,7 @@ pub fn read_faces_with(ex: &Exchange, item: u64, context: units::Context, trims:
                 return Err(format!("more than {MAX_FACES} faces"));
             }
             let mut b = Builder::new(ex, &mut reader, tolerance(&context), &mut budget, Some(trims));
-            let read = b.face(f, 0).and_then(|(face, forward)| b.asm.finish(item, String::new(), vec![vec![(face, forward != flip)]], Kind::Model));
+            let read = b.face(f, 0).and_then(|(face, forward)| b.finish(item, String::new(), vec![vec![(face, forward != flip)]], Kind::Model));
             let named = |m: String| if m.starts_with(&format!("face #{f}")) { m } else { format!("face #{f}: {m}") };
             out.push(match read {
                 Ok(s) => FaceRead { face: s.face_origin.first().copied().unwrap_or(f), record: Ok(s.brep) },
@@ -522,6 +597,17 @@ struct Builder<'b, 'a> {
     /// The line edges of POLY_LOOPs, by their two CARTESIAN_POINTs (lower id first): faces that
     /// share a side share its edge, as a faceted B-rep's do.
     poly_edges: HashMap<(u64, u64), u32>,
+    /// Vertices joined at one point ([`Builder::meet`]) as a union-find: each vertex's parent,
+    /// a vertex past its end its own root. Edges and vertex loops are put through it once, when
+    /// the file is read ([`Builder::join_vertices`]); until then a vertex is resolved at use.
+    vertex_parent: Vec<u32>,
+    /// The VERTEX_POINTs of each joined set, by its root (a vertex not listed: its own one).
+    vertex_members: HashMap<u32, Vec<u64>>,
+    /// Each vertex's VERTEX_POINT.
+    vertex_step: HashMap<u32, u64>,
+    /// The other ends of the file's EDGE_CURVEs at each VERTEX_POINT (an edge's own two ends
+    /// are never joined), read at the first join.
+    edge_partners: Option<HashMap<u64, Vec<u64>>>,
 }
 
 impl<'b, 'a> Builder<'b, 'a> {
@@ -535,12 +621,16 @@ impl<'b, 'a> Builder<'b, 'a> {
             edge_ids: HashMap::new(),
             face_ids: HashSet::new(),
             poly_edges: HashMap::new(),
+            vertex_parent: Vec::new(),
+            vertex_members: HashMap::new(),
+            vertex_step: HashMap::new(),
+            edge_partners: None,
         }
     }
 
     fn vertex(&mut self, id: u64) -> R<u32> {
-        if let Some(v) = self.vertex_ids.get(&id) {
-            return Ok(*v);
+        if let Some(&v) = self.vertex_ids.get(&id) {
+            return Ok(self.find(v));
         }
         let e = entity(self.ex, id)?;
         if e.name() != "VERTEX_POINT" {
@@ -550,6 +640,7 @@ impl<'b, 'a> Builder<'b, 'a> {
         let i = index(self.asm.vertices.len())?;
         self.asm.vertices.push(Vertex { point, tolerance: self.asm.tol });
         self.vertex_ids.insert(id, i);
+        self.vertex_step.insert(i, id);
         Ok(i)
     }
 
@@ -653,9 +744,152 @@ impl<'b, 'a> Builder<'b, 'a> {
         Ok((edge, with_step))
     }
 
-    fn ends(&self, (edge, forward): (u32, bool)) -> R<[u32; 2]> {
+    /// The root of vertex `v`'s joined set ([`Builder::meet`]), halving the path to it.
+    fn find(&mut self, v: u32) -> u32 {
+        let mut v = v;
+        while let Some(&p) = self.vertex_parent.get(v as usize) {
+            if p == v {
+                break;
+            }
+            let up = self.vertex_parent.get(p as usize).copied().unwrap_or(p);
+            if let Some(x) = self.vertex_parent.get_mut(v as usize) {
+                *x = up;
+            }
+            v = up;
+        }
+        v
+    }
+
+    /// The VERTEX_POINTs of the joined set whose root is `root`.
+    fn member_ids(&self, root: u32) -> Vec<u64> {
+        self.vertex_members.get(&root).cloned().unwrap_or_else(|| self.vertex_step.get(&root).copied().into_iter().collect())
+    }
+
+    /// [`Builder::member_ids`], taken out of the table.
+    fn take_members(&mut self, root: u32) -> Vec<u64> {
+        self.vertex_members.remove(&root).unwrap_or_else(|| self.vertex_step.get(&root).copied().into_iter().collect())
+    }
+
+    fn members(&self, root: u32) -> usize {
+        self.vertex_members.get(&root).map_or(1, Vec::len)
+    }
+
+    /// Whether an EDGE_CURVE of the file, read yet or not, runs from a VERTEX_POINT of `small`'s
+    /// set to one of `other`'s (both roots).
+    fn edge_between(&mut self, small: u32, other: u32) -> bool {
+        if self.edge_partners.is_none() {
+            let mut partners: HashMap<u64, Vec<u64>> = HashMap::new();
+            for e in self.ex.entities.values() {
+                if e.name() != "EDGE_CURVE" {
+                    continue;
+                }
+                let p = e.params();
+                if let (Some(a), Some(z)) = (p.get(1).and_then(Param::as_ref_id), p.get(2).and_then(Param::as_ref_id))
+                    && a != z
+                {
+                    partners.entry(a).or_default().push(z);
+                    partners.entry(z).or_default().push(a);
+                }
+            }
+            self.edge_partners = Some(partners);
+        }
+        let mut ends = Vec::new();
+        for id in self.member_ids(small) {
+            for p in self.edge_partners.as_ref().and_then(|m| m.get(&id)).into_iter().flatten() {
+                if let Some(&v) = self.vertex_ids.get(p) {
+                    ends.push(v);
+                }
+            }
+        }
+        ends.into_iter().any(|v| self.find(v) == other)
+    }
+
+    /// Whether vertices `a` and `b` are one: the same vertex, or two whose points coincide
+    /// within their own tolerances (the kernel's [`solidcore_ops::vertex_meet::points_meet`]; a
+    /// file may write one corner as two VERTEX_POINTs at one point). Coincident ones are joined
+    /// into one set, its root's tolerance covering both, so the faces and the edges they share
+    /// meet at one vertex. Two vertices that are the two ends of one EDGE_CURVE of the file are
+    /// never joined, whether that edge is read yet or not: its own ends are apart.
+    fn meet(&mut self, a: u32, b: u32) -> R<bool> {
+        let (a, b) = (self.find(a), self.find(b));
+        if a == b {
+            return Ok(true);
+        }
+        let (keep, drop) = if self.members(a) >= self.members(b) { (a, b) } else { (b, a) };
+        let (k, d) =
+            (self.asm.vertices.get(keep as usize).ok_or("vertex reference")?, self.asm.vertices.get(drop as usize).ok_or("vertex reference")?);
+        let Some(tolerance) = solidcore_ops::vertex_meet::points_meet(k.point, k.tolerance, d.point, d.tolerance) else {
+            return Ok(false);
+        };
+        if self.edge_between(drop, keep) {
+            return Ok(false);
+        }
+        while self.vertex_parent.len() < self.asm.vertices.len() {
+            let i = index(self.vertex_parent.len())?;
+            self.vertex_parent.push(i);
+        }
+        *self.vertex_parent.get_mut(drop as usize).ok_or("vertex reference")? = keep;
+        let moved = self.take_members(drop);
+        let mut kept = self.take_members(keep);
+        kept.extend(moved);
+        self.vertex_members.insert(keep, kept);
+        if let Some(x) = self.asm.vertices.get_mut(keep as usize) {
+            x.tolerance = tolerance;
+        }
+        Ok(true)
+    }
+
+    /// Edges and vertex loops on the roots of their vertices' joined sets ([`Builder::meet`]),
+    /// once the file is read; each root's tolerance covers every vertex joined into it, as
+    /// each one's has grown since.
+    fn join_vertices(&mut self) -> R<()> {
+        if self.vertex_members.is_empty() {
+            return Ok(());
+        }
+        for i in 0..self.asm.vertices.len() {
+            let v = index(i)?;
+            let r = self.find(v);
+            if r == v {
+                continue;
+            }
+            let (x, y) = (self.asm.vertices.get(r as usize).ok_or("vertex reference")?, self.asm.vertices.get(i).ok_or("vertex reference")?);
+            let tolerance = solidcore_ops::vertex_meet::points_meet(x.point, x.tolerance, y.point, y.tolerance).ok_or("joined vertices apart")?;
+            if let Some(x) = self.asm.vertices.get_mut(r as usize) {
+                x.tolerance = tolerance;
+            }
+        }
+        for i in 0..self.asm.edges.len() {
+            let [a, z] = self.asm.edges.get(i).ok_or("edge reference")?.vertices;
+            let ends = [self.find(a), self.find(z)];
+            if let Some(e) = self.asm.edges.get_mut(i) {
+                e.vertices = ends;
+            }
+        }
+        for f in 0..self.asm.faces.len() {
+            for l in 0..self.asm.faces.get(f).map_or(0, |x| x.loops.len()) {
+                if let Some(&Bound::Vertex(v)) = self.asm.faces.get(f).and_then(|x| x.loops.get(l)) {
+                    let r = self.find(v);
+                    if let Some(Bound::Vertex(v)) = self.asm.faces.get_mut(f).and_then(|x| x.loops.get_mut(l)) {
+                        *v = r;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The finished record ([`Assembly::finish`]), its edges and vertex loops first put on the
+    /// roots of their vertices' joined sets ([`Builder::join_vertices`]).
+    fn finish(mut self, item: u64, name: String, shells: Vec<Vec<(u32, bool)>>, kind: Kind) -> R<Solid> {
+        self.join_vertices()?;
+        self.asm.finish(item, name, shells, kind)
+    }
+
+    /// A use's start and end vertices, each its joined set's root ([`Builder::meet`]).
+    fn ends(&mut self, (edge, forward): (u32, bool)) -> R<[u32; 2]> {
         let e = self.asm.edges.get(edge as usize).ok_or("edge reference")?;
         let [a, z] = e.vertices;
+        let [a, z] = [self.find(a), self.find(z)];
         Ok(if forward { [a, z] } else { [z, a] })
     }
 
@@ -687,13 +921,19 @@ impl<'b, 'a> Builder<'b, 'a> {
                 let mut last = None;
                 for u in &uses {
                     let [s, e] = self.ends(*u)?;
-                    if last.is_some_and(|l| l != s) {
+                    if let Some(l) = last
+                        && !self.meet(l, s)?
+                    {
                         return Err(format!("edge loop #{lp_id} is not connected"));
                     }
                     last = Some(e);
                 }
-                if let (Some(first), Some(last)) = (uses.first(), last)
-                    && self.ends(*first)?[0] != last
+                let first_start = match uses.first() {
+                    Some(&first) => Some(self.ends(first)?[0]),
+                    None => None,
+                };
+                if let (Some(start), Some(last)) = (first_start, last)
+                    && !self.meet(last, start)?
                 {
                     return Err(format!("edge loop #{lp_id} is not closed"));
                 }
@@ -819,7 +1059,7 @@ impl<'b, 'a> Builder<'b, 'a> {
         if !loops.iter().any(|l| matches!(l, Bound::Edges(_))) {
             loops = self.whole_sphere(&step_surface, &loops).map_err(|m| format!("face #{id}: {m}"))?;
         }
-        let extent = self.extent(&loops)?;
+        let extent = self.asm.extent(&loops)?;
         let (surface, reversed) = swept::map_surface(&step_surface, &extent, self.asm.tol).map_err(|m| format!("face #{id}: {m}"))?;
         // Loops relative to the record's natural normal: the face's normal is STEP's surface
         // normal when same_sense, and the record's is STEP's unless `reversed`.
@@ -841,7 +1081,9 @@ impl<'b, 'a> Builder<'b, 'a> {
     /// keeps as its seam. Any other face without an edge loop is refused.
     fn whole_sphere(&mut self, surface: &crate::geom::Surface, loops: &[Bound]) -> R<Vec<Bound>> {
         let crate::geom::Surface::Sphere { position, radius } = surface else { return Err(unsupported("a face without an edge loop")) };
-        self.asm.whole_sphere(position.origin, position.axis, position.ref_direction, *radius, loops)
+        // Each pole vertex as its joined set's root ([`Builder::meet`]).
+        let loops: Vec<Bound> = loops.iter().map(|l| if let &Bound::Vertex(v) = l { Bound::Vertex(self.find(v)) } else { l.clone() }).collect();
+        self.asm.whole_sphere(position.origin, position.axis, position.ref_direction, *radius, &loops)
     }
 
     /// The plane a plain FACE's loops lie in (ISO 10303-42: a FACE with no face geometry is
@@ -876,50 +1118,6 @@ impl<'b, 'a> Builder<'b, 'a> {
         Ok(crate::geom::Surface::Plane {
             position: Placement { origin: [first.x, first.y, first.z], axis: [z.x, z.y, z.z], ref_direction: [x.x, x.y, x.z] },
         })
-    }
-
-    /// Points along a face's loops (each edge at nine points, and its vertex loops), and along
-    /// the edges its loops use twice (its seams).
-    fn extent(&self, loops: &[Bound]) -> R<swept::Extent> {
-        let mut ext = swept::Extent::default();
-        let mut count: HashMap<u32, usize> = HashMap::new();
-        for l in loops {
-            match l {
-                Bound::Edges(es) => {
-                    let mut walk = Vec::new();
-                    for &(e, forward) in es {
-                        *count.entry(e).or_default() += 1;
-                        let edge = self.asm.edges.get(e as usize).ok_or("edge reference")?;
-                        let c = CurveEval::new(&edge.curve).map_err(|m| m.to_string())?;
-                        let [lo, hi] = edge.interval;
-                        for k in 0..8 {
-                            let s = f64::from(k) / 8.0;
-                            walk.push(c.point(if forward { lo + (hi - lo) * s } else { hi - (hi - lo) * s }).ok_or("edge point")?);
-                        }
-                    }
-                    if let Some(&p) = walk.first() {
-                        walk.push(p);
-                    }
-                    ext.walks.push(walk);
-                }
-                Bound::Vertex(v) => ext.points.push(v3(self.asm.point(*v)?)),
-            }
-        }
-        let mut edges: Vec<u32> = count.keys().copied().collect();
-        edges.sort_unstable();
-        for e in edges {
-            let edge = self.asm.edges.get(e as usize).ok_or("edge reference")?;
-            let c = CurveEval::new(&edge.curve).map_err(|m| m.to_string())?;
-            let [lo, hi] = edge.interval;
-            for k in 0..=8 {
-                let p = c.point(lo + (hi - lo) * f64::from(k) / 8.0).ok_or("edge point")?;
-                ext.points.push(p);
-                if count.get(&e).is_some_and(|n| *n > 1) {
-                    ext.seam.push(p);
-                }
-            }
-        }
-        Ok(ext)
     }
 
     /// The faces of shell `id` but those `left_out`, and whether any was left out.
@@ -1329,17 +1527,40 @@ fn open_or_closed(curve: BCurve, ps: P3, pe: P3, same_sense: bool, closed: bool,
     }
     let (pa, pb) = (eval.point(a).ok_or("spline start")?, eval.point(b).ok_or("spline end")?);
     let curve_closed = pa.dist(pb) <= tol.max(1e-9 * (1.0 + pa.len()));
-    if closed {
-        if !curve_closed {
-            return Err("a closed edge on an open curve".into());
-        }
-        return Ok(Mapped { curve, interval: [a, b], with_step: true, sense_mismatch: false });
-    }
     let knots = match &curve {
         BCurve::Spline { knots, .. } | BCurve::RationalSpline { knots, .. } => knots.clone(),
         BCurve::Polyline { points } => (0..points.len()).map(|i| i as f64).collect(),
         _ => Vec::new(),
     };
+    if closed {
+        if !curve_closed {
+            let interval = loop_on_open_curve(&eval, a, b, &knots, ps, tol)?;
+            return Ok(Mapped { curve, interval, with_step: true, sense_mismatch: false });
+        }
+        // The whole curve, from its one vertex round to it again. A vertex at the curve's seam
+        // (within the tolerance of its ends) keeps the curve as it is; a vertex elsewhere on it
+        // (a loop whose vertex the file puts half way round) starts the curve there, exactly, so
+        // the edge's ends are its vertex.
+        let t = project(&eval, a, b, &knots, v3(ps)).ok_or("no parameter for the edge's vertex")?;
+        let eps = 1e-9 * (b - a);
+        // A vertex at a knot (where the file's curve joins its pieces) starts the curve at that
+        // knot, not a rounding beside it: a span a rounding long beside a knot run makes a run
+        // longer than the degree allows once the two are taken for one. Only a knot whose point
+        // is the vertex, within the tolerance: a rounding in parameter can be far in length on a
+        // large curve.
+        let at_vertex = |k: f64| eval.point(k).is_some_and(|q| q.dist(v3(ps)) <= tol);
+        let t = knots
+            .iter()
+            .copied()
+            .filter(|k| (k - t).abs() <= eps && at_vertex(*k))
+            .min_by(|x, y| (x - t).abs().total_cmp(&(y - t).abs()))
+            .unwrap_or(t);
+        if t - a <= eps || b - t <= eps || v3(ps).dist(pa).min(v3(ps).dist(pb)) <= tol {
+            return Ok(Mapped { curve, interval: [a, b], with_step: true, sense_mismatch: false });
+        }
+        let curve = crate::kernel::restart_curve(&curve, t)?;
+        return Ok(Mapped { curve, interval: [t, t + (b - a)], with_step: true, sense_mismatch: false });
+    }
     let ts = project(&eval, a, b, &knots, v3(ps)).ok_or("no parameter for the edge's start")?;
     let te = project(&eval, a, b, &knots, v3(pe)).ok_or("no parameter for the edge's end")?;
     let eps = 1e-9 * (b - a);
@@ -1382,9 +1603,55 @@ fn open_or_closed(curve: BCurve, ps: P3, pe: P3, same_sense: bool, closed: bool,
     Ok(Mapped { curve, interval: [from, to], with_step: same_sense, sense_mismatch: false })
 }
 
+/// A closed edge on an open curve that runs on past it: a full turn written as a spline that
+/// goes round more than once (a periodic curve unrolled, as a record keeps a turn whose seam
+/// moved), so the curve passes the edge's vertex twice. The edge is the loop between those two
+/// parameters; a curve that passes the vertex once, or three times, does not say which loop.
+fn loop_on_open_curve(eval: &CurveEval, a: f64, b: f64, knots: &[f64], p: P3, tol: f64) -> R<[f64; 2]> {
+    let open = || "a closed edge on an open curve".to_string();
+    let p = v3(p);
+    let near = tol.max(1e-9 * (1.0 + p.len()));
+    let at = |t: f64| eval.point(t).map_or(f64::INFINITY, |q| q.dist(p));
+    // Every pass: the nearest point of each stretch of the domain not yet near a pass found,
+    // a hundredth of the domain kept clear on each side of one.
+    let margin = (b - a) * 0.01;
+    let mut hits: Vec<f64> = Vec::new();
+    for _ in 0..4 {
+        let mut bounds = vec![a];
+        for h in &hits {
+            bounds.extend([h - margin, h + margin]);
+        }
+        bounds.push(b);
+        let found: Vec<f64> = bounds
+            .chunks(2)
+            .filter_map(|r| match r {
+                [lo, hi] if lo < hi => project(eval, *lo, *hi, knots, p).filter(|t| at(*t) <= near),
+                _ => None,
+            })
+            .collect();
+        if found.is_empty() {
+            break;
+        }
+        hits.extend(found);
+        hits.sort_by(f64::total_cmp);
+    }
+    // Hits with no point away from the vertex between them are one pass.
+    let leaves = |x: f64, y: f64| (1..8).any(|k| at(x + (y - x) * k as f64 / 8.0) > 2.0 * near);
+    let mut passes: Vec<f64> = Vec::new();
+    for t in hits {
+        if passes.last().is_none_or(|&last| leaves(last, t)) {
+            passes.push(t);
+        }
+    }
+    match passes.as_slice() {
+        [x, y] => Ok([*x, *y]),
+        _ => Err(open()),
+    }
+}
+
 /// The parameter in [a, b] of the curve's point nearest `p`: the nearest of samples along each
 /// knot span, refined by golden-section search between its neighbours.
-fn project(c: &CurveEval, a: f64, b: f64, knots: &[f64], p: Vec3) -> Option<f64> {
+pub(crate) fn project(c: &CurveEval, a: f64, b: f64, knots: &[f64], p: Vec3) -> Option<f64> {
     let mut breaks: Vec<f64> = knots.iter().copied().filter(|k| *k > a && *k < b).collect();
     breaks.dedup();
     let spans = breaks.len() + 1;

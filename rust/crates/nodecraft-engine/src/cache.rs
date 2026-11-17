@@ -51,8 +51,8 @@ pub struct EngineCache {
     comparison_failures: HashMap<CacheKey, String>,
     comparison_bytes: usize,
     comparison_hits: u64,
-    imports: HashMap<(String, u64, u64), Arc<nodecraft_mesh::StepImport>>,
-    import_order: std::collections::VecDeque<(String, u64, u64)>,
+    imports: HashMap<(String, String, String), Arc<nodecraft_mesh::StepImport>>,
+    import_order: std::collections::VecDeque<(String, String, String)>,
     import_hits: u64,
 }
 
@@ -222,9 +222,9 @@ impl EngineCache {
     pub fn failure_hits(&self) -> u64 { self.failure_hits }
 
     #[must_use]
-    pub fn import(&self, key: &(String, u64, u64)) -> Option<Arc<nodecraft_mesh::StepImport>> { self.imports.get(key).cloned() }
+    pub fn import(&self, key: &(String, String, String)) -> Option<Arc<nodecraft_mesh::StepImport>> { self.imports.get(key).cloned() }
 
-    pub fn insert_import(&mut self, key: (String, u64, u64), import: Arc<nodecraft_mesh::StepImport>) {
+    pub fn insert_import(&mut self, key: (String, String, String), import: Arc<nodecraft_mesh::StepImport>) {
         if self.imports.insert(key.clone(), import).is_none() { self.import_order.push_back(key); }
         while self.import_order.len() > 32 { if let Some(oldest) = self.import_order.pop_front() { self.imports.remove(&oldest); } }
     }
@@ -233,20 +233,15 @@ impl EngineCache {
     pub fn import_hits(&self) -> u64 { self.import_hits }
 }
 
-/// Every Stepio failure names the file it was operating on.
-#[cfg(test)]
-pub(crate) fn stepio_error(path: &str, error: String) -> String {
-    if path.is_empty() || error.starts_with(path) { error } else { format!("{path}: {error}") }
-}
-
-pub(crate) fn import_cache_key(path: &str) -> (String, u64, u64) {
-    std::fs::metadata(path)
-        .ok()
-        .map(|metadata| {
-            let modified = metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok()).map(|duration| duration.as_nanos() as u64).unwrap_or(0);
-            (path.to_string(), metadata.len(), modified)
-        })
-        .unwrap_or_else(|| (path.to_string(), 0, 0))
+/// Import cache identity: content hash, import options and the importer/cadmpeg
+/// version. The path, size and mtime are deliberately absent, so a renamed or
+/// moved copy of the same bytes hits the same entry.
+pub(crate) fn import_cache_key(content_hash: &str, options: &str) -> (String, String, String) {
+    (
+        content_hash.to_owned(),
+        options.to_owned(),
+        crate::import_io::IMPORT_FORMAT_VERSION.to_owned(),
+    )
 }
 
 fn mesh_bytes(mesh: &Mesh) -> usize {

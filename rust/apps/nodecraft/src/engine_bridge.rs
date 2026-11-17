@@ -154,7 +154,7 @@ pub fn evaluate_with_linked_progress_comparison(
 /// [`nodecraft_session::flat::FlatGraphCache`], so this function must not expand
 /// again.
 /// Immediate a/b sources when `target` is a Boolean with both operands.
-fn pre_merge_sources(document: &GraphDocument, target: &str) -> Option<(String, String)> {
+pub(crate) fn pre_merge_sources(document: &GraphDocument, target: &str) -> Option<(String, String)> {
     let node = document.nodes.iter().find(|node| node.id == target)?;
     if !matches!(node.node_type.as_str(), "boolean" | "fuse") {
         return None;
@@ -219,6 +219,8 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
         false,
         bypass_cache,
         None,
+        &nodecraft_engine::ImportContext::default(),
+        None,
     )
 }
 
@@ -253,6 +255,8 @@ pub fn evaluate_flat_with_progress_comparison_dirty_preview(
         false,
         bypass_cache,
         preview_detail,
+        &nodecraft_engine::ImportContext::default(),
+        None,
     )
 }
 
@@ -272,6 +276,80 @@ pub fn evaluate_flat_exact(
     edit_preview: Option<&str>,
     bypass_cache: bool,
 ) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_exact_with_imports(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        dirty_nodes,
+        ghost_input,
+        validation_targets,
+        edit_preview,
+        bypass_cache,
+        &nodecraft_engine::ImportContext::default(),
+    )
+}
+
+/// Exact evaluation with the active document's folder and ingested sources, so
+/// relative importer paths and missing-file fallbacks resolve identically in
+/// every app path. Hashing/reading happens on the evaluation worker.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_flat_exact_with_imports(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+    edit_preview: Option<&str>,
+    bypass_cache: bool,
+    imports: &nodecraft_engine::ImportContext,
+) -> (Option<Evaluation>, EngineCache) {
+    evaluate_flat_exact_with_imports_and_hashes(
+        document,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+        dirty_nodes,
+        ghost_input,
+        validation_targets,
+        edit_preview,
+        bypass_cache,
+        imports,
+        None,
+    )
+}
+
+/// Exact evaluation that can reuse hashes the caller already computed for this
+/// exact document revision.
+///
+/// `hashes` must be the node hashes of `document` under `imports.source_hashes`.
+/// The session cache is one such map; when the caller cannot prove the flat
+/// document equals the hashed document it must pass `None` and let the bridge
+/// do its one full pass.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_flat_exact_with_imports_and_hashes(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+    edit_preview: Option<&str>,
+    bypass_cache: bool,
+    imports: &nodecraft_engine::ImportContext,
+    hashes: Option<&std::collections::BTreeMap<String, nodecraft_session::ContentHash>>,
+) -> (Option<Evaluation>, EngineCache) {
     evaluate_flat_with_progress_comparison_dirty_mode(
         document,
         target,
@@ -286,37 +364,55 @@ pub fn evaluate_flat_exact(
         true,
         bypass_cache,
         None,
+        imports,
+        hashes,
     )
 }
 
-fn evaluate_flat_with_progress_comparison_dirty_mode(
+/// Whole-document content hashes for one engine request.
+///
+/// This is the bridge's own hash pass, distinct from the session's dirty-set
+/// passes. It is a separate function so a benchmark can measure the request
+/// build from the same code the app runs.
+pub(crate) fn document_hashes(
     document: &GraphDocument,
-    target: String,
-    cache: EngineCache,
-    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
-    run_exporters: bool,
+    imports: &nodecraft_engine::ImportContext,
+) -> std::collections::BTreeMap<String, nodecraft_session::ContentHash> {
+    document
+        .node_hashes_with_sources(&imports.source_hashes)
+        .unwrap_or_default()
+}
+
+/// Materialise the engine request from an already-hashed document.
+///
+/// Every node and connection is copied here, and the dirty set decides each
+/// node's cache state. The app calls this once per evaluation job.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_exact_request(
+    document: &GraphDocument,
+    target: &str,
+    hashes: &std::collections::BTreeMap<String, nodecraft_session::ContentHash>,
     dirty_nodes: &HashSet<String>,
+    comparison: Option<(&str, &str)>,
+    pre_merge: Option<(&str, &str)>,
     ghost_input: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
-    exact_only: bool,
-    bypass_cache: bool,
+    run_exporters: bool,
     preview_detail: Option<u8>,
-) -> (Option<Evaluation>, EngineCache) {
-    let started = Instant::now();
-    let hashes = document.node_hashes().unwrap_or_default();
-    let pre_merge = pre_merge_sources(document, &target);
-    let request = Request {
+    bypass_cache: bool,
+    progress_enabled: bool,
+) -> Request {
+    Request {
         request_id: 1,
         tab_id: None,
         graph_revision: None,
         targets: {
-            let mut targets = vec![target.clone()];
-            if let Some((a, b)) = &pre_merge {
+            let mut targets = vec![target.to_owned()];
+            if let Some((a, b)) = pre_merge {
                 for id in [a, b] {
                     if !targets.iter().any(|existing| existing == id) {
-                        targets.push(id.clone());
+                        targets.push(id.to_owned());
                     }
                 }
             }
@@ -345,11 +441,11 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             targets
         },
         mesh_targets: Some({
-            let mut targets = vec![target.clone()];
-            if let Some((a, b)) = &pre_merge {
+            let mut targets = vec![target.to_owned()];
+            if let Some((a, b)) = pre_merge {
                 for id in [a, b] {
                     if !targets.iter().any(|existing| existing == id) {
-                        targets.push(id.clone());
+                        targets.push(id.to_owned());
                     }
                 }
             }
@@ -409,14 +505,62 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             .collect(),
         binary_mesh: false,
         project_directory: None,
-        progress: progress.is_some(),
+        progress: progress_enabled,
         run_exporters,
         mesh_tolerance: None,
         preview_detail,
         comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
         bypass_cache,
+    }
+}
+
+fn evaluate_flat_with_progress_comparison_dirty_mode(
+    document: &GraphDocument,
+    target: String,
+    cache: EngineCache,
+    progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
+    comparison: Option<(&str, &str)>,
+    run_exporters: bool,
+    dirty_nodes: &HashSet<String>,
+    ghost_input: Option<&str>,
+    validation_targets: &[String],
+    edit_preview: Option<&str>,
+    exact_only: bool,
+    bypass_cache: bool,
+    preview_detail: Option<u8>,
+    imports: &nodecraft_engine::ImportContext,
+    known_hashes: Option<&std::collections::BTreeMap<String, nodecraft_session::ContentHash>>,
+) -> (Option<Evaluation>, EngineCache) {
+    let started = Instant::now();
+    // Reuse the caller's revision hashes when it proved they describe this exact
+    // document; otherwise the importer's runtime source hash is part of its
+    // cache identity, so a changed source changes this node's hash and every
+    // descendant's hash. One full pass is the correctness fallback.
+    let computed_hashes;
+    let hashes = match known_hashes {
+        Some(hashes) => hashes,
+        None => {
+            computed_hashes = document_hashes(document, imports);
+            &computed_hashes
+        }
     };
-    let output = nodecraft_engine::evaluate_exact(request, cache, progress);
+    let pre_merge = pre_merge_sources(document, &target);
+    let request = build_exact_request(
+        document,
+        &target,
+        &hashes,
+        dirty_nodes,
+        comparison,
+        pre_merge.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+        ghost_input,
+        validation_targets,
+        edit_preview,
+        run_exporters,
+        preview_detail,
+        bypass_cache,
+        progress.is_some(),
+    );
+    let output = nodecraft_engine::evaluate_exact_with_imports(request, cache, progress, imports.clone());
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let cache_stats = output.response.cache_stats;
@@ -429,7 +573,7 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     );
     let error = output.response.node_errors.get(&target).cloned();
     let mut display_cache = nodecraft_display::PlanCache::new(1024);
-    let quality = nodecraft_display::DisplayQuality::Full(0.35);
+    let quality = nodecraft_display::default_quality();
     let mut plans = Vec::new();
     let mut feature_plans = Vec::new();
     let mut tessellation_diagnostics = Vec::new();
@@ -620,5 +764,204 @@ mod tests {
                 .map(|body| body.key)
                 .collect::<Vec<_>>(),
         );
+    }
+
+    fn cache_key(request: &Request, id: &str) -> String {
+        request
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.cache.as_ref()?.key.clone())
+            .expect("node has a cache key")
+    }
+
+    fn cache_state(request: &Request, id: &str) -> String {
+        request
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.cache.as_ref()?.state.clone())
+            .expect("node has a cache state")
+    }
+
+    fn translate_document() -> GraphDocument {
+        let mut document = GraphDocument::new("hash-reuse");
+        document.nodes = vec![node("a"), {
+            let mut translate = node("b");
+            translate.node_type = "translate".into();
+            translate.values = serde_json::json!({"x": 5.0});
+            translate
+        }];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "a".into(),
+            to: "b".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        document
+    }
+
+    fn build_with_session_hashes(
+        session: &nodecraft_session::Session,
+        target: &str,
+        dirty: &HashSet<String>,
+    ) -> Request {
+        let hashes = session
+            .hashes_for_sources(session.source_hashes())
+            .expect("the revision cache matches the session source map");
+        build_exact_request(
+            session.document(),
+            target,
+            &hashes,
+            dirty,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+            false,
+        )
+    }
+
+    /// The app path used to hash once per session pass and once again in the
+    /// bridge. The session now computes the revision once and the request
+    /// builder reuses that map, so a value edit is one full pass total.
+    #[test]
+    fn one_full_hash_pass_per_edit_from_session_to_request() {
+        let mut session = nodecraft_session::Session::new(translate_document());
+        nodecraft_session::reset_thread_node_hash_pass_count();
+        let change = session
+            .apply_commands(&[nodecraft_session::Command::SetValue {
+                node: "a".into(),
+                field: "length".into(),
+                value: serde_json::json!(20.0),
+            }])
+            .expect("edit applies");
+        assert_eq!(
+            nodecraft_session::thread_node_hash_pass_count(),
+            1,
+            "session apply computes the new revision once"
+        );
+        let dirty: HashSet<String> = change.dirty_nodes.iter().cloned().collect();
+        assert_eq!(dirty, HashSet::from(["a".to_owned(), "b".to_owned()]));
+
+        let hashes = session
+            .hashes_for_sources(session.source_hashes())
+            .expect("session revision hashes");
+        let request = build_exact_request(
+            session.document(),
+            "b",
+            &hashes,
+            &dirty,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+            false,
+        );
+        assert_eq!(
+            nodecraft_session::thread_node_hash_pass_count(),
+            1,
+            "building the request from session hashes must not hash"
+        );
+        assert_eq!(cache_state(&request, "a"), "dirty");
+        assert_eq!(cache_state(&request, "b"), "dirty");
+        assert_eq!(
+            cache_key(&request, "a"),
+            format!(
+                "{}@{}",
+                hashes["a"].to_hex(),
+                nodecraft_kernel_profile::profile_generation()
+            )
+        );
+    }
+
+    /// Undo/redo and a runtime source-hash change must still put the right keys
+    /// and dirty states into the request even though the hash map is reused.
+    #[test]
+    fn history_and_source_changes_keep_request_keys_and_dirty_sets() {
+        let mut document = translate_document();
+        document.nodes.insert(
+            0,
+            {
+                let mut importer = node("imp");
+                importer.node_type = "stepimporter".into();
+                importer.values = serde_json::json!({"path": "input.step"});
+                importer
+            },
+        );
+        document.connections.insert(
+            0,
+            nodecraft_session::GraphConnection {
+                from: "imp".into(),
+                to: "b".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            },
+        );
+        let mut session = nodecraft_session::Session::new(document);
+        let initial = session.node_hashes().expect("initial hashes");
+
+        let sources = std::collections::BTreeMap::from([(
+            "imp".to_owned(),
+            "source-v1".to_owned(),
+        )]);
+        session.set_source_hashes(sources.clone());
+        nodecraft_session::reset_thread_node_hash_pass_count();
+        let change = session
+            .apply_commands(&[nodecraft_session::Command::SetValue {
+                node: "a".into(),
+                field: "length".into(),
+                value: serde_json::json!(20.0),
+            }])
+            .expect("edit applies");
+        assert_eq!(nodecraft_session::thread_node_hash_pass_count(), 1);
+        assert_eq!(change.dirty_nodes, vec!["a", "b", "imp"]);
+        let dirty: HashSet<String> = change.dirty_nodes.iter().cloned().collect();
+        let request = build_with_session_hashes(&session, "b", &dirty);
+        assert_eq!(nodecraft_session::thread_node_hash_pass_count(), 1);
+        assert_ne!(
+            cache_key(&request, "imp"),
+            format!(
+                "{}@{}",
+                initial["imp"].to_hex(),
+                nodecraft_kernel_profile::profile_generation()
+            ),
+            "the changed source must produce a new importer cache key"
+        );
+        assert_eq!(cache_state(&request, "imp"), "dirty");
+        let source_key = cache_key(&request, "imp");
+
+        nodecraft_session::reset_thread_node_hash_pass_count();
+        let undo = session.undo().expect("undo runs").expect("undo entry");
+        assert_eq!(nodecraft_session::thread_node_hash_pass_count(), 1);
+        assert_eq!(undo.dirty_nodes, vec!["a", "b"]);
+        let undo_dirty: HashSet<String> = undo.dirty_nodes.iter().cloned().collect();
+        let undo_request = build_with_session_hashes(&session, "b", &undo_dirty);
+        assert_eq!(cache_state(&undo_request, "a"), "dirty");
+        assert_eq!(cache_state(&undo_request, "b"), "dirty");
+        assert_eq!(cache_state(&undo_request, "imp"), "cached");
+        assert_eq!(
+            cache_key(&undo_request, "imp"),
+            source_key,
+            "undo must not roll the runtime source identity back"
+        );
+
+        nodecraft_session::reset_thread_node_hash_pass_count();
+        let redo = session.redo().expect("redo runs").expect("redo entry");
+        assert_eq!(nodecraft_session::thread_node_hash_pass_count(), 1);
+        assert_eq!(redo.dirty_nodes, vec!["a", "b"]);
+        let redo_dirty: HashSet<String> = redo.dirty_nodes.iter().cloned().collect();
+        let redo_request = build_with_session_hashes(&session, "b", &redo_dirty);
+        assert_eq!(cache_state(&redo_request, "a"), "dirty");
+        assert_eq!(cache_state(&redo_request, "b"), "dirty");
+        assert_eq!(cache_key(&redo_request, "imp"), source_key);
     }
 }

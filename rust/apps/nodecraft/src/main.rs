@@ -17,6 +17,7 @@ mod file_dialog;
 mod hover;
 mod theme;
 mod sketch_gui;
+mod source_service;
 mod ui_shape;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_backdrop;
@@ -27,6 +28,9 @@ mod plan_math;
 mod gpu_viewport;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_plan;
+// Measurement-only harness; its test is `#[ignore]`d and never runs by default.
+#[cfg(test)]
+mod edit_overhead;
 mod inspector;
 mod viewport;
 mod viewport_grid;
@@ -171,7 +175,7 @@ fn check(path: Option<PathBuf>) -> eframe::Result {
         .get(&target)
         .and_then(|part| nodecraft_display::mesh_part(
             part,
-            nodecraft_display::DisplayQuality::Full(0.35),
+            nodecraft_display::default_quality(),
             &mut plan_cache,
         ).ok())
         .map(|display| display.mesh);

@@ -246,7 +246,8 @@ fn handle_document(message: DocumentRequest, out: &mpsc::Sender<Vec<u8>>) {
 
 fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut nodecraft_display::PlanCache, out: &mpsc::Sender<Vec<u8>>) {
     let include_diagnostics = request.nodes.iter().any(|node| {
-        node.node_type == "stepimporter"
+        nodecraft_engine::nodes::diagnostics_scope(&node.node_type)
+            == nodecraft_engine::nodes::DiagnosticsScope::IsolatedProcess
             && node.values.get("diagnostics").and_then(serde_json::Value::as_bool) == Some(true)
     }) || std::env::var("NODECRAFT_WORKER_DIAGNOSTICS")
         .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
@@ -268,7 +269,7 @@ fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut node
         proof_generation: _,
     } = output;
     let quality = request.preview_detail.map_or(
-        nodecraft_display::DisplayQuality::Full(0.35),
+        nodecraft_display::default_quality(),
         nodecraft_display::DisplayQuality::Preview,
     );
     let (meshes, empty_targets) = nodecraft_display::protocol_meshes(
@@ -286,7 +287,18 @@ fn handle_evaluation(request: Request, cache: &mut EngineCache, plans: &mut node
     if include_diagnostics && !engine_diagnostics.is_empty() {
         let entries: serde_json::Map<String, serde_json::Value> = engine_diagnostics
             .iter()
-            .map(|(id, item)| (id.clone(), item.to_json()))
+            .map(|(id, items)| {
+                // One diagnostic per node keeps today's object JSON. A node
+                // that eventually reports several kinds serialises as an array
+                // without changing the existing single-kind shape.
+                let value = match items.as_slice() {
+                    [one] => one.to_json(),
+                    many => serde_json::Value::Array(
+                        many.iter().map(nodecraft_engine::nodes::NodeDiagnostic::to_json).collect(),
+                    ),
+                };
+                (id.clone(), value)
+            })
             .collect();
         value["diagnostics"] = serde_json::Value::Object(entries);
     }

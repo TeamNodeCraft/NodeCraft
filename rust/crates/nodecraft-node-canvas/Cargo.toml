@@ -7,9 +7,11 @@ description = "Reusable egui node canvas for NodeCraft"
 publish = false
 
 [dependencies]
+nodecraft-crash = { path = "../nodecraft-crash" }
 egui = "0.36"
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 nodecraft-session = { path = "../nodecraft-session", default-features = false }
+nodecraft-node-contract = { path = "../nodecraft-node-contract" }
 lyon = "1.0"
 egui-wgpu = "0.36"
 wgpu = "30"

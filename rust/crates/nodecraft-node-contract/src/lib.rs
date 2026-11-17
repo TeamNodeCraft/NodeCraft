@@ -8,6 +8,9 @@ use nodecraft_protocol::{Connection, Node};
 use std::borrow::Cow;
 use std::fmt;
 
+mod metadata;
+pub use metadata::*;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueKind {
     Shape,
@@ -338,6 +341,24 @@ const SPLINE_FIELDS: &[NodeFieldSpec] = &[
     field_switch("periodic", "Closed", false),
 ];
 
+/// CAD import source policy. `path` itself is a selector key, not a field: it
+/// is an asset reference, not a setting with a default.
+const STEP_IMPORTER_FIELDS: &[NodeFieldSpec] = &[
+    field_choice(
+        "pathMode",
+        "Path",
+        "relative",
+        &[("relative", "Relative"), ("absolute", "Full path")],
+    ),
+    field_switch("ingest", "Embed file", false),
+    field_switch("watch", "Auto-reload", false),
+];
+
+/// Inspector action labels for a CAD source that needs re-linking. Kept beside
+/// the field labels so the import UI has one copy of its user-facing strings.
+pub const STEP_IMPORT_LOCATE_LABEL: &str = "Locate…";
+pub const STEP_IMPORT_SAVE_COPY_LABEL: &str = "Save copy as…";
+
 
 pub const PRIMITIVE_TYPES: &[(&str, &str)] = &[
     ("box", "Box"),
@@ -417,26 +438,62 @@ pub fn primitive_fields(kind: &str) -> &'static [NodeFieldSpec] {
     }
 }
 
+/// Node types with a static contract field table. The table is the one list
+/// [`fields`], the inspector, and the contract-defaults lint read; adding a
+/// field table here makes it visible to all three.
+const STATIC_FIELD_TABLES: &[(&str, &[NodeFieldSpec])] = &[
+    ("translate", TRANSLATE_FIELDS),
+    ("boolean", BOOLEAN_FIELDS),
+    ("fuse", BOOLEAN_FIELDS),
+    ("extrude", EXTRUDE_FIELDS),
+    ("loft", LOFT_FIELDS),
+    ("surfaceloft", LOFT_FIELDS),
+    ("chamfer", CHAMFER_FIELDS),
+    ("fillet", FILLET_FIELDS),
+    ("offsetfaces", OFFSET_FIELDS),
+    ("shell", SHELL_FIELDS),
+    ("mirror", MIRROR_FIELDS),
+    ("scatter", SCATTER_FIELDS),
+    ("circularpattern", CIRCULAR_PATTERN_FIELDS),
+    ("spline", SPLINE_FIELDS),
+    ("stepimporter", STEP_IMPORTER_FIELDS),
+];
+
 /// Neutral field metadata for node types with static inspector fields.
 /// Dynamic field sets (primitive, stepimporter, exporter) stay with their
 /// dedicated UI until a conditional-field model is needed.
 #[must_use]
 pub fn fields(node_type: &str) -> Option<&'static [NodeFieldSpec]> {
-    Some(match node_type {
-        "translate" => TRANSLATE_FIELDS,
-        "boolean" | "fuse" => BOOLEAN_FIELDS,
-        "extrude" => EXTRUDE_FIELDS,
-        "loft" | "surfaceloft" => LOFT_FIELDS,
-        "chamfer" => CHAMFER_FIELDS,
-        "fillet" => FILLET_FIELDS,
-        "offsetfaces" => OFFSET_FIELDS,
-        "shell" => SHELL_FIELDS,
-        "mirror" => MIRROR_FIELDS,
-        "scatter" => SCATTER_FIELDS,
-        "circularpattern" => CIRCULAR_PATTERN_FIELDS,
-        "spline" => SPLINE_FIELDS,
-        _ => return None,
-    })
+    STATIC_FIELD_TABLES
+        .iter()
+        .find(|(name, _)| *name == node_type)
+        .map(|(_, fields)| *fields)
+}
+
+/// Every field spec the contract defines, both static tables and each primitive
+/// kind's dynamic table. This is the authoritative field vocabulary for lint
+/// rules and docs; it deliberately excludes selector keys that are not fields
+/// themselves (for example `primitiveType`).
+pub fn field_specs() -> impl Iterator<Item = &'static NodeFieldSpec> {
+    STATIC_FIELD_TABLES
+        .iter()
+        .flat_map(|(_, fields)| fields.iter())
+        .chain(
+            PRIMITIVE_TYPES
+                .iter()
+                .flat_map(|(kind, _)| primitive_fields(kind).iter()),
+        )
+}
+
+/// Every distinct field key the contract defines, sorted. The
+/// `contract-defaults-only` ast-grep rule's `FIELD` regex is generated from
+/// this list and checked by a test in this crate.
+#[must_use]
+pub fn field_keys() -> Vec<&'static str> {
+    let mut keys: Vec<&'static str> = field_specs().map(|spec| spec.key).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
 }
 
 /// The effective value of a contract field: the stored value when the reader
@@ -677,6 +734,14 @@ const PART_DISPLAY_TYPES: &[&str] = &[
     "stepimporter", "extrude", "sketch", "spline", "loft", "surfaceloft",
     "shell", "offsetfaces", "scatter", "circularpattern", "chamfer", "fillet", "look",
 ];
+
+/// Whether this node type owns a CAD source path that can be ingested,
+/// watched or rewritten relative to the document folder. A contract capability
+/// so session document policy does not add its own node-type branch.
+#[must_use]
+pub fn import_source_node(node_type: &str) -> bool {
+    matches!(node_type, "stepimporter")
+}
 
 /// Whether this node type has a Part result that the viewport can display.
 #[must_use]
@@ -949,7 +1014,7 @@ mod capability_tests {
         for spec in SELECTION_SPECS {
             assert!(descriptor(spec.node_type).is_some(), "selection type has no descriptor");
         }
-        for node_type in ["translate", "boolean", "extrude", "loft", "chamfer", "fillet", "shell", "mirror", "scatter", "circularpattern", "spline"] {
+        for node_type in ["translate", "boolean", "extrude", "loft", "chamfer", "fillet", "shell", "mirror", "scatter", "circularpattern", "spline", "stepimporter"] {
             let fields = fields(node_type).unwrap_or_else(|| panic!("missing fields for {node_type}"));
             let mut keys = std::collections::BTreeSet::new();
             for field in fields {
@@ -1009,6 +1074,7 @@ mod capability_tests {
         for node_type in [
             "translate", "boolean", "fuse", "extrude", "loft", "surfaceloft",
             "chamfer", "fillet", "offsetfaces", "shell", "mirror", "scatter", "circularpattern", "spline",
+            "stepimporter",
         ] {
             let base = serde_json::json!({});
             check(node_type, &base, fields(node_type).expect("static fields"));
@@ -1019,6 +1085,42 @@ mod capability_tests {
             assert!(!fields.is_empty(), "primitive {kind} has no fields");
             check("primitive", &base, fields);
         }
+    }
+
+    /// The `contract-defaults-only` ast-grep rule must name exactly the fields
+    /// the contract defines. This test generates that field alternation from
+    /// [`field_keys`] and compares it with the rule's `FIELD` constraint. On a
+    /// drift it prints the regex to paste, so the rule never grows a private
+    /// second list.
+    #[test]
+    fn contract_defaults_rule_tracks_every_contract_field() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let rule = root.join("ast-grep/rules/contract-defaults-only.yml");
+        if !rule.is_file() {
+            eprintln!(
+                "skipping contract-defaults rule sync: private rule is absent from {}",
+                root.display()
+            );
+            return;
+        }
+        let text = std::fs::read_to_string(&rule)
+            .unwrap_or_else(|error| panic!("read {}: {error}", rule.display()));
+        let expected = format!("^\"({})\"$", field_keys().join("|"));
+        let field_constraint = text
+            .split_once("  FIELD:")
+            .map(|(_, rest)| rest)
+            .unwrap_or_else(|| panic!("{} has no FIELD constraint", rule.display()));
+        let actual = field_constraint
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("regex: "))
+            .map(|value| value.trim().trim_matches('\''))
+            .unwrap_or_else(|| panic!("{} FIELD constraint has no regex", rule.display()));
+        assert_eq!(
+            actual,
+            expected,
+            "ast-grep FIELD regex drifted from nodecraft-node-contract::field_keys(); \
+             replace the contract-defaults-only FIELD constraint with:\n  FIELD:\n    regex: '{expected}'"
+        );
     }
 
     /// A Circular Pattern's fields resolve to the inspector defaults even when

@@ -18,6 +18,7 @@ use solidcore::query::api_queries::brep_is_closed_touching_solids;
 use solidcore::topology::brep::mirror::transform_matrix;
 use solidcore::topology::brep::p2::is_manifold_solid;
 use solidcore::topology::brep::p3::{brep_copy, brep_copy_mapped};
+use solidcore::topology::brep::primitive_outward::{is_outward_primitive, Template};
 use solidcore::topology::brep::sheet::turn_over_sheet;
 use solidcore::topology::brep::{is_outward_solid, is_valid_and_outward};
 use solidcore::topology::face::p2 as face_p2;
@@ -39,11 +40,22 @@ use crate::{Error, Result};
 #[derive(Debug)]
 pub struct Body(Mutex<Held>);
 
-/// What a [`Body`]'s lock holds: the B-rep, and its proof while nothing has changed it.
+/// What a [`Body`]'s lock holds: the B-rep, and its proof while nothing has changed it, or the
+/// template a kernel constructor built it from while nothing has changed it (#14830: proved
+/// from the template's closed form when an operation first takes it, [`Expect::of_held`]).
 #[derive(Debug)]
 pub(crate) struct Held {
     brep: Brep,
     outward: Option<Outward>,
+    primitive: Option<Template>,
+}
+
+/// What a body taken out of its lock brings for its proof ([`Body::take_held`]): the proof it
+/// held, the template it was built from, both or neither.
+#[derive(Debug, Default)]
+pub(crate) struct Proof {
+    outward: Option<Outward>,
+    primitive: Option<Template>,
 }
 
 /// The proof that a B-rep is valid and faces out ([`is_valid_and_outward`] held on it), with
@@ -100,11 +112,26 @@ fn prove(k: &mut Kernel, b: &mut Brep) -> solidcore::Result<Option<Outward>> {
     }))
 }
 
+/// `test`'s answer, with the kernel's random draws put back where they stood: a solid test
+/// taken on an operand before an operation never changes what the operation then draws. So an
+/// operation gives the same result on an operand that brought its proof ([`Outward`], taken
+/// without a test) as on one tested now, and the same as where no test is taken at all.
+fn undrawn<T>(
+    k: &mut Kernel,
+    test: impl FnOnce(&mut Kernel) -> solidcore::Result<T>,
+) -> solidcore::Result<T> {
+    let rng = k.rng.clone();
+    let answer = test(k);
+    k.rng = rng;
+    answer
+}
+
 /// A [`Body`] locked: the B-rep to read through `Deref`; through `DerefMut` it is handed out
 /// only once the proof beside it is dropped, so no change of the B-rep keeps a proof made
 /// before it.
 #[derive(Debug)]
-pub(crate) struct BodyGuard<'a>(MutexGuard<'a, Held>);
+#[doc(hidden)] // public only for the bridge below ([`Body::kernel`])
+pub struct BodyGuard<'a>(MutexGuard<'a, Held>);
 
 impl std::ops::Deref for BodyGuard<'_> {
     type Target = Brep;
@@ -116,7 +143,33 @@ impl std::ops::Deref for BodyGuard<'_> {
 impl std::ops::DerefMut for BodyGuard<'_> {
     fn deref_mut(&mut self) -> &mut Brep {
         self.0.outward = None;
+        self.0.primitive = None;
         &mut self.0.brep
+    }
+}
+
+/// A temporary bridge for SolidCraft's kernel wrapper (`crates/smlib`), which still calls the
+/// kernel crate itself for the operation families not yet moved onto this crate: it makes a
+/// body from a kernel B-rep and locks a body for its B-rep. Not part of the API: no other
+/// client may use it, and it is deleted with the last family (tangency-labs/solidcore#3304).
+#[doc(hidden)]
+impl Body {
+    /// A body of the kernel B-rep `b`, with no proof ([`Body::new`]).
+    #[must_use]
+    pub fn from_kernel(b: Brep) -> Body {
+        Body::new(b)
+    }
+
+    /// The kernel's body, locked ([`Body::lock`]): a body an earlier panic left unfinished is
+    /// still handed out, so the caller asks [`Body::kernel_left_unfinished`] first.
+    pub fn kernel(&self) -> BodyGuard<'_> {
+        self.lock()
+    }
+
+    /// Whether a panic interrupted an edit of this body ([`Body::is_poisoned`]).
+    #[must_use]
+    pub fn kernel_left_unfinished(&self) -> bool {
+        self.is_poisoned()
     }
 }
 
@@ -126,13 +179,8 @@ impl Body {
         // Match to_record: get or create a missing trim on each edge use, leaving
         // the ones that already have a pcurve alone.
         for edge in brep.edge_list().to_vec() {
-            let uses = solidcore::topology::edge::edgeuses(
-                &brep,
-                edge,
-                None,
-                None,
-            )
-            .map_err(status)?;
+            let uses =
+                solidcore::topology::edge::edgeuses(&brep, edge, None, None).map_err(status)?;
             for eu in uses {
                 solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
                     kernel, &mut brep, eu, false, false, true,
@@ -145,7 +193,9 @@ impl Body {
 
     /// Take the body's B-rep out.
     #[must_use]
-    pub fn into_brep(self) -> Brep { self.into_inner() }
+    pub fn into_brep(self) -> Brep {
+        self.into_inner()
+    }
 
     /// A standalone deep copy of the body's B-rep, with the same entity IDs and order
     /// ([`Brep::clone_standing_for_self`]), for an application that keeps the body itself (with
@@ -222,13 +272,43 @@ impl Body {
     /// A body with the proof [`finish_proved`] made on it, if any.
     #[must_use]
     pub(crate) fn held(brep: Brep, outward: Option<Outward>) -> Body {
-        Body(Mutex::new(Held { brep, outward }))
+        Body(Mutex::new(Held {
+            brep,
+            outward,
+            primitive: None,
+        }))
+    }
+
+    /// A body a kernel constructor has just built from `t`, unproved: an operation that first
+    /// takes it proves it from `t`'s closed form ([`Expect::of_held`]), so a body only measured
+    /// is never proved.
+    #[must_use]
+    pub(crate) fn primitive(brep: Brep, t: Template) -> Body {
+        Body(Mutex::new(Held {
+            brep,
+            outward: None,
+            primitive: Some(t),
+        }))
     }
 
     /// The kernel's body, locked. A body an earlier panic left unfinished is still handed out;
     /// [`with_body`] refuses it first.
     pub(crate) fn lock(&self) -> BodyGuard<'_> {
         BodyGuard(self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Two different bodies locked at once, returned in the order given. They are locked in one
+    /// order whichever is given first (by address, which stays put while both are borrowed), so
+    /// two calls holding the same two bodies, on threads of their own, never wait on each other
+    /// for good. The only way ops holds two bodies at once.
+    pub(crate) fn lock_pair<'a>(a: &'a Body, b: &'a Body) -> (BodyGuard<'a>, BodyGuard<'a>) {
+        if std::ptr::from_ref(a) < std::ptr::from_ref(b) {
+            let ga = a.lock();
+            (ga, b.lock())
+        } else {
+            let gb = b.lock();
+            (a.lock(), gb)
+        }
     }
 
     /// The kernel's body, locked, unless a panic left it unfinished or it is held now (never
@@ -240,12 +320,15 @@ impl Body {
         })
     }
 
-    /// The kernel's body taken out, leaving it empty, with its proof: the one way a proof
-    /// leaves a body (under one lock, before anything can change the B-rep).
-    pub(crate) fn take_held(&self) -> (Brep, Option<Outward>) {
+    /// The kernel's body taken out, leaving it empty, with its proof and its template: the one
+    /// way either leaves a body (under one lock, before anything can change the B-rep).
+    pub(crate) fn take_held(&self) -> (Brep, Proof) {
         let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-        let outward = held.outward.take();
-        (std::mem::replace(&mut held.brep, Brep::new()), outward)
+        let proof = Proof {
+            outward: held.outward.take(),
+            primitive: held.primitive.take(),
+        };
+        (std::mem::replace(&mut held.brep, Brep::new()), proof)
     }
 
     /// Whether a panic interrupted an edit of this body.
@@ -480,11 +563,25 @@ impl Body {
     /// [`Error::Unsupported`] for what the record cannot carry (yet); [`Error::Record`] for
     /// kernel data that does not make a valid record; the kernel's error by its type.
     pub fn to_record(&self) -> Result<(Record, Order)> {
+        self.with_record("brep::to_record", |_, record, order| Ok((record, order)))
+    }
+
+    /// `f` on this body's kernel B-rep with its record and [`Order`] ([`Body::to_record`]), in
+    /// one call under the body's lock, so the order is the one of the B-rep `f` reads. The body
+    /// is edited as [`Body::to_record`] edits it.
+    ///
+    /// # Errors
+    /// Those of [`Body::to_record`]; `f`'s, by its type.
+    pub(crate) fn with_record<T>(
+        &self,
+        call: &'static str,
+        f: impl FnOnce(&Brep, Record, Order) -> solidcore::Result<T>,
+    ) -> Result<T> {
         let mut out = None;
         let mut refusal = None;
-        with_body("brep::to_record", self, |k, b| {
+        with_body(call, self, |k, b| {
             match to_record(k, b) {
-                Ok(made) => out = Some(made),
+                Ok((record, order)) => out = Some(f(b, record, order)?),
                 Err(Unsupported::Kernel(e)) => return Err(e),
                 Err(e) => refusal = Some(refused(e)),
             }
@@ -515,28 +612,36 @@ impl Expect {
     /// The kernel's, from the solid test.
     pub(crate) fn of(k: &mut Kernel, input: &mut Brep) -> solidcore::Result<Expect> {
         Ok(Expect {
-            solid: is_outward_solid(k, input)?,
+            solid: undrawn(k, |k| is_outward_solid(k, input))?,
             touching: false,
         })
     }
 
-    /// As [`Expect::of`], for an operand taken out of its body with the proof it held
-    /// ([`Body::take_held`]): the manifold test always, then that proof where it stands under
-    /// `k`'s settings, else a new one (`is_outward_solid`'s, step by step). A proof is only
-    /// ever taken in place of the same test passing on the same B-rep: none, or one made under
-    /// other settings, proves as [`Expect::of`] does.
+    /// As [`Expect::of`], for an operand taken out of its body with what it held
+    /// ([`Body::take_held`]): the manifold test always, then the proof where it stands under
+    /// `k`'s settings; else, for a body a constructor built and nothing changed since, the
+    /// validity check and its template's closed form in place of the enclosure
+    /// ([`is_outward_primitive`], #14830); else a new proof (`is_outward_solid`'s, step by
+    /// step), which is also what a template whose certificate refuses gets. A proof or a
+    /// template is only ever taken in place of the same test on the same B-rep: none, or a
+    /// proof made under other settings, proves as [`Expect::of`] does.
     ///
     /// # Errors
-    /// As [`Expect::of`].
+    /// As [`Expect::of`]; those of [`is_outward_primitive`].
     pub(crate) fn of_held(
         k: &mut Kernel,
         input: &mut Brep,
-        outward: Option<Outward>,
+        proof: Proof,
     ) -> solidcore::Result<Expect> {
         let solid = is_manifold_solid(input)?
-            && (outward.is_some_and(|o| o.holds(k))
+            && (proof.outward.is_some_and(|o| o.holds(k))
                 || match validation() {
-                    Validation::EachStep => prove(k, input)?.is_some(),
+                    Validation::EachStep => undrawn(k, |k| {
+                        Ok(match proof.primitive {
+                            Some(t) => is_outward_primitive(k, input, &t)?,
+                            None => false,
+                        } || prove(k, input)?.is_some())
+                    })?,
                     // The cheap topology test above already decided closedness: a closed
                     // operand with no standing proof is a solid, an open one stays a sheet.
                     // The node's output proof decides the outward part once, at the end.
@@ -695,7 +800,8 @@ pub fn make_box(origin: [f64; 3], size: [f64; 3]) -> Result<Body> {
         return Err(Error::Argument);
     }
     let [x, y, z] = size;
-    run("create_box", |k| primitives::create_box(k, o, x, y, z)).map(Body::new)
+    run("create_box", |k| primitives::create_box(k, o, x, y, z))
+        .map(|b| Body::primitive(b, Template::Block { origin: o, size }))
 }
 
 /// A cylinder about +Z from its base centre, radius and height positive (`SmApiCreateCylinder`).
@@ -710,7 +816,16 @@ pub fn make_cylinder(origin: [f64; 3], radius: f64, height: f64) -> Result<Body>
     run("create_cylinder", |k| {
         primitives::create_cylinder(k, o, radius, height)
     })
-    .map(Body::new)
+    .map(|b| {
+        Body::primitive(
+            b,
+            Template::Cylinder {
+                origin: o,
+                radius,
+                height,
+            },
+        )
+    })
 }
 
 /// A sphere, radius positive (`SmApiCreateSphere`).
@@ -722,7 +837,8 @@ pub fn make_sphere(center: [f64; 3], radius: f64) -> Result<Body> {
     if !positive(radius) {
         return Err(Error::Argument);
     }
-    run("create_sphere", |k| primitives::create_sphere(k, o, radius)).map(Body::new)
+    run("create_sphere", |k| primitives::create_sphere(k, o, radius))
+        .map(|b| Body::primitive(b, Template::Sphere { center: o, radius }))
 }
 
 /// A cone or frustum about +Z (`SmApiCreateCone`): base radius and height positive, top radius
@@ -758,16 +874,25 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
     run("create_torus", |k| {
         primitives::create_torus(k, o, major_radius, minor_radius)
     })
-    .map(Body::new)
+    .map(|b| {
+        Body::primitive(
+            b,
+            Template::Torus {
+                center: o,
+                major: major_radius,
+                minor: minor_radius,
+            },
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{validating, Validation};
     use solidcore::kernel::KernelOptions;
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives::{create_box, create_plane};
-    use crate::session::{validating, Validation};
 
     fn kernel() -> Kernel {
         let mut kernel = Kernel::new(&KernelOptions::default());
@@ -781,19 +906,35 @@ mod tests {
     #[test]
     fn each_node_keeps_the_closedness_test_and_defers_only_the_proof() {
         let mut k = kernel();
-        let mut solid = create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
-        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None)).expect("expect");
-        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
+        let mut solid =
+            create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
+        let closed = validating(Validation::EachNode, || {
+            Expect::of_held(&mut k, &mut solid, None)
+        })
+        .expect("expect");
+        assert_eq!(
+            closed,
+            Expect::SOLID,
+            "a closed operand with no proof counts as a solid"
+        );
 
-        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None)).expect("expect");
+        let mut sheet =
+            create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
+        let open = validating(Validation::EachNode, || {
+            Expect::of_held(&mut k, &mut sheet, None)
+        })
+        .expect("expect");
         assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
 
         // The regression: with the operand's expect (SOLID), an open result must still fail
         // the closedness test inside the node. Under the old rule the expect was FACES, so
         // finish_proved returned the sheet without any test.
         let open = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed)).expect("finish");
-        assert!(matches!(refused, Err(Error::NotSolid)), "an open result under a solid expect is NotSolid");
+        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed))
+            .expect("finish");
+        assert!(
+            matches!(refused, Err(Error::NotSolid)),
+            "an open result under a solid expect is NotSolid"
+        );
     }
 }

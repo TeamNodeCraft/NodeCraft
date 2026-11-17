@@ -1,6 +1,6 @@
 //! Application shell and the first Swift/WebView-to-egui port slice.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -53,6 +53,7 @@ pub(super) const BREADCRUMB_LAYER_ORDER: egui::Order = egui::Order::Foreground;
 
 use crate::file_dialog::{FileDialogKind, FileDialogResult, PendingFileDialog};
 use crate::inspector;
+use crate::source_service;
 use nodecraft_node_canvas::canvas::{
     node_extent, node_width, ConnectionKey, LayoutMode, NodeEditor, NodeEditorAction, NODE_HEIGHT,
     NODE_LEFT_PADDING, NODE_RIGHT_PADDING,
@@ -354,6 +355,38 @@ enum DialogAction {
         field: &'static str,
         open_linked_part: bool,
     },
+    /// Pick a replacement for a missing CAD original. The chosen path is stored
+    /// in the importer's path mode and then re-checked by content hash.
+    LocateImportSource { node: String },
+    /// Write the embedded copy to a chosen file, then point the importer at it.
+    SaveImportCopy { node: String },
+}
+
+/// Node values for a chosen CAD source, stored in the importer's path mode.
+fn import_path_commands(
+    node: &GraphNode,
+    path: &Path,
+    directory: Option<&Path>,
+) -> Vec<Command> {
+    let mode = nodecraft_engine::import_io::path_mode(&node.values);
+    let (stored, relative, warning) = nodecraft_engine::import_io::store_path(path, mode, directory);
+    vec![
+        Command::SetValue {
+            node: node.id.clone(),
+            field: "path".to_owned(),
+            value: serde_json::Value::String(stored),
+        },
+        Command::SetValue {
+            node: node.id.clone(),
+            field: "relativePath".to_owned(),
+            value: serde_json::Value::String(relative.unwrap_or_default()),
+        },
+        Command::SetValue {
+            node: node.id.clone(),
+            field: "pathWarning".to_owned(),
+            value: serde_json::Value::String(warning.unwrap_or_default()),
+        },
+    ]
 }
 
 /// A native dialog running off the event loop, with the action to apply once it
@@ -548,6 +581,9 @@ fn dim_breakpoint_mesh(breakpoint: &Mesh) -> Mesh {
 struct TransformFrame {
     chain: nodecraft_session::placement::Affine3,
     placement: nodecraft_session::placement::Affine3,
+    /// Contract-resolved Translate fields, shared by the pivot and the gizmo
+    /// readouts so the gizmo cannot drift from the geometry placement.
+    translate: nodecraft_session::placement::TranslateValues,
     pivot: [f64; 3],
     axes_basis: nodecraft_session::placement::Affine3,
 }
@@ -557,7 +593,7 @@ fn transform_frame(
     selected: &str,
     target: &str,
 ) -> Option<TransformFrame> {
-    use nodecraft_session::placement::{transform_chain, Affine3};
+    use nodecraft_session::placement::{transform_chain, translate_values, Affine3};
     let node = document.nodes.iter().find(|node| node.id == selected)?;
     if node.node_type != "translate" || node.suppressed {
         return None;
@@ -567,7 +603,7 @@ fn transform_frame(
     } else {
         transform_chain(document, selected, target)?
     };
-    let value = |key: &str| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let translate = translate_values(&node.values);
     let local = node.values.get("space").and_then(serde_json::Value::as_str) == Some("local");
     let axes_basis = if local {
         chain.compose(Affine3::rotation(&node.values))
@@ -577,7 +613,8 @@ fn transform_frame(
     Some(TransformFrame {
         chain,
         placement: chain.compose(Affine3::from_node(node)?),
-        pivot: chain.apply_point([value("x"), value("y"), value("z")]),
+        translate,
+        pivot: chain.apply_point([translate.x, translate.y, translate.z]),
         axes_basis,
     })
 }
@@ -774,10 +811,30 @@ pub struct NodeCraftApp {
     kernel_fixes: bool,
     cable_routing: CableRouting,
     eval_worker: EvalWorker,
+    source_service: source_service::SourceService,
+    source_pending: usize,
+    /// Last imported source hash and the nodes whose source changed.
+    source_changes: source_service::ChangeTracker,
+    /// Checks in flight, so a focus/open burst does not queue duplicates.
+    source_checks: HashSet<(String, String)>,
+    /// Ingest reloads that should evaluate once the new record is stored.
+    reload_after_ingest: HashSet<(String, String)>,
+    window_focused: bool,
     commands: commands::CommandManager,
     display_worker: std::sync::Arc<nodecraft_display::service::DisplayWorker>,
     pending_display: Option<(u64, String, bool, Instant)>,
     quality_display: Option<(u64, u64, String, bool, Instant)>,
+    /// Per-body display levels from the installed screen-space LOD pass.
+    lod_levels: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::DisplayQuality>,
+    /// Display-space bounds cached against the exact snapshot id that produced
+    /// them. Recomputing them is only needed when that snapshot changes.
+    lod_bounds: Option<(
+        u64,
+        std::sync::Arc<BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds>>,
+    )>,
+    /// Camera/viewport the installed levels were computed for. Equal to the
+    /// next frame's view means nothing moved and no LOD request is needed.
+    lod_view: Option<nodecraft_display::LodView>,
     display_snapshot: Option<evaluation::DisplaySnapshot>,
     display_error: Option<String>,
     last_display_us: Option<(u64, u64)>,
@@ -1253,6 +1310,18 @@ fn unique_graph_definition_name(names: &BTreeSet<String>) -> String {
     }
 }
 
+/// Fold the current runtime importer-source hashes into the session before it
+/// creates a revision.
+///
+/// The session keeps these hashes as runtime state; setting them before an
+/// apply/undo/redo means a changed source dirties the importer and its
+/// descendants exactly as a content edit would. The map is tiny (importers only)
+/// and replacing it is far cheaper than the hash pass it avoids.
+fn set_session_source_hashes(changes: &source_service::ChangeTracker, session: &mut Session) {
+    let sources = evaluation::source_hashes(changes, session.document());
+    session.set_source_hashes(sources);
+}
+
 impl NodeCraftApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -1367,10 +1436,19 @@ impl NodeCraftApp {
             kernel_fixes: settings.kernel_fixes,
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
             eval_worker: EvalWorker::new(),
+            source_service: source_service::SourceService::new(),
+            source_pending: 0,
+            source_changes: source_service::ChangeTracker::default(),
+            source_checks: HashSet::new(),
+            reload_after_ingest: HashSet::new(),
+            window_focused: true,
             commands: commands::CommandManager,
             display_worker,
             pending_display: None,
             quality_display: None,
+            lod_levels: BTreeMap::new(),
+            lod_bounds: None,
+            lod_view: None,
             display_snapshot: None,
             display_error: None,
             last_display_us: None,
@@ -1830,6 +1908,7 @@ impl NodeCraftApp {
             id: format!("{definition_id}::graph"),
             root: nodecraft_graph_definition(&definition),
             definitions,
+            ingested_sources: Vec::new(),
         };
         if let Some(meta) = self.group_tabs.get_mut(&tab.id) {
             meta.view = ViewKey::definition(source_document_id.to_owned(), definition_id.to_owned());
@@ -2091,6 +2170,446 @@ impl NodeCraftApp {
     /// Apply edits made on a graph-owner inspector while viewing its body.
     /// Only value edits (not actions or port-count rewrites) are routed to the
     /// owning document; source ownership stays with the parent tab.
+    /// Drain finished hash/ingest/watcher work. The UI thread never blocks on a
+    /// source file; while a request is outstanding the frame loop keeps polling.
+    fn poll_source_service(&mut self, ctx: &egui::Context) {
+        while let Some(event) = self.source_service.try_recv() {
+            if event.request_id() != 0 {
+                self.source_pending = self.source_pending.saturating_sub(1);
+            }
+            match event {
+                source_service::Event::Ingested {
+                    document_id,
+                    node_id,
+                    record,
+                    ..
+                } => self.apply_ingested_record(&document_id, &node_id, record),
+                source_service::Event::Hashed {
+                    document_id,
+                    node_id,
+                    content_hash,
+                    purpose,
+                    ..
+                } => self.apply_source_hash(&document_id, &node_id, content_hash, purpose),
+                source_service::Event::Watched {
+                    document_id,
+                    node_id,
+                    content_hash,
+                } => self.apply_watched_source(&document_id, &node_id, content_hash),
+                source_service::Event::CopySaved {
+                    document_id,
+                    node_id,
+                    path,
+                    ..
+                } => self.apply_saved_import_copy(&document_id, &node_id, &path),
+                source_service::Event::Failed {
+                    document_id,
+                    node_id,
+                    action,
+                    error,
+                    ..
+                } => {
+                    self.source_checks.remove(&(document_id, node_id.clone()));
+                    self.status = format!("Source {} failed for {node_id}", action.as_str());
+                    self.error = Some(error);
+                }
+            }
+        }
+        if self.source_pending > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+        }
+    }
+
+    fn active_document_id(&self) -> Option<String> {
+        self.tabs
+            .get(self.active_tab)
+            .map(|tab| tab.document_id.clone())
+            .or_else(|| Some(self.session.as_ref()?.document().id.clone()))
+    }
+
+    /// Store one ingested record and point the importer at it, on whichever
+    /// session owns the document.
+    fn apply_ingested_record(
+        &mut self,
+        document_id: &str,
+        node_id: &str,
+        record: nodecraft_protocol::IngestRecord,
+    ) {
+        let hash = record.content_hash.clone();
+        let commands = [
+            Command::SetValue {
+                node: node_id.to_owned(),
+                field: "ingestHash".to_owned(),
+                value: serde_json::Value::String(hash.clone()),
+            },
+            Command::SetValue {
+                node: node_id.to_owned(),
+                field: "contentHash".to_owned(),
+                value: serde_json::Value::String(hash.clone()),
+            },
+        ];
+        let active = self
+            .tabs
+            .get(self.active_tab)
+            .is_some_and(|tab| tab.document_id == document_id);
+        if active {
+            let Some(mut session) = self.session.clone() else { return };
+            set_session_source_hashes(&self.source_changes, &mut session);
+            session.add_ingest_record(record);
+            let _ = session.apply_commands(&commands);
+            self.active_session_revision = session.revision();
+            self.session = Some(session);
+            self.publish_active_document();
+        } else if let Some(mut session) = self.documents.session(document_id).cloned() {
+            set_session_source_hashes(&self.source_changes, &mut session);
+            session.add_ingest_record(record);
+            let _ = session.apply_commands(&commands);
+            let _ = self.documents.set_session(document_id, session);
+        }
+        let key = (document_id.to_owned(), node_id.to_owned());
+        self.source_changes.reloaded(document_id, node_id, &hash);
+        if self.reload_after_ingest.remove(&key) {
+            self.evaluate_with_cache_policy(false, false);
+        }
+        self.sync_source_watches();
+        self.egui_ctx.request_repaint();
+    }
+
+    fn node_ingest_enabled(&self, node_id: &str) -> bool {
+        self.document_importer(node_id).is_some_and(|node| {
+            nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "ingest")
+                .unwrap_or(false)
+        })
+    }
+
+    fn node_watch_enabled(&self, node_id: &str) -> bool {
+        self.document_importer(node_id).is_some_and(|node| {
+            nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "watch")
+                .unwrap_or(false)
+        })
+    }
+
+    /// Replace the app-wide watch set with the active document's watch-on
+    /// importers. Replacing unregisters paths from a previously active tab.
+    fn sync_source_watches(&mut self) {
+        let Some(session) = &self.session else {
+            self.source_service.set_watches(Vec::new());
+            return;
+        };
+        let Some(document_id) = self.active_document_id() else {
+            self.source_service.set_watches(Vec::new());
+            return;
+        };
+        let directory = self.active_document_directory();
+        let targets: Vec<source_service::WatchTarget> = session
+            .document()
+            .nodes
+            .iter()
+            .filter(|node| nodecraft_node_contract::import_source_node(&node.node_type))
+            .filter(|node| {
+                nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "watch")
+                    .unwrap_or(false)
+            })
+            .filter_map(|node| {
+                let path = nodecraft_engine::import_io::primary_path(
+                    &node.values,
+                    directory.as_deref(),
+                )?;
+                // A missing original with Auto-reload on still watches its
+                // parent folder: the watcher registers directories, so the file
+                // reappearing is enough to reload without a per-frame stat.
+                if !path.is_file()
+                    && !path.parent().is_some_and(std::path::Path::is_dir)
+                {
+                    return None;
+                }
+                let content_hash = self
+                    .source_changes
+                    .hash(&document_id, &node.id)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        node.values
+                            .get("ingestHash")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    });
+                Some(source_service::WatchTarget {
+                    document_id: document_id.clone(),
+                    node_id: node.id.clone(),
+                    path,
+                    content_hash,
+                })
+            })
+            .collect();
+        self.source_service.set_watches(targets);
+    }
+
+    /// A watcher found stable new bytes. This is a normal edit: re-import on
+    /// the normal evaluation path, never moving the camera.
+    fn apply_watched_source(&mut self, document_id: &str, node_id: &str, content_hash: String) {
+        if self.active_document_id().as_deref() != Some(document_id) {
+            return;
+        }
+        self.source_changes
+            .reloaded(document_id, node_id, &content_hash);
+        if self.node_ingest_enabled(node_id) {
+            self.reload_after_ingest
+                .insert((document_id.to_owned(), node_id.to_owned()));
+            self.request_ingest_for_node(node_id);
+        } else {
+            self.evaluate_with_cache_policy(false, false);
+        }
+        self.refresh_diagnostics();
+        self.egui_ctx.request_repaint();
+    }
+
+    fn source_key(&self, node_id: &str) -> Option<(String, String)> {
+        self.active_document_id()
+            .map(|document_id| (document_id, node_id.to_owned()))
+    }
+
+    /// Re-check every importer in the active document. Called on open, tab
+    /// activation and window focus, never per frame.
+    fn check_importer_sources(&mut self) {
+        let Some(document_id) = self.active_document_id() else { return };
+        let Some(session) = &self.session else { return };
+        let directory = self.active_document_directory();
+        let importers: Vec<GraphNode> = session
+            .document()
+            .nodes
+            .iter()
+            .filter(|node| nodecraft_node_contract::import_source_node(&node.node_type))
+            .cloned()
+            .collect();
+        for node in importers {
+            self.check_importer_source_in(&document_id, &node, directory.as_deref());
+        }
+    }
+
+    fn check_importer_source(&mut self, node_id: &str) {
+        let Some(document_id) = self.active_document_id() else { return };
+        let Some(node) = self.document_importer(node_id) else { return };
+        let directory = self.active_document_directory();
+        self.check_importer_source_in(&document_id, &node, directory.as_deref());
+    }
+
+    fn check_importer_source_in(
+        &mut self,
+        document_id: &str,
+        node: &GraphNode,
+        directory: Option<&Path>,
+    ) {
+        let key = (document_id.to_owned(), node.id.clone());
+        if self.source_checks.contains(&key) {
+            return;
+        }
+        let Some(path) = nodecraft_engine::import_io::primary_path(&node.values, directory) else {
+            return;
+        };
+        if !path.is_file() {
+            return;
+        }
+        // A persisted ingestHash is the last content this document actually
+        // imported, so the first check after opening does not report a change.
+        if !self.source_changes.has_baseline(document_id, &node.id)
+            && let Some(hash) = node
+                .values
+                .get("ingestHash")
+                .and_then(serde_json::Value::as_str)
+                .filter(|hash| !hash.is_empty())
+        {
+            self.source_changes.seed(document_id, &node.id, hash);
+        }
+        self.source_checks.insert(key);
+        self.source_pending = self.source_pending.saturating_add(1);
+        self.source_service.hash(document_id, &node.id, &path);
+    }
+
+    fn apply_source_hash(
+        &mut self,
+        document_id: &str,
+        node_id: &str,
+        content_hash: String,
+        purpose: source_service::HashPurpose,
+    ) {
+        let key = (document_id.to_owned(), node_id.to_owned());
+        self.source_checks.remove(&key);
+        if purpose == source_service::HashPurpose::Check {
+            let differs = self.source_changes.observe(document_id, node_id, &content_hash);
+            if differs && self.node_watch_enabled(node_id) {
+                self.apply_watched_source(document_id, node_id, content_hash);
+                return;
+            }
+            self.refresh_diagnostics();
+            self.sync_source_watches();
+            self.egui_ctx.request_repaint();
+            return;
+        }
+        self.source_changes.reloaded(document_id, node_id, &content_hash);
+        if self.node_ingest_enabled(node_id) {
+            self.reload_after_ingest.insert(key);
+            self.request_ingest_for_node(node_id);
+        } else {
+            self.evaluate_with_cache_policy(false, false);
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    /// Explicit Reload: force a fresh hash even when size/mtime look unchanged.
+    fn reload_importer_source(&mut self, node_id: &str) {
+        let Some(node) = self.document_importer(node_id) else { return };
+        let directory = self.active_document_directory();
+        let Some(path) = nodecraft_engine::import_io::primary_path(&node.values, directory.as_deref())
+        else {
+            return;
+        };
+        if !path.is_file() {
+            self.error = Some(format!("Source file is missing: {}", path.display()));
+            return;
+        }
+        let Some(document_id) = self.active_document_id() else { return };
+        self.source_pending = self.source_pending.saturating_add(1);
+        self.source_service.hash_reload(&document_id, node_id, &path);
+        self.egui_ctx
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    fn document_importer(&self, node_id: &str) -> Option<GraphNode> {
+        self.session
+            .as_ref()?
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .cloned()
+    }
+
+    fn request_ingest_for_node(&mut self, node_id: &str) {
+        let Some(node) = self.document_importer(node_id) else { return };
+        let Some(document_id) = self.active_document_id() else { return };
+        let directory = self.active_document_directory();
+        let Some(path) = nodecraft_engine::import_io::primary_path(&node.values, directory.as_deref())
+        else {
+            return;
+        };
+        if !path.is_file() {
+            self.status = format!("Cannot embed {}: file is missing", path.display());
+            return;
+        }
+        self.source_pending = self.source_pending.saturating_add(1);
+        self.source_service.ingest(&document_id, node_id, &path);
+        self.egui_ctx
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    fn request_ingest_if_enabled(&mut self, node_id: &str) {
+        let Some(node) = self.document_importer(node_id) else { return };
+        if nodecraft_node_contract::resolve_bool("stepimporter", &node.values, "ingest")
+            .unwrap_or(false)
+        {
+            self.request_ingest_for_node(node_id);
+        }
+    }
+
+    fn handle_ingest_toggle(&mut self, node_id: &str, enabled: bool) {
+        if enabled {
+            self.request_ingest_for_node(node_id);
+        } else {
+            let _ = self.apply_commands(
+                &[Command::SetValue {
+                    node: node_id.to_owned(),
+                    field: "ingestHash".to_owned(),
+                    value: serde_json::Value::String(String::new()),
+                }],
+                Some(&format!("value:{node_id}:ingestHash")),
+            );
+        }
+    }
+
+    /// Re-link an importer to a file chosen for a missing original. The path is
+    /// stored in the node's path mode, then the shared background hasher decides
+    /// whether it is the same content (silent) or a change (Reload badge, or an
+    /// automatic reload when Auto-reload is on). Never ingests eagerly: Embed
+    /// without Auto-reload is a snapshot until Reload.
+    fn apply_located_import_path(&mut self, node_id: &str, path: &Path) {
+        let Some(node) = self.document_importer(node_id) else { return };
+        let directory = self.active_document_directory();
+        let commands = import_path_commands(&node, path, directory.as_deref());
+        // Choosing a file at the already-stored path is still a re-link: the
+        // file may have just reappeared, so always re-check its content.
+        self.apply_commands(&commands, Some("step-path"));
+        if let Some(key) = self.source_key(node_id) {
+            self.source_changes.forget(&key.0, &key.1);
+            self.source_checks.remove(&key);
+        }
+        self.check_importer_source(node_id);
+        self.sync_source_watches();
+        self.evaluate();
+    }
+
+    /// Write the embedded copy to the chosen file on the source worker.
+    fn request_save_import_copy(&mut self, node_id: &str, destination: &Path) {
+        let Some(node) = self.document_importer(node_id) else { return };
+        let ingest_enabled = nodecraft_node_contract::resolve_bool(
+            "stepimporter",
+            &node.values,
+            "ingest",
+        )
+        .unwrap_or(false);
+        let record = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                nodecraft_engine::import_io::ingest_record_for(
+                    &node.values,
+                    &session.document().ingested_sources,
+                    ingest_enabled,
+                )
+            })
+            .cloned();
+        let Some(record) = record else {
+            self.error = Some(format!(
+                "No embedded copy is available to save for {node_id}."
+            ));
+            return;
+        };
+        let Some(document_id) = self.active_document_id() else { return };
+        self.source_pending = self.source_pending.saturating_add(1);
+        self.source_service
+            .save_copy(&document_id, node_id, &record, destination);
+        self.egui_ctx
+            .request_repaint_after(std::time::Duration::from_millis(50));
+    }
+
+    /// The saved copy is on disk: point the importer at it. Its bytes are the
+    /// embedded record's, so the normal hash check re-links silently.
+    fn apply_saved_import_copy(&mut self, document_id: &str, node_id: &str, path: &Path) {
+        if self.active_document_id().as_deref() == Some(document_id) {
+            self.apply_located_import_path(node_id, path);
+            return;
+        }
+        let Some(mut session) = self.documents.session(document_id).cloned() else { return };
+        let Some(node) = session
+            .document()
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .cloned()
+        else {
+            return;
+        };
+        let directory = self
+            .documents
+            .path(document_id)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
+        let commands = import_path_commands(&node, path, directory.as_deref());
+        set_session_source_hashes(&self.source_changes, &mut session);
+        if session.apply_commands(&commands).is_ok() {
+            let _ = self.documents.set_session(document_id, session);
+        }
+    }
+
     fn apply_background_inspector_output(
         &mut self,
         document_id: &str,
@@ -2112,6 +2631,7 @@ impl NodeCraftApp {
                 value: change.value.clone(),
             })
             .collect();
+        set_session_source_hashes(&self.source_changes, &mut session);
         if session.apply_commands(&commands).is_ok() {
             let _ = self.documents.set_session(document_id.to_owned(), session);
             self.egui_ctx.request_repaint();
@@ -2127,14 +2647,20 @@ impl NodeCraftApp {
             definition: definition.clone(),
         };
         if self.tabs.get(self.active_tab).is_some_and(|active| active.id == tab_id) {
-            if let Some(session) = self.session.as_mut()
-                && session.apply_derived_commands(&[command]).is_ok()
-            {
-                self.active_session_revision = session.revision();
+            let mut derived = false;
+            if let Some(session) = self.session.as_mut() {
+                set_session_source_hashes(&self.source_changes, &mut *session);
+                if session.apply_derived_commands(&[command]).is_ok() {
+                    self.active_session_revision = session.revision();
+                    derived = true;
+                }
+            }
+            if derived {
                 self.publish_active_document();
             }
             self.mesh = None;
         } else if let Some(mut child) = self.documents.session(&tab.document_id).cloned() {
+            set_session_source_hashes(&self.source_changes, &mut child);
             if child.apply_derived_commands(&[command]).is_ok() {
                 let _ = self.documents.set_session(tab.document_id.clone(), child);
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -2192,6 +2718,7 @@ impl NodeCraftApp {
             ) else {
                 return;
             };
+            set_session_source_hashes(&self.source_changes, &mut parent);
             if parent.apply_commands(&commands).is_err() {
                 return;
             }
@@ -2209,14 +2736,20 @@ impl NodeCraftApp {
             {
                 return;
             }
-            if let Some(session) = self.session.as_mut()
-                && session
+            let mut derived = false;
+            if let Some(session) = self.session.as_mut() {
+                set_session_source_hashes(&self.source_changes, &mut *session);
+                if session
                     .apply_derived_commands(&[Command::SetRootDefinition {
                         definition: target,
                     }])
                     .is_ok()
-            {
-                self.active_session_revision = session.revision();
+                {
+                    self.active_session_revision = session.revision();
+                    derived = true;
+                }
+            }
+            if derived {
                 self.publish_active_document();
             }
             if let Some(tab) = self
@@ -2367,6 +2900,7 @@ impl NodeCraftApp {
             return;
         }
         let add_count = commands.len().saturating_sub(2);
+        set_session_source_hashes(&self.source_changes, &mut source);
         if source.apply_commands(&commands[..add_count]).is_err() {
             return;
         }
@@ -2452,6 +2986,7 @@ impl NodeCraftApp {
             }
             return;
         }
+        set_session_source_hashes(&self.source_changes, &mut source);
         if source.apply_commands(&commands[..1]).is_err() {
             return;
         }
@@ -2562,6 +3097,7 @@ impl NodeCraftApp {
             }
             return;
         }
+        set_session_source_hashes(&self.source_changes, &mut source_session);
         if source_session.apply_commands(&commands).is_err() {
             return;
         }
@@ -2690,6 +3226,7 @@ impl NodeCraftApp {
         if source_document_id == active_document_id {
             let _ = self.apply_commands(&commands, Some(&format!("graph-name:{graph_id}")));
         } else {
+            set_session_source_hashes(&self.source_changes, &mut *source_session);
             if source_session.apply_commands(&commands).is_err() {
                 return;
             }
@@ -2803,6 +3340,11 @@ impl NodeCraftApp {
         } else {
             match tool.primitive {
             Some(primitive) => serde_json::json!({ "primitiveType": primitive }),
+            None if tool.node_type == "stepimporter" => serde_json::json!({
+                "pathMode": "relative",
+                "ingest": false,
+                "watch": false,
+            }),
             None if tool.node_type == "group" => serde_json::json!({
                 "collapsed": false,
                 "nodes": [
@@ -3174,7 +3716,6 @@ impl NodeCraftApp {
         // separate viewer-breakpoint state.
         let target = self.eval_target.as_deref()?;
         let frame = transform_frame(document, &selected_id, target)?;
-        let value = |key: &str| node.values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(0.0);
         let axes = [
             frame.axes_basis.apply_vector([1.0, 0.0, 0.0]),
             frame.axes_basis.apply_vector([0.0, 1.0, 0.0]),
@@ -3183,12 +3724,12 @@ impl NodeCraftApp {
         Some(Gizmo {
             node_id: selected_id,
             pivot: frame.pivot,
-            x: value("x"),
-            y: value("y"),
-            z: value("z"),
-            rx: value("rx"),
-            ry: value("ry"),
-            rz: value("rz"),
+            x: frame.translate.x,
+            y: frame.translate.y,
+            z: frame.translate.z,
+            rx: frame.translate.rx,
+            ry: frame.translate.ry,
+            rz: frame.translate.rz,
             world_to_local: frame.chain.inverse_linear(),
             axes,
         })
@@ -3480,6 +4021,7 @@ impl NodeCraftApp {
             return false;
         };
         let scope = self.history_scope();
+        set_session_source_hashes(&self.source_changes, &mut parent);
         match parent.apply_definition_commands_scoped(definition_id, &scope, commands) {
             Ok(change) if change.changed => {
                 let updated = parent
@@ -3514,6 +4056,7 @@ impl NodeCraftApp {
                             id: format!("{}::graph", updated.id),
                             root: updated,
                             definitions: projection_definitions,
+                            ingested_sources: Vec::new(),
                         };
                         self.install_session(Some(Session::new(projection)));
                         self.active_session_revision =
@@ -3522,15 +4065,21 @@ impl NodeCraftApp {
                             tab.session_generation = self.session_generation;
                         }
                                 self.node_editor.request_fit();
-                    } else if let Some(session) = self.session.as_mut()
-                        && session
-                            .apply_derived_commands(&[Command::SetRootDefinition {
-                                definition: updated,
-                            }])
-                            .is_ok()
-                    {
-                        self.active_session_revision = session.revision();
-                        if !layout_only {
+                    } else {
+                        let mut derived = false;
+                        if let Some(session) = self.session.as_mut() {
+                            set_session_source_hashes(&self.source_changes, &mut *session);
+                            if session
+                                .apply_derived_commands(&[Command::SetRootDefinition {
+                                    definition: updated,
+                                }])
+                                .is_ok()
+                            {
+                                self.active_session_revision = session.revision();
+                                derived = true;
+                            }
+                        }
+                        if derived && !layout_only {
                                     }
                     }
                     if !layout_only {
@@ -3567,6 +4116,7 @@ impl NodeCraftApp {
         }
         let scope = self.history_scope();
         let Some(session) = self.session.as_mut() else { return false };
+        set_session_source_hashes(&self.source_changes, &mut *session);
         match session.apply_commands_scoped(
             commands,
             &scope,
@@ -3639,6 +4189,7 @@ impl NodeCraftApp {
             return false;
         };
         let scope = self.history_scope();
+        set_session_source_hashes(&self.source_changes, &mut parent);
         let change = if redo {
             parent.redo_scope(&scope)
         } else {
@@ -3662,12 +4213,18 @@ impl NodeCraftApp {
         {
             return false;
         }
-        if let Some(session) = self.session.as_mut()
-            && session
+        let mut derived = false;
+        if let Some(session) = self.session.as_mut() {
+            set_session_source_hashes(&self.source_changes, &mut *session);
+            if session
                 .apply_derived_commands(&[Command::SetRootDefinition { definition: updated }])
                 .is_ok()
-        {
-            self.active_session_revision = session.revision();
+            {
+                self.active_session_revision = session.revision();
+                derived = true;
+            }
+        }
+        if derived {
                 self.publish_active_document();
         }
         if let Some(tab) = self
@@ -3693,7 +4250,10 @@ impl NodeCraftApp {
             return;
         }
         let before = self.session.as_ref().map(|session| node_positions(session.document()));
-        let changed = self.session.as_mut().is_some_and(|session| session.undo_scope(&scope).ok().flatten().is_some());
+        let changed = self.session.as_mut().is_some_and(|session| {
+            set_session_source_hashes(&self.source_changes, &mut *session);
+            session.undo_scope(&scope).ok().flatten().is_some()
+        });
         if changed {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
@@ -3723,7 +4283,10 @@ impl NodeCraftApp {
             return;
         }
         let before = self.session.as_ref().map(|session| node_positions(session.document()));
-        let changed = self.session.as_mut().is_some_and(|session| session.redo_scope(&scope).ok().flatten().is_some());
+        let changed = self.session.as_mut().is_some_and(|session| {
+            set_session_source_hashes(&self.source_changes, &mut *session);
+            session.redo_scope(&scope).ok().flatten().is_some()
+        });
         if changed {
             self.layout_animation = None;
             let after = self.session.as_ref().map(|session| node_positions(session.document()));
@@ -4265,7 +4828,13 @@ impl NodeCraftApp {
         let mut node = GraphNode { expressions: Default::default(),
             id: id.clone(),
             node_type: "stepimporter".to_owned(),
-            values: serde_json::json!({ "path": path.display().to_string(), "heal": true }),
+            values: serde_json::json!({
+                "path": path.display().to_string(),
+                "heal": true,
+                "pathMode": "relative",
+                "ingest": false,
+                "watch": false,
+            }),
             suppressed: false,
             x: 0.0,
             y: 0.0,
@@ -4403,7 +4972,13 @@ impl NodeCraftApp {
                     document.nodes.push(GraphNode { expressions: Default::default(),
                         id: "step".to_owned(),
                         node_type: "stepimporter".to_owned(),
-                        values: serde_json::json!({ "path": path, "heal": true }),
+                        values: serde_json::json!({
+                            "path": path,
+                            "heal": true,
+                            "pathMode": "relative",
+                            "ingest": false,
+                            "watch": false,
+                        }),
                         suppressed: false,
                         x: 0.0,
                         y: 0.0,
@@ -4610,6 +5185,7 @@ impl NodeCraftApp {
 
 impl eframe::App for NodeCraftApp {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        crate::crash_report::begin_event();
         let started = Instant::now();
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.logic_inner(ctx, frame);
@@ -4621,11 +5197,15 @@ impl eframe::App for NodeCraftApp {
             }
         }
         if let Err(payload) = guarded {
-            crate::crash_report::handle_payload(payload);
+            let _ = crate::crash_report::handle_payload(
+                payload,
+                crate::crash_report::Origin::Event,
+            );
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        crate::crash_report::begin_event();
         let started = Instant::now();
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.ui_inner(ui, frame);
@@ -4637,7 +5217,10 @@ impl eframe::App for NodeCraftApp {
             }
         }
         if let Err(payload) = guarded {
-            crate::crash_report::handle_payload(payload);
+            let _ = crate::crash_report::handle_payload(
+                payload,
+                crate::crash_report::Origin::Event,
+            );
         }
     }
 }
@@ -4669,6 +5252,12 @@ impl NodeCraftApp {
         // when the window is hidden or occluded, so commands still run without
         // a paint. This is the single drain point.
         self.poll_control();
+        self.poll_source_service(ctx);
+        let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        if focused && !self.window_focused {
+            self.check_importer_sources();
+        }
+        self.window_focused = focused;
         self.node_editor.set_cable_routing(self.cable_routing);
         let view = self.viewport.view();
         let theme_id = Some(crate::theme::active_preset().id);
@@ -4726,38 +5315,108 @@ impl NodeCraftApp {
             && self.gizmo_drag.is_none()
             && self.session.is_some()
         {
-            let target = self.viewport.quality_detail();
-            if target != self.preview_detail {
-                self.preview_detail = target;
-                // A quality tier is display work, not graph work. Reuse the
-                // exact snapshot and submit straight to the display worker; do
-                // not enter evaluate(), which would reset node activity and run
-                // the legacy planner.
-                if let Some(snapshot) = self.display_snapshot.clone() {
-                    self.display_next = self.display_next.wrapping_add(1);
-                    // One monotonically increasing submission sequence shared
-                    // by exact and quality requests. The exact snapshot id is
-                    // the display order that matters; this revision only breaks
-                    // ties between re-plans of the same snapshot.
-                    let revision = self.display_next;
-                    self.display_worker.submit(nodecraft_display::service::DisplayRequest {
-                        revision,
-                        snapshot_id: snapshot.id,
-                        quality: self.preview_detail.map_or(
-                            nodecraft_display::DisplayQuality::Full(0.35),
-                            nodecraft_display::DisplayQuality::Preview,
-                        ),
-                        feature_ghost: snapshot.feature_ghost,
-                        snapshot: snapshot.snapshot,
-                    });
-                    self.quality_display = Some((
-                        revision,
-                        snapshot.id,
-                        snapshot.target,
-                        snapshot.feature_ghost,
-                        Instant::now(),
-                    ));
-                    self.egui_ctx.request_repaint();
+            // Per-body screen-space LOD. This is display work, not graph work:
+            // reuse the installed exact snapshot and submit straight to the
+            // display worker; never enter evaluate(), which would reset node
+            // activity and run the legacy planner. The request is event-driven:
+            // once the camera/viewport produce a level set, an unchanged view
+            // submits nothing.
+            if let Some(view) = self.viewport.lod_view(ctx.pixels_per_point()) {
+                if self.lod_view != Some(view) {
+                    if let Some(snapshot) = self.display_snapshot.clone() {
+                        // Bounds are pure geometry of one snapshot; compute them
+                        // once and reuse until a newer exact snapshot lands.
+                        let cached_bounds = match &self.lod_bounds {
+                            Some((id, bounds)) if *id == snapshot.id => {
+                                Some(std::sync::Arc::clone(bounds))
+                            }
+                            _ => None,
+                        };
+                        let bounds = if let Some(bounds) = cached_bounds {
+                            bounds
+                        } else {
+                            let bounds = std::sync::Arc::new(
+                                evaluation::lod_bounds_for_snapshot(&snapshot.snapshot),
+                            );
+                            self.lod_bounds =
+                                Some((snapshot.id, std::sync::Arc::clone(&bounds)));
+                            bounds
+                        };
+                        let eye: [f64; 3] = self.viewport.camera.eye().into();
+                        let fov_y = self.viewport.camera.fov;
+                        let ortho_height = self.viewport.camera.half_height() * 2.0;
+                        let error_px = view.error_px;
+                        let mut body_quality = BTreeMap::new();
+                        let mut order: Vec<(f64, nodecraft_display::BodyKey)> =
+                            Vec::with_capacity(bounds.len());
+                        for (key, body_bounds) in bounds.iter() {
+                            let current_tolerance = match self.lod_levels.get(key).copied() {
+                                Some(nodecraft_display::DisplayQuality::Full(tolerance)) => {
+                                    Some(tolerance)
+                                }
+                                _ => None,
+                            };
+                            let params = nodecraft_display::LodParams {
+                                current_tolerance,
+                                ..nodecraft_display::LodParams::new(error_px)
+                            };
+                            let quality = nodecraft_display::quality_for(
+                                *body_bounds,
+                                nodecraft_display::LodCamera { eye, fov_y, ortho_height },
+                                nodecraft_display::ViewportSize {
+                                    width: view.viewport[0],
+                                    height: view.viewport[1],
+                                },
+                                view.pixels_per_point,
+                                params,
+                            );
+                            body_quality.insert(*key, quality);
+                            // Nearest-first planning order. The distance is
+                            // centre depth minus radius, so a large body that
+                            // reaches the camera is planned early too.
+                            let distance = ((eye[0] - body_bounds.center[0]).powi(2)
+                                + (eye[1] - body_bounds.center[1]).powi(2)
+                                + (eye[2] - body_bounds.center[2]).powi(2))
+                            .sqrt()
+                                - body_bounds.radius;
+                            order.push((distance, *key));
+                        }
+                        order.sort_by(|a, b| {
+                            a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+                        });
+                        let body_priority =
+                            order.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
+                        self.lod_view = Some(view);
+                        if body_quality != self.lod_levels {
+                            self.display_next = self.display_next.wrapping_add(1);
+                            // One monotonically increasing submission sequence
+                            // shared by exact and quality requests. The exact
+                            // snapshot id is the display order that matters;
+                            // this revision only breaks ties between re-plans of
+                            // the same snapshot.
+                            let revision = self.display_next;
+                            self.display_worker.submit(
+                                nodecraft_display::service::DisplayRequest {
+                                    revision,
+                                    snapshot_id: snapshot.id,
+                                    quality: nodecraft_display::default_quality(),
+                                    body_quality: body_quality.clone(),
+                                    body_priority,
+                                    feature_ghost: snapshot.feature_ghost,
+                                    snapshot: snapshot.snapshot,
+                                },
+                            );
+                            self.quality_display = Some((
+                                revision,
+                                snapshot.id,
+                                snapshot.target,
+                                snapshot.feature_ghost,
+                                Instant::now(),
+                            ));
+                            self.lod_levels = body_quality;
+                            self.egui_ctx.request_repaint();
+                        }
+                    }
                 }
             }
         }
@@ -5849,6 +6508,37 @@ impl NodeCraftApp {
                             let active_selection =
                                 self.active_selection_field().map(str::to_owned);
                             let reflow = self.inspector_reflow;
+                            let inspector_source_changed = inspector_document_id
+                                .as_deref()
+                                .is_some_and(|id| self.source_changes.is_changed(id, &node.id));
+                            let document_directory = self
+                                .path
+                                .as_deref()
+                                .and_then(std::path::Path::parent)
+                                .map(std::path::Path::to_path_buf);
+                            let import_status = if node.node_type == "stepimporter" {
+                                let ingest_enabled = nodecraft_node_contract::resolve_bool(
+                                    "stepimporter",
+                                    &node.values,
+                                    "ingest",
+                                )
+                                .unwrap_or(false);
+                                let ingested_sources = self
+                                    .session
+                                    .as_ref()
+                                    .map(|session| {
+                                        session.document().ingested_sources.as_slice()
+                                    })
+                                    .unwrap_or(&[]);
+                                nodecraft_engine::import_io::import_status(
+                                    &node.values,
+                                    document_directory.as_deref(),
+                                    ingested_sources,
+                                    ingest_enabled,
+                                )
+                            } else {
+                                None
+                            };
                             let mut scroll = egui::ScrollArea::vertical()
                                 .max_height(list_height)
                                 .auto_shrink([false, false])
@@ -5874,6 +6564,9 @@ impl NodeCraftApp {
                                                     meta.view.definition_id.is_some()
                                                 })
                                             }),
+                                        document_directory.as_deref(),
+                                        inspector_source_changed,
+                                        import_status.as_ref(),
                                     );
                                     if sketch_editing {
                                         self.sketch_gui.show_palette(ui);
@@ -6019,6 +6712,15 @@ impl NodeCraftApp {
                 // Apply the whole frame's inspector edits before asking the engine
                 // to evaluate the resulting document. Each field keeps its own
                 // undo coalescing key, but the worker sees one consistent update.
+                let ingest_toggle = output
+                    .changes
+                    .iter()
+                    .find(|change| change.field == "ingest")
+                    .and_then(|change| change.value.as_bool());
+                let path_changed = output
+                    .changes
+                    .iter()
+                    .any(|change| change.field == "path");
                 let mut changed = false;
                 for change in output.changes {
                     let coalesce = format!("value:{}:{}", node.id, change.field);
@@ -6046,6 +6748,24 @@ impl NodeCraftApp {
                         values: expressions,
                     };
                     changed |= self.apply_commands(&[command], Some(&format!("expressions:{}", node.id)));
+                }
+                if path_changed || ingest_toggle.is_some() {
+                    if let Some(key) = self.source_key(&node.id) {
+                        self.source_changes.forget(&key.0, &key.1);
+                        self.source_checks.remove(&key);
+                    }
+                }
+                if let Some(enabled) = ingest_toggle {
+                    self.handle_ingest_toggle(&node.id, enabled);
+                } else if path_changed {
+                    self.request_ingest_if_enabled(&node.id);
+                    self.check_importer_source(&node.id);
+                }
+                if output.reload_source {
+                    self.reload_importer_source(&node.id);
+                }
+                if changed || ingest_toggle.is_some() || path_changed {
+                    self.sync_source_watches();
                 }
                 if output.choose_linked_part {
                     self.start_dialog(
@@ -6081,6 +6801,38 @@ impl NodeCraftApp {
                             open_linked_part: false,
                         },
                         FileDialogKind::ChooseDirectory,
+                    );
+                }
+                if output.locate_import {
+                    self.start_dialog(
+                        ui.ctx(),
+                        DialogAction::LocateImportSource { node: node.id.clone() },
+                        FileDialogKind::OpenStepFile,
+                    );
+                }
+                if output.save_import_copy {
+                    let ingest_enabled = nodecraft_node_contract::resolve_bool(
+                        "stepimporter",
+                        &node.values,
+                        "ingest",
+                    )
+                    .unwrap_or(false);
+                    let suggested_name = self
+                        .session
+                        .as_ref()
+                        .and_then(|session| {
+                            nodecraft_engine::import_io::ingest_record_for(
+                                &node.values,
+                                &session.document().ingested_sources,
+                                ingest_enabled,
+                            )
+                        })
+                        .map(|record| record.file_name.clone())
+                        .unwrap_or_else(|| "source.step".to_owned());
+                    self.start_dialog(
+                        ui.ctx(),
+                        DialogAction::SaveImportCopy { node: node.id.clone() },
+                        FileDialogKind::SaveImportCopy { suggested_name },
                     );
                 }
                 if output.toggle_suppressed {
@@ -6507,6 +7259,44 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_copy_writes_the_recorded_bytes_and_stores_its_path() {
+        use nodecraft_engine::import_io;
+        let directory = std::env::temp_dir().join(format!(
+            "sn-nodecraft-save-copy-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let record = import_io::ingest_record("bracket.step", b"embedded bracket bytes")
+            .expect("record");
+        let destination = directory.join("bracket copy.step");
+        import_io::save_ingest_copy(&record, &destination).expect("save copy");
+        let saved = std::fs::read(&destination).expect("read saved copy");
+        assert_eq!(import_io::content_hash(&saved), record.content_hash);
+
+        let node = GraphNode {
+            expressions: Default::default(),
+            id: "import".into(),
+            node_type: "stepimporter".into(),
+            values: json!({ "path": "missing/bracket.step", "pathMode": "relative" }),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut values = node.values.clone();
+        for command in import_path_commands(&node, &destination, Some(&directory)) {
+            if let Command::SetValue { field, value, .. } = command {
+                values
+                    .as_object_mut()
+                    .expect("node values are an object")
+                    .insert(field, value);
+            }
+        }
+        assert_eq!(values["path"], json!("bracket copy.step"));
+        assert_eq!(values["pathWarning"], json!(""));
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn removing_a_graph_instance_cascades_unreferenced_definitions() {
         let node = |id: &str, node_type: &str, definition: Option<&str>| GraphNode {
             expressions: Default::default(),
@@ -6565,6 +7355,7 @@ mod tests {
                 connections: Vec::new(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         };
         let binding = EvalBinding {
             source_document_id: "root".into(),
@@ -6824,6 +7615,7 @@ mod tests {
             false,
             false,
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -6988,8 +7780,8 @@ mod tests {
         part.bodies.iter().map(|body| body.key).collect()
     }
 
-    fn part_transforms(part: &nodecraft_exact::ExactPart) -> Vec<Vec<nodecraft_exact::DisplayTransform>> {
-        part.bodies.iter().map(|body| body.transforms.clone()).collect()
+    fn part_transforms(part: &nodecraft_exact::ExactPart) -> Vec<nodecraft_exact::Affine3> {
+        part.bodies.iter().map(|body| *body.placement.matrix()).collect()
     }
 
     fn submit_for_test(
@@ -7258,6 +8050,7 @@ mod tests {
                 interface: Default::default(),
             },
             definitions: Vec::new(),
+            ingested_sources: Vec::new(),
         }
     }
 
@@ -7585,6 +8378,48 @@ mod tests {
         let frame = transform_frame(&document, "move", "look").expect("frame");
         assert_eq!(frame.pivot, [22.0, 0.0, 6.0]);
         assert_eq!(frame.placement.apply_point([0.0, 0.0, 0.0]), [22.0, 0.0, 6.0]);
+    }
+
+    #[test]
+    fn transform_frame_reads_missing_translate_fields_through_the_contract() {
+        use nodecraft_session::placement::translate_values;
+        let node = |id: &str, node_type: &str, values: serde_json::Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("frame-defaults");
+        document.nodes = vec![
+            node("box", "solid", serde_json::json!({"primitiveType": "box"})),
+            // Every Translate field is absent. The gizmo/ghost frame must take
+            // the contract defaults, not a private viewport fallback.
+            node("move", "translate", serde_json::json!({})),
+            node("look", "look", serde_json::json!({})),
+        ];
+        document.connections = vec![
+            GraphConnection { from: "box".into(), to: "move".into(), input: "shape".into(), out: "shape".into() },
+            GraphConnection { from: "move".into(), to: "look".into(), input: "shape".into(), out: "shape".into() },
+        ];
+        let frame = transform_frame(&document, "move", "look").expect("frame");
+        // All six Translate contract defaults are 0.0, so a missing field is
+        // observably equal to the old private fallback. This test pins the
+        // path: the frame carries the resolver's value, and the promoted
+        // contract-defaults-only ast-grep rule fails on a private read.
+        assert_eq!(frame.translate, translate_values(&serde_json::json!({})));
+        assert_eq!(
+            [frame.translate.x, frame.translate.y, frame.translate.z],
+            [0.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            [frame.translate.rx, frame.translate.ry, frame.translate.rz],
+            [0.0, 0.0, 0.0]
+        );
+        assert_eq!(frame.pivot, [0.0, 0.0, 0.0]);
+        assert_eq!(frame.placement.apply_point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
     }
 
     /// A Transform that feeds a repeater activates at copy 0, the untouched
