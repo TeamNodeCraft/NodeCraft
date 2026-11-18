@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 
 use egui_wgpu::wgpu;
-use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Renderer, SceneSlot};
+use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Renderer, SceneSlot, clip_hatches, clip_planes};
 
 // The framebuffer is rendered wider/taller than the displayed panel so the
 // blur can sample content just outside the crop instead of clamping at its edge.
@@ -561,7 +561,8 @@ impl BackdropRenderer {
             view_proj,
             back: frame.back,
             size_px: [WIDTH as f32, HEIGHT as f32],
-            clip: [0.0; 4],
+            clip: clip_planes(&[]),
+            clip_hatch: clip_hatches(&[]),
             cap: [0.0; 4],
             images: Vec::new(),
             analysis: [0.0; 8],

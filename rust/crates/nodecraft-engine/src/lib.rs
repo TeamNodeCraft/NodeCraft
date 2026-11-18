@@ -5705,15 +5705,109 @@ mod tests {
         assert!((min[2] + 2.5).abs() < 1e-3 && (max[2] - 7.5).abs() < 1e-3, "{min:?} {max:?}");
     }
 
-    /// B-spline solids with the `_KNOTS` knot-spec spelling import through the
-    /// explicit display-mesh fallback, with warnings instead of a partial exact Brep.
+    /// Every level of the kernel's Check on an imported record.
+    fn check_imported_at_all_levels(brep: &solidcore_record::brep::Brep) {
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let imported = solidcore_convert::brep::to_kernel_body(&mut kernel, brep, true)
+            .expect("imported record as a kernel body");
+        let mut session = nodecraft_ops::OpsSession::new(&mut kernel);
+        for level in [
+            nodecraft_ops::CheckLevel::Basic,
+            nodecraft_ops::CheckLevel::Geometry,
+            nodecraft_ops::CheckLevel::All,
+        ] {
+            let report = session
+                .check(&imported, level)
+                .unwrap_or_else(|error| panic!("Check {level:?}: {error}"));
+            assert!(report.is_valid(), "Check {level:?}: {report}");
+        }
+    }
+
+    /// The record the real importer produces: its face count, volume and Check.
+    fn imported_record(relative: &str, faces: usize) -> f64 {
+        let path = fixture(relative);
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let import = nodecraft_step::read_cad(&bytes, &path)
+            .unwrap_or_else(|error| panic!("{relative}: {error}"));
+        assert!(import.failures.is_empty(), "{relative}: {:?}", import.failures);
+        let [body] = import.bodies.as_slice() else {
+            panic!("{relative}: {} bodies", import.bodies.len());
+        };
+        assert!(!body.sheet, "{relative}: a surface body");
+        assert_eq!(body.brep.faces.len(), faces, "{relative}: all faces");
+        let volume = nodecraft_step::record_volume(&body.brep)
+            .unwrap_or_else(|error| panic!("{relative} volume: {error}"));
+        check_imported_at_all_levels(&body.brep);
+        volume
+    }
+
+    /// The exact bodies the real importer hands the engine, one closed solid each.
+    fn imported_kernel_body(relative: &str, faces: usize) {
+        let path = fixture(relative);
+        let breps = nodecraft_mesh::import_step_breps(&path)
+            .unwrap_or_else(|error| panic!("{relative}: {error}"));
+        let [body] = breps.bodies.as_slice() else {
+            panic!("{relative}: {} bodies", breps.bodies.len());
+        };
+        let body = &body.brep;
+        assert_eq!(body.faces().len(), faces, "{relative}: all faces");
+        assert!(
+            nodecraft_solidcore::solidcore::topology::brep::p2::is_closed_manifold(body)
+                .expect("closed manifold"),
+            "{relative}: not a closed solid"
+        );
+    }
+
+    /// B-spline solids with the `_KNOTS` knot-spec spelling now import as one closed
+    /// exact solid: the importer's `Trims` makes the pcurves the file does not carry.
     #[test]
     fn bspline_solid_with_suffixed_knot_spec_imports() {
         let path = fixture("tests/Sample AP203 Data Files/piston.stp");
         let import = import_step(&path).expect("piston.stp B-spline solid import");
         assert_eq!(import.diagnostics.kind, "solidcore-brep");
+        assert_eq!(import.diagnostics.bodies, 1);
+        assert_eq!(import.diagnostics.breps, 1);
+        assert_eq!(import.diagnostics.brep_faces, 66);
+        assert_eq!(import.diagnostics.open_edges, 0);
+        assert!(
+            import.diagnostics.fallbacks.is_empty(),
+            "piston fell back: {:?}",
+            import.diagnostics.fallbacks
+        );
         assert!(!import.mesh.faces.is_empty(), "piston produced no triangles");
 
+        let volume = imported_record("tests/Sample AP203 Data Files/piston.stp", 66);
+        assert!(volume > 0.0, "piston volume {volume}");
+        imported_kernel_body("tests/Sample AP203 Data Files/piston.stp", 66);
+    }
+
+    /// `moon_buggy.stp`: 35 of its 77 faces have no closed-form pcurve. The kernel-fitted
+    /// trims make every face, and the body is one closed solid with the SMLib oracle's
+    /// volume.
+    #[test]
+    fn moon_buggy_bspline_solid_imports_closed() {
+        const ORACLE_VOLUME: f64 = 1_678_611_094.382_282;
+        let path = fixture("tests/Sample AP203 Data Files/moon_buggy.stp");
+        let import = import_step(&path).expect("moon_buggy.stp B-spline solid import");
+        assert_eq!(import.diagnostics.kind, "solidcore-brep");
+        assert_eq!(import.diagnostics.bodies, 1);
+        assert_eq!(import.diagnostics.breps, 1);
+        assert_eq!(import.diagnostics.brep_faces, 77);
+        assert_eq!(import.diagnostics.open_edges, 0);
+        assert!(
+            import.diagnostics.fallbacks.is_empty(),
+            "moon_buggy fell back: {:?}",
+            import.diagnostics.fallbacks
+        );
+
+        let volume = imported_record("tests/Sample AP203 Data Files/moon_buggy.stp", 77);
+        let relative = (volume - ORACLE_VOLUME).abs() / ORACLE_VOLUME;
+        assert!(
+            relative < 1e-3,
+            "moon_buggy volume {volume} is {:.6}% from the oracle {ORACLE_VOLUME}",
+            relative * 100.0
+        );
+        imported_kernel_body("tests/Sample AP203 Data Files/moon_buggy.stp", 77);
     }
 
     /// One import evaluation must decode the STEP file once: the display mesh

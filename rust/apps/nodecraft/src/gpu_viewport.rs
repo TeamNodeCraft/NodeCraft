@@ -13,10 +13,10 @@ use egui_wgpu::{wgpu, CallbackTrait, RenderState};
 use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
 use solidcore_record::Vec3;
 
-use crate::viewport::ViewSettings;
+use crate::viewport::{ViewSettings, draws_grid};
 use solidcraft_viewport_gpu::depth_format;
 use solidcraft_viewport_gpu::view::{gpu_view_proj, reversed_depth};
-use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, MovingLayer, Palette, PaletteIndex, Renderer, SceneSlot};
+use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, MovingLayer, Palette, PaletteIndex, Renderer, SceneSlot, clip_hatches, clip_planes};
 use solidcraft_viewport::surface::OpaqueSurface;
 use solidcraft_viewport::Camera;
 
@@ -3315,67 +3315,72 @@ impl GpuViewport {
         let eye = camera.eye().to_f32();
         let back = camera.back().to_f32();
         let (right, up, _) = camera.basis();
-        let theme = crate::theme::get();
-        let grid = GridUniforms {
-            eye: [eye[0], eye[1], eye[2], 1.0],
-            target: {
-                let t = camera.target.to_f32();
-                [t[0], t[1], t[2], 1.0]
-            },
-            center: [grid_center[0] as f32, grid_center[1] as f32, grid_center[2] as f32, 1.0],
-            origin: [0.0, 0.0, 0.0, 1.0],
-            right: {
-                let r = right.to_f32();
-                [
-                    r[0],
-                    r[1],
-                    r[2],
+        let (grid, axis) = if draws_grid(&self.view) {
+            let theme = crate::theme::get();
+            let grid = GridUniforms {
+                eye: [eye[0], eye[1], eye[2], 1.0],
+                target: {
+                    let t = camera.target.to_f32();
+                    [t[0], t[1], t[2], 1.0]
+                },
+                center: [grid_center[0] as f32, grid_center[1] as f32, grid_center[2] as f32, 1.0],
+                origin: [0.0, 0.0, 0.0, 1.0],
+                right: {
+                    let r = right.to_f32();
+                    [
+                        r[0],
+                        r[1],
+                        r[2],
+                        if camera.fov > 0.0 { 1.0 } else { 0.0 },
+                    ]
+                },
+                up: {
+                    let u = up.to_f32();
+                    [u[0], u[1], u[2], 0.0]
+                },
+                back: [back[0], back[1], back[2], 0.0],
+                view_proj,
+                inv_view_proj: invert4x4(view_proj),
+                params: [
+                    camera.half_height() as f32,
+                    camera.distance as f32,
+                    aspect as f32,
                     if camera.fov > 0.0 { 1.0 } else { 0.0 },
-                ]
-            },
-            up: {
-                let u = up.to_f32();
-                [u[0], u[1], u[2], 0.0]
-            },
-            back: [back[0], back[1], back[2], 0.0],
-            view_proj,
-            inv_view_proj: invert4x4(view_proj),
-            params: [
-                camera.half_height() as f32,
-                camera.distance as f32,
-                aspect as f32,
-                if camera.fov > 0.0 { 1.0 } else { 0.0 },
-            ],
-            grid: [
-                grid_minor as f32,
-                0.07,
-                0.22,
-                grid_extent as f32,
-            ],
-            minor: colour(theme.grid_minor, 1.0),
-            major: colour(theme.grid_major, 1.0),
-            axis_x: {
-                let mut colour = colour(theme.axis_x, 1.0);
-                colour[3] = crate::viewport_grid::GRID_MAJOR_STEP as f32;
-                colour
-            },
-            axis_y: {
-                let mut colour = colour(theme.axis_y, 1.0);
-                colour[3] = camera.clip_bounds(&bounds).1 as f32;
-                colour
-            },
-            options: [
-                (grid_major / grid_minor) as f32,
-                fade_start as f32,
-                fade_end as f32,
-                grid_fine_weight,
-            ],
-        };
-        let axis = AxisUniforms {
-            view_proj,
-            start: [0.0, 0.0, 0.0, 1.0],
-            end: [0.0, 0.0, self.grid_extent as f32, 1.0],
-            colour: colour(theme.axis_z, 230.0 / 255.0),
+                ],
+                grid: [
+                    grid_minor as f32,
+                    0.07,
+                    0.22,
+                    grid_extent as f32,
+                ],
+                minor: colour(theme.grid_minor, 1.0),
+                major: colour(theme.grid_major, 1.0),
+                axis_x: {
+                    let mut colour = colour(theme.axis_x, 1.0);
+                    colour[3] = crate::viewport_grid::GRID_MAJOR_STEP as f32;
+                    colour
+                },
+                axis_y: {
+                    let mut colour = colour(theme.axis_y, 1.0);
+                    colour[3] = camera.clip_bounds(&bounds).1 as f32;
+                    colour
+                },
+                options: [
+                    (grid_major / grid_minor) as f32,
+                    fade_start as f32,
+                    fade_end as f32,
+                    grid_fine_weight,
+                ],
+            };
+            let axis = AxisUniforms {
+                view_proj,
+                start: [0.0, 0.0, 0.0, 1.0],
+                end: [0.0, 0.0, self.grid_extent as f32, 1.0],
+                colour: colour(theme.axis_z, 230.0 / 255.0),
+            };
+            (Some(grid), Some(axis))
+        } else {
+            (None, None)
         };
         let object = ObjectUniforms {
             view_proj: gpu_view_proj(view_proj, self.reversed_depth),
@@ -3438,7 +3443,8 @@ impl GpuViewport {
             view_proj: scene_view_proj,
             back,
             size_px: [width * pixels_per_point, height * pixels_per_point],
-            clip: [0.0; 4],
+            clip: clip_planes(&[]),
+            clip_hatch: clip_hatches(&[]),
             cap: [0.0; 4],
             images: Vec::new(),
             analysis: [0.0; 8],
@@ -3515,8 +3521,8 @@ pub struct GpuCallback {
     pub pick: Arc<Mutex<crate::gpu_pick::PickRenderer>>,
     pub pick_frame: Option<crate::gpu_pick::PickFrame>,
     pub pick_request: Arc<Mutex<Option<crate::gpu_pick::PickRequest>>>,
-    pub grid: GridUniforms,
-    pub axis: AxisUniforms,
+    pub grid: Option<GridUniforms>,
+    pub axis: Option<AxisUniforms>,
 }
 
 impl GpuCallback {
@@ -3531,11 +3537,15 @@ impl GpuCallback {
         if let Some(clear) = resources.get::<ViewportClear>() {
             clear.set_background(queue, self.background);
         }
-        if let Some(grid) = resources.get::<GridRenderer>() {
-            grid.prepare(queue, &self.grid);
+        if let Some(grid) = resources.get::<GridRenderer>()
+            && let Some(uniforms) = self.grid.as_ref()
+        {
+            grid.prepare(queue, uniforms);
         }
-        if let Some(axis) = resources.get::<AxisRenderer>() {
-            axis.prepare(queue, &self.axis);
+        if let Some(axis) = resources.get::<AxisRenderer>()
+            && let Some(uniforms) = self.axis.as_ref()
+        {
+            axis.prepare(queue, uniforms);
         }
         // A staged pair activates inside this call and hands the renderer both
         // the new scene and its own key. The frame captured when the callback
@@ -3695,8 +3705,15 @@ impl GpuCallback {
                         &mut pass,
                         [0.0, 0.0, size[0] as f32, size[1] as f32],
                     );
-                    grid.paint(&mut pass);
-                    axis.paint(&mut pass);
+                    // The axis lines belong to the XY ground grid: the grid
+                    // toggle hides the grid shader's X/Y axes and the world Z
+                    // axis together.
+                    if self.grid.is_some() {
+                        grid.paint(&mut pass);
+                    }
+                    if self.axis.is_some() {
+                        axis.paint(&mut pass);
+                    }
                 }
             }
         }
@@ -4188,7 +4205,8 @@ mod tests {
             view_proj: identity_matrix(),
             back: [0.0; 3],
             size_px: [1.0, 1.0],
-            clip: [0.0; 4],
+            clip: clip_planes(&[]),
+            clip_hatch: clip_hatches(&[]),
             cap: [0.0; 4],
             images: Vec::new(),
             analysis: [0.0; 8],

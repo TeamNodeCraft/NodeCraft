@@ -178,7 +178,7 @@ impl<'k> OpsSession<'k> {
             .collect::<Result<Vec<_>, _>>()?;
         let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
-        let mut body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
+        let body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
         self.kernel.blend_face_log = Some(Default::default());
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (

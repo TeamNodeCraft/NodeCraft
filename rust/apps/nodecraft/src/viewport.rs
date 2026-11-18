@@ -59,6 +59,8 @@ pub struct ViewSettings {
     /// Ignore face colours authored by Look nodes for display only.
     pub ignore_look_colors: bool,
     pub edges: bool,
+    /// Draw the XY ground grid, including the axis lines drawn with it.
+    pub grid: bool,
     pub triangles: bool,
     /// Draw one normal per display face.
     pub normals: bool,
@@ -95,6 +97,7 @@ impl Default for ViewSettings {
             ghost_opacity: 0.45,
             ignore_look_colors: false,
             edges: true,
+            grid: true,
             triangles: false,
             normals: false,
             face_colours: false,
@@ -109,10 +112,18 @@ impl Default for ViewSettings {
     }
 }
 
+/// The one grid visibility decision shared by the CPU scene and the GPU
+/// grid/axis passes. Display-only: toggling it never asks the engine to
+/// re-evaluate or re-tessellate.
+pub(crate) fn draws_grid(view: &ViewSettings) -> bool {
+    view.grid
+}
+
 impl ViewSettings {
     fn any_extra(self) -> bool {
         self.translucent
             || !self.edges
+            || !self.grid
             || self.triangles
             || self.normals
             || self.face_colours
@@ -3210,6 +3221,8 @@ impl Viewport {
                 Self::settings_section(ui, "Display");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.translucent, "Translucent");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.edges, "Edges");
+                // Temporary tick row: to be replaced by the icon grid toggle (user-approved).
+                changed |= crate::theme::menu_toggle(ui, &mut edited.grid, "XY grid");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.triangles, "Triangles");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.normals, "Face normals");
                 changed |= crate::theme::menu_toggle(ui, &mut edited.face_colours, "Face colours");
@@ -3288,7 +3301,7 @@ impl Viewport {
             return;
         };
 
-        let scene = scene_for(display, &self.camera, self.lod_index);
+        let scene = scene_for(display, &self.camera, self.lod_index, &self.view);
         let canvas = solidcraft_viewport::render(&scene, &self.camera, width, height);
         let image = egui::ColorImage::from_rgba_unmultiplied([canvas.w, canvas.h], &canvas.rgba);
         self.texture = Some(ctx.load_texture(
@@ -3338,7 +3351,12 @@ fn add_grid(
     }
 }
 
-fn scene_for(display: &DisplayMesh, camera: &Camera, lod_index: usize) -> Scene {
+fn scene_for(
+    display: &DisplayMesh,
+    camera: &Camera,
+    lod_index: usize,
+    view: &ViewSettings,
+) -> Scene {
     let mut scene = Scene::default();
     // Keep model depth precision; do not push the far plane out for the grid.
     scene.radius = display.radius;
@@ -3358,13 +3376,15 @@ fn scene_for(display: &DisplayMesh, camera: &Camera, lod_index: usize) -> Scene 
         let t = ((angle - 0.04) / 0.18).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    add_grid(
-        &mut scene,
-        display.radius,
-        VIEW_ORIGIN,
-        camera.fov > 0.0,
-        ortho_fade,
-    );
+    if draws_grid(view) {
+        add_grid(
+            &mut scene,
+            display.radius,
+            VIEW_ORIGIN,
+            camera.fov > 0.0,
+            ortho_fade,
+        );
+    }
     scene.meshes.push(SceneMesh::solid(
         std::sync::Arc::new(display.render_mesh(lod_index).clone()),
         Rgb(151, 162, 176),
@@ -3458,6 +3478,62 @@ mod tests {
         assert!(!view.any_extra());
         view.zebra = true;
         assert!(view.any_extra());
+    }
+
+    #[test]
+    fn grid_defaults_on_and_old_settings_keep_it_on() {
+        assert!(ViewSettings::default().grid);
+        // Settings saved before the field existed must load with the grid on.
+        let legacy: ViewSettings =
+            serde_json::from_str(r#"{"edges":false}"#).expect("legacy settings parse");
+        assert!(legacy.grid);
+        let explicit: ViewSettings =
+            serde_json::from_str(r#"{"grid":false}"#).expect("grid setting parses");
+        assert!(!explicit.grid);
+        assert!(explicit.any_extra(), "grid off is an active display override");
+    }
+
+    #[test]
+    fn grid_visibility_is_one_shared_decision() {
+        let mut view = ViewSettings::default();
+        assert!(draws_grid(&view));
+        view.grid = false;
+        assert!(!draws_grid(&view), "the GPU grid and axis passes must stay off");
+    }
+
+    #[test]
+    fn grid_off_produces_no_cpu_grid_lines() {
+        let display = crate::adapter::DisplayMesh {
+            mesh: std::sync::Arc::new(solidcraft_geom::Mesh::default()),
+            lods: Vec::new(),
+            face_ids: Vec::new(),
+            exact_normals: false,
+            face_colors: Vec::new(),
+            edges: Vec::new(),
+            comparison: None,
+            selection_edges: None,
+            radius: 10.0,
+            center: Vec3::ZERO,
+        };
+        let camera = Camera::default();
+        let mut view = ViewSettings::default();
+        assert!(!scene_for(&display, &camera, 0, &view).grid.is_empty());
+        view.grid = false;
+        assert!(scene_for(&display, &camera, 0, &view).grid.is_empty());
+    }
+
+    #[test]
+    fn toggling_grid_only_repaints_the_viewport() {
+        let mut viewport = Viewport::default();
+        viewport.dirty = false;
+        let mut view = viewport.view();
+        view.grid = false;
+        viewport.set_view(view);
+        assert!(viewport.dirty, "the grid toggle must repaint the viewport");
+        assert!(
+            !viewport.plan_set_staged,
+            "the grid toggle must not restage the plan set"
+        );
     }
 
     #[test]

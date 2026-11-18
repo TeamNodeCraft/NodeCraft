@@ -360,6 +360,19 @@ pub(crate) fn map_error(error: OpsError) -> SessionError {
         OpsError::BlendNotCertified { halvings, stations } => SessionError::Invalid(format!(
             "SolidCore could not certify the blend's surface within its tolerance in the work allowed ({halvings} spans halved, {stations} stations). This is a kernel work-budget limit on this geometry, not a size that does not fit; try a slightly smaller blend, or fewer edges at once."
         )),
+
+        // A control-point edit meets the seam: the two faces' boundary rows along the edge are
+        // not one curve, so moving a point on one face would open it. The kernel names the edge
+        // (its record index) and why the rows differ.
+        OpsError::SeamMismatch { edge, why } => SessionError::Invalid(format!(
+            "A control-point edit would move edge {edge}, whose two faces' rows along it are not one curve ({why}), so the seam would open. Edit the points away from that edge."
+        )),
+
+        // A control-point edit moves a vertex ending an edge that cannot follow it: the edge is
+        // not a line between planar faces the edit keeps, so its end would leave a gap.
+        OpsError::EdgeLeftBehind { edge } => SessionError::Invalid(format!(
+            "A control-point edit would move edge {edge}, which cannot follow its end (it is not a line between planar faces the edit keeps) and would leave a gap at the vertex. Edit the points away from that edge."
+        )),
     }
 }
 
@@ -617,6 +630,11 @@ mod tests {
             },
             OpsError::BlendFailed { class: ErrorKind::StageFailed, status: 1001, phrase: String::new() },
             OpsError::BlendNotCertified { halvings: 3, stations: 9 },
+            OpsError::SeamMismatch {
+                edge: 2,
+                why: solidcore_ops::surface_cvs::SeamMismatch::Degree { a: 2, b: 3 },
+            },
+            OpsError::EdgeLeftBehind { edge: 4 },
         ];
         for error in errors {
             assert_readable(error);

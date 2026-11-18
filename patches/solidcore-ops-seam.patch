@@ -1,7 +1,7 @@
-From c8ae90db96303e70acccaa0dc541f5f2bbdf7763 Mon Sep 17 00:00:00 2001
+From 34effd3de1af981d620ca3f57cf3567cff4ecf79 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:05:16 +1030
-Subject: [PATCH 01/15] ops: lend a kernel and build bodies from B-reps
+Subject: [PATCH 1/8] ops: lend a kernel and build bodies from B-reps
 
 Add session::with_kernel, borrowed-mode rules, Body::from_brep/into_brep, Order::of and a seam test.
 ---
@@ -44,7 +44,7 @@ index b1c08cbe8..2317bc8f2 100644
  solidcore-record = { path = "../solidcore-record" }
  solidcore-convert = { path = "../solidcore-convert" }
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index c2c831536..09fe7826e 100644
+index 4e6d558d9..78c4648aa 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
 @@ -174,6 +174,19 @@ impl Body {
@@ -68,7 +68,7 @@ index c2c831536..09fe7826e 100644
      #[must_use]
      pub(crate) fn new(b: Brep) -> Body {
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 5d7a86df5..21e7201ab 100644
+index 294224823..bf116c3b3 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -47,6 +47,7 @@
@@ -89,7 +89,7 @@ index 5d7a86df5..21e7201ab 100644
  
  /// A failed call, as the failure callback sees it.
  #[derive(Debug)]
-@@ -322,6 +326,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+@@ -325,6 +329,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
      (value, mine)
  }
  
@@ -112,7 +112,7 @@ index 5d7a86df5..21e7201ab 100644
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
  /// such a panic recovered.)
  #[must_use]
-@@ -411,6 +431,51 @@ pub(crate) fn run_taking<T: Answer>(
+@@ -427,6 +447,51 @@ pub(crate) fn run_taking<T: Answer>(
      run_with(call, inputs, true, f)
  }
  
@@ -164,7 +164,7 @@ index 5d7a86df5..21e7201ab 100644
  fn run_with<T: Answer>(
      call: &'static str,
      inputs: Inputs<'_>,
-@@ -428,6 +493,13 @@ fn run_with<T: Answer>(
+@@ -444,6 +509,13 @@ fn run_with<T: Answer>(
      if in_call() || IN_HOOK.with(Cell::get) {
          return Err(Error::Reentered);
      }
@@ -179,7 +179,7 @@ index 5d7a86df5..21e7201ab 100644
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 19af43adf..6dbdd5f78 100644
+index 03eb7e422..f210e17b9 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
 @@ -1979,6 +1979,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
@@ -215,10 +215,10 @@ index 19af43adf..6dbdd5f78 100644
 2.54.0 (Apple Git-157)
 
 
-From 2c7c5644032fe694900b3a3cb48c4d4ec3c704ea Mon Sep 17 00:00:00 2001
+From 46124b32ee918eb75215a3539dc258fdeb524ea7 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:25:30 +1030
-Subject: [PATCH 02/15] ops: fix borrowed-kernel reset, cancel, panic and hook
+Subject: [PATCH 2/8] ops: fix borrowed-kernel reset, cancel, panic and hook
  rules
 
 Per-thread needs-reset flag, restore the saved cancel token, catch/restore the kernel around with_kernel, refuse hook reentry, get-or-create trims and list-order Order::of.
@@ -231,12 +231,12 @@ Per-thread needs-reset flag, restore the saved cancel token, catch/restore the k
  5 files changed, 49 insertions(+), 19 deletions(-)
 
 diff --git a/solidcore/Cargo.lock b/solidcore/Cargo.lock
-index 0fc07a6f9..7977c44e4 100644
+index 824241764..1b5357d07 100644
 --- a/solidcore/Cargo.lock
 +++ b/solidcore/Cargo.lock
-@@ -220,6 +220,12 @@ version = "1.2.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
+@@ -342,6 +342,12 @@ dependencies = [
+  "twox-hash",
+ ]
  
 +[[package]]
 +name = "scoped-tls"
@@ -247,7 +247,7 @@ index 0fc07a6f9..7977c44e4 100644
  [[package]]
  name = "serde"
  version = "1.0.229"
-@@ -308,6 +314,7 @@ name = "solidcore-ops"
+@@ -463,6 +469,7 @@ name = "solidcore-ops"
  version = "0.1.0"
  dependencies = [
   "flate2",
@@ -269,7 +269,7 @@ index d6c9219ad..9e503db79 100644
  }
  
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index 09fe7826e..0cf472f23 100644
+index 78c4648aa..b24420a04 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
 @@ -176,9 +176,22 @@ impl Body {
@@ -298,7 +298,7 @@ index 09fe7826e..0cf472f23 100644
          Ok(Body::new(brep))
      }
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 21e7201ab..8494490aa 100644
+index bf116c3b3..ac1398280 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -47,7 +47,6 @@
@@ -322,7 +322,7 @@ index 21e7201ab..8494490aa 100644
  
  /// A failed call, as the failure callback sees it.
  #[derive(Debug)]
-@@ -327,19 +327,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+@@ -330,19 +330,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
  }
  
  /// Run `f` with every ops call on this thread using `kernel` instead of the process kernel.
@@ -354,7 +354,7 @@ index 21e7201ab..8494490aa 100644
  }
  
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
-@@ -446,8 +452,9 @@ fn run_borrowed<T: Answer>(
+@@ -462,8 +468,9 @@ fn run_borrowed<T: Answer>(
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
          return Err(Error::Cancelled);
      }
@@ -365,7 +365,7 @@ index 21e7201ab..8494490aa 100644
          k.cancel = Some(token.either(&previous));
      }
      set_current(Some(call));
-@@ -459,19 +466,21 @@ fn run_borrowed<T: Answer>(
+@@ -475,19 +482,21 @@ fn run_borrowed<T: Answer>(
      let caught = catch_unwind(AssertUnwindSafe(|| f(k)));
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
@@ -392,7 +392,7 @@ index 21e7201ab..8494490aa 100644
      r
  }
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 6dbdd5f78..aa3783939 100644
+index f210e17b9..aceb2979b 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
 @@ -1996,9 +1996,10 @@ fn borrowed_kernel_matches_the_global_path() {
@@ -412,10 +412,10 @@ index 6dbdd5f78..aa3783939 100644
 2.54.0 (Apple Git-157)
 
 
-From 16c63ddba2ad483e2f9426012a012b8ec19119c3 Mon Sep 17 00:00:00 2001
+From 6ff6862a4abb59f9eb9dd42bfa3492eee909e655 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 20:07:23 +1030
-Subject: [PATCH 03/15] ops: keep a lent kernel's own cancel token
+Subject: [PATCH 3/8] ops: keep a lent kernel's own cancel token
 
 Combine the kernel token with any cancel::within token and test a cancelled lent kernel without within.
 ---
@@ -424,10 +424,10 @@ Combine the kernel token with any cancel::within token and test a cancelled lent
  2 files changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 8494490aa..07d3e1f97 100644
+index ac1398280..12885483f 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -453,10 +453,11 @@ fn run_borrowed<T: Answer>(
+@@ -469,10 +469,11 @@ fn run_borrowed<T: Answer>(
          return Err(Error::Cancelled);
      }
      let saved_cancel = k.cancel.take();
@@ -444,7 +444,7 @@ index 8494490aa..07d3e1f97 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index aa3783939..52321ca71 100644
+index aceb2979b..00856dfc8 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
 @@ -3314,6 +3314,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
@@ -478,18 +478,17 @@ index aa3783939..52321ca71 100644
 2.54.0 (Apple Git-157)
 
 
-From ed63d42824037f132130497a3f9261798953da16 Mon Sep 17 00:00:00 2001
+From aba6ef4139c2026bf6eaf4df1d2822e7928cec7a Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Fri, 13 Nov 2026 21:04:31 +1030
-Subject: [PATCH 04/15] test: close the carried-faces test after the seam
- rebase
+Subject: [PATCH 4/8] test: close the carried-faces test after the seam rebase
 
 ---
  solidcore/crates/solidcore-ops/tests/blend.rs | 1 +
  1 file changed, 1 insertion(+)
 
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 52321ca71..c2b941941 100644
+index 00856dfc8..a576b055b 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
 @@ -1979,6 +1979,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
@@ -504,11 +503,10 @@ index 52321ca71..c2b941941 100644
 2.54.0 (Apple Git-157)
 
 
-From 2a155c2295e03f9f89a6cc74ea00ca33769776d7 Mon Sep 17 00:00:00 2001
+From 3bc168f9e4de6f5880cc81433055bb7a843b05fc Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:47:39 +1030
-Subject: [PATCH 05/15] ops: keep a proof across a copy, and defer it to the
- node
+Subject: [PATCH 5/8] ops: keep a proof across a copy, and defer it to the node
 
 Body::to_brep_on / copy_held_on keep the proof on a deep copy (the same B-rep in the same
 order), Body::prove_on takes the node-end proof, and session::Validation::EachNode leaves the
@@ -517,26 +515,28 @@ the saved volume-sign decisions can be counted.
 
 Co-Authored-By: DeepSeek <noreply@deepseek.com>
 ---
- solidcore/crates/solidcore-ops/src/body.rs    | 97 +++++++++++++++++--
+ solidcore/crates/solidcore-ops/src/body.rs    | 99 +++++++++++++++++--
  solidcore/crates/solidcore-ops/src/lib.rs     |  1 +
- solidcore/crates/solidcore-ops/src/session.rs | 65 ++++++++++++-
- .../crates/solidcore-ops/tests/proof_reuse.rs | 55 +++++++++++
+ solidcore/crates/solidcore-ops/src/session.rs | 65 +++++++++++-
+ .../crates/solidcore-ops/tests/proof_reuse.rs | 53 ++++++++++
  4 files changed, 207 insertions(+), 11 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index 0cf472f23..eefa26eec 100644
+index b24420a04..e399a9c22 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -29,7 +29,7 @@ use solidcore_convert::brep::{to_kernel, to_record, Order, Unsupported};
+@@ -29,7 +29,9 @@ use solidcore_convert::brep::{to_kernel, to_record, Order, Unsupported};
  use solidcore_record::brep::Brep as Record;
  
  use crate::error::status;
--use crate::session::{measure_body, read_body, run, with_body};
-+use crate::session::{measure_body, read_body, run, unfinished, validation, with_body, Validation};
+-use crate::session::{measure_body, read_body, read_held, run, with_body};
++use crate::session::{
++    measure_body, read_body, read_held, run, unfinished, validation, with_body, Validation,
++};
  use crate::split::copies_of;
  use crate::{Error, Result};
  
-@@ -200,6 +200,72 @@ impl Body {
+@@ -200,6 +202,72 @@ impl Body {
      #[must_use]
      pub fn into_brep(self) -> Brep { self.into_inner() }
  
@@ -609,7 +609,7 @@ index 0cf472f23..eefa26eec 100644
      /// A body the kernel made.
      #[must_use]
      pub(crate) fn new(b: Brep) -> Body {
-@@ -572,12 +638,17 @@ impl Expect {
+@@ -607,12 +675,17 @@ impl Expect {
      ) -> solidcore::Result<Expect> {
          let solid = is_manifold_solid(input)?
              && (proof.outward.is_some_and(|o| o.holds(k))
@@ -633,7 +633,7 @@ index 0cf472f23..eefa26eec 100644
          Ok(Expect {
              solid,
              touching: false,
-@@ -644,8 +715,16 @@ pub(crate) fn finish_proved(
+@@ -700,8 +773,16 @@ pub(crate) fn finish_proved(
      } else {
          is_manifold_solid(&b)?
      };
@@ -653,19 +653,19 @@ index 0cf472f23..eefa26eec 100644
      }
      Ok(Ok((b, outward)))
 diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
-index 649197198..59454662e 100644
+index fbb00c50e..485f83f70 100644
 --- a/solidcore/crates/solidcore-ops/src/lib.rs
 +++ b/solidcore/crates/solidcore-ops/src/lib.rs
-@@ -86,6 +86,7 @@ pub use blend::{
-     ChamferCorner, ChamferSecond, Corners, EndRoom, Hole, HoleEdge, Room, SetBack, Turn,
+@@ -89,6 +89,7 @@ pub use blend::{
+ pub use body::{
+     make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, Contract, TurnedOver,
  };
- pub use body::{make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, TurnedOver};
 +pub use session::Validation;
  pub use boolean::BooleanOp;
  pub use check::{CheckLevel, CheckReport};
  pub use contact::Gap;
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 07d3e1f97..efa84481c 100644
+index 12885483f..ab32e06f0 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -69,6 +69,46 @@ static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
@@ -715,7 +715,7 @@ index 07d3e1f97..efa84481c 100644
  }
  
  /// A failed call, as the failure callback sees it.
-@@ -464,7 +504,28 @@ fn run_borrowed<T: Answer>(
+@@ -480,7 +520,28 @@ fn run_borrowed<T: Answer>(
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
      let snapshot = (before && hook.is_some()).then(|| written(k, inputs));
      STOPPED.with(|d| d.set(None));
@@ -745,7 +745,7 @@ index 07d3e1f97..efa84481c 100644
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
          Ok(_) if stopped => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Cancelled) }
-@@ -747,7 +808,7 @@ pub(crate) fn measure_body<T: Answer>(
+@@ -779,7 +840,7 @@ pub(crate) fn measure_body<T: Answer>(
      })
  }
  
@@ -755,19 +755,10 @@ index 07d3e1f97..efa84481c 100644
          "{call}: the body was left unfinished by an earlier panic"
      ))
 diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index 8744775a1..fc8adf5c4 100644
+index 45343de54..919f21bf1 100644
 --- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
 +++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -10,6 +10,8 @@
- #![cfg(feature = "profile")]
- #![allow(clippy::unwrap_used)]
- 
-+use solidcore::kernel::{Kernel, KernelOptions, UpstreamFixes};
-+use solidcore::primitive::api_primitives::create_plane;
- use solidcore_ops::boolean::boolean;
- use solidcore_ops::session::{self, CallProfile};
- use solidcore_ops::{make_box, make_cylinder, Body, BooleanOp};
-@@ -120,3 +122,56 @@ fn a_proof_made_under_other_fixes_is_not_taken() {
+@@ -157,3 +157,56 @@ fn a_proof_made_under_other_fixes_is_not_taken() {
      all_fixes();
      assert_eq!(decided, 3);
  }
@@ -828,10 +819,10 @@ index 8744775a1..fc8adf5c4 100644
 2.54.0 (Apple Git-157)
 
 
-From ca568fdd87101fb10f7f5da4e97652b949c73efb Mon Sep 17 00:00:00 2001
+From 14dec952607dd15950dd8836335b74c12f5c71d5 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:58:33 +1030
-Subject: [PATCH 06/15] ops: EachNode keeps the closedness test and defers only
+Subject: [PATCH 6/8] ops: EachNode keeps the closedness test and defers only
  the proof
 
 An operand with no standing proof counts as a solid exactly when is_manifold_solid says it is
@@ -847,10 +838,10 @@ Co-Authored-By: DeepSeek <noreply@deepseek.com>
  2 files changed, 63 insertions(+), 3 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index eefa26eec..d1fdf505d 100644
+index e399a9c22..fba5ec7f7 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -645,9 +645,10 @@ impl Expect {
+@@ -682,9 +682,10 @@ impl Expect {
                              None => false,
                          } || prove(k, input)?.is_some())
                      })?,
@@ -864,7 +855,7 @@ index eefa26eec..d1fdf505d 100644
                  });
          Ok(Expect {
              solid,
-@@ -887,3 +888,40 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
+@@ -974,3 +975,40 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
          )
      })
  }
@@ -906,10 +897,10 @@ index eefa26eec..d1fdf505d 100644
 +    }
 +}
 diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index fc8adf5c4..1c769e6b4 100644
+index 919f21bf1..8a1b9508d 100644
 --- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
 +++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -175,3 +175,25 @@ fn each_node_proves_only_the_output() {
+@@ -210,3 +210,25 @@ fn each_node_proves_only_the_output() {
      assert_eq!(decisions(&calls), 0, "the calls inside the node prove nothing");
      body.prove_on(&mut kernel).expect("the node's output is a solid");
  }
@@ -939,2405 +930,399 @@ index fc8adf5c4..1c769e6b4 100644
 2.54.0 (Apple Git-157)
 
 
-From 3fb5a1fa409ee4ffee3d9c8651f6e65e09b19dc3 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 01:12:05 -0800
-Subject: [PATCH 07/15] solidcore-cadir: read cadmpeg's neutral CAD model
- (CADIR) straight into B-rep records
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
+From 325ce6fc655cebc1617b524d68ca6928974375aa Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 15:40:36 +1030
+Subject: [PATCH 7/8] ops: fit the borrowed-kernel path to the per-call session
 
-A new solidcore crate reads the bodies of a CADIR model, the neutral model cadmpeg decodes
-FreeCAD, Rhino and other CAD files into, into schema 4 records: each body region's faces, edges
-and vertices go through the format-neutral assembly the STEP reader uses (pcurves, seams,
-tolerances, the canonical order). SolidCraft reads FreeCAD and Rhino files through cadmpeg
-today by having cadmpeg write STEP text and reading that back; this is the reader that
-replaces the STEP round trip.
-
-CADIR's topology conventions are STEP's (checked against cadmpeg's own STEP writer); its
-curves keep their parameters, so an edge's interval carries over unchanged. Two places where
-the STEP round trip lost information are read right: a sphere or torus with a negative
-radius, whose surface normal points inward (the STEP writer drops the sign but not the side),
-and a NURBS surface marked `normal_reversed`. A placed carrier is mapped exactly when its
-placement is a rotation and uniform scale. Elliptical cones, parabolas, hyperbolas, composite
-and polygonal carriers are refused with the reason, as are faces with no boundary.
-
-Tested on cadmpeg's example cube (10 mm: 1000 mm³, faces outward), an edge whose vertices are
-written the other way round, a face on a plane facing the other way, and hostile input (a
-missing coedge, a vertex 5 mm off its edge). The crate joins the panic-site check; its one
-site is a clamp between constants.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+The rebased session keeps each call's kernel in the pool and the call's name
+in a thread local, so the borrowed path sets CURRENT directly and clears it
+from its depth guard. Format the rebased ops files as rustfmt writes them.
 ---
- solidcore/Cargo.lock                          | 167 +++++++
- solidcore/Cargo.toml                          |   2 +-
- solidcore/crates/solidcore-cadir/Cargo.toml   |  36 ++
- .../crates/solidcore-cadir/src/geometry.rs    | 471 ++++++++++++++++++
- solidcore/crates/solidcore-cadir/src/lib.rs   | 378 ++++++++++++++
- solidcore/crates/solidcore-cadir/src/tests.rs | 132 +++++
- .../crates/solidcore-step/src/assembly.rs     |   5 +
- solidcore/plan/panic-sites.tsv                |   1 +
- solidcore/scripts/ci/check_panic_sites.py     |   2 +-
- 9 files changed, 1192 insertions(+), 2 deletions(-)
- create mode 100644 solidcore/crates/solidcore-cadir/Cargo.toml
- create mode 100644 solidcore/crates/solidcore-cadir/src/geometry.rs
- create mode 100644 solidcore/crates/solidcore-cadir/src/lib.rs
- create mode 100644 solidcore/crates/solidcore-cadir/src/tests.rs
+ .../crates/solidcore-convert/src/brep.rs      |  6 +-
+ solidcore/crates/solidcore-ops/src/body.rs    | 47 +++++++++-----
+ solidcore/crates/solidcore-ops/src/session.rs | 43 +++++++++---
+ solidcore/crates/solidcore-ops/tests/blend.rs | 36 ++++++++--
+ .../crates/solidcore-ops/tests/proof_reuse.rs | 65 +++++++++++++++----
+ 5 files changed, 151 insertions(+), 46 deletions(-)
 
-diff --git a/solidcore/Cargo.lock b/solidcore/Cargo.lock
-index 7977c44e4..1b5357d07 100644
---- a/solidcore/Cargo.lock
-+++ b/solidcore/Cargo.lock
-@@ -20,12 +20,72 @@ version = "1.5.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
- 
-+[[package]]
-+name = "base64"
-+version = "0.23.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-+
-+[[package]]
-+name = "block-buffer"
-+version = "0.12.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "d2f6c7dbe95a6ed67ad9f18e57daf93a2f034c524b99fd2b76d18fdfeb6660aa"
-+dependencies = [
-+ "hybrid-array",
-+]
-+
-+[[package]]
-+name = "cadmpeg-core"
-+version = "0.6.12"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "5f5b7d2834b48bd9929f8428bd511ca5e03d331d36e5f4fbcf20e93fde8e3498"
-+dependencies = [
-+ "flate2",
-+ "memchr",
-+ "roxmltree",
-+ "ruzstd",
-+ "serde",
-+ "serde_json",
-+ "thiserror",
-+]
-+
-+[[package]]
-+name = "cadmpeg-ir"
-+version = "0.6.7"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "5592036516aaf2574b159a86a3d1ae872dc245261de86e4c0ce6773fed00a249"
-+dependencies = [
-+ "base64",
-+ "cadmpeg-core",
-+ "serde",
-+ "serde-value",
-+ "serde_json",
-+ "sha2",
-+ "thiserror",
-+]
-+
- [[package]]
- name = "cfg-if"
- version = "1.0.5"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
- 
-+[[package]]
-+name = "const-oid"
-+version = "0.10.3"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "be95d4a884358a21a199689323c29e9256b4a1b315e22f183d155422041d3a9a"
-+
-+[[package]]
-+name = "cpufeatures"
-+version = "0.3.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
-+dependencies = [
-+ "libc",
-+]
-+
- [[package]]
- name = "crc32fast"
- version = "1.5.3"
-@@ -60,6 +120,15 @@ version = "0.8.23"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
- 
-+[[package]]
-+name = "crypto-common"
-+version = "0.2.2"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
-+dependencies = [
-+ "hybrid-array",
-+]
-+
- [[package]]
- name = "diagnostics"
- version = "0.1.0"
-@@ -71,6 +140,17 @@ dependencies = [
-  "solidcore-tess",
- ]
- 
-+[[package]]
-+name = "digest"
-+version = "0.11.3"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "f1dd6dbb5841937940781866fa1281a1ff7bd3bf827091440879f9994983d5c2"
-+dependencies = [
-+ "block-buffer",
-+ "const-oid",
-+ "crypto-common",
-+]
-+
- [[package]]
- name = "either"
- version = "1.19.0"
-@@ -131,6 +211,15 @@ version = "0.17.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
- 
-+[[package]]
-+name = "hybrid-array"
-+version = "0.4.15"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
-+dependencies = [
-+ "typenum",
-+]
-+
- [[package]]
- name = "indexmap"
- version = "2.14.2"
-@@ -147,6 +236,12 @@ version = "1.0.18"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
- 
-+[[package]]
-+name = "libc"
-+version = "0.2.191"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
-+
- [[package]]
- name = "memchr"
- version = "2.8.3"
-@@ -176,6 +271,15 @@ dependencies = [
- name = "nurbs-grid-mesh"
- version = "0.1.0"
- 
-+[[package]]
-+name = "ordered-float"
-+version = "2.10.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
-+dependencies = [
-+ "num-traits",
-+]
-+
- [[package]]
- name = "proc-macro2"
- version = "1.0.107"
-@@ -220,6 +324,24 @@ version = "1.2.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
- 
-+[[package]]
-+name = "roxmltree"
-+version = "0.21.2"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
-+dependencies = [
-+ "memchr",
-+]
-+
-+[[package]]
-+name = "ruzstd"
-+version = "0.9.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
-+dependencies = [
-+ "twox-hash",
-+]
-+
- [[package]]
- name = "scoped-tls"
- version = "1.0.1"
-@@ -236,6 +358,16 @@ dependencies = [
-  "serde_derive",
- ]
- 
-+[[package]]
-+name = "serde-value"
-+version = "0.7.0"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
-+dependencies = [
-+ "ordered-float",
-+ "serde",
-+]
-+
- [[package]]
- name = "serde_core"
- version = "1.0.229"
-@@ -278,6 +410,17 @@ dependencies = [
-  "serde",
- ]
- 
-+[[package]]
-+name = "sha2"
-+version = "0.11.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
-+dependencies = [
-+ "cfg-if",
-+ "cpufeatures",
-+ "digest",
-+]
-+
- [[package]]
- name = "simd-adler32"
- version = "0.3.10"
-@@ -299,6 +442,18 @@ dependencies = [
-  "thiserror",
- ]
- 
-+[[package]]
-+name = "solidcore-cadir"
-+version = "0.1.0"
-+dependencies = [
-+ "cadmpeg-ir",
-+ "serde_json",
-+ "solidcore",
-+ "solidcore-ops",
-+ "solidcore-record",
-+ "solidcore-step",
-+]
-+
- [[package]]
- name = "solidcore-convert"
- version = "0.1.0"
-@@ -462,6 +617,18 @@ version = "0.1.2"
- source = "registry+https://github.com/rust-lang/crates.io-index"
- checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
- 
-+[[package]]
-+name = "twox-hash"
-+version = "2.1.5"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "86a801b3cea342a06d468c8710662aa29e5e05e4f5c0d62f00bbb7f2ad7941c2"
-+
-+[[package]]
-+name = "typenum"
-+version = "1.20.1"
-+source = "registry+https://github.com/rust-lang/crates.io-index"
-+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
-+
- [[package]]
- name = "unicode-ident"
- version = "1.0.27"
-diff --git a/solidcore/Cargo.toml b/solidcore/Cargo.toml
-index 578a521fc..f6b02ab39 100644
---- a/solidcore/Cargo.toml
-+++ b/solidcore/Cargo.toml
-@@ -1,6 +1,6 @@
- [workspace]
- resolver = "2"
--members = ["crates/solidcore", "crates/solidcore-record", "crates/solidcore-convert", "crates/solidcore-tess", "crates/goldens", "crates/nurbs-grid-mesh", "crates/ssi", "crates/solidcore-ssi", "crates/step-export", "crates/xtask", "crates/solidcore-ops", "crates/solidcore-step", "crates/diagnostics"]
-+members = ["crates/solidcore", "crates/solidcore-record", "crates/solidcore-convert", "crates/solidcore-tess", "crates/goldens", "crates/nurbs-grid-mesh", "crates/ssi", "crates/solidcore-ssi", "crates/step-export", "crates/xtask", "crates/solidcore-ops", "crates/solidcore-step", "crates/solidcore-cadir", "crates/diagnostics"]
- default-members = ["crates/solidcore"]
- 
- [workspace.package]
-diff --git a/solidcore/crates/solidcore-cadir/Cargo.toml b/solidcore/crates/solidcore-cadir/Cargo.toml
-new file mode 100644
-index 000000000..ce1ffa394
---- /dev/null
-+++ b/solidcore/crates/solidcore-cadir/Cargo.toml
-@@ -0,0 +1,36 @@
-+[package]
-+name = "solidcore-cadir"
-+description = "CADIR, cadmpeg's neutral CAD model, read into B-rep records: each body's faces, edges and vertices on their curves and surfaces, assembled as the STEP reader assembles its solids"
-+edition = "2024"
-+license.workspace = true
-+version.workspace = true
-+publish = false
-+
-+# solidcore's hard rules (no unsafe, no unwrap/expect/panic, no unchecked indexing), as
-+# solidcore-step has them.
-+[lints.rust]
-+unsafe_code = "forbid"
-+
-+[lints.clippy]
-+unwrap_used = "deny"
-+expect_used = "deny"
-+panic = "deny"
-+indexing_slicing = "deny"
-+todo = "deny"
-+unimplemented = "deny"
-+dbg_macro = "deny"
-+neg_cmp_op_on_partial_ord = "allow"
-+
-+[dependencies]
-+# The model read (Apache-2.0); pinned to the release SolidCraft links, whose wire form and
-+# conventions this reader was written against.
-+cadmpeg-ir = "=0.6.7"
-+solidcore = { path = "../solidcore" }
-+solidcore-ops = { path = "../solidcore-ops" }
-+solidcore-record = { path = "../solidcore-record" }
-+solidcore-step = { path = "../solidcore-step" }
-+
-+# cadmpeg's own example models (a unit cube) as test input.
-+[dev-dependencies]
-+cadmpeg-ir = { version = "=0.6.7", features = ["examples"] }
-+serde_json = "1"
-diff --git a/solidcore/crates/solidcore-cadir/src/geometry.rs b/solidcore/crates/solidcore-cadir/src/geometry.rs
-new file mode 100644
-index 000000000..b51c93a0a
---- /dev/null
-+++ b/solidcore/crates/solidcore-cadir/src/geometry.rs
-@@ -0,0 +1,471 @@
-+//! CADIR's curve and surface carriers as record curves and surfaces.
-+//!
-+//! A curve keeps its parameter exactly: an edge's interval on the CADIR carrier is its interval
-+//! on the record curve. CADIR's line is `origin + t direction` with a unit direction, its circle
-+//! and ellipse are at the angle `t` from the frame's reference direction (the major axis of an
-+//! ellipse) about its axis, and a NURBS curve is on its own knots: the record's line through
-+//! `origin` and `origin + direction`, and its circle, ellipse and spline, have the same `t`. A
-+//! polyline is the degree-one spline on its own sample parameters.
-+//!
-+//! A surface need not keep its (u, v): the assembly makes every pcurve from the 3D edges. What
-+//! a surface must keep is its side, so each comes back with whether the record's natural normal
-+//! is opposite CADIR's (`reversed`), which turns the face's sense against it. CADIR's plane,
-+//! cylinder, circular cone, sphere and torus are the record's with the same frame (x the
-+//! reference direction, z the axis) and the same formulas, so their natural normals agree, but
-+//! for a sphere or torus with a negative (tube) radius, whose points CADIR places on the other
-+//! side of the centre (`c + r n` for `r < 0`): the record holds the radius's magnitude and its
-+//! normal is the opposite. A NURBS surface's oriented normal is opposite `Pu × Pv` when CADIR says
-+//! `normal_reversed`. A procedural carrier is read by the solved form the producer cached.
-+//!
-+//! A placed carrier (`Transformed`) is its basis mapped by its affine placement, when that is a
-+//! rotation and a uniform scale (with a move): frames turn, lengths scale and parameters are
-+//! kept. A placement that shears, scales unevenly or mirrors is refused.
-+
-+use cadmpeg_ir::geometry::{
-+    CurveGeometry, SolvedCurveGeometry, SolvedSurfaceGeometry, SurfaceGeometry,
-+};
-+use cadmpeg_ir::units::OrthonormalFrame3;
-+use solidcore::Vec3;
-+use solidcore_record::brep::{Curve as BCurve, Frame, Surface as BSurface};
-+use solidcore_step::assembly::{spline_curve, spline_surface};
-+
-+/// A reason a carrier is not read.
-+pub(crate) type R<T> = Result<T, String>;
-+
-+/// Deepest chain of placed carriers followed (CADIR caps its own nesting too).
-+const MAX_PLACEMENTS: usize = 16;
-+/// How far a placement's columns may be from one length and from square to each other, relative
-+/// to their length, for it to be taken as a rotation and a uniform scale.
-+const SIMILARITY: f64 = 1e-9;
-+
-+fn unsupported(what: impl std::fmt::Display) -> String {
-+    format!("not supported yet: {what}")
-+}
-+
-+fn v(p: [f64; 3]) -> Vec3 {
-+    Vec3::new(p[0], p[1], p[2])
-+}
-+
-+fn a(p: Vec3) -> [f64; 3] {
-+    [p.x, p.y, p.z]
-+}
-+
-+fn point(p: cadmpeg_ir::math::Point3) -> [f64; 3] {
-+    [p.x, p.y, p.z]
-+}
-+
-+fn unit(u: &cadmpeg_ir::units::UnitVector3) -> Vec3 {
-+    let r = u.as_raw();
-+    Vec3::new(r.x, r.y, r.z)
-+}
-+
-+/// The record frame of a CADIR frame at `origin`: x its reference direction, z its axis.
-+fn frame(origin: [f64; 3], f: &OrthonormalFrame3) -> Frame {
-+    let (z, x) = (unit(f.axis()), unit(f.reference()));
-+    Frame {
-+        origin,
-+        x_axis: a(x),
-+        y_axis: a(z.cross(x)),
-+    }
-+}
-+
-+/// A rotation, a uniform scale and a move: `p ↦ s Q p + t`, from a placement's rows.
-+#[derive(Clone, Copy, Debug)]
-+pub(crate) struct Similarity {
-+    rows: [[f64; 4]; 3],
-+    scale: f64,
-+}
-+
-+impl Similarity {
-+    /// The placement `rows` (row i: `x_i' = r_i0 x + r_i1 y + r_i2 z + r_i3`), when it is a
-+    /// similarity that keeps handedness; else why not.
-+    pub(crate) fn of(rows: [[f64; 4]; 3]) -> R<Similarity> {
-+        if rows.iter().flatten().any(|x| !x.is_finite()) {
-+            return Err("a placement that is not finite".into());
+diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
+index 9e503db79..e4cf1ad17 100644
+--- a/solidcore/crates/solidcore-convert/src/brep.rs
++++ b/solidcore/crates/solidcore-convert/src/brep.rs
+@@ -87,7 +87,11 @@ impl Order {
+     /// The order of a B-rep's own lists.
+     #[must_use]
+     pub fn of(brep: &Brep) -> Self {
+-        Self { faces: brep.face_list().to_vec(), edges: brep.edge_list().to_vec(), vertices: brep.vertex_list().to_vec() }
++        Self {
++            faces: brep.face_list().to_vec(),
++            edges: brep.edge_list().to_vec(),
++            vertices: brep.vertex_list().to_vec(),
 +        }
-+        let [[a00, a01, a02, _], [a10, a11, a12, _], [a20, a21, a22, _]] = rows;
-+        let (c0, c1, c2) = (
-+            Vec3::new(a00, a10, a20),
-+            Vec3::new(a01, a11, a21),
-+            Vec3::new(a02, a12, a22),
-+        );
-+        let scale = c0.length();
-+        let near = |x: f64, y: f64| (x - y).abs() <= SIMILARITY * scale.max(f64::MIN_POSITIVE);
-+        let square = near(c0.dot(c1) / scale, 0.0)
-+            && near(c1.dot(c2) / scale, 0.0)
-+            && near(c0.dot(c2) / scale, 0.0);
-+        if !(scale > 0.0) || !square || !near(c1.length(), scale) || !near(c2.length(), scale) {
-+            return Err(unsupported("a placement that shears or scales unevenly"));
-+        }
-+        if !(c0.cross(c1).dot(c2) > 0.0) {
-+            return Err(unsupported("a placement that mirrors"));
-+        }
-+        Ok(Similarity { rows, scale })
-+    }
-+
-+    pub(crate) fn point(&self, p: [f64; 3]) -> [f64; 3] {
-+        self.rows
-+            .map(|r| r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3])
-+    }
-+
-+    /// A vector (a direction times a length): scaled with the placement.
-+    fn vector(&self, d: [f64; 3]) -> [f64; 3] {
-+        self.rows.map(|r| r[0] * d[0] + r[1] * d[1] + r[2] * d[2])
-+    }
-+
-+    /// A unit direction: turned, still unit.
-+    fn direction(&self, d: [f64; 3]) -> [f64; 3] {
-+        self.vector(d).map(|x| x / self.scale)
-+    }
-+
-+    fn frame(&self, f: &Frame) -> Frame {
-+        Frame {
-+            origin: self.point(f.origin),
-+            x_axis: self.direction(f.x_axis),
-+            y_axis: self.direction(f.y_axis),
-+        }
-+    }
-+
-+    fn curve(&self, c: BCurve) -> R<BCurve> {
-+        let s = self.scale;
-+        Ok(match c {
-+            // The direction is scaled with the line, so `t` stays where it was.
-+            BCurve::Line { start, end } => {
-+                let d = self.vector([end[0] - start[0], end[1] - start[1], end[2] - start[2]]);
-+                let start = self.point(start);
-+                BCurve::Line {
-+                    start,
-+                    end: [start[0] + d[0], start[1] + d[1], start[2] + d[2]],
-+                }
-+            }
-+            BCurve::Circle { frame, radius } => BCurve::Circle {
-+                frame: self.frame(&frame),
-+                radius: radius * s,
-+            },
-+            BCurve::Ellipse { frame, radii } => BCurve::Ellipse {
-+                frame: self.frame(&frame),
-+                radii: radii.map(|r| r * s),
-+            },
-+            BCurve::Polyline { points } => BCurve::Polyline {
-+                points: points.into_iter().map(|p| self.point(p)).collect(),
-+            },
-+            BCurve::Spline { knots, points } => BCurve::Spline {
-+                knots,
-+                points: points.into_iter().map(|p| self.point(p)).collect(),
-+            },
-+            // A rational spline's weights are kept: an affine map acts on its points alone.
-+            BCurve::RationalSpline { knots, homogeneous } => BCurve::RationalSpline {
-+                knots,
-+                homogeneous: homogeneous
-+                    .into_iter()
-+                    .map(|h| {
-+                        let w = h[3];
-+                        let p = self.point([h[0] / w, h[1] / w, h[2] / w]);
-+                        [p[0] * w, p[1] * w, p[2] * w, w]
-+                    })
-+                    .collect(),
-+            },
-+            BCurve::SurfaceIntersection { .. } => {
-+                return Err(unsupported("a placed intersection curve"));
-+            }
-+        })
-+    }
-+
-+    fn surface(&self, s: BSurface) -> R<BSurface> {
-+        let k = self.scale;
-+        Ok(match s {
-+            BSurface::Plane {
-+                origin,
-+                u_axis,
-+                v_axis,
-+            } => BSurface::Plane {
-+                origin: self.point(origin),
-+                u_axis: self.direction(u_axis),
-+                v_axis: self.direction(v_axis),
-+            },
-+            BSurface::Cylinder { frame, radius } => BSurface::Cylinder {
-+                frame: self.frame(&frame),
-+                radius: radius * k,
-+            },
-+            BSurface::Cone {
-+                frame,
-+                radius_at_origin,
-+                half_angle,
-+            } => BSurface::Cone {
-+                frame: self.frame(&frame),
-+                radius_at_origin: radius_at_origin * k,
-+                half_angle,
-+            },
-+            BSurface::Sphere { frame, radius } => BSurface::Sphere {
-+                frame: self.frame(&frame),
-+                radius: radius * k,
-+            },
-+            BSurface::Torus {
-+                frame,
-+                major_radius,
-+                minor_radius,
-+                tube_start,
-+            } => BSurface::Torus {
-+                frame: self.frame(&frame),
-+                major_radius: major_radius * k,
-+                minor_radius: minor_radius * k,
-+                tube_start,
-+            },
-+            BSurface::Spline {
-+                u_knots,
-+                v_knots,
-+                points,
-+            } => BSurface::Spline {
-+                u_knots,
-+                v_knots,
-+                points: points
-+                    .into_iter()
-+                    .map(|r| r.into_iter().map(|p| self.point(p)).collect())
-+                    .collect(),
-+            },
-+            BSurface::RationalSpline {
-+                u_knots,
-+                v_knots,
-+                homogeneous,
-+            } => BSurface::RationalSpline {
-+                u_knots,
-+                v_knots,
-+                homogeneous: homogeneous
-+                    .into_iter()
-+                    .map(|r| {
-+                        r.into_iter()
-+                            .map(|h| {
-+                                let w = h[3];
-+                                let p = self.point([h[0] / w, h[1] / w, h[2] / w]);
-+                                [p[0] * w, p[1] * w, p[2] * w, w]
-+                            })
-+                            .collect()
-+                    })
-+                    .collect(),
-+            },
-+            other => return Err(unsupported(format!("a placed {}", surface_kind(&other)))),
-+        })
-+    }
-+}
-+
-+fn surface_kind(s: &BSurface) -> &'static str {
-+    match s {
-+        BSurface::Plane { .. } | BSurface::PlaneThrough { .. } => "plane",
-+        BSurface::Cylinder { .. } => "cylinder",
-+        BSurface::Cone { .. } => "cone",
-+        BSurface::Sphere { .. } => "sphere",
-+        BSurface::Torus { .. } => "torus",
-+        BSurface::BallPatch { .. } => "ball patch",
-+        BSurface::Spline { .. } | BSurface::RationalSpline { .. } => "spline surface",
-+        BSurface::PlacedRevolution { .. } => "surface of revolution",
-+        BSurface::Blend { .. } => "blend surface",
-+    }
-+}
-+
-+/// An edge's curve: the record curve with CADIR's parameter, or `None` for a degenerate curve
-+/// (an edge collapsed to a point: a pole of the faces it bounds).
-+pub(crate) fn curve(g: &CurveGeometry) -> R<Option<BCurve>> {
-+    let solved = g
-+        .solved()
-+        .ok_or_else(|| unsupported("a procedural curve without its solved form"))?;
-+    solved_curve(solved, 0)
-+}
-+
-+fn solved_curve(g: &SolvedCurveGeometry, depth: usize) -> R<Option<BCurve>> {
-+    Ok(Some(match g {
-+        SolvedCurveGeometry::Line(l) => {
-+            let (o, d) = (point(l.origin().get()), unit(&l.direction()));
-+            BCurve::Line {
-+                start: o,
-+                end: a(v(o) + d),
-+            }
-+        }
-+        SolvedCurveGeometry::Circle(c) => BCurve::Circle {
-+            frame: frame(point(c.center().get()), c.frame()),
-+            radius: c.radius().get(),
-+        },
-+        SolvedCurveGeometry::Ellipse(e) => BCurve::Ellipse {
-+            frame: frame(point(e.center().get()), e.frame()),
-+            radii: [e.major_radius().get(), e.minor_radius().get()],
-+        },
-+        SolvedCurveGeometry::Nurbs(n) => {
-+            let points: Vec<[f64; 3]> = n
-+                .control_points()
-+                .into_iter()
-+                .map(|p| point(p.get()))
-+                .collect();
-+            let weights: Option<Vec<f64>> = n
-+                .weights()
-+                .map(|w| w.into_iter().map(|w| w.get()).collect());
-+            spline_curve(
-+                n.degree() as usize,
-+                n.knots().as_slice().to_vec(),
-+                &points,
-+                weights.as_deref(),
-+            )?
-+        }
-+        SolvedCurveGeometry::Polyline(p) => {
-+            let points: Vec<[f64; 3]> = p.points().map(|q| point(q.get())).collect();
-+            let params: Vec<f64> = match p.parameters() {
-+                Some(t) => t.map(|t| t.get()).collect(),
-+                None => (0..points.len()).map(|i| i as f64).collect(),
-+            };
-+            if params.len() != points.len()
-+                || params.windows(2).any(|w| !matches!(w, [x, y] if x < y))
-+            {
-+                return Err("a polyline whose parameters do not increase with its points".into());
-+            }
-+            let (Some(first), Some(last)) = (params.first(), params.last()) else {
-+                return Err("an empty polyline".into());
-+            };
-+            let knots: Vec<f64> = std::iter::once(*first)
-+                .chain(params.iter().copied())
-+                .chain(std::iter::once(*last))
-+                .collect();
-+            spline_curve(1, knots, &points, None)?
-+        }
-+        SolvedCurveGeometry::Degenerate(_) => return Ok(None),
-+        SolvedCurveGeometry::Transformed(placed) => {
-+            if depth >= MAX_PLACEMENTS {
-+                return Err("placed curves nested too deeply".into());
-+            }
-+            let Some(basis) = solved_curve(placed.basis(), depth + 1)? else {
-+                return Ok(None);
-+            };
-+            Similarity::of(placed.transform().rows3())?.curve(basis)?
-+        }
-+        SolvedCurveGeometry::Parabola(_) => return Err(unsupported("a parabola")),
-+        SolvedCurveGeometry::Hyperbola(_) => return Err(unsupported("a hyperbola")),
-+        SolvedCurveGeometry::Composite { .. } => return Err(unsupported("a composite curve")),
-+        SolvedCurveGeometry::Unknown { .. } => {
-+            return Err(unsupported("a curve of a kind the producer did not state"));
-+        }
-+    }))
-+}
-+
-+/// A face's surface, and whether the record's natural normal is opposite CADIR's.
-+pub(crate) fn surface(g: &SurfaceGeometry) -> R<(BSurface, bool)> {
-+    let solved = g
-+        .solved()
-+        .ok_or_else(|| unsupported("a procedural surface without its solved form"))?;
-+    solved_surface(solved, 0)
-+}
-+
-+fn solved_surface(g: &SolvedSurfaceGeometry, depth: usize) -> R<(BSurface, bool)> {
-+    Ok(match g {
-+        SolvedSurfaceGeometry::Plane(p) => {
-+            let f = frame(point(p.origin().get()), p.frame());
-+            (
-+                BSurface::Plane {
-+                    origin: f.origin,
-+                    u_axis: f.x_axis,
-+                    v_axis: f.y_axis,
-+                },
-+                false,
-+            )
-+        }
-+        SolvedSurfaceGeometry::Cylinder(c) => (
-+            BSurface::Cylinder {
-+                frame: frame(point(c.origin().get()), c.frame()),
-+                radius: c.radius().get(),
-+            },
-+            false,
-+        ),
-+        SolvedSurfaceGeometry::Cone(c) => {
-+            if c.ratio().get() != 1.0 {
-+                return Err(unsupported("an elliptical cone"));
-+            }
-+            let (f, radius, half_angle) = (
-+                frame(point(c.origin().get()), c.frame()),
-+                c.radius().get(),
-+                c.half_angle().get(),
-+            );
-+            if half_angle == 0.0 {
-+                // A cone of no angle is the cylinder over its section, in the same (u, v).
-+                if !(radius > 0.0) {
-+                    return Err(unsupported("a cone of no angle and no radius"));
-+                }
-+                (BSurface::Cylinder { frame: f, radius }, false)
-+            } else {
-+                (
-+                    BSurface::Cone {
-+                        frame: f,
-+                        radius_at_origin: radius,
-+                        half_angle,
-+                    },
-+                    false,
-+                )
-+            }
-+        }
-+        SolvedSurfaceGeometry::Sphere(s) => {
-+            let r = s.radius().get();
-+            (
-+                BSurface::Sphere {
-+                    frame: frame(point(s.center().get()), s.frame()),
-+                    radius: r.abs(),
-+                },
-+                r < 0.0,
-+            )
-+        }
-+        SolvedSurfaceGeometry::Torus(t) => {
-+            let minor = t.minor_radius().get();
-+            let torus = BSurface::Torus {
-+                frame: frame(point(t.center().get()), t.frame()),
-+                major_radius: t.major_radius().get(),
-+                minor_radius: minor.abs(),
-+                tube_start: 0.0,
-+            };
-+            (torus, minor < 0.0)
-+        }
-+        SolvedSurfaceGeometry::Nurbs(n) => {
-+            let points: Vec<Vec<[f64; 3]>> = n
-+                .control_grid()
-+                .into_iter()
-+                .map(|r| r.into_iter().map(|p| point(p.get())).collect())
-+                .collect();
-+            let weights: Option<Vec<Vec<f64>>> = n.weights().map(|w| {
-+                w.into_iter()
-+                    .map(|r| r.into_iter().map(|w| w.get()).collect())
-+                    .collect()
-+            });
-+            let surface = spline_surface(
-+                [n.u_degree() as usize, n.v_degree() as usize],
-+                [
-+                    n.u_knots().as_slice().to_vec(),
-+                    n.v_knots().as_slice().to_vec(),
-+                ],
-+                &points,
-+                weights.as_deref(),
-+            )?;
-+            (surface, n.normal_reversed())
-+        }
-+        SolvedSurfaceGeometry::Transformed(placed) => {
-+            if depth >= MAX_PLACEMENTS {
-+                return Err("placed surfaces nested too deeply".into());
-+            }
-+            let (basis, reversed) = solved_surface(placed.basis(), depth + 1)?;
-+            (
-+                Similarity::of(placed.transform().rows3())?.surface(basis)?,
-+                reversed,
-+            )
-+        }
-+        SolvedSurfaceGeometry::Polygonal(_) => return Err(unsupported("a polygonal surface")),
-+        SolvedSurfaceGeometry::Unknown { .. } => {
-+            return Err(unsupported(
-+                "a surface of a kind the producer did not state",
-+            ));
-+        }
-+    })
-+}
-+
-+/// The rows of CADIR's affine placement, `[[f64; 4]; 3]`.
-+trait Rows3 {
-+    fn rows3(&self) -> [[f64; 4]; 3];
-+}
-+
-+impl Rows3 for cadmpeg_ir::transform::Transform {
-+    fn rows3(&self) -> [[f64; 4]; 3] {
-+        let r = self.rows();
-+        [r[0], r[1], r[2]]
-+    }
-+}
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-new file mode 100644
-index 000000000..fa9666560
---- /dev/null
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -0,0 +1,378 @@
-+//! CADIR, cadmpeg's neutral CAD model, read into B-rep records ([`solidcore_record::brep`]),
-+//! schema 4. Each region of a body is one record: its shells' faces on their surfaces, bounded
-+//! by loops of edges on their curves between vertices, added to an [`Assembly`] and finished as
-+//! the STEP reader finishes its solids (pcurves, seams, tolerances, the canonical order), so a
-+//! file read through cadmpeg and the same file written as STEP become the same record.
-+//!
-+//! Conventions: CADIR's topology is STEP's. A face's sense compares its normal with its
-+//! surface's, a coedge's sense compares its traversal with its edge's curve, an edge runs from
-+//! its start vertex to its end along its curve, and a loop's coedges are in traversal order, an
-+//! outer loop counter-clockwise about the face's normal. The geometry is in millimetres and
-+//! radians ([`geometry`] maps each carrier).
-+//!
-+//! An edge whose curve is degenerate, or that has none, collapses to its vertex (a cone's apex,
-+//! a sphere's pole): its uses are left out of their loops, and a loop of nothing else is that
-+//! vertex. What cannot be read refuses its body's region, with the reason, and the others are
-+//! still read ([`Bodies::failures`]).
-+//!
-+//! Input is hostile: every id is looked up (a missing one refuses its region), and the faces of
-+//! one model and the edges of one loop are capped.
-+
-+mod geometry;
-+
-+use std::collections::HashMap;
-+
-+use cadmpeg_ir::document::CadIr;
-+use cadmpeg_ir::topology::{
-+    BodyKind, Coedge, Edge, Face, FaceLoops, Loop, LoopBoundary, Sense, Shell,
-+};
-+use solidcore_ops::pcurve::Trims;
-+pub use solidcore_step::assembly::Solid;
-+use solidcore_step::assembly::{Assembly, Bound, Kind};
-+use solidcore_step::topology::{
-+    MAX_FACES, MAX_FILE_FACES, MAX_FIT_TOLERANCE, MAX_LOOP, MIN_TOLERANCE,
-+};
-+
-+use geometry::R;
-+
-+/// One body region read into a record.
-+#[derive(Clone, Debug)]
-+pub struct Read {
-+    /// The body's id in the model.
-+    pub body: String,
-+    /// Which of the body's regions this is, in its order.
-+    pub region: usize,
-+    /// The record; each of its faces' origin is that face's index in the model's faces.
-+    pub solid: Solid,
-+}
-+
-+/// A body region that could not be read, and why.
-+#[derive(Clone, Debug, PartialEq)]
-+pub struct Failure {
-+    pub body: String,
-+    pub region: usize,
-+    pub message: String,
-+}
-+
-+/// Every body region of a model: those read and those refused.
-+#[derive(Clone, Debug, Default)]
-+pub struct Bodies {
-+    pub read: Vec<Read>,
-+    pub failures: Vec<Failure>,
-+}
-+
-+/// The model's tolerance for its records: CADIR's linear tolerance, within the range the STEP
-+/// reader takes a file's.
-+pub fn tolerance(ir: &CadIr) -> f64 {
-+    ir.tolerances
-+        .linear
-+        .get()
-+        .clamp(MIN_TOLERANCE, MAX_FIT_TOLERANCE)
-+}
-+
-+/// Every region of every solid or sheet body of `ir`, read into a record. `trims` makes the
-+/// pcurves that have no closed form; without it a face with such a use refuses its region. A
-+/// wire body has no faces and is not read.
-+pub fn read_bodies(ir: &CadIr, trims: Option<&dyn Trims>) -> Bodies {
-+    let model = Model::of(ir);
-+    let mut out = Bodies::default();
-+    let mut budget = MAX_FILE_FACES;
-+    for body in &ir.model.bodies {
-+        let id = body.id.as_str().to_string();
-+        let kind = match body.kind {
-+            BodyKind::Solid => Some(Kind::Solid),
-+            BodyKind::Sheet | BodyKind::General => Some(Kind::Model),
-+            BodyKind::Wire => None,
-+        };
-+        let Some(kind) = kind else { continue };
-+        for (k, region) in body.regions.iter().enumerate() {
-+            let name = body.name.clone().unwrap_or_default();
-+            match model.region(
-+                region.as_str(),
-+                kind,
-+                name,
-+                tolerance(ir),
-+                trims,
-+                &mut budget,
-+            ) {
-+                Ok(solid) => out.read.push(Read {
-+                    body: id.clone(),
-+                    region: k,
-+                    solid,
-+                }),
-+                Err(message) => out.failures.push(Failure {
-+                    body: id.clone(),
-+                    region: k,
-+                    message,
-+                }),
-+            }
-+        }
-+    }
-+    out
-+}
-+
-+/// The model's arenas by id.
-+struct Model<'a> {
-+    regions: HashMap<&'a str, &'a cadmpeg_ir::topology::Region>,
-+    shells: HashMap<&'a str, &'a Shell>,
-+    faces: HashMap<&'a str, (usize, &'a Face)>,
-+    loops: HashMap<&'a str, &'a Loop>,
-+    coedges: HashMap<&'a str, &'a Coedge>,
-+    edges: HashMap<&'a str, &'a Edge>,
-+    vertices: HashMap<&'a str, &'a cadmpeg_ir::topology::Vertex>,
-+    points: HashMap<&'a str, &'a cadmpeg_ir::topology::Point>,
-+    surfaces: HashMap<&'a str, &'a cadmpeg_ir::geometry::Surface>,
-+    curves: HashMap<&'a str, &'a cadmpeg_ir::geometry::Curve>,
-+}
-+
-+impl<'a> Model<'a> {
-+    fn of(ir: &'a CadIr) -> Model<'a> {
-+        let m = &ir.model;
-+        Model {
-+            regions: m.regions.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            shells: m.shells.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            faces: m
-+                .faces
-+                .iter()
-+                .enumerate()
-+                .map(|(i, x)| (x.id.as_str(), (i, x)))
-+                .collect(),
-+            loops: m.loops.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            coedges: m.coedges.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            edges: m.edges.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            vertices: m.vertices.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            points: m.points.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            surfaces: m.surfaces.iter().map(|x| (x.id.as_str(), x)).collect(),
-+            curves: m.curves.iter().map(|x| (x.id.as_str(), x)).collect(),
-+        }
-+    }
-+
-+    /// Region `id` read into a record of `kind` (a solid's first shell its outer one, the rest
-+    /// its voids).
-+    fn region(
-+        &self,
-+        id: &str,
-+        kind: Kind,
-+        name: String,
-+        tol: f64,
-+        trims: Option<&dyn Trims>,
-+        budget: &mut usize,
-+    ) -> R<Solid> {
-+        let region = self
-+            .regions
-+            .get(id)
-+            .ok_or_else(|| format!("missing region {id}"))?;
-+        let kind = match kind {
-+            Kind::Solid if region.shells.len() > 1 => Kind::Voids,
-+            k => k,
-+        };
-+        let mut b = Builder {
-+            model: self,
-+            asm: Assembly::new(tol, trims),
-+            vertices: HashMap::new(),
-+            edges: HashMap::new(),
-+        };
-+        let mut shells = Vec::new();
-+        for s in &region.shells {
-+            if shells.len() >= solidcore_record::brep::MAX_SHELLS {
-+                return Err(format!(
-+                    "more than {} shells",
-+                    solidcore_record::brep::MAX_SHELLS
-+                ));
-+            }
-+            let shell = self
-+                .shells
-+                .get(s.as_str())
-+                .ok_or_else(|| format!("missing shell {s}"))?;
-+            let mut faces = Vec::new();
-+            for f in shell.faces() {
-+                if faces.len() >= MAX_FACES {
-+                    return Err(format!("more than {MAX_FACES} faces"));
-+                }
-+                *budget = budget
-+                    .checked_sub(1)
-+                    .ok_or_else(|| format!("more than {MAX_FILE_FACES} faces in one model"))?;
-+                faces.push(b.face(f.as_str())?);
-+            }
-+            shells.push(faces);
-+        }
-+        b.asm.finish(0, name, shells, kind)
-+    }
-+}
-+
-+/// One region being read: the model, and what of it the assembly holds.
-+struct Builder<'m, 'a, 't> {
-+    model: &'m Model<'a>,
-+    asm: Assembly<'t>,
-+    /// CADIR vertex → the assembly's.
-+    vertices: HashMap<&'a str, u32>,
-+    /// CADIR edge → the assembly's edge, or the vertex an edge collapsed to a point is.
-+    edges: HashMap<&'a str, Result<u32, u32>>,
-+}
-+
-+impl<'a> Builder<'_, 'a, '_> {
-+    fn vertex(&mut self, id: &'a str) -> R<u32> {
-+        if let Some(v) = self.vertices.get(id) {
-+            return Ok(*v);
-+        }
-+        let vertex = self
-+            .model
-+            .vertices
-+            .get(id)
-+            .ok_or_else(|| format!("missing vertex {id}"))?;
-+        let point = self
-+            .model
-+            .points
-+            .get(vertex.point.as_str())
-+            .ok_or_else(|| format!("missing point {}", vertex.point))?;
-+        let p = point.position().get();
-+        let v = self.asm.add_vertex([p.x, p.y, p.z])?;
-+        self.vertices.insert(id, v);
-+        Ok(v)
-+    }
-+
-+    /// Edge `id` in the assembly, or the vertex it collapses to. The record edge runs along its
-+    /// curve; its vertices are the CADIR edge's, at the interval's ends their points are nearer.
-+    fn edge(&mut self, id: &'a str, origin: u64) -> R<Result<u32, u32>> {
-+        if let Some(e) = self.edges.get(id) {
-+            return Ok(*e);
-+        }
-+        let edge = self
-+            .model
-+            .edges
-+            .get(id)
-+            .ok_or_else(|| format!("missing edge {id}"))?;
-+        let (start, end) = (
-+            self.vertex(edge.start.as_str())?,
-+            self.vertex(edge.end.as_str())?,
-+        );
-+        let curve = match edge.carrier.curve() {
-+            Some(c) => {
-+                let carrier = self
-+                    .model
-+                    .curves
-+                    .get(c.as_str())
-+                    .ok_or_else(|| format!("missing curve {c}"))?;
-+                geometry::curve(&carrier.geometry).map_err(|m| format!("edge {id}: {m}"))?
-+            }
-+            None => None,
-+        };
-+        let made = match curve {
-+            Some(curve) => {
-+                let interval = edge.param_range().map(|r| r.get()).ok_or_else(|| {
-+                    format!("edge {id}: not supported yet: an edge without a parameter range")
-+                })?;
-+                Ok(self
-+                    .asm
-+                    .add_edge(origin, curve, interval, [start, end])
-+                    .map_err(|m| format!("edge {id}: {m}"))?
-+                    .0)
-+            }
-+            // Collapsed to a point: its vertices are one.
-+            None if start == end || same_point(&self.asm, start, end) => Err(start),
-+            None => return Err(format!("edge {id}: no curve between two vertices apart")),
-+        };
-+        self.edges.insert(id, made);
-+        Ok(made)
-+    }
-+
-+    /// Face `id` as its shell uses it: its index in the assembly and its side (always the face's
-+    /// own normal: CADIR's shells hold faces as they are).
-+    fn face(&mut self, id: &'a str) -> R<(u32, bool)> {
-+        let &(index, face) = self
-+            .model
-+            .faces
-+            .get(id)
-+            .ok_or_else(|| format!("missing face {id}"))?;
-+        let origin = index as u64;
-+        let surface = self
-+            .model
-+            .surfaces
-+            .get(face.surface.as_str())
-+            .ok_or_else(|| format!("face {id}: missing surface {}", face.surface))?;
-+        let (surface, reversed) =
-+            geometry::surface(&surface.geometry).map_err(|m| format!("face {id}: {m}"))?;
-+        let ids: Vec<&'a cadmpeg_ir::ids::LoopId> = face.loops.iter().collect();
-+        if ids.is_empty() {
-+            return Err(format!(
-+                "face {id}: not supported yet: a face with no boundary"
-+            ));
-+        }
-+        let outer = match &face.loops {
-+            FaceLoops::Classified { outer, .. } => ids.iter().position(|l| *l == outer),
-+            FaceLoops::Unspecified { .. } => None,
-+        };
-+        // Bounds relative to the record surface's natural normal.
-+        let side = (face.sense == Sense::Forward) != reversed;
-+        let mut bounds = Vec::new();
-+        for l in ids {
-+            let mut bound = self
-+                .bound(l.as_str(), origin)
-+                .map_err(|m| format!("face {id}: {m}"))?;
-+            if !side && let Bound::Edges(uses) = &mut bound {
-+                uses.reverse();
-+                for u in uses.iter_mut() {
-+                    u.1 = !u.1;
-+                }
-+            }
-+            bounds.push(bound);
-+        }
-+        Ok((
-+            self.asm.add_face(origin, surface, bounds, outer, side)?,
-+            side,
-+        ))
-+    }
-+
-+    /// Loop `id`: its coedges as edge uses in traversal order, those of collapsed edges left
-+    /// out; a loop of nothing else (or a vertex loop) is its vertex.
-+    fn bound(&mut self, id: &'a str, origin: u64) -> R<Bound> {
-+        let lp = self
-+            .model
-+            .loops
-+            .get(id)
-+            .ok_or_else(|| format!("missing loop {id}"))?;
-+        let ring = match &lp.boundary {
-+            LoopBoundary::Vertex { vertex, .. } => {
-+                return Ok(Bound::Vertex(self.vertex(vertex.as_str())?));
-+            }
-+            LoopBoundary::Ring(ring) => ring.coedges(),
-+        };
-+        if ring.len() > MAX_LOOP {
-+            return Err(format!("a loop of {} edges", ring.len()));
-+        }
-+        let mut uses = Vec::new();
-+        let mut pole = None;
-+        for c in ring {
-+            let coedge = self
-+                .model
-+                .coedges
-+                .get(c.as_str())
-+                .ok_or_else(|| format!("missing coedge {c}"))?;
-+            match self.edge(coedge.edge.as_str(), origin)? {
-+                // A coedge's sense is against its edge's curve, which the record edge runs along
-+                // whichever of its vertices the producer called its start.
-+                Ok(e) => uses.push((e, coedge.sense == Sense::Forward)),
-+                Err(v) => pole = Some(v),
-+            }
-+        }
-+        match (uses.is_empty(), pole) {
-+            (false, _) => Ok(Bound::Edges(uses)),
-+            (true, Some(v)) => Ok(Bound::Vertex(v)),
-+            (true, None) => Err(format!("loop {id} has no edges")),
-+        }
-+    }
-+}
-+
-+/// Two of the assembly's vertices at one point to within its tolerance.
-+fn same_point(asm: &Assembly<'_>, a: u32, b: u32) -> bool {
-+    match (asm.vertex_point(a), asm.vertex_point(b)) {
-+        (Some(p), Some(q)) => {
-+            let d = [p[0] - q[0], p[1] - q[1], p[2] - q[2]];
-+            solidcore::Vec3::new(d[0], d[1], d[2]).length() <= asm.tolerance()
-+        }
-+        _ => false,
-+    }
-+}
-+
-+#[cfg(test)]
-+mod tests;
-diff --git a/solidcore/crates/solidcore-cadir/src/tests.rs b/solidcore/crates/solidcore-cadir/src/tests.rs
-new file mode 100644
-index 000000000..d41c6920b
---- /dev/null
-+++ b/solidcore/crates/solidcore-cadir/src/tests.rs
-@@ -0,0 +1,132 @@
-+//! Models read into records: cadmpeg's unit cube as it is, and changed the ways a producer may
-+//! write the same solid (an edge's vertices the other way round, a face on a plane facing the
-+//! other way), and broken the ways hostile input may be. The cube is 10 mm across: 1000 mm³.
-+
-+use super::*;
-+use cadmpeg_ir::geometry::{SolvedSurfaceGeometry, SurfaceGeometry};
-+use cadmpeg_ir::math::{Point3, Vector3};
-+
-+fn cube() -> CadIr {
-+    cadmpeg_ir::examples::unit_cube().unwrap()
-+}
-+
-+fn one(ir: &CadIr) -> Solid {
-+    let bodies = read_bodies(ir, None);
-+    assert!(bodies.failures.is_empty(), "{:?}", bodies.failures);
-+    assert_eq!(bodies.read.len(), 1);
-+    bodies.read.into_iter().next().unwrap().solid
-+}
-+
-+/// The record's volume: positive when its faces face out of the material.
-+fn volume(s: &Solid) -> f64 {
-+    let (body, _) = solidcore_ops::Body::from_record(&s.brep, false).unwrap();
-+    body.volume(1e-9).unwrap()
-+}
-+
-+#[test]
-+fn the_example_cube_is_a_closed_solid_record_of_its_volume() {
-+    let s = one(&cube());
-+    assert_eq!(
-+        (
-+            s.brep.faces.len(),
-+            s.brep.edges.len(),
-+            s.brep.vertices.len()
-+        ),
-+        (6, 12, 8)
-+    );
-+    assert!(!s.sheet);
-+    assert!(s.turned.is_empty(), "{:?}", s.turned);
-+    for e in &s.brep.edges {
-+        assert_eq!(e.uses.len(), 2);
-+    }
-+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
-+    // Each face's origin is its index in the model's faces.
-+    let mut origins = s.face_origin.clone();
-+    origins.sort_unstable();
-+    assert_eq!(origins, vec![0, 1, 2, 3, 4, 5]);
-+}
-+
-+#[test]
-+fn an_edge_whose_vertices_are_written_the_other_way_round_is_turned_and_noted() {
-+    let mut ir = cube();
-+    let edge = ir.model.edges.first_mut().unwrap();
-+    std::mem::swap(&mut edge.start, &mut edge.end);
-+    let s = one(&ir);
-+    assert!(
-+        s.notes
-+            .iter()
-+            .any(|n| n.contains("1 edges whose vertices lie at the other ends")),
-+        "{:?}",
-+        s.notes
-+    );
-+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
-+}
-+
-+#[test]
-+fn a_face_on_a_plane_facing_the_other_way_keeps_its_side() {
-+    let mut ir = cube();
-+    let face = ir.model.faces.first().unwrap().clone();
-+    let surface = ir
-+        .model
-+        .surfaces
-+        .iter_mut()
-+        .find(|s| s.id == face.surface)
-+        .unwrap();
-+    let SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(plane)) = &surface.geometry else {
-+        panic!("{:?}", surface.geometry)
-+    };
-+    let o = plane.origin().get();
-+    let (n, u) = (
-+        plane.frame().axis().as_raw(),
-+        plane.frame().reference().as_raw(),
-+    );
-+    let flipped = cadmpeg_ir::geometry::analytic::PlaneSurface::try_new(
-+        Point3::new(o.x, o.y, o.z),
-+        Vector3::new(-n.x, -n.y, -n.z),
-+        Vector3::new(u.x, u.y, u.z),
-+    )
-+    .unwrap();
-+    surface.geometry = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Plane(flipped));
-+    let f = ir.model.faces.first_mut().unwrap();
-+    f.sense = if f.sense == Sense::Forward {
-+        Sense::Reversed
-+    } else {
-+        Sense::Forward
-+    };
-+    let s = one(&ir);
-+    assert!(s.turned.is_empty(), "{:?}", s.turned);
-+    assert!((volume(&s) - 1000.0).abs() < 1e-6, "{}", volume(&s));
-+}
-+
-+#[test]
-+fn a_missing_coedge_refuses_its_region_without_a_panic() {
-+    let mut ir = cube();
-+    ir.model.coedges.remove(0);
-+    let bodies = read_bodies(&ir, None);
-+    assert!(bodies.read.is_empty());
-+    assert_eq!(bodies.failures.len(), 1);
-+    assert!(
-+        bodies.failures[0].message.contains("missing coedge"),
-+        "{:?}",
-+        bodies.failures
-+    );
-+}
-+
-+#[test]
-+fn a_vertex_far_from_its_edges_refuses_its_region() {
-+    let mut ir = cube();
-+    let v = ir.model.vertices.first().unwrap().point.clone();
-+    let p = ir.model.points.iter_mut().find(|p| p.id == v).unwrap();
-+    // The point moved 5 mm along x, through its wire form.
-+    let mut wire = serde_json::to_value(&*p).unwrap();
-+    let x = wire["position"]["x"].as_f64().unwrap();
-+    wire["position"]["x"] = serde_json::json!(x + 5.0);
-+    *p = serde_json::from_value(wire).unwrap();
-+    let bodies = read_bodies(&ir, None);
-+    assert!(bodies.read.is_empty());
-+    assert!(
-+        bodies.failures[0].message.contains("off its curve"),
-+        "{:?}",
-+        bodies.failures
-+    );
-+}
-diff --git a/solidcore/crates/solidcore-step/src/assembly.rs b/solidcore/crates/solidcore-step/src/assembly.rs
-index 919a027b0..1e2588dc4 100644
---- a/solidcore/crates/solidcore-step/src/assembly.rs
-+++ b/solidcore/crates/solidcore-step/src/assembly.rs
-@@ -227,6 +227,11 @@ impl<'t> Assembly<'t> {
-         self.tol
-     }
- 
-+    /// Where vertex `v` is, if there is one.
-+    pub fn vertex_point(&self, v: u32) -> Option<P3> {
-+        self.vertices.get(v as usize).map(|x| x.point)
-+    }
-+
-     /// A vertex at `point`, its index.
-     pub fn add_vertex(&mut self, point: P3) -> R<u32> {
-         let i = index(self.vertices.len())?;
-diff --git a/solidcore/plan/panic-sites.tsv b/solidcore/plan/panic-sites.tsv
-index d4b467f68..955a00715 100644
---- a/solidcore/plan/panic-sites.tsv
-+++ b/solidcore/plan/panic-sites.tsv
-@@ -3,6 +3,7 @@
- # SolidError (checked arithmetic, .get(), a length check) and drop its row. `proven` marks
- # a site that cannot panic, with the reason; it is exempt from the ratchet.
- file	fn	pattern	n	status	code	reason
-+crates/solidcore-cadir/src/lib.rs	tolerance	f64::clamp	1	proven	clamp(MIN_TOLERANCE, MAX_FIT_TOLERANCE)	constant bounds MIN_TOLERANCE (1e-7) <= MAX_FIT_TOLERANCE (1.0)
- crates/solidcore-step/src/eval.rs	BSplineSurface::point	with_capacity	1	proven	Vec::with_capacity(nu)	nu = points.len(), already in memory
- crates/solidcore-step/src/eval.rs	expanded	with_capacity	1	proven	Vec::with_capacity(total)	total == points + degree + 1 with degree < points, checked just above: at most twice the points, already in memory
- crates/solidcore-step/src/read.rs	Reader::bspline_surface	with_capacity	1	proven	Vec::with_capacity(rows.len().min(MAX_CTRL))	rows.len() of rows already in memory, and at most MAX_CTRL
-diff --git a/solidcore/scripts/ci/check_panic_sites.py b/solidcore/scripts/ci/check_panic_sites.py
-index 027ee0cdf..2ce7265bd 100644
---- a/solidcore/scripts/ci/check_panic_sites.py
-+++ b/solidcore/scripts/ci/check_panic_sites.py
-@@ -46,7 +46,7 @@ LIST = Path("plan/panic-sites.tsv")
- # solidcore and the STEP crates SolidCraft links (solidcore-step: SolidCraft's STEP reader,
- # moved in by tangency-labs/solidcraft#13979). nurbs-grid-mesh is not here: nothing depends on
- # it, and docs/layers.md has it merged into solidcore-tess and then deleted.
--CRATES = ["solidcore", "step-export", "solidcore-step"]
-+CRATES = ["solidcore", "step-export", "solidcore-step", "solidcore-cadir"]
- COLUMNS = ["file", "fn", "pattern", "n", "status", "code", "reason"]
- 
- # clippy `disallowed-methods` path -> pattern name. Only calls that can panic on their
--- 
-2.54.0 (Apple Git-157)
-
-
-From fbf01439676dde5dc2355998ea308fa1c7769444 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 11:38:52 -0800
-Subject: [PATCH 08/15] solidcore-cadir: decreasing polyline parameters, a
- rounding-only similarity check, shell members noted, normal tests
-
-Review follow-up.
-- A polyline whose parameters decrease along its samples (CADIR admits both directions) is read
-  as the same map from parameter to point instead of refusing its region.
-- A placement is taken as a rotation and uniform scale only to within the rounding of a matrix
-  written to double precision (64 ulp), not 1e-9: diag(1, 1, 1 + 5e-10) is now refused.
-- A shell's wire edges and free vertices, which a record of faces cannot hold yet, are noted on
-  the region instead of left out silently.
-- Tests: a negative sphere and torus (tube) radius turn the surface side and a positive one does
-  not; NURBS `normal_reversed` turns it; descending polyline parameters keep their points.
-- The public result fields are documented.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- .../crates/solidcore-cadir/src/geometry.rs    |  22 +++-
- solidcore/crates/solidcore-cadir/src/lib.rs   |  16 ++-
- solidcore/crates/solidcore-cadir/src/tests.rs | 102 ++++++++++++++++++
- 3 files changed, 134 insertions(+), 6 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/geometry.rs b/solidcore/crates/solidcore-cadir/src/geometry.rs
-index b51c93a0a..e67ccbfbf 100644
---- a/solidcore/crates/solidcore-cadir/src/geometry.rs
-+++ b/solidcore/crates/solidcore-cadir/src/geometry.rs
-@@ -35,8 +35,11 @@ pub(crate) type R<T> = Result<T, String>;
- /// Deepest chain of placed carriers followed (CADIR caps its own nesting too).
- const MAX_PLACEMENTS: usize = 16;
- /// How far a placement's columns may be from one length and from square to each other, relative
--/// to their length, for it to be taken as a rotation and a uniform scale.
--const SIMILARITY: f64 = 1e-9;
-+/// to their length, for it to be taken as a rotation and a uniform scale: the rounding of an
-+/// orthonormal matrix written to double precision (a few units in the last place of each of its
-+/// dot products), not a modelling tolerance, so a placement that really scales unevenly by as
-+/// little as 1e-12 is refused.
-+const SIMILARITY: f64 = 64.0 * f64::EPSILON;
- 
- fn unsupported(what: impl std::fmt::Display) -> String {
-     format!("not supported yet: {what}")
-@@ -305,15 +308,24 @@ fn solved_curve(g: &SolvedCurveGeometry, depth: usize) -> R<Option<BCurve>> {
-             )?
-         }
-         SolvedCurveGeometry::Polyline(p) => {
--            let points: Vec<[f64; 3]> = p.points().map(|q| point(q.get())).collect();
--            let params: Vec<f64> = match p.parameters() {
-+            let mut points: Vec<[f64; 3]> = p.points().map(|q| point(q.get())).collect();
-+            let mut params: Vec<f64> = match p.parameters() {
-                 Some(t) => t.map(|t| t.get()).collect(),
-                 None => (0..points.len()).map(|i| i as f64).collect(),
-             };
-+            // CADIR admits parameters that decrease along the samples: the same map from
-+            // parameter to point, read with both lists the other way round.
-+            if params.windows(2).all(|w| matches!(w, [x, y] if x > y)) {
-+                points.reverse();
-+                params.reverse();
-+            }
-             if params.len() != points.len()
-                 || params.windows(2).any(|w| !matches!(w, [x, y] if x < y))
-             {
--                return Err("a polyline whose parameters do not increase with its points".into());
-+                return Err(
-+                    "a polyline whose parameters do not change monotonically with its points"
-+                        .into(),
-+                );
-             }
-             let (Some(first), Some(last)) = (params.first(), params.last()) else {
-                 return Err("an empty polyline".into());
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index fa9666560..baf70cd9d 100644
---- a/solidcore/crates/solidcore-cadir/src/lib.rs
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -49,15 +49,20 @@ pub struct Read {
- /// A body region that could not be read, and why.
- #[derive(Clone, Debug, PartialEq)]
- pub struct Failure {
-+    /// The body's id in the model.
-     pub body: String,
-+    /// Which of the body's regions this is, in its order (from 0).
-     pub region: usize,
-+    /// Why the region was not read.
-     pub message: String,
- }
- 
- /// Every body region of a model: those read and those refused.
- #[derive(Clone, Debug, Default)]
- pub struct Bodies {
-+    /// The regions read into records, in the model's order.
-     pub read: Vec<Read>,
-+    /// The regions that could not be read, with why.
-     pub failures: Vec<Failure>,
- }
- 
-@@ -173,6 +178,7 @@ impl<'a> Model<'a> {
-             edges: HashMap::new(),
-         };
-         let mut shells = Vec::new();
-+        let mut left_out = 0usize;
-         for s in &region.shells {
-             if shells.len() >= solidcore_record::brep::MAX_SHELLS {
-                 return Err(format!(
-@@ -184,6 +190,8 @@ impl<'a> Model<'a> {
-                 .shells
-                 .get(s.as_str())
-                 .ok_or_else(|| format!("missing shell {s}"))?;
-+            // A shell's wire edges and free vertices have no place in a record of faces yet.
-+            left_out += shell.wire_edges().len() + shell.free_vertices().len();
-             let mut faces = Vec::new();
-             for f in shell.faces() {
-                 if faces.len() >= MAX_FACES {
-@@ -196,7 +204,13 @@ impl<'a> Model<'a> {
-             }
-             shells.push(faces);
-         }
--        b.asm.finish(0, name, shells, kind)
-+        let mut solid = b.asm.finish(0, name, shells, kind)?;
-+        if left_out > 0 {
-+            solid.notes.push(format!(
-+                "{left_out} wire edges and free vertices of its shells left out"
-+            ));
-+        }
-+        Ok(solid)
      }
  }
  
-diff --git a/solidcore/crates/solidcore-cadir/src/tests.rs b/solidcore/crates/solidcore-cadir/src/tests.rs
-index d41c6920b..f74b95a4b 100644
---- a/solidcore/crates/solidcore-cadir/src/tests.rs
-+++ b/solidcore/crates/solidcore-cadir/src/tests.rs
-@@ -130,3 +130,105 @@ fn a_vertex_far_from_its_edges_refuses_its_region() {
-         bodies.failures
-     );
- }
-+
-+/// The side a record surface keeps against CADIR's: a sphere or torus whose (tube) radius is
-+/// negative has CADIR's normal pointing inward, so the record (with the radius's magnitude,
-+/// whose natural normal points out) is reversed against it; with a positive radius it is not.
-+/// Both signs are checked, so a reversal applied to both could not pass.
-+#[test]
-+fn a_negative_radius_turns_the_surface_side_and_a_positive_one_does_not() {
-+    use cadmpeg_ir::geometry::analytic::{SphereSurface, TorusSurface};
-+    use solidcore_record::brep::Surface as BSurface;
-+    let (c, z, x) = (
-+        Point3::new(1.0, 2.0, 3.0),
-+        Vector3::new(0.0, 0.0, 1.0),
-+        Vector3::new(1.0, 0.0, 0.0),
-+    );
-+    for r in [5.0, -5.0] {
-+        let g = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Sphere(
-+            SphereSurface::try_new(c, z, x, r).unwrap(),
-+        ));
-+        let (s, reversed) = geometry::surface(&g).unwrap();
-+        assert!(
-+            matches!(s, BSurface::Sphere { radius, .. } if radius == 5.0),
-+            "{s:?}"
-+        );
-+        assert_eq!(reversed, r < 0.0, "sphere radius {r}");
-+        let g = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Torus(
-+            TorusSurface::try_new(c, z, x, 20.0, r).unwrap(),
-+        ));
-+        let (s, reversed) = geometry::surface(&g).unwrap();
-+        assert!(
-+            matches!(s, BSurface::Torus { minor_radius, major_radius, .. } if minor_radius == 5.0 && major_radius == 20.0),
-+            "{s:?}"
-+        );
-+        assert_eq!(reversed, r < 0.0, "torus tube radius {r}");
-+    }
-+}
-+
-+/// A NURBS surface CADIR marks `normal_reversed` is reversed against its record, whose natural
-+/// normal is `Pu × Pv`; one not marked is not.
-+#[test]
-+fn a_nurbs_surface_marked_normal_reversed_turns_the_side() {
-+    use cadmpeg_ir::geometry::nurbs::{NurbsPoleGrid, NurbsSurface, NurbsSurfaceAxis};
-+    for flag in [false, true] {
-+        let axis = || NurbsSurfaceAxis::new(1, vec![0.0, 0.0, 1.0, 1.0], false);
-+        let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
-+        let poles = NurbsPoleGrid::Polynomial {
-+            rows: vec![
-+                vec![p(0.0, 0.0), p(0.0, 1.0)],
-+                vec![p(1.0, 0.0), p(1.0, 1.0)],
-+            ],
-+        };
-+        let g = SurfaceGeometry::Solved(SolvedSurfaceGeometry::Nurbs(
-+            NurbsSurface::new(axis(), axis(), poles, flag).unwrap(),
-+        ));
-+        let (_, reversed) = geometry::surface(&g).unwrap();
-+        assert_eq!(reversed, flag);
-+    }
-+}
-+
-+/// A polyline whose parameters decrease along its samples is the same map from parameter to
-+/// point: the point at each parameter is the sample given with it.
-+#[test]
-+fn a_polyline_with_decreasing_parameters_keeps_its_parameters() {
-+    use cadmpeg_ir::geometry::sampled::{PolylineCurve, PolylineSamples, PolylineVertex};
-+    use cadmpeg_ir::geometry::{CurveGeometry, SolvedCurveGeometry};
-+    let at = |t: f64, x: f64| PolylineVertex {
-+        parameter: t,
-+        point: Point3::new(x, 0.0, 0.0),
-+    };
-+    let samples = PolylineSamples::Parameterized {
-+        vertices: vec![at(2.0, 0.0), at(1.0, 4.0), at(0.0, 5.0)]
-+            .try_into()
-+            .unwrap(),
-+    };
-+    let g = CurveGeometry::Solved(SolvedCurveGeometry::Polyline(
-+        PolylineCurve::new(samples, 0.0).unwrap(),
-+    ));
-+    let Some(solidcore_record::brep::Curve::Spline { knots, points }) =
-+        geometry::curve(&g).unwrap()
-+    else {
-+        panic!("not a spline")
-+    };
-+    assert_eq!(knots, vec![0.0, 0.0, 1.0, 2.0, 2.0]);
-+    assert_eq!(
-+        points,
-+        vec![[5.0, 0.0, 0.0], [4.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
-+    );
-+}
-+
-+/// A placement that scales unevenly, by however little more than rounding, is refused; a
-+/// rotation is taken.
-+#[test]
-+fn a_placement_scaling_unevenly_is_refused() {
-+    let uneven = [
-+        [1.0, 0.0, 0.0, 0.0],
-+        [0.0, 1.0, 0.0, 0.0],
-+        [0.0, 0.0, 1.0 + 5e-10, 0.0],
-+    ];
-+    assert!(geometry::Similarity::of(uneven).is_err());
-+    let (c, s) = (0.6, 0.8);
-+    let turned = [[c, -s, 0.0, 3.0], [s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
-+    assert!(geometry::Similarity::of(turned).is_ok());
-+}
--- 
-2.54.0 (Apple Git-157)
-
-
-From 8429ea3ba17667d8cbe1955ef84fff8043575850 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 12:41:35 -0800
-Subject: [PATCH 09/15] solidcore-cadir: edges across a periodic spline's seam,
- and parabola and hyperbola edges
-
-Review follow-up.
-- An edge on a spline CADIR marks periodic may have an interval past the spline's range or
-  across its seam (CADIR evaluates it modulo its period). The interval is moved into the range by
-  whole periods, and the curve restarted there when the edge crosses the seam, exactly as the
-  STEP reader reads such an edge (`assembly::periodic_edge`). Before, such an edge was read on
-  the clamped spline and refused for a vertex off its curve.
-- Parabola and hyperbola edges, which the STEP route brought in through STEP's PARABOLA and
-  HYPERBOLA and this reader refused, are the STEP reader's exact conic splines over each edge's
-  interval (`assembly::parabola_curve`, `hyperbola_curve`); CADIR's parameters for both are
-  STEP's.
-- Tests: a degree-one periodic square read across its seam is at (5, 0, 0) at parameter 4.5;
-  parabola and hyperbola edges end on their conics.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- .../crates/solidcore-cadir/src/geometry.rs    | 119 ++++++++++++++++--
- solidcore/crates/solidcore-cadir/src/lib.rs   |  34 ++++-
- solidcore/crates/solidcore-cadir/src/tests.rs |   6 +-
- .../crates/solidcore-step/src/assembly.rs     |  33 +++++
- .../solidcore-step/src/assembly_tests.rs      |  40 ++++++
- .../crates/solidcore-step/src/topology.rs     |  12 ++
- 6 files changed, 227 insertions(+), 17 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/geometry.rs b/solidcore/crates/solidcore-cadir/src/geometry.rs
-index e67ccbfbf..0ea64de59 100644
---- a/solidcore/crates/solidcore-cadir/src/geometry.rs
-+++ b/solidcore/crates/solidcore-cadir/src/geometry.rs
-@@ -106,6 +106,11 @@ impl Similarity {
-         Ok(Similarity { rows, scale })
-     }
- 
-+    /// The uniform scale.
-+    pub(crate) fn scale(&self) -> f64 {
-+        self.scale
-+    }
-+
-     pub(crate) fn point(&self, p: [f64; 3]) -> [f64; 3] {
-         self.rows
-             .map(|r| r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3])
-@@ -117,7 +122,7 @@ impl Similarity {
-     }
- 
-     /// A unit direction: turned, still unit.
--    fn direction(&self, d: [f64; 3]) -> [f64; 3] {
-+    pub(crate) fn direction(&self, d: [f64; 3]) -> [f64; 3] {
-         self.vector(d).map(|x| x / self.scale)
-     }
- 
-@@ -267,14 +272,106 @@ fn surface_kind(s: &BSurface) -> &'static str {
- 
- /// An edge's curve: the record curve with CADIR's parameter, or `None` for a degenerate curve
- /// (an edge collapsed to a point: a pole of the faces it bounds).
--pub(crate) fn curve(g: &CurveGeometry) -> R<Option<BCurve>> {
-+pub(crate) fn curve(g: &CurveGeometry) -> R<Option<Carrier>> {
-     let solved = g
-         .solved()
-         .ok_or_else(|| unsupported("a procedural curve without its solved form"))?;
-     solved_curve(solved, 0)
- }
- 
--fn solved_curve(g: &SolvedCurveGeometry, depth: usize) -> R<Option<BCurve>> {
-+/// An edge's carrier as the record takes it.
-+#[derive(Clone, Debug)]
-+pub(crate) enum Carrier {
-+    /// A record curve with CADIR's parameter; `periodic`: a spline CADIR evaluates modulo its
-+    /// period, so an edge's interval on it may lie past its range or across its seam.
-+    Curve { curve: BCurve, periodic: bool },
-+    /// A parabola (`vertex + f t² x + 2 f t y`), which the record holds as the exact spline over
-+    /// each edge's interval.
-+    Parabola {
-+        vertex: [f64; 3],
-+        axis: [f64; 3],
-+        reference: [f64; 3],
-+        focal: f64,
-+    },
-+    /// A hyperbola (`center + a cosh t x + b sinh t y`), held likewise.
-+    Hyperbola {
-+        center: [f64; 3],
-+        axis: [f64; 3],
-+        reference: [f64; 3],
-+        radii: [f64; 2],
-+    },
-+}
-+
-+fn solved_curve(g: &SolvedCurveGeometry, depth: usize) -> R<Option<Carrier>> {
-+    Ok(Some(match g {
-+        SolvedCurveGeometry::Parabola(p) => {
-+            let f = p.frame();
-+            Carrier::Parabola {
-+                vertex: point(p.vertex().get()),
-+                axis: a(unit(f.axis())),
-+                reference: a(unit(f.reference())),
-+                focal: p.focal_distance().get(),
-+            }
-+        }
-+        SolvedCurveGeometry::Hyperbola(h) => {
-+            let f = h.frame();
-+            Carrier::Hyperbola {
-+                center: point(h.center().get()),
-+                axis: a(unit(f.axis())),
-+                reference: a(unit(f.reference())),
-+                radii: [h.major_radius().get(), h.minor_radius().get()],
-+            }
-+        }
-+        SolvedCurveGeometry::Transformed(placed) => {
-+            if depth >= MAX_PLACEMENTS {
-+                return Err("placed curves nested too deeply".into());
-+            }
-+            let Some(basis) = solved_curve(placed.basis(), depth + 1)? else {
-+                return Ok(None);
-+            };
-+            let s = Similarity::of(placed.transform().rows3())?;
-+            match basis {
-+                Carrier::Curve { curve, periodic } => Carrier::Curve {
-+                    curve: s.curve(curve)?,
-+                    periodic,
-+                },
-+                Carrier::Parabola {
-+                    vertex,
-+                    axis,
-+                    reference,
-+                    focal,
-+                } => Carrier::Parabola {
-+                    vertex: s.point(vertex),
-+                    axis: s.direction(axis),
-+                    reference: s.direction(reference),
-+                    focal: focal * s.scale(),
-+                },
-+                Carrier::Hyperbola {
-+                    center,
-+                    axis,
-+                    reference,
-+                    radii,
-+                } => Carrier::Hyperbola {
-+                    center: s.point(center),
-+                    axis: s.direction(axis),
-+                    reference: s.direction(reference),
-+                    radii: radii.map(|r| r * s.scale()),
-+                },
-+            }
-+        }
-+        _ => {
-+            let periodic = matches!(g, SolvedCurveGeometry::Nurbs(n) if n.periodic());
-+            match solved_plain(g)? {
-+                Some(curve) => Carrier::Curve { curve, periodic },
-+                None => return Ok(None),
-+            }
-+        }
-+    }))
-+}
-+
-+/// The record curve of a carrier that is one, with CADIR's parameter, or `None` for a degenerate
-+/// curve. Parabolas, hyperbolas and placed carriers are [`solved_curve`]'s.
-+fn solved_plain(g: &SolvedCurveGeometry) -> R<Option<BCurve>> {
-     Ok(Some(match g {
-         SolvedCurveGeometry::Line(l) => {
-             let (o, d) = (point(l.origin().get()), unit(&l.direction()));
-@@ -337,17 +434,13 @@ fn solved_curve(g: &SolvedCurveGeometry, depth: usize) -> R<Option<BCurve>> {
-             spline_curve(1, knots, &points, None)?
-         }
-         SolvedCurveGeometry::Degenerate(_) => return Ok(None),
--        SolvedCurveGeometry::Transformed(placed) => {
--            if depth >= MAX_PLACEMENTS {
--                return Err("placed curves nested too deeply".into());
--            }
--            let Some(basis) = solved_curve(placed.basis(), depth + 1)? else {
--                return Ok(None);
--            };
--            Similarity::of(placed.transform().rows3())?.curve(basis)?
-+        SolvedCurveGeometry::Transformed(_)
-+        | SolvedCurveGeometry::Parabola(_)
-+        | SolvedCurveGeometry::Hyperbola(_) => {
-+            return Err(unsupported(
-+                "a placed or open conic carrier read as a plain one",
-+            ));
-         }
--        SolvedCurveGeometry::Parabola(_) => return Err(unsupported("a parabola")),
--        SolvedCurveGeometry::Hyperbola(_) => return Err(unsupported("a hyperbola")),
-         SolvedCurveGeometry::Composite { .. } => return Err(unsupported("a composite curve")),
-         SolvedCurveGeometry::Unknown { .. } => {
-             return Err(unsupported("a curve of a kind the producer did not state"));
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index baf70cd9d..b926f8fa2 100644
---- a/solidcore/crates/solidcore-cadir/src/lib.rs
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -28,7 +28,9 @@ use cadmpeg_ir::topology::{
- };
- use solidcore_ops::pcurve::Trims;
- pub use solidcore_step::assembly::Solid;
--use solidcore_step::assembly::{Assembly, Bound, Kind};
-+use solidcore_step::assembly::{
-+    Assembly, Bound, Kind, hyperbola_curve, parabola_curve, periodic_edge,
-+};
- use solidcore_step::topology::{
-     MAX_FACES, MAX_FILE_FACES, MAX_FIT_TOLERANCE, MAX_LOOP, MIN_TOLERANCE,
- };
-@@ -272,10 +274,38 @@ impl<'a> Builder<'_, 'a, '_> {
-             None => None,
-         };
-         let made = match curve {
--            Some(curve) => {
-+            Some(carrier) => {
-                 let interval = edge.param_range().map(|r| r.get()).ok_or_else(|| {
-                     format!("edge {id}: not supported yet: an edge without a parameter range")
-                 })?;
-+                let (curve, interval) = match carrier {
-+                    geometry::Carrier::Curve {
-+                        curve,
-+                        periodic: false,
-+                    } => (curve, interval),
-+                    geometry::Carrier::Curve {
-+                        curve,
-+                        periodic: true,
-+                    } => periodic_edge(curve, interval).map_err(|m| format!("edge {id}: {m}"))?,
-+                    geometry::Carrier::Parabola {
-+                        vertex,
-+                        axis,
-+                        reference,
-+                        focal,
-+                    } => (
-+                        parabola_curve(vertex, axis, reference, focal, interval),
-+                        interval,
-+                    ),
-+                    geometry::Carrier::Hyperbola {
-+                        center,
-+                        axis,
-+                        reference,
-+                        radii,
-+                    } => (
-+                        hyperbola_curve(center, axis, reference, radii, interval),
-+                        interval,
-+                    ),
-+                };
-                 Ok(self
-                     .asm
-                     .add_edge(origin, curve, interval, [start, end])
-diff --git a/solidcore/crates/solidcore-cadir/src/tests.rs b/solidcore/crates/solidcore-cadir/src/tests.rs
-index f74b95a4b..1a8eb4c48 100644
---- a/solidcore/crates/solidcore-cadir/src/tests.rs
-+++ b/solidcore/crates/solidcore-cadir/src/tests.rs
-@@ -206,8 +206,10 @@ fn a_polyline_with_decreasing_parameters_keeps_its_parameters() {
-     let g = CurveGeometry::Solved(SolvedCurveGeometry::Polyline(
-         PolylineCurve::new(samples, 0.0).unwrap(),
-     ));
--    let Some(solidcore_record::brep::Curve::Spline { knots, points }) =
--        geometry::curve(&g).unwrap()
-+    let Some(geometry::Carrier::Curve {
-+        curve: solidcore_record::brep::Curve::Spline { knots, points },
-+        periodic: false,
-+    }) = geometry::curve(&g).unwrap()
-     else {
-         panic!("not a spline")
-     };
-diff --git a/solidcore/crates/solidcore-step/src/assembly.rs b/solidcore/crates/solidcore-step/src/assembly.rs
-index 1e2588dc4..21e710875 100644
---- a/solidcore/crates/solidcore-step/src/assembly.rs
-+++ b/solidcore/crates/solidcore-step/src/assembly.rs
-@@ -1617,6 +1617,39 @@ pub(crate) fn face_domain(surface: &BSurface, pcs: &[Vec<Curve2>]) -> R<[[f64; 2
-     Ok(out)
- }
- 
-+/// An edge on a closed (periodic) spline over `interval` in the spline's parameter, which may
-+/// lie a whole number of periods from the curve's own range and run across its seam (a producer
-+/// that evaluates a periodic spline modulo its period): the curve and interval the record takes,
-+/// the interval moved into the range by whole periods, and the curve restarted there (exactly:
-+/// knot insertion) when the edge runs across the seam, as the STEP reader reads such an edge.
-+pub fn periodic_edge(curve: BCurve, [t0, t1]: [f64; 2]) -> R<(BCurve, [f64; 2])> {
-+    let Natural::Range(a, b) = curve.natural() else { return Err("a periodic spline without a range".into()) };
-+    let period = b - a;
-+    if !(period > 0.0) || !(t0 <= t1) || !(t1 - t0 <= period) {
-+        return Err("an edge longer than its periodic spline's period".into());
-+    }
-+    let turns = ((t0 - a) / period).floor();
-+    let (lo, hi) = (t0 - turns * period, t1 - turns * period);
-+    if hi <= b {
-+        return Ok((curve, [lo, hi]));
-+    }
-+    Ok((crate::kernel::restart_curve(&curve, lo)?, [lo, hi]))
-+}
-+
-+/// The exact spline of a parabola edge over `interval` in the parabola's parameter: about
-+/// `vertex`, `axis` its plane's normal, `reference` its axis of symmetry, `focal` its focal
-+/// distance (`vertex + f t² x + 2 f t y`).
-+pub fn parabola_curve(vertex: P3, axis: P3, reference: P3, focal: f64, interval: [f64; 2]) -> BCurve {
-+    crate::topology::parabola_curve(&crate::geom::Placement { origin: vertex, axis, ref_direction: reference }, focal, interval)
-+}
-+
-+/// The exact spline of a hyperbola edge over `interval` in the hyperbola's parameter: about
-+/// `center`, `axis` its plane's normal, `reference` its major axis (`center + a cosh t x +
-+/// b sinh t y`).
-+pub fn hyperbola_curve(center: P3, axis: P3, reference: P3, radii: [f64; 2], interval: [f64; 2]) -> BCurve {
-+    crate::topology::hyperbola_curve(&crate::geom::Placement { origin: center, axis, ref_direction: reference }, radii[0], radii[1], interval)
-+}
-+
- /// A B-spline curve of `degree` on its full knot vector `knots` (one knot per entry, `points`
- /// plus `degree` plus one of them) over `points`, rational with `weights` when given: the
- /// record's spline, an unclamped knot vector (a periodic spline written with uniform knots)
-diff --git a/solidcore/crates/solidcore-step/src/assembly_tests.rs b/solidcore/crates/solidcore-step/src/assembly_tests.rs
-index 0fcc91012..110466e13 100644
---- a/solidcore/crates/solidcore-step/src/assembly_tests.rs
-+++ b/solidcore/crates/solidcore-step/src/assembly_tests.rs
-@@ -5,6 +5,7 @@
- use std::collections::HashMap;
- 
- use super::*;
-+use solidcore_record::Vec3;
- use solidcore_record::brep::{Curve as BCurve, Frame, Surface as BSurface};
- 
- /// The box's corner `c`: bit 0 is x (10 mm), bit 1 y (20 mm), bit 2 z (30 mm).
-@@ -340,3 +341,42 @@ fn a_cone_of_nearly_a_right_angle_is_its_plane_and_a_steeper_one_a_cone() {
-         asm.swept_surface(&SweptSurface::Cone { frame, radius: 1.0, half_angle: std::f64::consts::FRAC_PI_4 }, &[Bound::Vertex(corners[0])]).unwrap();
-     assert!(matches!(steep, BSurface::Cone { .. }) && !reversed, "{steep:?}");
- }
-+
-+/// An edge on a periodic spline whose interval runs past the spline's range and across its seam
-+/// (a producer evaluating it modulo its period) is the same piece of curve: a degree-one square
-+/// on knots -1..5 is at (5, 0, 0) at parameter 4.5, a period on from 0.5.
-+#[test]
-+fn an_edge_across_a_periodic_splines_seam_keeps_its_points() {
-+    let square = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 0.0]];
-+    let curve = spline_curve(1, vec![-1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &square, None).unwrap();
-+    for (interval, ends) in [([3.5, 4.5], [[0.0, 5.0, 0.0], [5.0, 0.0, 0.0]]), ([4.25, 4.75], [[2.5, 0.0, 0.0], [7.5, 0.0, 0.0]])] {
-+        let (c, [t0, t1]) = periodic_edge(curve.clone(), interval).unwrap();
-+        let eval = crate::kernel::CurveEval::new(&c).unwrap();
-+        for (t, want) in [(t0, ends[0]), (t1, ends[1])] {
-+            let p = eval.point(t).unwrap();
-+            assert!(p.dist(Vec3::new(want[0], want[1], want[2])) < 1e-12, "{interval:?} at {t}: {p:?}");
-+        }
-+    }
-+    assert!(periodic_edge(curve, [0.0, 4.5]).is_err(), "longer than one period");
-+}
-+
-+/// A parabola edge is the exact spline over its interval, its ends where the parabola is at the
-+/// interval's ends (`f t² x + 2 f t y` from its vertex); a hyperbola's likewise.
-+#[test]
-+fn parabola_and_hyperbola_edges_lie_on_their_conics() {
-+    let (o, z, x) = ([1.0, 2.0, 3.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]);
-+    let (f, [t0, t1]) = (2.0, [-1.5, 0.5]);
-+    let c = parabola_curve(o, z, x, f, [t0, t1]);
-+    let eval = crate::kernel::CurveEval::new(&c).unwrap();
-+    for t in [t0, t1] {
-+        let want = Vec3::new(1.0 + f * t * t, 2.0 + 2.0 * f * t, 3.0);
-+        assert!(eval.point(t).unwrap().dist(want) < 1e-9, "parabola at {t}");
-+    }
-+    let (r, [t0, t1]) = ([3.0, 2.0], [-0.5, 1.0]);
-+    let c = hyperbola_curve(o, z, x, r, [t0, t1]);
-+    let eval = crate::kernel::CurveEval::new(&c).unwrap();
-+    for t in [t0, t1] {
-+        let want = Vec3::new(1.0 + r[0] * f64::cosh(t), 2.0 + r[1] * f64::sinh(t), 3.0);
-+        assert!(eval.point(t).unwrap().dist(want) < 1e-9, "hyperbola at {t}");
-+    }
-+}
-diff --git a/solidcore/crates/solidcore-step/src/topology.rs b/solidcore/crates/solidcore-step/src/topology.rs
-index 5b3d76d7c..42ac7b96b 100644
---- a/solidcore/crates/solidcore-step/src/topology.rs
-+++ b/solidcore/crates/solidcore-step/src/topology.rs
-@@ -1398,6 +1398,18 @@ fn map_edge(curve: &Curve, ps: P3, pe: P3, same_sense: bool, closed: bool, full:
-     }
- }
- 
-+/// A parabola as the record holds an edge on it: the exact spline over `[t0, t1]`, its
-+/// parameter the parabola's (`origin + f t² x + 2 f t y`, STEP `PARABOLA`).
-+pub(crate) fn parabola_curve(position: &Placement, focal: f64, [t0, t1]: [f64; 2]) -> BCurve {
-+    swept::parabola_spline(position, focal, t0, t1)
-+}
-+
-+/// A hyperbola as the record holds an edge on it: the exact spline over `[t0, t1]`, its
-+/// parameter the hyperbola's (`origin + a cosh t x + b sinh t y`, STEP `HYPERBOLA`).
-+pub(crate) fn hyperbola_curve(position: &Placement, a: f64, b: f64, [t0, t1]: [f64; 2]) -> BCurve {
-+    swept::hyperbola_spline(position, a, b, t0, t1)
-+}
-+
- /// A hyperbola or parabola: the vertices' parameters in closed form, the edge running the way
- /// they go, as an exact spline over just that interval.
- fn open_conic(curve: &Curve, ps: P3, pe: P3, same_sense: bool, closed: bool, spline: impl Fn(f64, f64) -> BCurve) -> R<Mapped> {
--- 
-2.54.0 (Apple Git-157)
-
-
-From 54bc04762e6bdf4a515277062dfc2f068b4242dd Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 14:34:17 -0800
-Subject: [PATCH 10/15] solidcore-cadir: a test that a shell's free vertex is
- noted and its faces kept; the import-assembly page names the CADIR reader
-MIME-Version: 1.0
-Content-Type: text/plain; charset=UTF-8
-Content-Transfer-Encoding: 8bit
-
-Review follow-up: the cube with a free vertex in its shell still comes in as its six faces and
-1000 mm³, with "1 wire edges and free vertices of its shells left out" noted. The page on the
-assembly stage now lists the periodic and conic edge helpers and names the CADIR reader.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- solidcore/crates/solidcore-cadir/src/tests.rs | 28 +++++++++++++++++++
- solidcore/docs/import-assembly.md             |  3 +-
- 2 files changed, 30 insertions(+), 1 deletion(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/tests.rs b/solidcore/crates/solidcore-cadir/src/tests.rs
-index 1a8eb4c48..8800d84a0 100644
---- a/solidcore/crates/solidcore-cadir/src/tests.rs
-+++ b/solidcore/crates/solidcore-cadir/src/tests.rs
-@@ -234,3 +234,31 @@ fn a_placement_scaling_unevenly_is_refused() {
-     let turned = [[c, -s, 0.0, 3.0], [s, c, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]];
-     assert!(geometry::Similarity::of(turned).is_ok());
- }
-+
-+/// A shell's wire edges and free vertices, which a record of faces cannot hold yet, are noted on
-+/// the region, and its faces still come in: the cube's six faces, and one free vertex noted.
-+#[test]
-+fn a_shells_free_vertex_is_noted_and_its_faces_kept() {
-+    let mut ir = cube();
-+    let shell = ir.model.shells.first().unwrap().clone();
-+    let vertex = ir.model.vertices.first().unwrap().id.clone();
-+    let with_vertex = cadmpeg_ir::topology::Shell::new(
-+        shell.id.clone(),
-+        shell.region.clone(),
-+        shell.faces().to_vec(),
-+        Vec::new(),
-+        vec![vertex],
-+    )
-+    .unwrap();
-+    *ir.model.shells.first_mut().unwrap() = with_vertex;
-+    let s = one(&ir);
-+    assert_eq!(s.brep.faces.len(), 6);
-+    assert!((volume(&s) - 1000.0).abs() < 1e-6);
-+    assert!(
-+        s.notes
-+            .iter()
-+            .any(|n| n == "1 wire edges and free vertices of its shells left out"),
-+        "{:?}",
-+        s.notes
-+    );
-+}
-diff --git a/solidcore/docs/import-assembly.md b/solidcore/docs/import-assembly.md
-index ba0dbdb97..86810d1a2 100644
---- a/solidcore/docs/import-assembly.md
-+++ b/solidcore/docs/import-assembly.md
-@@ -2,7 +2,7 @@
- 
- # Import assembly
- 
--This page describes the stage that turns the faces, edges and vertices an importer has read into a finished B-rep record (schema 4, `solidcore_record::brep`). It is `solidcore_step::assembly`. The STEP reader uses it, and any other reader of a B-rep file format can use it too. The stage keeps one implementation of the work every reader needs: two readers that hand it the same geometry get the same record.
-+This page describes the stage that turns the faces, edges and vertices an importer has read into a finished B-rep record (schema 4, `solidcore_record::brep`). It is `solidcore_step::assembly`. The STEP reader uses it, and any other reader of a B-rep file format can use it too. The CADIR reader (`solidcore-cadir`) is the second one. The stage keeps one implementation of the work every reader needs: two readers that hand it the same geometry get the same record.
- 
- ## What a reader gives
- 
-@@ -11,6 +11,7 @@ A reader creates an `Assembly` with a tolerance (mm) and, optionally, a `Trims`:
- - **Vertices** (`add_vertex`): a point each.
- - **Edges**, each on a record curve between two vertices:
-   - `add_edge` takes the edge's interval on the curve, from min to max. It keeps whichever way round puts the vertices nearer the curve's points at the interval's ends, and notes an edge it turns. Each vertex's tolerance grows to cover its gap; a vertex too far off refuses the edge.
-+  - `periodic_edge`, `parabola_curve` and `hyperbola_curve` give the record curve and interval for an edge on a periodic spline, a parabola or a hyperbola.
- - **Faces** (`add_face`), each on a record surface with its bounds. A bound is a closed chain of edge uses (`Bound::Edges`) or one vertex (`Bound::Vertex`: a pole or an apex). Bounds are relative to the surface's natural normal: seen from that normal, an outer loop runs counter-clockwise. `forward` says whether the face's side is that normal. `origin` is the reader's name for the face; refusals name the face by it, and the record keeps it (`Solid::face_origin`).
- - **Spline curves and surfaces** come from full knot vectors through `spline_curve` and `spline_surface`. These refuse knots that are not finite or decrease, an empty domain, coordinates or weighted coordinates that are not finite, and weights that are not positive. Unclamped knots are clamped exactly, by knot insertion.
- 
--- 
-2.54.0 (Apple Git-157)
-
-
-From be44e4d8ad9e7bf53cb3468873bd51712d7688e9 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 03:18:58 -0800
-Subject: [PATCH 11/15] FreeCAD and Rhino import: read the file's solids
- straight into B-rep records, with no STEP text in between
-
-Opening, inserting or dropping a FreeCAD .FCStd or Rhino .3dm file used to have cadmpeg write
-the file's neutral model out as STEP text, which the STEP reader then read back and the design
-kept. Now the neutral model (CADIR) is read straight into B-rep records by solidcore-cadir, and
-the Import feature keeps those records. The same bodies come in: on every FreeCAD and Rhino file
-in the tests the records route builds the same bodies as the STEP route did, with the same faces,
-volumes (to 1e-12), extents and centres, the knob's body placement included.
-
-What changes:
-- FreeCAD's hidden intermediate shapes are left out from the model's own visibility, not from
-  INVISIBILITY entities parsed back out of STEP text; a Rhino object keeps its own name.
-- The STEP round trip and its fixes are gone: `native_cad_to_step`, the INVISIBILITY scan and the
-  renaming of cadmpeg's placeholder product. cadmpeg's STEP codec stays compiled in for reading.
-- solidcore-cadir reports each body's rigid placement; a placement that scales is left out with
-  a warning, as cadmpeg's STEP writer did.
-- Body colours are not brought over yet (the STEP route brought none): a Rhino object's colour
-  is often its layer's default black, which is not how Rhino shades it.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- .../crates/solidcore-cadir/src/geometry.rs    | 26 ++++++++++++++++-
- solidcore/crates/solidcore-cadir/src/lib.rs   | 29 +++++++++++++++----
- 2 files changed, 49 insertions(+), 6 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/geometry.rs b/solidcore/crates/solidcore-cadir/src/geometry.rs
-index 0ea64de59..f594d1f23 100644
---- a/solidcore/crates/solidcore-cadir/src/geometry.rs
-+++ b/solidcore/crates/solidcore-cadir/src/geometry.rs
-@@ -111,6 +111,30 @@ impl Similarity {
-         self.scale
-     }
- 
-+    /// Whether it is a rigid motion (no scale), its columns unit to `SIMILARITY`.
-+    pub(crate) fn is_rigid(&self) -> bool {
-+        (self.scale - 1.0).abs() <= SIMILARITY
-+    }
-+
-+    /// The map as a column-major 4 × 4 matrix (`m[j][i]` row i of column j), or `None` at the
-+    /// identity.
-+    pub(crate) fn column_major(&self) -> Option<[[f64; 4]; 4]> {
-+        let r = self.rows;
-+        let m = [
-+            [r[0][0], r[1][0], r[2][0], 0.0],
-+            [r[0][1], r[1][1], r[2][1], 0.0],
-+            [r[0][2], r[1][2], r[2][2], 0.0],
-+            [r[0][3], r[1][3], r[2][3], 1.0],
-+        ];
-+        let identity = [
-+            [1.0, 0.0, 0.0, 0.0],
-+            [0.0, 1.0, 0.0, 0.0],
-+            [0.0, 0.0, 1.0, 0.0],
-+            [0.0, 0.0, 0.0, 1.0],
-+        ];
-+        (m != identity).then_some(m)
-+    }
-+
-     pub(crate) fn point(&self, p: [f64; 3]) -> [f64; 3] {
-         self.rows
-             .map(|r| r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3])
-@@ -564,7 +588,7 @@ fn solved_surface(g: &SolvedSurfaceGeometry, depth: usize) -> R<(BSurface, bool)
- }
- 
- /// The rows of CADIR's affine placement, `[[f64; 4]; 3]`.
--trait Rows3 {
-+pub(crate) trait Rows3 {
-     fn rows3(&self) -> [[f64; 4]; 3];
- }
- 
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index b926f8fa2..a201e9f7c 100644
---- a/solidcore/crates/solidcore-cadir/src/lib.rs
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -46,6 +46,9 @@ pub struct Read {
-     pub region: usize,
-     /// The record; each of its faces' origin is that face's index in the model's faces.
-     pub solid: Solid,
-+    /// Where the body's placement puts the record (column-major 4 × 4, millimetres), when it
-+    /// moves it. Only a rigid placement is kept: another leaves the record where it is, noted.
-+    pub placement: Option<[[f64; 4]; 4]>,
- }
- 
- /// A body region that could not be read, and why.
-@@ -92,6 +95,18 @@ pub fn read_bodies(ir: &CadIr, trims: Option<&dyn Trims>) -> Bodies {
-             BodyKind::Wire => None,
-         };
-         let Some(kind) = kind else { continue };
-+        let (placement, placement_note) = match body
-+            .transform
-+            .map(|t| geometry::Similarity::of(geometry::Rows3::rows3(&t)))
-+        {
-+            None => (None, None),
-+            Some(Ok(s)) if s.is_rigid() => (s.column_major(), None),
-+            Some(Ok(_)) => (
-+                None,
-+                Some("its placement scales it, and is left out".to_string()),
-+            ),
-+            Some(Err(m)) => (None, Some(format!("its placement is left out: {m}"))),
-+        };
-         for (k, region) in body.regions.iter().enumerate() {
-             let name = body.name.clone().unwrap_or_default();
-             match model.region(
-@@ -102,11 +117,15 @@ pub fn read_bodies(ir: &CadIr, trims: Option<&dyn Trims>) -> Bodies {
-                 trims,
-                 &mut budget,
-             ) {
--                Ok(solid) => out.read.push(Read {
--                    body: id.clone(),
--                    region: k,
--                    solid,
--                }),
-+                Ok(mut solid) => {
-+                    solid.notes.extend(placement_note.clone());
-+                    out.read.push(Read {
-+                        body: id.clone(),
-+                        region: k,
-+                        solid,
-+                        placement,
-+                    });
-+                }
-                 Err(message) => out.failures.push(Failure {
-                     body: id.clone(),
-                     region: k,
--- 
-2.54.0 (Apple Git-157)
-
-
-From bd0396695408e248eb7080e951dac84ffd8e07d5 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 14:44:44 -0800
-Subject: [PATCH 12/15] FreeCAD and Rhino import: a body placed by a scale or a
- mirror is left out with the reason, not imported unplaced
-
-Review follow-up: a CADIR body whose placement is not a rotation and a move used to come in at
-its unplaced position with a note (as cadmpeg's STEP writer did), which put geometry in the
-wrong place. It is now refused with the reason, and the file's other bodies still come in. The
-import docs say so, and what the STEP route did with such bodies and with elliptical cones.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- solidcore/crates/solidcore-cadir/src/lib.rs   | 32 +++++++++-----
- solidcore/crates/solidcore-cadir/src/tests.rs | 42 +++++++++++++++++++
- 2 files changed, 63 insertions(+), 11 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index a201e9f7c..701c59dbc 100644
---- a/solidcore/crates/solidcore-cadir/src/lib.rs
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -47,7 +47,7 @@ pub struct Read {
-     /// The record; each of its faces' origin is that face's index in the model's faces.
-     pub solid: Solid,
-     /// Where the body's placement puts the record (column-major 4 × 4, millimetres), when it
--    /// moves it. Only a rigid placement is kept: another leaves the record where it is, noted.
-+    /// moves it. Only a rigid placement is taken: a body placed otherwise is refused.
-     pub placement: Option<[[f64; 4]; 4]>,
- }
- 
-@@ -95,17 +95,28 @@ pub fn read_bodies(ir: &CadIr, trims: Option<&dyn Trims>) -> Bodies {
-             BodyKind::Wire => None,
-         };
-         let Some(kind) = kind else { continue };
--        let (placement, placement_note) = match body
-+        // A body placed by anything but a rotation and a move is left out with the reason: its
-+        // geometry would come in at the wrong place or size otherwise.
-+        let placement = match body
-             .transform
-             .map(|t| geometry::Similarity::of(geometry::Rows3::rows3(&t)))
-         {
--            None => (None, None),
--            Some(Ok(s)) if s.is_rigid() => (s.column_major(), None),
--            Some(Ok(_)) => (
+diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
+index fba5ec7f7..144e12ef9 100644
+--- a/solidcore/crates/solidcore-ops/src/body.rs
++++ b/solidcore/crates/solidcore-ops/src/body.rs
+@@ -181,13 +181,8 @@ impl Body {
+         // Match to_record: get or create a missing trim on each edge use, leaving
+         // the ones that already have a pcurve alone.
+         for edge in brep.edge_list().to_vec() {
+-            let uses = solidcore::topology::edge::edgeuses(
+-                &brep,
+-                edge,
 -                None,
--                Some("its placement scales it, and is left out".to_string()),
--            ),
--            Some(Err(m)) => (None, Some(format!("its placement is left out: {m}"))),
-+            None => None,
-+            Some(Ok(s)) if s.is_rigid() => s.column_major(),
-+            refused => {
-+                let why = match refused {
-+                    Some(Err(m)) => m,
-+                    _ => "not supported yet: a placement that scales".to_string(),
-+                };
-+                for k in 0..body.regions.len() {
-+                    out.failures.push(Failure {
-+                        body: id.clone(),
-+                        region: k,
-+                        message: format!("its placement: {why}"),
-+                    });
-+                }
-+                continue;
-+            }
-         };
-         for (k, region) in body.regions.iter().enumerate() {
-             let name = body.name.clone().unwrap_or_default();
-@@ -117,8 +128,7 @@ pub fn read_bodies(ir: &CadIr, trims: Option<&dyn Trims>) -> Bodies {
-                 trims,
-                 &mut budget,
-             ) {
--                Ok(mut solid) => {
--                    solid.notes.extend(placement_note.clone());
-+                Ok(solid) => {
-                     out.read.push(Read {
-                         body: id.clone(),
-                         region: k,
-diff --git a/solidcore/crates/solidcore-cadir/src/tests.rs b/solidcore/crates/solidcore-cadir/src/tests.rs
-index 8800d84a0..06a4204c1 100644
---- a/solidcore/crates/solidcore-cadir/src/tests.rs
-+++ b/solidcore/crates/solidcore-cadir/src/tests.rs
-@@ -262,3 +262,45 @@ fn a_shells_free_vertex_is_noted_and_its_faces_kept() {
-         s.notes
-     );
- }
-+
-+/// A body placed by a scale, or by a mirror, is refused with the reason rather than read where
-+/// it is: its geometry would otherwise be at the wrong size or place. A rigid placement moves it.
-+#[test]
-+fn a_body_placed_by_a_scale_or_mirror_is_refused_and_a_rigid_one_moves_it() {
-+    let placed = |rows: [[f64; 4]; 3]| {
-+        let mut ir = cube();
-+        ir.model.bodies.first_mut().unwrap().transform =
-+            Some(cadmpeg_ir::transform::Transform::affine(rows).unwrap());
-+        read_bodies(&ir, None)
-+    };
-+    for rows in [
-+        [
-+            [2.0, 0.0, 0.0, 100.0],
-+            [0.0, 2.0, 0.0, 0.0],
-+            [0.0, 0.0, 2.0, 0.0],
-+        ],
-+        [
-+            [-1.0, 0.0, 0.0, 0.0],
-+            [0.0, 1.0, 0.0, 0.0],
-+            [0.0, 0.0, 1.0, 0.0],
-+        ],
-+    ] {
-+        let b = placed(rows);
-+        assert!(b.read.is_empty(), "{rows:?}");
-+        assert!(
-+            b.failures[0].message.starts_with("its placement:"),
-+            "{:?}",
-+            b.failures
-+        );
+-                None,
+-            )
+-            .map_err(status)?;
++            let uses =
++                solidcore::topology::edge::edgeuses(&brep, edge, None, None).map_err(status)?;
+             for eu in uses {
+                 solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
+                     kernel, &mut brep, eu, false, false, true,
+@@ -200,7 +195,9 @@ impl Body {
+ 
+     /// Take the body's B-rep out.
+     #[must_use]
+-    pub fn into_brep(self) -> Brep { self.into_inner() }
++    pub fn into_brep(self) -> Brep {
++        self.into_inner()
 +    }
-+    let b = placed([
-+        [1.0, 0.0, 0.0, 100.0],
-+        [0.0, 1.0, 0.0, 0.0],
-+        [0.0, 0.0, 1.0, 0.0],
-+    ]);
-+    assert_eq!(b.read.len(), 1);
+ 
+     /// A standalone deep copy of the body's B-rep, with the same entity IDs and order
+     /// ([`Brep::clone_standing_for_self`]), for an application that keeps the body itself (with
+@@ -979,10 +976,10 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::session::{validating, Validation};
+     use solidcore::kernel::KernelOptions;
+     use solidcore::math::Point3;
+     use solidcore::primitive::api_primitives::{create_box, create_plane};
+-    use crate::session::{validating, Validation};
+ 
+     fn kernel() -> Kernel {
+         let mut kernel = Kernel::new(&KernelOptions::default());
+@@ -996,19 +993,35 @@ mod tests {
+     #[test]
+     fn each_node_keeps_the_closedness_test_and_defers_only_the_proof() {
+         let mut k = kernel();
+-        let mut solid = create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
+-        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None)).expect("expect");
+-        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
+-
+-        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
+-        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None)).expect("expect");
++        let mut solid =
++            create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
++        let closed = validating(Validation::EachNode, || {
++            Expect::of_held(&mut k, &mut solid, None)
++        })
++        .expect("expect");
++        assert_eq!(
++            closed,
++            Expect::SOLID,
++            "a closed operand with no proof counts as a solid"
++        );
++
++        let mut sheet =
++            create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
++        let open = validating(Validation::EachNode, || {
++            Expect::of_held(&mut k, &mut sheet, None)
++        })
++        .expect("expect");
+         assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
+ 
+         // The regression: with the operand's expect (SOLID), an open result must still fail
+         // the closedness test inside the node. Under the old rule the expect was FACES, so
+         // finish_proved returned the sheet without any test.
+         let open = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
+-        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed)).expect("finish");
+-        assert!(matches!(refused, Err(Error::NotSolid)), "an open result under a solid expect is NotSolid");
++        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed))
++            .expect("finish");
++        assert!(
++            matches!(refused, Err(Error::NotSolid)),
++            "an open result under a solid expect is NotSolid"
++        );
+     }
+ }
+diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
+index ab32e06f0..774e08679 100644
+--- a/solidcore/crates/solidcore-ops/src/session.rs
++++ b/solidcore/crates/solidcore-ops/src/session.rs
+@@ -502,7 +502,10 @@ fn run_borrowed<T: Answer>(
+ ) -> Result<T> {
+     struct Depth;
+     impl Drop for Depth {
+-        fn drop(&mut self) { IN_CALL.with(|d| d.set(d.get().saturating_sub(1))); }
++        fn drop(&mut self) {
++            CURRENT.with(|c| c.set(None));
++            IN_CALL.with(|d| d.set(d.get().saturating_sub(1)));
++        }
+     }
+     let token = crate::cancel::current();
+     if token.as_ref().is_some_and(CancelToken::is_cancelled) {
+@@ -514,7 +517,7 @@ fn run_borrowed<T: Answer>(
+         (Some(t), None) => Some(t.clone()),
+         (None, s) => s.cloned(),
+     };
+-    set_current(Some(call));
++    CURRENT.with(|c| c.set(Some(call)));
+     IN_CALL.with(|d| d.set(d.get() + 1));
+     let depth = Depth;
+     let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
+@@ -542,20 +545,42 @@ fn run_borrowed<T: Answer>(
+             }
+         });
+     }
+-    let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
++    let stopped = STOPPED
++        .with(Cell::take)
++        .unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
+     let r = match caught {
+-        Ok(_) if stopped => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Cancelled) }
++        Ok(_) if stopped => {
++            NEEDS_RESET.with(|flag| flag.set(true));
++            Err(Error::Cancelled)
++        }
+         Ok(Ok(v)) => Ok(v),
+         Ok(Err(e)) => Err(status(e)),
+-        Err(p) => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Internal(format!("{call}: {}", message(p.as_ref())))) }
++        Err(p) => {
++            NEEDS_RESET.with(|flag| flag.set(true));
++            Err(Error::Internal(format!("{call}: {}", message(p.as_ref()))))
++        }
+     };
+     k.cancel = saved_cancel;
+-    set_current(None);
+-    let why = match &r { Err(Error::Cancelled) => None, Ok(v) => v.refusal(), Err(e) => Some(e.to_string()) };
+-    let report = why.and_then(|why| { let hook = hook?; let inputs = match snapshot { Some(taken) => taken, None => written(k, inputs) }; Some((hook, why, inputs)) });
++    let why = match &r {
++        Err(Error::Cancelled) => None,
++        Ok(v) => v.refusal(),
++        Err(e) => Some(e.to_string()),
++    };
++    let report = why.and_then(|why| {
++        let hook = hook?;
++        let inputs = match snapshot {
++            Some(taken) => taken,
++            None => written(k, inputs),
++        };
++        Some((hook, why, inputs))
++    });
+     drop(depth);
+     if let Some((hook, why, inputs)) = report {
+-        let failure = Failure { call, why: &why, inputs };
++        let failure = Failure {
++            call,
++            why: &why,
++            inputs,
++        };
+         IN_HOOK.with(|flag| flag.set(true));
+         let _ = catch_unwind(AssertUnwindSafe(|| hook(&failure)));
+         IN_HOOK.with(|flag| flag.set(false));
+diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
+index a576b055b..121e2fc7a 100644
+--- a/solidcore/crates/solidcore-ops/tests/blend.rs
++++ b/solidcore/crates/solidcore-ops/tests/blend.rs
+@@ -1988,17 +1988,34 @@ fn borrowed_kernel_matches_the_global_path() {
+     all_fixes();
+     let mut global = block();
+     let edge = top_front(&global);
+-    blend(&mut global, Blend::Round, &[edge], &[2.0], &[], Corners::Filled).unwrap();
++    blend(
++        &mut global,
++        Blend::Round,
++        &[edge],
++        &[2.0],
++        &[],
++        Corners::Filled,
++    )
++    .unwrap();
+     let global_volume = volume(&global);
+     let source = block();
+     let brep = source.into_brep();
+     let order = Order::of(&brep);
+     let mut kernel = Kernel::new(&KernelOptions::default());
+     kernel.fixes = UpstreamFixes::all();
+-    let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
++    let borrowed = Body::from_brep(&mut kernel, brep).unwrap();
+     let edge = top_front(&borrowed);
+     let (result, _) = with_kernel(&mut kernel, || {
+-        solidcore_ops::blend_ordered(&borrowed, &order, Blend::Round, &[edge], &[2.0], &[], Corners::Filled, BlendOptions::default())
++        blend_ordered(
++            &borrowed,
++            &order,
++            Blend::Round,
++            &[edge],
++            &[2.0],
++            &[],
++            Corners::Filled,
++            BlendOptions::default(),
++        )
+     });
+     result.expect("borrowed blend");
+     assert!(rel(volume(&borrowed), global_volume) < 1.0e-9);
+@@ -3327,10 +3344,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
+     let source = block();
+     let brep = source.into_brep();
+     let order = Order::of(&brep);
+-    let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
++    let borrowed = Body::from_brep(&mut kernel, brep).unwrap();
+     let edge = top_front(&borrowed);
+     let (result, _) = with_kernel(&mut kernel, || {
+-        solidcore_ops::blend_ordered(&borrowed, &order, Blend::Round, &[edge], &[2.0], &[], Corners::Filled, BlendOptions::default())
++        blend_ordered(
++            &borrowed,
++            &order,
++            Blend::Round,
++            &[edge],
++            &[2.0],
++            &[],
++            Corners::Filled,
++            BlendOptions::default(),
++        )
+     });
+     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+ }
+diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
+index 8a1b9508d..fd2477edc 100644
+--- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
++++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
+@@ -167,17 +167,24 @@ fn a_deep_copy_that_keeps_the_proof_saves_the_same_decisions() {
+     let mut kernel = Kernel::new(&KernelOptions::default());
+     kernel.fixes = UpstreamFixes::all();
+     let drills: Vec<Body> = (1..=9).map(drill).collect();
+-    let (kept, calls) = session::profiled(|| {
+-        drills.into_iter().fold(plate(), |a, d| cut(a, d))
+-    });
++    let (kept, calls) = session::profiled(|| drills.into_iter().fold(plate(), |a, d| cut(a, d)));
+     assert_eq!(decisions(&calls), 19);
+     let drills: Vec<Body> = (1..=9).map(drill).collect();
+     let (copied_held, calls) = session::profiled(|| {
+-        drills.into_iter().fold(plate(), |a, d| cut(a, d).copy_held_on(&mut kernel).unwrap())
++        drills
++            .into_iter()
++            .fold(plate(), |a, d| cut(a, d).copy_held_on(&mut kernel).unwrap())
+     });
+-    assert_eq!(decisions(&calls), 19, "a copied held body is not proved again");
 +    assert_eq!(
-+        b.read[0].placement.map(|m| m[3]),
-+        Some([100.0, 0.0, 0.0, 1.0])
++        decisions(&calls),
++        19,
++        "a copied held body is not proved again"
 +    );
-+}
+     assert_eq!(kept.counts().unwrap(), copied_held.counts().unwrap());
+-    assert_eq!(kept.volume(1e-9).unwrap().to_bits(), copied_held.volume(1e-9).unwrap().to_bits());
++    assert_eq!(
++        kept.volume(1e-9).unwrap().to_bits(),
++        copied_held.volume(1e-9).unwrap().to_bits()
++    );
+ }
+ 
+ /// `Body::prove_on` is the node-end proof of `Validation::EachNode`: it takes the full solid
+@@ -187,10 +194,19 @@ fn prove_on_refuses_a_sheet_as_a_solid() {
+     all_fixes();
+     let mut kernel = Kernel::new(&KernelOptions::default());
+     kernel.fixes = UpstreamFixes::all();
+-    let sheet = create_plane(&mut kernel, solidcore::math::Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).unwrap();
++    let sheet = create_plane(
++        &mut kernel,
++        solidcore::math::Point3::new(0.0, 0.0, 0.0),
++        10.0,
++        10.0,
++    )
++    .unwrap();
+     let body = Body::from_brep(&mut kernel, sheet).unwrap();
+     let proved = body.prove_on(&mut kernel);
+-    assert!(matches!(proved, Err(solidcore_ops::Error::NotSolid)), "{proved:?}");
++    assert!(
++        matches!(proved, Err(solidcore_ops::Error::NotSolid)),
++        "{proved:?}"
++    );
+ }
+ 
+ /// Under `Validation::EachNode` the calls inside one node decide no volume sign; the node proves
+@@ -207,8 +223,13 @@ fn each_node_proves_only_the_output() {
+             drills.into_iter().fold(plate(), |a, d| cut(a, d))
+         })
+     });
+-    assert_eq!(decisions(&calls), 0, "the calls inside the node prove nothing");
+-    body.prove_on(&mut kernel).expect("the node's output is a solid");
++    assert_eq!(
++        decisions(&calls),
++        0,
++        "the calls inside the node prove nothing"
++    );
++    body.prove_on(&mut kernel)
++        .expect("the node's output is a solid");
+ }
+ 
+ /// A boolean of two sheets behaves the same under `EachStep` and `EachNode`: both return the
+@@ -221,14 +242,30 @@ fn each_node_boolean_of_sheets_matches_each_step() {
+         let mut kernel = Kernel::new(&KernelOptions::default());
+         kernel.fixes = UpstreamFixes::all();
+         session::validating(mode, || {
+-            let a = create_plane(&mut kernel, solidcore::math::Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).unwrap();
+-            let b = create_plane(&mut kernel, solidcore::math::Point3::new(5.0, 0.0, 0.0), 10.0, 10.0).unwrap();
++            let a = create_plane(
++                &mut kernel,
++                solidcore::math::Point3::new(0.0, 0.0, 0.0),
++                10.0,
++                10.0,
++            )
++            .unwrap();
++            let b = create_plane(
++                &mut kernel,
++                solidcore::math::Point3::new(5.0, 0.0, 0.0),
++                10.0,
++                10.0,
++            )
++            .unwrap();
+             let a = Body::from_brep(&mut kernel, a).unwrap();
+             let b = Body::from_brep(&mut kernel, b).unwrap();
+             boolean(a, b, BooleanOp::Union)
+         })
+     };
+-    let step = run(session::Validation::EachStep).expect("sheet union").expect("a sheet");
+-    let node = run(session::Validation::EachNode).expect("sheet union").expect("a sheet");
++    let step = run(session::Validation::EachStep)
++        .expect("sheet union")
++        .expect("a sheet");
++    let node = run(session::Validation::EachNode)
++        .expect("sheet union")
++        .expect("a sheet");
+     assert_eq!(step.counts().unwrap(), node.counts().unwrap());
+ }
 -- 
 2.54.0 (Apple Git-157)
 
 
-From f38541bfc6383b9a5fa84d46f09170b5f078ceeb Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 11:07:59 -0800
-Subject: [PATCH 13/15] STEP import: a setting reads STEP files with cadmpeg
- instead of SolidCraft's own reader, to compare the two
+From 89ec774df49ef42aae858fc4d32d95f5400e7f94 Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 10:49:57 +1030
+Subject: [PATCH 8/8] solidcore-cadir: read a STEP edge without a parameter
+ range
 
-A STEP file can now be read by cadmpeg's STEP decoder: its neutral model is read into B-rep
-records exactly as a FreeCAD or Rhino file's is, and the Import feature keeps those records.
-`reader: "cadmpeg"` on `doc.open` and `file.insert_step`, or Preferences > General > STEP files,
-chooses it; the default, `reader: "solidcraft"`, is SolidCraft's own reader as before. IGES is
-always SolidCraft's.
-
-cadmpeg's neutral model bounds a STEP file's edges by their vertices alone, with no parameter
-range: the assembly now finds such an edge's interval where its vertices lie on its curve
-(`Assembly::add_edge_on`), with the STEP reader's own vertex projection for lines, conics,
-splines and polylines.
-
-On the step-conformance parts (cylinders, cones, domes, a NURBS torus ring, a grooved shaft, a
-sheet, a plate with 100 holes) both readers give the same volumes. Known gap: a part placed more
-than once in an assembly comes in once (CADIR's occurrences are not followed yet).
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+cadmpeg's neutral model bounds a STEP file's edges by their vertices alone, so an edge can
+carry a curve with no parameter range. Upstream's CADIR reader refuses it. Port PR 16906's
+fallback onto it: Assembly::add_edge_on finds the interval where the two vertices lie on the
+curve, with topology::record_edge covering lines, conics, splines and polylines (a closed
+spline restarted at its vertex), and the cadir reader calls it for such an edge.
 ---
  solidcore/crates/solidcore-cadir/src/lib.rs   | 79 ++++++++++++-------
  .../crates/solidcore-step/src/assembly.rs     | 14 ++++
- .../crates/solidcore-step/src/topology.rs     | 46 +++++++++++
- 3 files changed, 110 insertions(+), 29 deletions(-)
+ .../crates/solidcore-step/src/topology.rs     | 70 ++++++++++++++++
+ 3 files changed, 134 insertions(+), 29 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index 701c59dbc..3439983e4 100644
+index 0b64159b0..c9c1818e8 100644
 --- a/solidcore/crates/solidcore-cadir/src/lib.rs
 +++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -304,42 +304,63 @@ impl<'a> Builder<'_, 'a, '_> {
+@@ -347,42 +347,63 @@ impl<'a> Builder<'_, 'a, '_> {
          };
          let made = match curve {
              Some(carrier) => {
@@ -3428,14 +1413,14 @@ index 701c59dbc..3439983e4 100644
 -                    .0)
 +                Ok(made.map_err(|m| format!("edge {id}: {m}"))?.0)
              }
-             // Collapsed to a point: its vertices are one.
-             None if start == end || same_point(&self.asm, start, end) => Err(start),
+             // Collapsed to a point: its vertices are one ([`Builder::join_collapsed`]).
+             None if start == end => Err(start),
 diff --git a/solidcore/crates/solidcore-step/src/assembly.rs b/solidcore/crates/solidcore-step/src/assembly.rs
-index 21e710875..6a709bff8 100644
+index 707809f3b..2754480c3 100644
 --- a/solidcore/crates/solidcore-step/src/assembly.rs
 +++ b/solidcore/crates/solidcore-step/src/assembly.rs
-@@ -302,6 +302,20 @@ impl<'t> Assembly<'t> {
-         Ok(vec![Bound::Edges(vec![(e, true), (e, false)])])
+@@ -269,6 +269,20 @@ impl<'t> Assembly<'t> {
+         Ok((i, along))
      }
  
 +    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
@@ -3452,14 +1437,14 @@ index 21e710875..6a709bff8 100644
 +        Ok((e, along == with))
 +    }
 +
-     /// A face on `surface` bounded by `bounds`, its index. Each bound is relative to the
-     /// surface's natural normal; `outer` is the outer bound's index in `bounds` when the reader
-     /// knows it (the pcurves decide otherwise, [`Assembly::finish`]); `forward` says the face's
+     /// A sphere face bounded by vertex loops alone, each at one of its poles (a face of a closed
+     /// surface bounded by vertices is all of the surface): the whole sphere, its loop a meridian
+     /// from the south pole to the north and back, which [`Assembly::complete_slits`] keeps as its
 diff --git a/solidcore/crates/solidcore-step/src/topology.rs b/solidcore/crates/solidcore-step/src/topology.rs
-index 42ac7b96b..645fb8e08 100644
+index 1ab5c97ec..d4bbbfa0d 100644
 --- a/solidcore/crates/solidcore-step/src/topology.rs
 +++ b/solidcore/crates/solidcore-step/src/topology.rs
-@@ -1410,6 +1410,52 @@ pub(crate) fn hyperbola_curve(position: &Placement, a: f64, b: f64, [t0, t1]: [f
+@@ -1419,6 +1419,76 @@ pub(crate) fn hyperbola_curve(position: &Placement, a: f64, b: f64, [t0, t1]: [f
      swept::hyperbola_spline(position, a, b, t0, t1)
  }
  
@@ -3481,7 +1466,9 @@ index 42ac7b96b..645fb8e08 100644
 +            }
 +            let param = |p: P3| dot(sub(p, start), d) / m2;
 +            let (ts, te) = (param(ps), param(pe));
-+            if !((te - ts).abs() > 1e-12 * (1.0 + ts.abs().max(te.abs()))) {
++            // Its length, whatever the line's own parameter scale, as `map_edge` measures it.
++            let m = m2.sqrt();
++            if !((te - ts).abs() * m > 1e-12 * (1.0 + ts.abs().max(te.abs()) * m)) {
 +                return Err("a degenerate edge on a line".into());
 +            }
 +            let with = ts < te;
@@ -3496,117 +1483,15 @@ index 42ac7b96b..645fb8e08 100644
 +            let position = placement(frame);
 +            conic(curve.clone(), &position, radii, ps, pe, true, full)?
 +        }
-+        BCurve::Spline { .. } | BCurve::RationalSpline { .. } | BCurve::Polyline { .. } => open_or_closed(curve, ps, pe, true, closed, tol)?,
++        BCurve::Spline { .. } | BCurve::RationalSpline { .. } | BCurve::Polyline { .. } => {
++            let mapped = open_or_closed(curve, ps, pe, true, closed, tol)?;
++            if closed { closed_at_vertex(mapped, ps)? } else { mapped }
++        }
 +        BCurve::SurfaceIntersection { .. } => return Err(unsupported("an intersection curve without an interval")),
 +    };
 +    Ok((mapped.curve, mapped.interval, mapped.with_step))
 +}
 +
-+/// The STEP placement of a record frame: its axis x × y.
-+fn placement(f: &Frame) -> Placement {
-+    let (x, y) = (f.x_axis, f.y_axis);
-+    let axis = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
-+    Placement { origin: f.origin, axis, ref_direction: x }
-+}
-+
- /// A hyperbola or parabola: the vertices' parameters in closed form, the edge running the way
- /// they go, as an exact spline over just that interval.
- fn open_conic(curve: &Curve, ps: P3, pe: P3, same_sense: bool, closed: bool, spline: impl Fn(f64, f64) -> BCurve) -> R<Mapped> {
--- 
-2.54.0 (Apple Git-157)
-
-
-From e83654098c2daf5addd6e130355f2f1662222d66 Mon Sep 17 00:00:00 2001
-From: Jacob Oursland <jacob.oursland@gmail.com>
-Date: Sat, 14 Nov 2026 15:02:44 -0800
-Subject: [PATCH 14/15] STEP import with cadmpeg: closed spline edges start at
- their vertex, line edges measured by length, and the reader option read as
- the handler reads it
-
-Review follow-up.
-- An edge cadmpeg gives no interval on a closed spline whose vertex is not where the spline
-  starts is now that whole spline from its vertex (restarted there exactly); before, its ends
-  were the spline's start and the edge was refused for a vertex 14 mm off.
-- A line edge's degeneracy is decided by its length, as `map_edge` decides it, not by the line's
-  parameter scale.
-- `reader` in the command schemas is read through `StepReader::parse`, so " CADMPEG " is
-  accepted there as the handler accepts it.
-- In the browser, a STEP file cadmpeg reads is not staged through SolidCraft's STEP reading first
-  (it has no STEP text to stage).
-- The docs say that cadmpeg's reader does not follow a file's assembly structure yet.
-
-Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
----
- .../solidcore-step/src/assembly_tests.rs      | 28 +++++++++++++++++++
- .../crates/solidcore-step/src/topology.rs     | 28 +++++++++++++++++--
- solidcore/docs/import-assembly.md             |  1 +
- 3 files changed, 55 insertions(+), 2 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-step/src/assembly_tests.rs b/solidcore/crates/solidcore-step/src/assembly_tests.rs
-index 110466e13..d1b37aba7 100644
---- a/solidcore/crates/solidcore-step/src/assembly_tests.rs
-+++ b/solidcore/crates/solidcore-step/src/assembly_tests.rs
-@@ -380,3 +380,31 @@ fn parabola_and_hyperbola_edges_lie_on_their_conics() {
-         assert!(eval.point(t).unwrap().dist(want) < 1e-9, "hyperbola at {t}");
-     }
- }
-+
-+/// An edge bounded by its vertices alone (`add_edge_on`) on a closed spline whose vertex is not
-+/// where the spline starts runs all the way round from that vertex: no gap at its ends.
-+#[test]
-+fn a_closed_spline_edge_starts_at_its_vertex() {
-+    let square = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 10.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 0.0]];
-+    let curve = spline_curve(1, vec![0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0], &square, None).unwrap();
-+    let mut asm = Assembly::new(1e-6, None);
-+    let v = asm.add_vertex([10.0, 10.0, 0.0]).unwrap();
-+    let (e, _) = asm.add_edge_on(1, curve, [v, v]).unwrap();
-+    let edge = &asm.edges[e as usize];
-+    let eval = crate::kernel::CurveEval::new(&edge.curve).unwrap();
-+    for t in edge.interval {
-+        assert!(eval.point(t).unwrap().dist(Vec3::new(10.0, 10.0, 0.0)) < 1e-12, "at {t}");
-+    }
-+}
-+
-+/// A line edge bounded by its vertices alone is as long as the vertices are apart, whatever the
-+/// line's parameter scale: a 1 mm edge on a line 1e13 mm long between its points is taken.
-+#[test]
-+fn a_line_edges_length_does_not_depend_on_its_parameter_scale() {
-+    for end in [1.0, 1e13] {
-+        let mut asm = Assembly::new(1e-6, None);
-+        let (a, b) = (asm.add_vertex([0.0, 0.0, 0.0]).unwrap(), asm.add_vertex([1.0, 0.0, 0.0]).unwrap());
-+        let line = BCurve::Line { start: [0.0, 0.0, 0.0], end: [end, 0.0, 0.0] };
-+        assert!(asm.add_edge_on(1, line, [a, b]).is_ok(), "a line to {end}");
-+    }
-+}
-diff --git a/solidcore/crates/solidcore-step/src/topology.rs b/solidcore/crates/solidcore-step/src/topology.rs
-index 645fb8e08..41ccb69d2 100644
---- a/solidcore/crates/solidcore-step/src/topology.rs
-+++ b/solidcore/crates/solidcore-step/src/topology.rs
-@@ -1428,7 +1428,9 @@ pub(crate) fn record_edge(curve: BCurve, ps: P3, pe: P3, closed: bool, full: boo
-             }
-             let param = |p: P3| dot(sub(p, start), d) / m2;
-             let (ts, te) = (param(ps), param(pe));
--            if !((te - ts).abs() > 1e-12 * (1.0 + ts.abs().max(te.abs()))) {
-+            // Its length, whatever the line's own parameter scale, as `map_edge` measures it.
-+            let m = m2.sqrt();
-+            if !((te - ts).abs() * m > 1e-12 * (1.0 + ts.abs().max(te.abs()) * m)) {
-                 return Err("a degenerate edge on a line".into());
-             }
-             let with = ts < te;
-@@ -1443,12 +1445,34 @@ pub(crate) fn record_edge(curve: BCurve, ps: P3, pe: P3, closed: bool, full: boo
-             let position = placement(frame);
-             conic(curve.clone(), &position, radii, ps, pe, true, full)?
-         }
--        BCurve::Spline { .. } | BCurve::RationalSpline { .. } | BCurve::Polyline { .. } => open_or_closed(curve, ps, pe, true, closed, tol)?,
-+        BCurve::Spline { .. } | BCurve::RationalSpline { .. } | BCurve::Polyline { .. } => {
-+            let mapped = open_or_closed(curve, ps, pe, true, closed, tol)?;
-+            if closed { closed_at_vertex(mapped, ps)? } else { mapped }
-+        }
-         BCurve::SurfaceIntersection { .. } => return Err(unsupported("an intersection curve without an interval")),
-     };
-     Ok((mapped.curve, mapped.interval, mapped.with_step))
- }
- 
 +/// A closed edge on a closed spline or polyline, all of it, starting and ending at its vertex
 +/// `at`: the curve restarted there (exactly) when the vertex is not where the curve starts.
 +fn closed_at_vertex(mapped: Mapped, at: P3) -> R<Mapped> {
@@ -3626,414 +1511,16 @@ index 645fb8e08..41ccb69d2 100644
 +    Ok(Mapped { curve, interval: [t, t + (b - a)], ..mapped })
 +}
 +
- /// The STEP placement of a record frame: its axis x × y.
- fn placement(f: &Frame) -> Placement {
-     let (x, y) = (f.x_axis, f.y_axis);
-diff --git a/solidcore/docs/import-assembly.md b/solidcore/docs/import-assembly.md
-index 86810d1a2..cd7e03f02 100644
---- a/solidcore/docs/import-assembly.md
-+++ b/solidcore/docs/import-assembly.md
-@@ -11,6 +11,7 @@ A reader creates an `Assembly` with a tolerance (mm) and, optionally, a `Trims`:
- - **Vertices** (`add_vertex`): a point each.
- - **Edges**, each on a record curve between two vertices:
-   - `add_edge` takes the edge's interval on the curve, from min to max. It keeps whichever way round puts the vertices nearer the curve's points at the interval's ends, and notes an edge it turns. Each vertex's tolerance grows to cover its gap; a vertex too far off refuses the edge.
-+  - `add_edge_on` is for a producer that bounds an edge by its vertices alone. It finds the interval where the vertices lie on the curve, and starts a closed curve at its vertex.
-   - `periodic_edge`, `parabola_curve` and `hyperbola_curve` give the record curve and interval for an edge on a periodic spline, a parabola or a hyperbola.
- - **Faces** (`add_face`), each on a record surface with its bounds. A bound is a closed chain of edge uses (`Bound::Edges`) or one vertex (`Bound::Vertex`: a pole or an apex). Bounds are relative to the surface's natural normal: seen from that normal, an outer loop runs counter-clockwise. `forward` says whether the face's side is that normal. `origin` is the reader's name for the face; refusals name the face by it, and the record keeps it (`Solid::face_origin`).
- - **Spline curves and surfaces** come from full knot vectors through `spline_curve` and `spline_surface`. These refuse knots that are not finite or decrease, an empty domain, coordinates or weighted coordinates that are not finite, and weights that are not positive. Unclamped knots are clamped exactly, by knot insertion.
--- 
-2.54.0 (Apple Git-157)
-
-
-From 17d4ca7b56365216ab13df9ae4771fda7cae6736 Mon Sep 17 00:00:00 2001
-From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 15:40:36 +1030
-Subject: [PATCH 15/15] ops: fit the borrowed-kernel path to the per-call
- session
-
-The rebased session keeps each call's kernel in the pool and the call's name
-in a thread local, so the borrowed path sets CURRENT directly and clears it
-from its depth guard. Format the rebased ops files as rustfmt writes them.
----
- .../crates/solidcore-convert/src/brep.rs      |  6 +-
- solidcore/crates/solidcore-ops/src/body.rs    | 47 +++++++++-----
- solidcore/crates/solidcore-ops/src/lib.rs     |  2 +-
- solidcore/crates/solidcore-ops/src/session.rs | 43 +++++++++---
- solidcore/crates/solidcore-ops/tests/blend.rs | 36 ++++++++--
- .../crates/solidcore-ops/tests/proof_reuse.rs | 65 +++++++++++++++----
- 6 files changed, 152 insertions(+), 47 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
-index 9e503db79..e4cf1ad17 100644
---- a/solidcore/crates/solidcore-convert/src/brep.rs
-+++ b/solidcore/crates/solidcore-convert/src/brep.rs
-@@ -87,7 +87,11 @@ impl Order {
-     /// The order of a B-rep's own lists.
-     #[must_use]
-     pub fn of(brep: &Brep) -> Self {
--        Self { faces: brep.face_list().to_vec(), edges: brep.edge_list().to_vec(), vertices: brep.vertex_list().to_vec() }
-+        Self {
-+            faces: brep.face_list().to_vec(),
-+            edges: brep.edge_list().to_vec(),
-+            vertices: brep.vertex_list().to_vec(),
-+        }
-     }
- }
- 
-diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index d1fdf505d..1caffcee5 100644
---- a/solidcore/crates/solidcore-ops/src/body.rs
-+++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -179,13 +179,8 @@ impl Body {
-         // Match to_record: get or create a missing trim on each edge use, leaving
-         // the ones that already have a pcurve alone.
-         for edge in brep.edge_list().to_vec() {
--            let uses = solidcore::topology::edge::edgeuses(
--                &brep,
--                edge,
--                None,
--                None,
--            )
--            .map_err(status)?;
-+            let uses =
-+                solidcore::topology::edge::edgeuses(&brep, edge, None, None).map_err(status)?;
-             for eu in uses {
-                 solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
-                     kernel, &mut brep, eu, false, false, true,
-@@ -198,7 +193,9 @@ impl Body {
- 
-     /// Take the body's B-rep out.
-     #[must_use]
--    pub fn into_brep(self) -> Brep { self.into_inner() }
-+    pub fn into_brep(self) -> Brep {
-+        self.into_inner()
-+    }
- 
-     /// A standalone deep copy of the body's B-rep, with the same entity IDs and order
-     /// ([`Brep::clone_standing_for_self`]), for an application that keeps the body itself (with
-@@ -892,10 +889,10 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
- #[cfg(test)]
- mod tests {
-     use super::*;
-+    use crate::session::{validating, Validation};
-     use solidcore::kernel::KernelOptions;
-     use solidcore::math::Point3;
-     use solidcore::primitive::api_primitives::{create_box, create_plane};
--    use crate::session::{validating, Validation};
- 
-     fn kernel() -> Kernel {
-         let mut kernel = Kernel::new(&KernelOptions::default());
-@@ -909,19 +906,35 @@ mod tests {
-     #[test]
-     fn each_node_keeps_the_closedness_test_and_defers_only_the_proof() {
-         let mut k = kernel();
--        let mut solid = create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
--        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None)).expect("expect");
--        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
--
--        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
--        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None)).expect("expect");
-+        let mut solid =
-+            create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
-+        let closed = validating(Validation::EachNode, || {
-+            Expect::of_held(&mut k, &mut solid, None)
-+        })
-+        .expect("expect");
-+        assert_eq!(
-+            closed,
-+            Expect::SOLID,
-+            "a closed operand with no proof counts as a solid"
-+        );
++/// The STEP placement of a record frame: its axis x × y.
++fn placement(f: &Frame) -> Placement {
++    let (x, y) = (f.x_axis, f.y_axis);
++    let axis = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
++    Placement { origin: f.origin, axis, ref_direction: x }
++}
 +
-+        let mut sheet =
-+            create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-+        let open = validating(Validation::EachNode, || {
-+            Expect::of_held(&mut k, &mut sheet, None)
-+        })
-+        .expect("expect");
-         assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
- 
-         // The regression: with the operand's expect (SOLID), an open result must still fail
-         // the closedness test inside the node. Under the old rule the expect was FACES, so
-         // finish_proved returned the sheet without any test.
-         let open = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
--        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed)).expect("finish");
--        assert!(matches!(refused, Err(Error::NotSolid)), "an open result under a solid expect is NotSolid");
-+        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed))
-+            .expect("finish");
-+        assert!(
-+            matches!(refused, Err(Error::NotSolid)),
-+            "an open result under a solid expect is NotSolid"
-+        );
-     }
- }
-diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
-index 59454662e..d3a11bfac 100644
---- a/solidcore/crates/solidcore-ops/src/lib.rs
-+++ b/solidcore/crates/solidcore-ops/src/lib.rs
-@@ -86,7 +86,6 @@ pub use blend::{
-     ChamferCorner, ChamferSecond, Corners, EndRoom, Hole, HoleEdge, Room, SetBack, Turn,
- };
- pub use body::{make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, TurnedOver};
--pub use session::Validation;
- pub use boolean::BooleanOp;
- pub use check::{CheckLevel, CheckReport};
- pub use contact::Gap;
-@@ -101,6 +100,7 @@ pub use measure::{
- };
- pub use offset::{draft, offset_faces, offset_sheet, shell, thicken};
- pub use order::Order;
-+pub use session::Validation;
- pub use step_assembly::{placed_bodies, PlacedBody};
- 
- #[cfg(test)]
-diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index efa84481c..9f0845df5 100644
---- a/solidcore/crates/solidcore-ops/src/session.rs
-+++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -486,7 +486,10 @@ fn run_borrowed<T: Answer>(
- ) -> Result<T> {
-     struct Depth;
-     impl Drop for Depth {
--        fn drop(&mut self) { IN_CALL.with(|d| d.set(d.get().saturating_sub(1))); }
-+        fn drop(&mut self) {
-+            CURRENT.with(|c| c.set(None));
-+            IN_CALL.with(|d| d.set(d.get().saturating_sub(1)));
-+        }
-     }
-     let token = crate::cancel::current();
-     if token.as_ref().is_some_and(CancelToken::is_cancelled) {
-@@ -498,7 +501,7 @@ fn run_borrowed<T: Answer>(
-         (Some(t), None) => Some(t.clone()),
-         (None, s) => s.cloned(),
-     };
--    set_current(Some(call));
-+    CURRENT.with(|c| c.set(Some(call)));
-     IN_CALL.with(|d| d.set(d.get() + 1));
-     let depth = Depth;
-     let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
-@@ -526,20 +529,42 @@ fn run_borrowed<T: Answer>(
-             }
-         });
-     }
--    let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
-+    let stopped = STOPPED
-+        .with(Cell::take)
-+        .unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
-     let r = match caught {
--        Ok(_) if stopped => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Cancelled) }
-+        Ok(_) if stopped => {
-+            NEEDS_RESET.with(|flag| flag.set(true));
-+            Err(Error::Cancelled)
-+        }
-         Ok(Ok(v)) => Ok(v),
-         Ok(Err(e)) => Err(status(e)),
--        Err(p) => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Internal(format!("{call}: {}", message(p.as_ref())))) }
-+        Err(p) => {
-+            NEEDS_RESET.with(|flag| flag.set(true));
-+            Err(Error::Internal(format!("{call}: {}", message(p.as_ref()))))
-+        }
-     };
-     k.cancel = saved_cancel;
--    set_current(None);
--    let why = match &r { Err(Error::Cancelled) => None, Ok(v) => v.refusal(), Err(e) => Some(e.to_string()) };
--    let report = why.and_then(|why| { let hook = hook?; let inputs = match snapshot { Some(taken) => taken, None => written(k, inputs) }; Some((hook, why, inputs)) });
-+    let why = match &r {
-+        Err(Error::Cancelled) => None,
-+        Ok(v) => v.refusal(),
-+        Err(e) => Some(e.to_string()),
-+    };
-+    let report = why.and_then(|why| {
-+        let hook = hook?;
-+        let inputs = match snapshot {
-+            Some(taken) => taken,
-+            None => written(k, inputs),
-+        };
-+        Some((hook, why, inputs))
-+    });
-     drop(depth);
-     if let Some((hook, why, inputs)) = report {
--        let failure = Failure { call, why: &why, inputs };
-+        let failure = Failure {
-+            call,
-+            why: &why,
-+            inputs,
-+        };
-         IN_HOOK.with(|flag| flag.set(true));
-         let _ = catch_unwind(AssertUnwindSafe(|| hook(&failure)));
-         IN_HOOK.with(|flag| flag.set(false));
-diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index c2b941941..3921c010b 100644
---- a/solidcore/crates/solidcore-ops/tests/blend.rs
-+++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -1988,17 +1988,34 @@ fn borrowed_kernel_matches_the_global_path() {
-     all_fixes();
-     let mut global = block();
-     let edge = top_front(&global);
--    blend(&mut global, Blend::Round, &[edge], &[2.0], &[], Corners::Filled).unwrap();
-+    blend(
-+        &mut global,
-+        Blend::Round,
-+        &[edge],
-+        &[2.0],
-+        &[],
-+        Corners::Filled,
-+    )
-+    .unwrap();
-     let global_volume = volume(&global);
-     let source = block();
-     let brep = source.into_brep();
-     let order = Order::of(&brep);
-     let mut kernel = Kernel::new(&KernelOptions::default());
-     kernel.fixes = UpstreamFixes::all();
--    let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
-+    let borrowed = Body::from_brep(&mut kernel, brep).unwrap();
-     let edge = top_front(&borrowed);
-     let (result, _) = with_kernel(&mut kernel, || {
--        solidcore_ops::blend_ordered(&borrowed, &order, Blend::Round, &[edge], &[2.0], &[], Corners::Filled, BlendOptions::default())
-+        blend_ordered(
-+            &borrowed,
-+            &order,
-+            Blend::Round,
-+            &[edge],
-+            &[2.0],
-+            &[],
-+            Corners::Filled,
-+            BlendOptions::default(),
-+        )
-     });
-     result.expect("borrowed blend");
-     assert!(rel(volume(&borrowed), global_volume) < 1.0e-9);
-@@ -3327,10 +3344,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
-     let source = block();
-     let brep = source.into_brep();
-     let order = Order::of(&brep);
--    let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
-+    let borrowed = Body::from_brep(&mut kernel, brep).unwrap();
-     let edge = top_front(&borrowed);
-     let (result, _) = with_kernel(&mut kernel, || {
--        solidcore_ops::blend_ordered(&borrowed, &order, Blend::Round, &[edge], &[2.0], &[], Corners::Filled, BlendOptions::default())
-+        blend_ordered(
-+            &borrowed,
-+            &order,
-+            Blend::Round,
-+            &[edge],
-+            &[2.0],
-+            &[],
-+            Corners::Filled,
-+            BlendOptions::default(),
-+        )
-     });
-     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
- }
-diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index 1c769e6b4..11862b08d 100644
---- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-+++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -132,17 +132,24 @@ fn a_deep_copy_that_keeps_the_proof_saves_the_same_decisions() {
-     let mut kernel = Kernel::new(&KernelOptions::default());
-     kernel.fixes = UpstreamFixes::all();
-     let drills: Vec<Body> = (1..=9).map(drill).collect();
--    let (kept, calls) = session::profiled(|| {
--        drills.into_iter().fold(plate(), |a, d| cut(a, d))
--    });
-+    let (kept, calls) = session::profiled(|| drills.into_iter().fold(plate(), |a, d| cut(a, d)));
-     assert_eq!(decisions(&calls), 19);
-     let drills: Vec<Body> = (1..=9).map(drill).collect();
-     let (copied_held, calls) = session::profiled(|| {
--        drills.into_iter().fold(plate(), |a, d| cut(a, d).copy_held_on(&mut kernel).unwrap())
-+        drills
-+            .into_iter()
-+            .fold(plate(), |a, d| cut(a, d).copy_held_on(&mut kernel).unwrap())
-     });
--    assert_eq!(decisions(&calls), 19, "a copied held body is not proved again");
-+    assert_eq!(
-+        decisions(&calls),
-+        19,
-+        "a copied held body is not proved again"
-+    );
-     assert_eq!(kept.counts().unwrap(), copied_held.counts().unwrap());
--    assert_eq!(kept.volume(1e-9).unwrap().to_bits(), copied_held.volume(1e-9).unwrap().to_bits());
-+    assert_eq!(
-+        kept.volume(1e-9).unwrap().to_bits(),
-+        copied_held.volume(1e-9).unwrap().to_bits()
-+    );
- }
- 
- /// `Body::prove_on` is the node-end proof of `Validation::EachNode`: it takes the full solid
-@@ -152,10 +159,19 @@ fn prove_on_refuses_a_sheet_as_a_solid() {
-     all_fixes();
-     let mut kernel = Kernel::new(&KernelOptions::default());
-     kernel.fixes = UpstreamFixes::all();
--    let sheet = create_plane(&mut kernel, solidcore::math::Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).unwrap();
-+    let sheet = create_plane(
-+        &mut kernel,
-+        solidcore::math::Point3::new(0.0, 0.0, 0.0),
-+        10.0,
-+        10.0,
-+    )
-+    .unwrap();
-     let body = Body::from_brep(&mut kernel, sheet).unwrap();
-     let proved = body.prove_on(&mut kernel);
--    assert!(matches!(proved, Err(solidcore_ops::Error::NotSolid)), "{proved:?}");
-+    assert!(
-+        matches!(proved, Err(solidcore_ops::Error::NotSolid)),
-+        "{proved:?}"
-+    );
- }
- 
- /// Under `Validation::EachNode` the calls inside one node decide no volume sign; the node proves
-@@ -172,8 +188,13 @@ fn each_node_proves_only_the_output() {
-             drills.into_iter().fold(plate(), |a, d| cut(a, d))
-         })
-     });
--    assert_eq!(decisions(&calls), 0, "the calls inside the node prove nothing");
--    body.prove_on(&mut kernel).expect("the node's output is a solid");
-+    assert_eq!(
-+        decisions(&calls),
-+        0,
-+        "the calls inside the node prove nothing"
-+    );
-+    body.prove_on(&mut kernel)
-+        .expect("the node's output is a solid");
- }
- 
- /// A boolean of two sheets behaves the same under `EachStep` and `EachNode`: both return the
-@@ -186,14 +207,30 @@ fn each_node_boolean_of_sheets_matches_each_step() {
-         let mut kernel = Kernel::new(&KernelOptions::default());
-         kernel.fixes = UpstreamFixes::all();
-         session::validating(mode, || {
--            let a = create_plane(&mut kernel, solidcore::math::Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).unwrap();
--            let b = create_plane(&mut kernel, solidcore::math::Point3::new(5.0, 0.0, 0.0), 10.0, 10.0).unwrap();
-+            let a = create_plane(
-+                &mut kernel,
-+                solidcore::math::Point3::new(0.0, 0.0, 0.0),
-+                10.0,
-+                10.0,
-+            )
-+            .unwrap();
-+            let b = create_plane(
-+                &mut kernel,
-+                solidcore::math::Point3::new(5.0, 0.0, 0.0),
-+                10.0,
-+                10.0,
-+            )
-+            .unwrap();
-             let a = Body::from_brep(&mut kernel, a).unwrap();
-             let b = Body::from_brep(&mut kernel, b).unwrap();
-             boolean(a, b, BooleanOp::Union)
-         })
-     };
--    let step = run(session::Validation::EachStep).expect("sheet union").expect("a sheet");
--    let node = run(session::Validation::EachNode).expect("sheet union").expect("a sheet");
-+    let step = run(session::Validation::EachStep)
-+        .expect("sheet union")
-+        .expect("a sheet");
-+    let node = run(session::Validation::EachNode)
-+        .expect("sheet union")
-+        .expect("a sheet");
-     assert_eq!(step.counts().unwrap(), node.counts().unwrap());
- }
+ /// A hyperbola or parabola: the vertices' parameters in closed form, the edge running the way
+ /// they go, as an exact spline over just that interval.
+ fn open_conic(curve: &Curve, ps: P3, pe: P3, same_sense: bool, closed: bool, spline: impl Fn(f64, f64) -> BCurve) -> R<Mapped> {
 -- 
 2.54.0 (Apple Git-157)
 

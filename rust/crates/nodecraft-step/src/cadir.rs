@@ -186,36 +186,363 @@ pub struct CadImport {
 
 /// The pcurves a face's uses need when the file gives no closed form, made by the
 /// kernel, as both STEP readers made them.
-struct KernelTrims;
+///
+/// The exact forms are tried first (`On::exact`/`On::along`). A face whose trim is not a
+/// closed form goes to the kernel as a one-face sheet, exactly as SolidCraft's
+/// `SmlibTrims` does: `to_kernel_with_bare_uses` admits the bare uses,
+/// `get_or_create_uv_trim_curve` (inside `to_record`) makes their trims with the kernel's
+/// own `DropCurve`, and the resulting record's pcurves are returned. This is the same
+/// `Trims` extension point; nothing here fits a curve.
+#[derive(Default)]
+struct KernelTrims {
+    /// A face went to the kernel for fitted trims, so the body's tolerances may need the
+    /// kernel's tolerance pass (see [`cover_fitted_gaps`]).
+    fitted: std::cell::Cell<bool>,
+}
 
 impl solidcore_ops::pcurve::Trims for KernelTrims {
     fn trims(
         &self,
         face: &solidcore_ops::pcurve::TrimFace<'_>,
     ) -> Result<Vec<Vec<solidcore_record::brep::Curve2>>, String> {
-        use solidcore_ops::pcurve::{EdgeUse, pcurves_within};
-        let mut loops: Vec<Vec<EdgeUse<'_>>> = Vec::with_capacity(face.loops.len());
-        for loop_ in &face.loops {
-            let mut uses = Vec::with_capacity(loop_.len());
-            for use_ in loop_ {
-                let edge = face
-                    .edges
-                    .get(use_.edge as usize)
-                    .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
-                uses.push(EdgeUse {
-                    edge: use_.edge,
-                    curve: edge.curve,
-                    interval: edge.interval,
-                    forward: use_.forward,
-                    tolerance: edge.tolerance,
-                    given: use_.pcurve.as_ref(),
-                });
+        match exact_trims(face) {
+            Ok(pcurves) => Ok(pcurves),
+            Err(exact) => {
+                self.fitted.set(true);
+                fitted_trims(face)
+                    .map_err(|fitted| format!("{exact}; the kernel's fitted trims: {fitted}"))
             }
-            loops.push(uses);
         }
-        pcurves_within(face.surface, &loops, face.tolerance, Some(face.domain))
-            .map_err(|error| error.to_string())
     }
+}
+
+/// Cover the gaps a fitted body has with the kernel's own tolerance pass.
+///
+/// `solidcore-step` raises an edge to `1.5 * gap` on the pcurves it made, but the Check
+/// measures a vertex against its edge and face at half the kernel's zone (`SmBrep::Test`
+/// #0-4), which is a quarter of the record's tolerance. A fitted pcurve (and the source
+/// geometry it follows) can leave a gap between those, so the record is taken to the
+/// kernel, `validate_and_update_tolerances` grows the tolerances the kernel's own check
+/// would refuse (up to the same caps), and the grown zones are written back as record
+/// tolerances. Only bodies with fitted trims are touched, and only upward.
+fn cover_fitted_gaps(brep: &mut solidcore_record::brep::Brep) {
+    use solidcore::topology::brep::validation::{
+        CheckLevel as KernelCheckLevel, validate_and_update_tolerances,
+    };
+    let mut kernel = nodecraft_kernel_profile::kernel();
+    let Ok((mut body, order)) = solidcore_convert::brep::to_kernel(&mut kernel, brep, true) else {
+        return;
+    };
+    if validate_and_update_tolerances(
+        &mut kernel,
+        &mut body,
+        false,
+        None,
+        KernelCheckLevel::Level2 as u8,
+    )
+    .is_err()
+    {
+        return;
+    }
+    // `Order` maps each record entity to its kernel one; a kernel zone is half a record
+    // tolerance (`intersection_tolerance` in `solidcore-convert`).
+    for (index, edge) in brep.edges.iter_mut().enumerate() {
+        let Some(&kernel_edge) = order.edges.get(index) else {
+            continue;
+        };
+        if let Ok(zone) = solidcore::topology::edge::tolerance(&body, kernel_edge) {
+            edge.tolerance = edge.tolerance.max(2.0 * zone);
+        }
+    }
+    for (index, vertex) in brep.vertices.iter_mut().enumerate() {
+        let Some(&kernel_vertex) = order.vertices.get(index) else {
+            continue;
+        };
+        if let Ok(zone) = solidcore::topology::vertex::tolerance(&body, kernel_vertex) {
+            vertex.tolerance = vertex.tolerance.max(2.0 * zone);
+        }
+    }
+}
+
+/// The exact pcurves a face's uses have a closed form for, or why one has none.
+fn exact_trims(
+    face: &solidcore_ops::pcurve::TrimFace<'_>,
+) -> Result<Vec<Vec<solidcore_record::brep::Curve2>>, String> {
+    use solidcore_ops::pcurve::{EdgeUse, pcurves_within};
+    // The form is what the pcurves are on (a cylinder's NURBS form, not its label), and an
+    // edge's NURBS form is what its interval runs along.
+    let surface = face.nurbs.unwrap_or(face.surface);
+    let mut loops: Vec<Vec<EdgeUse<'_>>> = Vec::with_capacity(face.loops.len());
+    for loop_ in &face.loops {
+        let mut uses = Vec::with_capacity(loop_.len());
+        for use_ in loop_ {
+            let edge = face
+                .edges
+                .get(use_.edge as usize)
+                .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
+            uses.push(EdgeUse {
+                edge: use_.edge,
+                curve: edge.nurbs.unwrap_or(edge.curve),
+                interval: edge.interval,
+                forward: use_.forward,
+                tolerance: edge.tolerance,
+                given: use_.pcurve.as_ref(),
+            });
+        }
+        loops.push(uses);
+    }
+    pcurves_within(surface, &loops, face.tolerance, Some(face.domain))
+        .map_err(|error| error.to_string())
+}
+
+/// A face as a one-face open sheet, its uses with no pcurve marked bare, and those uses
+/// (sorted, as `to_kernel_with_bare_uses` takes them). The sheet is `SmlibTrims::sheet`'s:
+/// the face alone, its edges and vertices, a placeholder pcurve for a bare use.
+fn one_face_sheet(
+    face: &solidcore_ops::pcurve::TrimFace<'_>,
+) -> Result<(solidcore_record::brep::Brep, Vec<(u32, u32, u32)>), String> {
+    use solidcore_record::brep::{
+        self as b, Curve2, EdgeUseRef, Loop, OrientedEdge, OrientedFace, Region, Shell, Vertex,
+    };
+    let mut edges: Vec<b::Edge> = face
+        .edges
+        .iter()
+        .map(|edge| b::Edge {
+            curve: edge.curve.clone(),
+            nurbs: edge.nurbs.cloned(),
+            interval: edge.interval,
+            vertices: edge.vertices,
+            tolerance: edge.tolerance,
+            uses: Vec::new(),
+        })
+        .collect();
+    let mut bare = Vec::new();
+    let mut loops = Vec::with_capacity(face.loops.len());
+    for (li, loop_) in face.loops.iter().enumerate() {
+        let li = u32::try_from(li).map_err(|_| "too many loops")?;
+        let mut uses = Vec::with_capacity(loop_.len());
+        for (position, use_) in loop_.iter().enumerate() {
+            let position = u32::try_from(position).map_err(|_| "too many uses")?;
+            let edge = edges
+                .get_mut(use_.edge as usize)
+                .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
+            edge.uses.push(EdgeUseRef {
+                face: 0,
+                r#loop: li,
+                position,
+                upper: !use_.forward,
+            });
+            let pcurve = match &use_.pcurve {
+                Some(pcurve) => pcurve.clone(),
+                None => {
+                    bare.push((0, li, position));
+                    // Not read: the use goes without a trim (`to_kernel_with_bare_uses`).
+                    Curve2::Spline {
+                        knots: vec![
+                            edge.interval[0],
+                            edge.interval[0],
+                            edge.interval[1],
+                            edge.interval[1],
+                        ],
+                        points: vec![[0.0; 2]; 2],
+                    }
+                }
+            };
+            uses.push(OrientedEdge {
+                edge: use_.edge,
+                forward: use_.forward,
+                pcurve,
+            });
+        }
+        loops.push(Loop::Edges { edges: uses });
+    }
+    let vertices = face
+        .vertices
+        .iter()
+        .map(|&point| Vertex {
+            point,
+            tolerance: face.tolerance,
+        })
+        .collect();
+    let record = b::Brep {
+        version: b::VERSION,
+        tolerance: face.tolerance,
+        regions: vec![Region {
+            shells: vec![0],
+            void: false,
+        }],
+        shells: vec![Shell::Faces {
+            faces: vec![OrientedFace {
+                face: 0,
+                forward: true,
+            }],
+            wires: Vec::new(),
+        }],
+        faces: vec![b::Face {
+            surface: face.surface.clone(),
+            nurbs: face.nurbs.cloned(),
+            domain: face.domain,
+            loops,
+        }],
+        edges,
+        vertices,
+    };
+    bare.sort_unstable();
+    Ok((record, bare))
+}
+
+/// The pcurves of a face's uses by the kernel's own trim maker: the face as a one-face
+/// sheet, its bare uses admitted, the body exported with `to_record` (which calls
+/// `get_or_create_uv_trim_curve` for every use without a trim).
+fn fitted_trims(
+    face: &solidcore_ops::pcurve::TrimFace<'_>,
+) -> Result<Vec<Vec<solidcore_record::brep::Curve2>>, String> {
+    use solidcore_record::brep::{Loop, OrientedEdge};
+    let (record, bare) = one_face_sheet(face)?;
+    let mut kernel = nodecraft_kernel_profile::kernel();
+    let (mut body, sheet_order) =
+        solidcore_convert::brep::to_kernel_with_bare_uses(&mut kernel, &record, true, &bare)
+            .map_err(|error| format!("the one-face sheet: {error}"))?;
+    let (made, order) = solidcore_convert::brep::to_record(&mut kernel, &mut body)
+        .map_err(|error| format!("making the trims: {error}"))?;
+    let [made_face] = made.faces.as_slice() else {
+        return Err(format!("the kernel made {} faces of one", made.faces.len()));
+    };
+    let made_uses: Vec<&OrientedEdge> = made_face
+        .loops
+        .iter()
+        .flat_map(|loop_| match loop_ {
+            Loop::Edges { edges } => edges.as_slice(),
+            Loop::Vertex { .. } => &[],
+        })
+        .collect();
+    // The sheet's edge and the made record's edge are the same kernel edge; the record
+    // renumbers them, so name each edge by its kernel one.
+    let kernel_edge = |sheet_edge: u32| {
+        sheet_order
+            .edges
+            .get(sheet_edge as usize)
+            .copied()
+            .ok_or_else(|| format!("the kernel lost edge {sheet_edge}"))
+    };
+    let record_edge = |kernel: solidcore::EdgeId| {
+        order
+            .edges
+            .iter()
+            .position(|&edge| edge == kernel)
+            .ok_or_else(|| "the record lost an edge".to_string())
+    };
+    // A sheet's loops may come back the way the kernel runs them, against ours: a use is
+    // the same pcurve either way, and the loop's way round is read from an edge the face
+    // uses once.
+    let ours = face.loops.iter().flatten();
+    let once = ours
+        .clone()
+        .find(|use_| ours.clone().filter(|other| other.edge == use_.edge).count() == 1)
+        .ok_or_else(|| "a face of seam edges only".to_string())?;
+    let once_edge = record_edge(kernel_edge(once.edge)?)?;
+    let reversed = made_uses
+        .iter()
+        .find(|use_| use_.edge as usize == once_edge)
+        .ok_or_else(|| "a use the kernel did not keep".to_string())?
+        .forward
+        != once.forward;
+    let mut result = Vec::with_capacity(face.loops.len());
+    for loop_ in &face.loops {
+        let mut pcurves = Vec::with_capacity(loop_.len());
+        for use_ in loop_ {
+            let edge_index = record_edge(kernel_edge(use_.edge)?)?;
+            let found = made_uses.iter().find(|made_use| {
+                made_use.edge as usize == edge_index
+                    && made_use.forward == (use_.forward != reversed)
+            });
+            let made_use = found.ok_or_else(|| "a use the kernel did not keep".to_string())?;
+            let ours = face
+                .edges
+                .get(use_.edge as usize)
+                .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
+            let made_edge = made
+                .edges
+                .get(edge_index)
+                .ok_or_else(|| "the record lost an edge".to_string())?;
+            let tolerance = made_edge.tolerance.max(ours.tolerance);
+            // How far each end may move: within its vertex's tolerance where the caller
+            // covers the gap (`TrimFace::vertex_tolerances`), else within the edge's.
+            let reach = ours.vertices.map(|vertex| {
+                face.vertex_tolerances
+                    .get(vertex as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            });
+            pcurves.push(on_our_interval(
+                made_use.pcurve.clone(),
+                ours,
+                made_edge.interval,
+                tolerance,
+                reach,
+            )?);
+        }
+        result.push(pcurves);
+    }
+    Ok(result)
+}
+
+/// A pcurve the kernel made on its edge's interval `theirs`, on ours, as
+/// `SmlibTrims::on_our_interval`: the affine change of parameter is exact for a B-spline
+/// (its knots move), and an end that moved farther than the edge's or its vertex's
+/// tolerance is refused with how far.
+fn on_our_interval(
+    pcurve: solidcore_record::brep::Curve2,
+    ours: &solidcore_ops::pcurve::TrimEdge<'_>,
+    theirs: [f64; 2],
+    tolerance: f64,
+    reach: [f64; 2],
+) -> Result<solidcore_record::brep::Curve2, String> {
+    use solidcore_record::brep::Curve2;
+    let [a, b] = ours.interval;
+    let [c, d] = theirs;
+    if a == c && b == d {
+        return Ok(pcurve);
+    }
+    let curve = solidcore_convert::curve(ours.nurbs.unwrap_or(ours.curve))
+        .map_err(|error| error.to_string())?;
+    let curve = solidcore::eval::CurveEval::new(&curve).map_err(|error| error.to_string())?;
+    let at = |t: f64| {
+        curve
+            .point(t)
+            .ok_or_else(|| format!("the edge's curve has no point at {t}"))
+    };
+    let moved = [at(a)?.distance(at(c)?), at(b)?.distance(at(d)?)];
+    let within = moved
+        .iter()
+        .zip(reach)
+        .all(|(moved, reach)| *moved <= tolerance.max(reach));
+    if !within || !(d > c) {
+        let shift = moved[0].max(moved[1]);
+        return Err(format!(
+            "the kernel moved an edge's interval from {:?} to {theirs:?}, its ends {shift} mm along its curve (tolerance {tolerance} mm, its vertices' {reach:?} mm)",
+            ours.interval
+        ));
+    }
+    let map = |k: f64| {
+        if k == c {
+            a
+        } else if k == d {
+            b
+        } else {
+            a + (k - c) * ((b - a) / (d - c))
+        }
+    };
+    Ok(match pcurve {
+        Curve2::Spline { knots, points } => Curve2::Spline {
+            knots: knots.into_iter().map(map).collect(),
+            points,
+        },
+        Curve2::RationalSpline { knots, homogeneous } => Curve2::RationalSpline {
+            knots: knots.into_iter().map(map).collect(),
+            homogeneous,
+        },
+    })
 }
 
 /// The decode policy: cadmpeg's tight service profile under our input cap.
@@ -800,7 +1127,13 @@ fn read_cad_inner(bytes: &[u8], name: &str) -> Result<CadImport, String> {
     warnings.extend(instance_warnings);
     let tolerance = solidcore_cadir::tolerance(&ir);
     let (type_report, solid_types) = type_reports(&ir);
-    let read = solidcore_cadir::read_bodies(&ir, Some(&KernelTrims));
+    let trims = KernelTrims::default();
+    let mut read = solidcore_cadir::read_bodies(&ir, Some(&trims));
+    if trims.fitted.get() {
+        for region in &mut read.read {
+            cover_fitted_gaps(&mut region.solid.brep);
+        }
+    }
     let by_id: BTreeMap<&str, &cadmpeg_ir::topology::Body> = ir
         .model
         .bodies

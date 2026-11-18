@@ -269,6 +269,20 @@ impl<'t> Assembly<'t> {
         Ok((i, along))
     }
 
+    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
+    /// interval is where the vertices lie on the curve (the whole of a closed curve when both
+    /// ends are one vertex or one point), the edge running from `ends[0]` along the curve, as a
+    /// STEP edge is read. Then as [`Assembly::add_edge`].
+    pub fn add_edge_on(&mut self, origin: u64, curve: BCurve, ends: [u32; 2]) -> R<(u32, bool)> {
+        let (ps, pe) = (self.point(ends[0])?, self.point(ends[1])?);
+        let closed = ends[0] == ends[1];
+        let full = closed || ps == pe;
+        let (curve, interval, with) =
+            crate::topology::record_edge(curve, ps, pe, closed, full, self.tol).map_err(|m| format!("edge #{origin}: {m}"))?;
+        let (e, along) = self.add_edge(origin, curve, interval, if with { ends } else { [ends[1], ends[0]] })?;
+        Ok((e, along == with))
+    }
+
     /// A sphere face bounded by vertex loops alone, each at one of its poles (a face of a closed
     /// surface bounded by vertices is all of the surface): the whole sphere, its loop a meridian
     /// from the south pole to the north and back, which [`Assembly::complete_slits`] keeps as its
@@ -300,20 +314,6 @@ impl<'t> Assembly<'t> {
         let half = std::f64::consts::FRAC_PI_2;
         self.edges.push(EdgeB { curve: BCurve::Circle { frame, radius }, interval: [-half, half], vertices: ends, tolerance: self.tol, form: None });
         Ok(vec![Bound::Edges(vec![(e, true), (e, false)])])
-    }
-
-    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
-    /// interval is where the vertices lie on the curve (the whole of a closed curve when both
-    /// ends are one vertex or one point), the edge running from `ends[0]` along the curve, as a
-    /// STEP edge is read. Then as [`Assembly::add_edge`].
-    pub fn add_edge_on(&mut self, origin: u64, curve: BCurve, ends: [u32; 2]) -> R<(u32, bool)> {
-        let (ps, pe) = (self.point(ends[0])?, self.point(ends[1])?);
-        let closed = ends[0] == ends[1];
-        let full = closed || ps == pe;
-        let (curve, interval, with) =
-            crate::topology::record_edge(curve, ps, pe, closed, full, self.tol).map_err(|m| format!("edge #{origin}: {m}"))?;
-        let (e, along) = self.add_edge(origin, curve, interval, if with { ends } else { [ends[1], ends[0]] })?;
-        Ok((e, along == with))
     }
 
     /// A face on `surface` bounded by `bounds`, its index. Each bound is relative to the
@@ -548,6 +548,14 @@ impl<'t> Assembly<'t> {
         // (a sphere's frame put on the slit), before anything is measured on the frame or split
         // at its poles.
         self.complete_slits()?;
+        // A face on a torus that is the rest of it round a patch its loop bounds gets the
+        // torus's seams, its loop a hole in it.
+        let outsides = self.complete_outsides()?;
+        if outsides > 0 {
+            notes.push(format!("{outsides} faces on a torus that are the outside of their loops given the torus's seams"));
+        }
+        // A torus face's seams where its torus starts, so its (u, v) box is read whole.
+        self.seat_torus_seams()?;
         let slits = self.drop_inner_slits();
         if slits > 0 {
             notes.push(format!("{slits} slits of no area left out of the faces they lie in"));
@@ -1659,7 +1667,8 @@ pub fn parabola_curve(vertex: P3, axis: P3, reference: P3, focal: f64, interval:
 
 /// The exact spline of a hyperbola edge over `interval` in the hyperbola's parameter: about
 /// `center`, `axis` its plane's normal, `reference` its major axis (`center + a cosh t x +
-/// b sinh t y`).
+/// b sinh t y`). Its ends and knots are at the hyperbola's parameters; between knots its
+/// parameter is not the hyperbola's (see `topology::hyperbola_curve`).
 pub fn hyperbola_curve(center: P3, axis: P3, reference: P3, radii: [f64; 2], interval: [f64; 2]) -> BCurve {
     crate::topology::hyperbola_curve(&crate::geom::Placement { origin: center, axis, ref_direction: reference }, radii[0], radii[1], interval)
 }
