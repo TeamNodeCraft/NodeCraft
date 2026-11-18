@@ -377,20 +377,134 @@ mod tests {
         assert_eq!(stats.misses, 1, "b should be recomputed");
     }
 
+    /// Write a STEP file with `bodies` 10 mm boxes through the engine's
+    /// exporter node, the kernel and the normal exact-export path. The test
+    /// carries its own fixtures so it runs from any checkout, including the
+    /// public snapshot, which does not export the private sample directories.
+    fn write_step_fixture(
+        directory: &std::path::Path,
+        stem: &str,
+        bodies: usize,
+    ) -> std::path::PathBuf {
+        assert!(bodies >= 1, "a fixture needs at least one body");
+        let mut nodes = Vec::new();
+        let mut connections = Vec::new();
+        let target;
+        if bodies == 1 {
+            nodes.push(json!({
+                "id": "body0",
+                "type": "primitive",
+                "cache": {"key": "body0"},
+                "values": {
+                    "primitiveType": "box",
+                    "length": 10.0,
+                    "width": 10.0,
+                    "height": 10.0
+                }
+            }));
+            target = "body0";
+        } else {
+            for index in 0..bodies {
+                let primitive = format!("body{index}");
+                let translate = format!("move{index}");
+                nodes.push(json!({
+                    "id": primitive.clone(),
+                    "type": "primitive",
+                    "cache": {"key": primitive.clone()},
+                    "values": {
+                        "primitiveType": "box",
+                        "length": 10.0,
+                        "width": 10.0,
+                        "height": 10.0
+                    }
+                }));
+                nodes.push(json!({
+                    "id": translate.clone(),
+                    "type": "translate",
+                    "cache": {"key": translate.clone()},
+                    "values": {"x": index as f64 * 20.0}
+                }));
+                connections.push(json!({
+                    "from": primitive,
+                    "out": "shape",
+                    "to": translate.clone(),
+                    "in": "shape"
+                }));
+                connections.push(json!({
+                    "from": translate,
+                    "out": "shape",
+                    "to": "part",
+                    "in": "shape"
+                }));
+            }
+            nodes.push(json!({
+                "id": "part",
+                "type": "combine",
+                "cache": {"key": "part"},
+                "values": {}
+            }));
+            target = "part";
+        }
+        nodes.push(json!({
+            "id": "export",
+            "type": "exporter",
+            "cache": {"key": "export"},
+            "values": {
+                "directory": directory.to_string_lossy(),
+                "fileName": stem
+            }
+        }));
+        if bodies == 1 {
+            connections.push(json!({
+                "from": "body0", "out": "shape", "to": "export", "in": "shape"
+            }));
+        } else {
+            connections.push(json!({
+                "from": "part", "out": "shape", "to": "export", "in": "shape"
+            }));
+        }
+
+        let request: nodecraft_protocol::Request = serde_json::from_value(json!({
+            "requestId": 1,
+            "targets": [target, "export"],
+            "meshTargets": [],
+            "runExporters": true,
+            "nodes": nodes,
+            "connections": connections
+        }))
+        .expect("STEP fixture request");
+        let output = nodecraft_engine::evaluate_exact(
+            request,
+            nodecraft_engine::EngineCache::new(),
+            None,
+        );
+        assert!(
+            output.response.node_errors.is_empty(),
+            "STEP fixture export failed: {:?}",
+            output.response.node_errors
+        );
+        let path = directory.join(format!("{stem}.step"));
+        assert!(
+            path.is_file(),
+            "STEP fixture was not written: {}",
+            path.display()
+        );
+        path
+    }
+
     /// A reloaded source changes the importer's runtime cache identity, which
     /// propagates to its descendants exactly like a value edit. An unrelated
     /// branch stays cached, and the replacement STEP's bodies are what display.
     #[test]
     fn source_content_change_invalidates_the_importer_branch_only() {
-        let workspace = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
-        let one_body = workspace.join("tests/Sample AP203 Data Files/block.stp");
-        let six_bodies = workspace.join("samples/rust-export.step");
         let directory = std::env::temp_dir().join(format!(
             "sn-source-invalidation-{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("temp directory");
+        let one_body = write_step_fixture(&directory, "one-body", 1);
+        let six_bodies = write_step_fixture(&directory, "six-bodies", 6);
         let source = directory.join("part.step");
         std::fs::copy(&one_body, &source).expect("copy source");
 
