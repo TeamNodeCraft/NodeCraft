@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
+mod auxiliary_window;
 mod evaluation;
 mod commands;
 mod document_ops;
+mod debug_ui;
 mod settings;
 mod settings_ui;
 mod tabs;
@@ -16,6 +18,7 @@ mod titlebar;
 mod tool_dock;
 use tabs::{DocumentTab, TabDrag, TabViewMode};
 use theme_editor::*;
+use auxiliary_window::*;
 use document_ops::*;
 use evaluation::EvalWorker;
 pub(crate) use tool_dock::tool_dock_style;
@@ -277,6 +280,29 @@ impl SettingsTab {
             Self::Engine => "Engine",
             Self::Diagnostics => "Diagnostics",
             Self::Keys => "Keys",
+        }
+    }
+}
+
+/// The Debug window's tabs. The selected tab is persisted with the window
+/// switch so reopening the window returns to the last view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum DebugTab {
+    #[default]
+    Frame,
+    Gpu,
+    Camera,
+}
+
+impl DebugTab {
+    pub(super) const ALL: [Self; 3] = [Self::Frame, Self::Gpu, Self::Camera];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Frame => "Frame",
+            Self::Gpu => "GPU",
+            Self::Camera => "Camera",
         }
     }
 }
@@ -809,6 +835,16 @@ pub struct NodeCraftApp {
     tessellation_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
+    /// Settings > Diagnostics switch. Off means no Debug window, no timer
+    /// queries and no ring writes.
+    debug_window: bool,
+    /// The Debug window tab last shown; persisted beside the switch.
+    debug_tab: DebugTab,
+    /// Shared with the wgpu paint callback, which scopes the render passes it
+    /// owns. It holds no query resources while the setting is off.
+    gpu_profiler_slot:
+        Option<std::sync::Arc<std::sync::Mutex<crate::gpu_profiler::GpuProfilerSlot>>>,
+    profiler_window: crate::gpu_profiler::ProfilerWindow,
     cable_routing: CableRouting,
     eval_worker: EvalWorker,
     source_service: source_service::SourceService,
@@ -824,17 +860,10 @@ pub struct NodeCraftApp {
     display_worker: std::sync::Arc<nodecraft_display::service::DisplayWorker>,
     pending_display: Option<(u64, String, bool, Instant)>,
     quality_display: Option<(u64, u64, String, bool, Instant)>,
-    /// Per-body display levels from the installed screen-space LOD pass.
-    lod_levels: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::DisplayQuality>,
-    /// Display-space bounds cached against the exact snapshot id that produced
-    /// them. Recomputing them is only needed when that snapshot changes.
-    lod_bounds: Option<(
-        u64,
-        std::sync::Arc<BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds>>,
-    )>,
-    /// Camera/viewport the installed levels were computed for. Equal to the
-    /// next frame's view means nothing moved and no LOD request is needed.
-    lod_view: Option<nodecraft_display::LodView>,
+    /// Per-body display levels and placed bounds. This state survives exact
+    /// snapshots: a colour edit keeps it, and only a new or moved body chooses
+    /// a level again.
+    lod: evaluation::LodState,
     display_snapshot: Option<evaluation::DisplaySnapshot>,
     display_error: Option<String>,
     last_display_us: Option<(u64, u64)>,
@@ -885,7 +914,12 @@ pub struct NodeCraftApp {
     display_mesh_hits: u32,
     /// Planner defects from the latest display tessellation.
     tessellation_diagnostics: Vec<String>,
-    /// Provisional display quality detail; None is the full plan.
+    /// Legacy provisional display detail reported in the control snapshot.
+    ///
+    /// The interactive display path no longer requests it: every exact
+    /// snapshot is planned at each body's screen-space level, and a body with
+    /// no camera yet uses the normal full-plan tolerance. `DisplayQuality`'s
+    /// preview variant stays for the engine/export callers that still use it.
     preview_detail: Option<u8>,
     warmup_until: Instant,
     screenshot: Option<CaptureRequest>,
@@ -903,9 +937,15 @@ pub struct NodeCraftApp {
     /// A drag applied values while document publishing was deferred; publish
     /// once when the drag releases instead of cloning the graph every frame.
     gizmo_publish_pending: bool,
+    /// Node and field a click on the transform triad asked the inspector to
+    /// focus. Consumed by the inspector draw in the same frame.
+    gizmo_focus: Option<(String, String)>,
     /// A native file dialog is open off the event thread; its action runs when
     /// the result arrives (never synchronously inside the event handler).
     pending_dialog: Option<PendingDialogState>,
+    /// The profiler's "Save trace" picker; like every native dialog it runs on
+    /// a worker thread and is polled from `logic`.
+    pending_profiler_trace: Option<PendingFileDialog>,
     camera_initialized: bool,
     last_saved_view: crate::viewport::ViewSettings,
     last_saved_theme: Option<String>,
@@ -1359,6 +1399,42 @@ impl NodeCraftApp {
                 solidcraft_viewport_gpu::depth_format(&render_state.device, true),
             );
         }
+        // The profiler slot is cheap while off: it holds device/queue handles
+        // but creates no query sets until the Diagnostics switch is turned on.
+        // It is shared with the paint callback through callback resources.
+        let debug_window_setting = settings.debug_window;
+        let debug_tab = settings.debug_tab;
+        let timestamp_query = eframe::wgpu::Features::TIMESTAMP_QUERY;
+        let (profiler_device, profiler_queue, profiler_timestamps, profiler_backend) =
+            if let Some(render_state) = &cc.wgpu_render_state {
+                (
+                    Some(render_state.device.clone()),
+                    Some(render_state.queue.clone()),
+                    render_state.adapter.features().contains(timestamp_query)
+                        && render_state.device.features().contains(timestamp_query),
+                    Some(render_state.adapter.get_info().backend),
+                )
+            } else {
+                (None, None, false, None)
+            };
+        // The slot exists even without a wgpu render state so the window can
+        // still show CPU timings; enabling GPU queries is lazy.
+        let profiler_slot = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::gpu_profiler::GpuProfilerSlot::new(
+                profiler_device,
+                profiler_queue,
+                profiler_timestamps,
+                profiler_backend,
+            ),
+        ));
+        if let Some(render_state) = &cc.wgpu_render_state {
+            render_state
+                .renderer
+                .write()
+                .callback_resources
+                .insert(profiler_slot.clone());
+        }
+        let gpu_profiler_slot = Some(profiler_slot);
         if render_model {
             viewport.set_chrome_visible(false);
         }
@@ -1434,6 +1510,10 @@ impl NodeCraftApp {
             tessellation_threads: settings.tessellation_threads,
             workload_profiler: settings.workload_profiler,
             kernel_fixes: settings.kernel_fixes,
+            debug_window: debug_window_setting,
+            debug_tab,
+            gpu_profiler_slot,
+            profiler_window: crate::gpu_profiler::ProfilerWindow::new(),
             cable_routing: CableRouting::from_setting(&settings.cable_routing),
             eval_worker: EvalWorker::new(),
             source_service: source_service::SourceService::new(),
@@ -1446,9 +1526,7 @@ impl NodeCraftApp {
             display_worker,
             pending_display: None,
             quality_display: None,
-            lod_levels: BTreeMap::new(),
-            lod_bounds: None,
-            lod_view: None,
+            lod: evaluation::LodState::default(),
             display_snapshot: None,
             display_error: None,
             last_display_us: None,
@@ -1478,7 +1556,7 @@ impl NodeCraftApp {
             part_hits: 0,
             display_mesh_hits: 0,
             tessellation_diagnostics: Vec::new(),
-            preview_detail: Some(1),
+            preview_detail: None,
             // The SolidCraft callback needs a prepare frame before its first blit.
             warmup_until: Instant::now() + std::time::Duration::from_secs(2),
             screenshot: screenshot.map(|path| CaptureRequest {
@@ -1497,7 +1575,9 @@ impl NodeCraftApp {
             gizmo_dragging: false,
             gizmo_edited: false,
             gizmo_publish_pending: false,
+            gizmo_focus: None,
             pending_dialog: None,
+            pending_profiler_trace: None,
             camera_initialized: false,
             last_saved_view: persisted_view,
             last_saved_theme: initial_theme_id,
@@ -1550,6 +1630,9 @@ impl NodeCraftApp {
         };
         #[cfg(target_os = "macos")]
         nodecraft_macos::install(cc.egui_ctx.clone());
+        if debug_window_setting {
+            app.set_debug_window(true);
+        }
         app.node_editor.set_cable_routing(app.cable_routing);
         if let Some(path) = choose_startup_document(initial, startup_recent, default_document()) {
             app.open(path);
@@ -3721,6 +3804,8 @@ impl NodeCraftApp {
             frame.axes_basis.apply_vector([0.0, 1.0, 0.0]),
             frame.axes_basis.apply_vector([0.0, 0.0, 1.0]),
         ];
+        let local_axes =
+            node.values.get("space").and_then(serde_json::Value::as_str) == Some("local");
         Some(Gizmo {
             node_id: selected_id,
             pivot: frame.pivot,
@@ -3732,6 +3817,7 @@ impl NodeCraftApp {
             rz: frame.translate.rz,
             world_to_local: frame.chain.inverse_linear(),
             axes,
+            local_axes,
         })
     }
 
@@ -3910,6 +3996,14 @@ impl NodeCraftApp {
             }
             return;
         };
+        // A click on an arrow or ring selects the field it drives in the
+        // inspector, without moving it. The update carries the field; the
+        // inspector consumes it below.
+        if let Some(field) = update.focus.clone()
+            && let Some(node) = selected_node.filter(|node| node.node_type == "translate")
+        {
+            self.gizmo_focus = Some((node.id.clone(), field));
+        }
         self.gizmo_dragging = update.dragging;
         if update.started {
             self.gizmo_drag = selected_node.and_then(|node| self.begin_gizmo_preview(node));
@@ -5210,6 +5304,10 @@ impl eframe::App for NodeCraftApp {
         let guarded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.ui_inner(ui, frame);
         }));
+        self.profiler_record(
+            crate::gpu_profiler::Series::UiUpdate,
+            started.elapsed().as_secs_f64() * 1000.0,
+        );
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
             let elapsed = started.elapsed();
             if elapsed.as_millis() >= 50 {
@@ -5227,6 +5325,11 @@ impl eframe::App for NodeCraftApp {
 
 impl NodeCraftApp {
     fn logic_inner(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Finish a trace-save picker without ever blocking the event thread.
+        self.poll_profiler_trace();
+        // Off is one bool check; on harvests the previous frame's GPU results
+        // and opens a new fixed ring slot before the UI runs.
+        self.profiler_tick(ctx);
         let tess_ready = self.viewport.plan_ready();
         let tess_was_ready = nodecraft_display::service::gpu_tess_ready();
         nodecraft_display::service::set_gpu_tess_ready(tess_ready);
@@ -5281,6 +5384,8 @@ impl NodeCraftApp {
                 self.tessellation_threads,
                 self.workload_profiler,
                 self.kernel_fixes,
+                self.debug_window,
+                self.debug_tab,
                 self.cable_routing,
                 self.tool_dock_offset_y,
                 &self.tool_dock_shortcut,
@@ -5321,102 +5426,42 @@ impl NodeCraftApp {
             // activity and run the legacy planner. The request is event-driven:
             // once the camera/viewport produce a level set, an unchanged view
             // submits nothing.
-            if let Some(view) = self.viewport.lod_view(ctx.pixels_per_point()) {
-                if self.lod_view != Some(view) {
-                    if let Some(snapshot) = self.display_snapshot.clone() {
-                        // Bounds are pure geometry of one snapshot; compute them
-                        // once and reuse until a newer exact snapshot lands.
-                        let cached_bounds = match &self.lod_bounds {
-                            Some((id, bounds)) if *id == snapshot.id => {
-                                Some(std::sync::Arc::clone(bounds))
-                            }
-                            _ => None,
-                        };
-                        let bounds = if let Some(bounds) = cached_bounds {
-                            bounds
-                        } else {
-                            let bounds = std::sync::Arc::new(
-                                evaluation::lod_bounds_for_snapshot(&snapshot.snapshot),
-                            );
-                            self.lod_bounds =
-                                Some((snapshot.id, std::sync::Arc::clone(&bounds)));
-                            bounds
-                        };
-                        let eye: [f64; 3] = self.viewport.camera.eye().into();
-                        let fov_y = self.viewport.camera.fov;
-                        let ortho_height = self.viewport.camera.half_height() * 2.0;
-                        let error_px = view.error_px;
-                        let mut body_quality = BTreeMap::new();
-                        let mut order: Vec<(f64, nodecraft_display::BodyKey)> =
-                            Vec::with_capacity(bounds.len());
-                        for (key, body_bounds) in bounds.iter() {
-                            let current_tolerance = match self.lod_levels.get(key).copied() {
-                                Some(nodecraft_display::DisplayQuality::Full(tolerance)) => {
-                                    Some(tolerance)
-                                }
-                                _ => None,
-                            };
-                            let params = nodecraft_display::LodParams {
-                                current_tolerance,
-                                ..nodecraft_display::LodParams::new(error_px)
-                            };
-                            let quality = nodecraft_display::quality_for(
-                                *body_bounds,
-                                nodecraft_display::LodCamera { eye, fov_y, ortho_height },
-                                nodecraft_display::ViewportSize {
-                                    width: view.viewport[0],
-                                    height: view.viewport[1],
-                                },
-                                view.pixels_per_point,
-                                params,
-                            );
-                            body_quality.insert(*key, quality);
-                            // Nearest-first planning order. The distance is
-                            // centre depth minus radius, so a large body that
-                            // reaches the camera is planned early too.
-                            let distance = ((eye[0] - body_bounds.center[0]).powi(2)
-                                + (eye[1] - body_bounds.center[1]).powi(2)
-                                + (eye[2] - body_bounds.center[2]).powi(2))
-                            .sqrt()
-                                - body_bounds.radius;
-                            order.push((distance, *key));
-                        }
-                        order.sort_by(|a, b| {
-                            a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1))
-                        });
-                        let body_priority =
-                            order.into_iter().map(|(_, key)| key).collect::<Vec<_>>();
-                        self.lod_view = Some(view);
-                        if body_quality != self.lod_levels {
-                            self.display_next = self.display_next.wrapping_add(1);
-                            // One monotonically increasing submission sequence
-                            // shared by exact and quality requests. The exact
-                            // snapshot id is the display order that matters;
-                            // this revision only breaks ties between re-plans of
-                            // the same snapshot.
-                            let revision = self.display_next;
-                            self.display_worker.submit(
-                                nodecraft_display::service::DisplayRequest {
-                                    revision,
-                                    snapshot_id: snapshot.id,
-                                    quality: nodecraft_display::default_quality(),
-                                    body_quality: body_quality.clone(),
-                                    body_priority,
-                                    feature_ghost: snapshot.feature_ghost,
-                                    snapshot: snapshot.snapshot,
-                                },
-                            );
-                            self.quality_display = Some((
-                                revision,
-                                snapshot.id,
-                                snapshot.target,
-                                snapshot.feature_ghost,
-                                Instant::now(),
-                            ));
-                            self.lod_levels = body_quality;
-                            self.egui_ctx.request_repaint();
-                        }
-                    }
+            if let Some(view) = self.viewport.lod_view(ctx.pixels_per_point())
+                && self.lod.view != Some(view)
+                && let Some(snapshot) = self.display_snapshot.clone()
+            {
+                // A camera/viewport change is the only reason to choose levels
+                // again here; an edit already reconciled them against its own
+                // snapshot and submitted once. Bounds are cached per body key
+                // and placement, so this pass samples no geometry.
+                let previous = self.lod.levels.clone();
+                let lod = self.lod.levels_for_view(view);
+                if lod.body_quality != previous {
+                    self.display_next = self.display_next.wrapping_add(1);
+                    // One monotonically increasing submission sequence shared
+                    // by exact and quality requests. The exact snapshot id is
+                    // the display order that matters; this revision only breaks
+                    // ties between re-plans of the same snapshot.
+                    let revision = self.display_next;
+                    self.display_worker.submit(
+                        nodecraft_display::service::DisplayRequest {
+                            revision,
+                            snapshot_id: snapshot.id,
+                            quality: lod.quality,
+                            body_quality: lod.body_quality,
+                            body_priority: lod.body_priority,
+                            feature_ghost: snapshot.feature_ghost,
+                            snapshot: snapshot.snapshot,
+                        },
+                    );
+                    self.quality_display = Some((
+                        revision,
+                        snapshot.id,
+                        snapshot.target,
+                        snapshot.feature_ghost,
+                        Instant::now(),
+                    ));
+                    self.egui_ctx.request_repaint();
                 }
             }
         }
@@ -5519,6 +5564,9 @@ impl NodeCraftApp {
     }
 
     fn ui_inner(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // A triad click's focus request lives for the frame it was made in;
+        // if the inspector did not draw then, it must not focus a later field.
+        self.gizmo_focus = None;
         if self.render_model {
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 let rect = ui.max_rect();
@@ -6549,6 +6597,11 @@ impl NodeCraftApp {
                             if reflow {
                                 scroll = scroll.vertical_scroll_offset(0.0);
                             }
+                            let inspector_focus = self
+                                .gizmo_focus
+                                .as_ref()
+                                .filter(|(id, _)| id == &node.id)
+                                .map(|(_, field)| field.clone());
                             scroll.show(ui, |ui| {
                                     ui.set_width(content_width);
                                     let mut output = inspector::show(
@@ -6567,7 +6620,11 @@ impl NodeCraftApp {
                                         document_directory.as_deref(),
                                         inspector_source_changed,
                                         import_status.as_ref(),
+                                        inspector_focus.as_deref(),
                                     );
+                                    if inspector_focus.is_some() {
+                                        self.gizmo_focus = None;
+                                    }
                                     if sketch_editing {
                                         self.sketch_gui.show_palette(ui);
                                         ui.add_space(8.0);
@@ -7108,6 +7165,7 @@ impl NodeCraftApp {
             );
         }
         self.show_tool_dock(ui.ctx(), workspace_rect, tool_connect_source);
+        self.show_debug_window(ui.ctx());
     }
 }
 
@@ -7792,15 +7850,16 @@ mod tests {
         pending: &mut Option<(u64, String, bool, Instant)>,
         quality: &mut Option<(u64, u64, String, bool, Instant)>,
     ) -> bool {
+        let snapshot = evaluation::build_display(evaluation, None, None, None);
         evaluation::submit_exact_snapshot(
             evaluation::DisplaySubmission {
                 evaluation,
                 feature_ghost: false,
-                edit_preview: None,
-                ghost_input: None,
-                comparison: None,
+                snapshot,
                 run_exporters: false,
-                quality: Some(1),
+                quality: nodecraft_display::default_quality(),
+                body_quality: BTreeMap::new(),
+                body_priority: Vec::new(),
             },
             worker,
             next,
@@ -7874,6 +7933,506 @@ mod tests {
         assert!(suppressed_order.is_stale(Some(second.id)));
         assert!(!suppressed_order.supersedes(active_order));
         assert!(active_order.supersedes(suppressed_order));
+    }
+
+    fn test_lod_view() -> nodecraft_display::LodView {
+        nodecraft_display::LodView {
+            eye: [0.0, 0.0, 100.0],
+            fov_y: 0.0,
+            ortho_height: 50.0,
+            viewport: [1100.0, 559.0],
+            pixels_per_point: 2.0,
+            error_px: 0.75,
+        }
+    }
+
+    fn display_request(
+        revision: u64,
+        snapshot: std::sync::Arc<nodecraft_display::service::ExactSnapshot>,
+        lod: &evaluation::LodRequest,
+    ) -> nodecraft_display::service::DisplayRequest {
+        nodecraft_display::service::DisplayRequest {
+            revision,
+            snapshot_id: revision,
+            quality: lod.quality,
+            body_quality: lod.body_quality.clone(),
+            body_priority: lod.body_priority.clone(),
+            feature_ghost: false,
+            snapshot,
+        }
+    }
+
+    fn planned_body(
+        frame: &nodecraft_display::service::DisplayFrame,
+        key: nodecraft_display::BodyKey,
+    ) -> &nodecraft_display::PlanInstance {
+        let body = nodecraft_display::body_instance_id(key, 0);
+        frame
+            .breakpoint
+            .values()
+            .flat_map(|part| part.plans.iter())
+            .find(|plan| plan.body == body)
+            .expect("body plan")
+    }
+
+    fn look_document(color: &str) -> GraphDocument {
+        legacy_document(json!({
+            "nodes": [
+                {"id": "box", "type": "primitive",
+                 "values": {"primitiveType": "box", "length": 40, "width": 20, "height": 10},
+                 "x": 0.0, "y": 0.0},
+                {"id": "look", "type": "look", "values": {"color": color},
+                 "x": 200.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "box", "to": "look", "in": "shape", "out": "shape"}
+            ]
+        }))
+    }
+
+    /// A two-body Part: `a` and `b` are separate producing nodes combined into
+    /// one Part, so each body has its own `BodyKey`.
+    fn two_body_document(a_length: f64) -> GraphDocument {
+        legacy_document(json!({
+            "nodes": [
+                {"id": "a", "type": "primitive",
+                 "values": {"primitiveType": "box", "length": a_length, "width": 10, "height": 10},
+                 "x": 0.0, "y": 0.0},
+                {"id": "b", "type": "primitive",
+                 "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10},
+                 "x": 0.0, "y": 100.0},
+                {"id": "moveb", "type": "translate", "values": {"x": 30.0},
+                 "x": 200.0, "y": 100.0},
+                {"id": "part", "type": "combine", "values": {},
+                 "x": 400.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "a", "to": "part", "in": "shape", "out": "shape"},
+                {"from": "b", "to": "moveb", "in": "shape", "out": "shape"},
+                {"from": "moveb", "to": "part", "in": "shape", "out": "shape"}
+            ]
+        }))
+    }
+
+    fn one_body_document() -> GraphDocument {
+        legacy_document(json!({
+            "nodes": [
+                {"id": "a", "type": "primitive",
+                 "values": {"primitiveType": "box", "length": 10.0, "width": 10, "height": 10},
+                 "x": 0.0, "y": 0.0},
+                {"id": "part", "type": "combine", "values": {}, "x": 400.0, "y": 0.0}
+            ],
+            "connections": [
+                {"from": "a", "to": "part", "in": "shape", "out": "shape"}
+            ]
+        }))
+    }
+
+    /// A colour edit is a new exact snapshot but not new geometry. It must keep
+    /// the installed levels and bounds, request no preview tier, build no plan,
+    /// and upload only the changed face colours.
+    #[test]
+    fn colour_edit_reuses_levels_plans_and_only_refreshes_colours() {
+        let red = eval_downstream(&look_document("#ff0000"), "look");
+        let blue = eval_downstream(&look_document("#0000ff"), "look");
+        let red_part = red.exact_parts.get("look").expect("red part");
+        let blue_part = blue.exact_parts.get("look").expect("blue part");
+        assert_eq!(
+            part_keys(red_part),
+            part_keys(blue_part),
+            "a Look keeps the source body plan",
+        );
+        let red = evaluation::build_display(&red, None, None, None);
+        let blue = evaluation::build_display(&blue, None, None, None);
+
+        let view = test_lod_view();
+        let mut state = evaluation::LodState::default();
+        let first = state.reconcile(&red, Some(view));
+        let bounds_built = state.bounds_built;
+        let second = state.reconcile(&blue, Some(view));
+
+        assert_eq!(
+            state.view,
+            Some(view),
+            "the exact submission installs the view, so no second quality request is needed",
+        );
+        assert_eq!(
+            state.levels, first.body_quality,
+            "a colour edit must not reset or re-choose a level",
+        );
+        assert_eq!(second.body_quality, first.body_quality);
+        assert_eq!(
+            state.bounds_built, bounds_built,
+            "a colour edit must reuse the placed bounds",
+        );
+        assert_eq!(first.quality, nodecraft_display::default_quality());
+        assert!(
+            first
+                .body_quality
+                .values()
+                .chain(second.body_quality.values())
+                .all(|quality| matches!(quality, nodecraft_display::DisplayQuality::Full(_))),
+            "the interactive path must not request a preview level",
+        );
+
+        let mut service = nodecraft_display::service::DisplayService::new(16);
+        let first_frame = service
+            .plan(&display_request(1, std::sync::Arc::clone(&red), &first))
+            .expect("first frame");
+        let cached = service.cache.len();
+        let hits = service.cache.hits();
+        let second_frame = service
+            .plan(&display_request(2, blue, &second))
+            .expect("colour frame");
+
+        assert_eq!(service.cache.len(), cached, "no plan may be built for a colour edit");
+        assert!(service.cache.hits() > hits, "the colour edit must reuse the cached plans");
+        let key = part_keys(red_part)[0];
+        let before = planned_body(&first_frame, key);
+        let after = planned_body(&second_frame, key);
+        assert!(
+            std::sync::Arc::ptr_eq(&before.plan, &after.plan),
+            "the same plan must be uploaded again, not rebuilt",
+        );
+        assert_ne!(
+            before.face_colors, after.face_colors,
+            "the colour table is the only display data that changes",
+        );
+    }
+
+    /// A geometry edit changes the edited body's content key. Only that body is
+    /// planned, and it is planned directly at its screen-space level on the
+    /// first submission; the untouched body keeps its level and plan.
+    #[test]
+    fn geometry_edit_plans_only_the_changed_body_at_its_screen_level() {
+        let before = eval_downstream(&two_body_document(10.0), "part");
+        let after = eval_downstream(&two_body_document(20.0), "part");
+        let before_part = before.exact_parts.get("part").expect("before part");
+        let after_part = after.exact_parts.get("part").expect("after part");
+        let before_keys = part_keys(before_part);
+        let after_keys = part_keys(after_part);
+        assert_eq!(before_keys.len(), 2);
+        assert_eq!(after_keys.len(), 2);
+        let unchanged = after_keys
+            .iter()
+            .find(|key| before_keys.contains(key))
+            .copied()
+            .expect("the unedited body keeps its key");
+        let changed_before = before_keys
+            .iter()
+            .find(|key| **key != unchanged)
+            .copied()
+            .expect("the edited body's old key");
+        let changed_after = after_keys
+            .iter()
+            .find(|key| **key != unchanged)
+            .copied()
+            .expect("the edited body's new key");
+        assert_ne!(changed_before, changed_after, "the edited body has new geometry");
+
+        let before = evaluation::build_display(&before, None, None, None);
+        let after = evaluation::build_display(&after, None, None, None);
+        let view = test_lod_view();
+        let mut state = evaluation::LodState::default();
+        let first = state.reconcile(&before, Some(view));
+        let unchanged_level = first.body_quality[&unchanged];
+        let second = state.reconcile(&after, Some(view));
+
+        assert_eq!(
+            state.view,
+            Some(view),
+            "the edited snapshot is submitted at its levels, not previewed then re-requested",
+        );
+        assert!(!state.levels.contains_key(&changed_before), "the old key disappears");
+        assert!(state.levels.contains_key(&changed_after), "the new key gets a level");
+        assert_eq!(
+            second.body_quality[&unchanged], unchanged_level,
+            "the unedited body's level must not be recomputed",
+        );
+        let expected = {
+            let body = after_part
+                .bodies
+                .iter()
+                .find(|body| body.key == changed_after)
+                .expect("edited body");
+            let bounds = nodecraft_display::body_bounds(&body.brep)
+                .expect("bounds")
+                .placed(&body.placement);
+            nodecraft_display::quality_for(
+                bounds,
+                nodecraft_display::LodCamera {
+                    eye: view.eye,
+                    fov_y: view.fov_y,
+                    ortho_height: view.ortho_height,
+                },
+                nodecraft_display::ViewportSize {
+                    width: view.viewport[0],
+                    height: view.viewport[1],
+                },
+                view.pixels_per_point,
+                nodecraft_display::LodParams::new(view.error_px),
+            )
+        };
+        assert_eq!(
+            second.body_quality[&changed_after], expected,
+            "the edited body is chosen at its quality_for level before the first request",
+        );
+
+        let mut service = nodecraft_display::service::DisplayService::new(16);
+        let first_frame = service
+            .plan(&display_request(1, before, &first))
+            .expect("before frame");
+        let cached = service.cache.len();
+        let hits = service.cache.hits();
+        let second_frame = service
+            .plan(&display_request(2, after, &second))
+            .expect("after frame");
+        assert_eq!(
+            service.cache.len(),
+            cached + 1,
+            "only the edited body may be planned",
+        );
+        assert_eq!(
+            service.cache.hits(),
+            hits + 1,
+            "the untouched body must reuse its plan",
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(
+                &planned_body(&first_frame, unchanged).plan,
+                &planned_body(&second_frame, unchanged).plan,
+            ),
+            "the untouched body's plan must be untouched",
+        );
+    }
+
+    /// Moving one body changes only its placement. The local bounds belong to
+    /// the body geometry, so every move reuses the one measurement and the
+    /// display plan cache gains nothing for bounds.
+    #[test]
+    fn moving_a_body_reuses_one_local_bounds_measurement_and_plans_nothing() {
+        let result = eval_downstream(&one_body_document(), "part");
+        let snapshot = evaluation::build_display(&result, None, None, None);
+        let view = test_lod_view();
+        let mut state = evaluation::LodState::default();
+        nodecraft_layers::plan_stats::reset();
+        let first = state.reconcile(&snapshot, Some(view));
+        assert_eq!(state.bounds_built, 1, "one body geometry is measured once");
+        assert_eq!(
+            nodecraft_layers::plan_stats::calls(),
+            0,
+            "measuring bounds must not tessellate the body",
+        );
+        let key = *first.body_quality.keys().next().expect("body level");
+
+        let mut service = nodecraft_display::service::DisplayService::new(16);
+        let first_frame = service
+            .plan(&display_request(1, std::sync::Arc::clone(&snapshot), &first))
+            .expect("first frame");
+        let cached = service.cache.len();
+        let hits = service.cache.hits();
+        assert_eq!(first_frame.breakpoint["part"].plans.len(), 1);
+
+        for step in 1..=8 {
+            let moved = moved_snapshot(&snapshot, key, [f64::from(step) * 0.5, 0.0, 0.0]);
+            nodecraft_layers::plan_stats::reset();
+            let request = state.reconcile(&moved, Some(view));
+            assert_eq!(
+                state.bounds_built, 1,
+                "move {step} must reuse the body's local bounds, not re-measure them",
+            );
+            assert_eq!(
+                nodecraft_layers::plan_stats::calls(),
+                0,
+                "move {step} must do zero tessellation just to place the bounds",
+            );
+            let frame = service
+                .plan(&display_request(step as u64 + 1, moved, &request))
+                .expect("moved frame");
+            assert_eq!(
+                service.cache.len(),
+                cached,
+                "move {step} must reuse the display plan; bounds add no tessellation",
+            );
+            assert_eq!(frame.breakpoint["part"].plans.len(), 1);
+        }
+        assert!(
+            service.cache.hits() >= hits + 8,
+            "every moved frame is a plan-cache hit",
+        );
+    }
+
+    /// Two instances of one shared body are one geometry identity: the local
+    /// bound is measured once and placed separately for each instance.
+    #[test]
+    fn two_instances_of_one_shared_body_build_bounds_once() {
+        let result = eval_downstream(&one_body_document(), "part");
+        let snapshot = evaluation::build_display(&result, None, None, None);
+        let part = snapshot.breakpoint.get("part").expect("part");
+        let body = part.bodies[0].clone();
+        let mut placed = (*snapshot).clone();
+        placed.breakpoint.get_mut("part").expect("part").bodies = vec![
+            body.clone().with_placement(nodecraft_exact::Placement::from(
+                nodecraft_exact::DisplayTransform::Place { offset: [0.0, 0.0, 0.0], rotation: [0.0; 3] },
+            )),
+            body.with_placement(nodecraft_exact::Placement::from(
+                nodecraft_exact::DisplayTransform::Place { offset: [100.0, 0.0, 0.0], rotation: [0.0; 3] },
+            )),
+        ];
+        let placed = std::sync::Arc::new(placed);
+        let mut state = evaluation::LodState::default();
+        nodecraft_layers::plan_stats::reset();
+        let request = state.reconcile(&placed, Some(test_lod_view()));
+        assert_eq!(
+            nodecraft_layers::plan_stats::calls(),
+            0,
+            "a shared body's bounds are measured without tessellation",
+        );
+        assert_eq!(
+            state.bounds_built, 1,
+            "one shared body geometry is measured once for every instance",
+        );
+        assert_eq!(request.body_quality.len(), 1, "instances share one body key");
+    }
+
+    fn moved_snapshot(
+        snapshot: &std::sync::Arc<nodecraft_display::service::ExactSnapshot>,
+        key: nodecraft_display::BodyKey,
+        offset: [f64; 3],
+    ) -> std::sync::Arc<nodecraft_display::service::ExactSnapshot> {
+        let mut moved = (**snapshot).clone();
+        for part in moved.breakpoint.values_mut() {
+            for body in &mut part.bodies {
+                if body.key == key {
+                    body.placement = nodecraft_exact::Placement::from(
+                        nodecraft_exact::DisplayTransform::Place { offset, rotation: [0.0; 3] },
+                    );
+                }
+            }
+        }
+        std::sync::Arc::new(moved)
+    }
+
+    /// A fast zoom-out that stops is one view change, not many. The LOD state
+    /// must settle to the same rung a slow multi-step zoom-out reaches instead
+    /// of staying one rung too fine forever.
+    #[test]
+    fn fast_zoom_out_settles_levels_in_one_view_change() {
+        let result = eval_downstream(&one_body_document(), "part");
+        let display = evaluation::build_display(&result, None, None, None);
+        let view = |ortho_height: f64| nodecraft_display::LodView {
+            eye: [0.0, 0.0, 100.0],
+            fov_y: 0.0,
+            ortho_height,
+            viewport: [1100.0, 559.0],
+            pixels_per_point: 1.0,
+            error_px: 0.75,
+        };
+        let close = view(20.0);
+        // 8x zoom-out in one view change.
+        let far = view(160.0);
+        let finest = nodecraft_display::DisplayQuality::Full(nodecraft_display::LOD_LADDER[0]);
+
+        let mut fast = evaluation::LodState::default();
+        let first = fast.reconcile(&display, Some(close));
+        let key = *first.body_quality.keys().next().expect("body level");
+        fast.levels.insert(key, finest);
+
+        let mut slow = evaluation::LodState::default();
+        let _ = slow.reconcile(&display, Some(close));
+        slow.levels.insert(key, finest);
+        for step in 1..=64 {
+            let t = f64::from(step) / 64.0;
+            let ortho_height = 20.0 * (160.0_f64 / 20.0).powf(t);
+            let _ = slow.levels_for_view(view(ortho_height));
+        }
+        let slow_level = slow.levels[&key];
+
+        let fast_levels = fast.levels_for_view(far);
+        let fast_level = fast_levels.body_quality[&key];
+        assert_eq!(
+            fast_level, slow_level,
+            "one fast zoom-out must land on the slow zoom's settled rung"
+        );
+        assert_ne!(
+            fast_level, finest,
+            "the settled level must move coarser after an 8x zoom-out"
+        );
+    }
+
+    /// Reconciliation follows the snapshot's body set: a vanished body drops
+    /// its level, and a new body gets a level on the first submission.
+    #[test]
+    fn vanished_body_drops_its_level_and_a_new_body_gets_one() {
+        let two = eval_downstream(&two_body_document(10.0), "part");
+        let two_part = two.exact_parts.get("part").expect("two-body part");
+        let two_keys = part_keys(two_part);
+        assert_eq!(two_keys.len(), 2);
+        let one_part = one_body_document();
+        let one = eval_downstream(&one_part, "part");
+        let one_key = part_keys(one.exact_parts.get("part").expect("one-body part"))[0];
+        let a_key = *two_keys
+            .iter()
+            .find(|key| **key == one_key)
+            .expect("a keeps its key after b is removed");
+        let b_key = *two_keys.iter().find(|key| **key != a_key).expect("b key");
+        let two = evaluation::build_display(&two, None, None, None);
+        let view = test_lod_view();
+        let mut state = evaluation::LodState::default();
+        let first = state.reconcile(&two, Some(view));
+        assert!(first.body_quality.contains_key(&a_key));
+        assert!(first.body_quality.contains_key(&b_key));
+        let built_two = state.bounds_built;
+
+        // Remove b by evaluating a one-body Part with the same a.
+        let one = evaluation::build_display(&one, None, None, None);
+        let vanished = state.reconcile(&one, Some(view));
+        assert!(vanished.body_quality.contains_key(&a_key));
+        assert!(!vanished.body_quality.contains_key(&b_key));
+        assert!(!state.levels.contains_key(&b_key), "the vanished level is dropped");
+        assert_eq!(
+            state.bounds_built, built_two,
+            "the surviving body's bounds are reused; only the vanished body is dropped",
+        );
+        let built_one = state.bounds_built;
+
+        // Add a new body c alongside a.
+        let mut document = one_body_document();
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
+            id: "c".to_owned(),
+            node_type: "primitive".to_owned(),
+            values: json!({"primitiveType": "box", "length": 6, "width": 6, "height": 6}),
+            suppressed: false,
+            x: 0.0,
+            y: 200.0,
+        });
+        document.root.connections.push(nodecraft_session::GraphConnection {
+            from: "c".to_owned(),
+            to: "part".to_owned(),
+            input: "shape".to_owned(),
+            out: "shape".to_owned(),
+        });
+        let added = eval_downstream(&document, "part");
+        let added_part = added.exact_parts.get("part").expect("added part");
+        assert!(part_keys(added_part).contains(&a_key));
+        let added_key = part_keys(added_part)
+            .into_iter()
+            .find(|key| *key != a_key && *key != b_key)
+            .expect("new body key");
+        let added = evaluation::build_display(&added, None, None, None);
+        let fresh = state.reconcile(&added, Some(view));
+        assert!(fresh.body_quality.contains_key(&a_key));
+        assert!(
+            fresh.body_quality.contains_key(&added_key),
+            "a new body gets its level on the first submission",
+        );
+        assert_eq!(
+            state.bounds_built,
+            built_one + 1,
+            "only the new body's bounds are computed; the surviving body reuses its bounds",
+        );
+        assert!(!fresh.body_quality.contains_key(&b_key), "a vanished body stays gone");
     }
 
     #[test]
@@ -8699,6 +9258,8 @@ mod tests {
             tessellation_threads: 0,
             workload_profiler: true,
             kernel_fixes: true,
+            debug_window: true,
+            debug_tab: DebugTab::Camera,
             cable_routing: "bezier-routing".to_owned(),
             tool_dock_offset_y: 12.0,
             tool_dock_shortcut: "Cmd+M".to_owned(),
@@ -8715,8 +9276,46 @@ mod tests {
         assert_eq!(parsed.view, crate::viewport::ViewSettings::default());
         assert_eq!(parsed.activity, ActivitySettings::default());
         assert!(parsed.feature_overlay);
+        assert!(parsed.debug_window);
+        assert_eq!(parsed.debug_tab, DebugTab::Camera);
         assert_eq!(parsed.cable_routing, "bezier-routing");
         assert_eq!(parsed.tool_dock_offset_y, 12.0);
+    }
+
+    #[test]
+    fn app_settings_debug_window_defaults_off_on_the_frame_tab() {
+        let mut value =
+            serde_json::to_value(AppSettings::default()).expect("serialize default settings");
+        let object = value.as_object_mut().expect("settings object");
+        object.remove("debug_window");
+        object.remove("debug_tab");
+        let parsed: AppSettings = serde_json::from_value(value).expect("parse settings");
+        assert!(!parsed.debug_window);
+        assert_eq!(parsed.debug_tab, DebugTab::Frame);
+    }
+
+    #[test]
+    fn legacy_debug_settings_migrate_and_unknown_overlay_keys_are_ignored() {
+        let legacy = serde_json::json!({
+            "gpu_profiler": true,
+            "show_view_matrix": true,
+            "show_gpu_info": true,
+        });
+        let parsed: AppSettings =
+            serde_json::from_value(legacy).expect("old settings must keep loading");
+        assert!(parsed.debug_window, "gpu_profiler migrates to debug_window");
+        assert_eq!(parsed.debug_tab, DebugTab::Frame);
+
+        let text = serde_json::to_string(&parsed).expect("serialize settings");
+        let value: serde_json::Value = serde_json::from_str(&text).expect("parse settings json");
+        let object = value.as_object().expect("settings object");
+        assert_eq!(
+            object.get("debug_window").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert!(!object.contains_key("gpu_profiler"));
+        assert!(!object.contains_key("show_view_matrix"));
+        assert!(!object.contains_key("show_gpu_info"));
     }
 
     #[test]

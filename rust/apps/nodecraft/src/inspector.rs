@@ -772,6 +772,7 @@ fn draw_number(
     kind: nodecraft_node_contract::NumberKind,
     id: egui::Id,
     stored_expression: Option<&str>,
+    focus: bool,
 ) -> (bool, Option<Option<String>>) {
     let mut changed = false;
     let control_width = ui.available_width();
@@ -823,6 +824,9 @@ fn draw_number(
         if entry.changed() {
             clamp_number(number, min, max);
             changed = true;
+        }
+        if focus {
+            ui.memory_mut(|memory| memory.request_focus(entry.id));
         }
         let plus = ui_shape::button(
             ui,
@@ -945,6 +949,7 @@ fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                 nodecraft_node_contract::NumberKind::Unitless,
                 egui::Id::new(("graph-definition-inputs", &node.id)),
                 None,
+                false,
             );
             changed |= edited;
         });
@@ -958,6 +963,7 @@ fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
                 nodecraft_node_contract::NumberKind::Unitless,
                 egui::Id::new(("graph-definition-outputs", &node.id)),
                 None,
+                false,
             );
             changed |= edited;
         });
@@ -1064,6 +1070,7 @@ fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_por
             nodecraft_node_contract::NumberKind::Unitless,
             egui::Id::new(("graph-input-ports", &node.id)),
             None,
+            false,
         );
         changed |= edited;
     });
@@ -1077,6 +1084,7 @@ fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_por
             nodecraft_node_contract::NumberKind::Unitless,
             egui::Id::new(("graph-output-ports", &node.id)),
             None,
+            false,
         );
         changed |= edited;
     });
@@ -1128,6 +1136,7 @@ fn marker_interface_fields(
             nodecraft_node_contract::NumberKind::Unitless,
             egui::Id::new(("root-interface-ports", &node.id)),
             None,
+            false,
         );
         changed |= edited;
     });
@@ -1633,6 +1642,7 @@ pub fn show(
     document_directory: Option<&std::path::Path>,
     source_changed: bool,
     import_status: Option<&nodecraft_engine::import_io::ImportStatus>,
+    focus_field: Option<&str>,
 ) -> Output {
     let mut output = Output::default();
     if node.node_type == "stepimporter" {
@@ -1788,6 +1798,7 @@ pub fn show(
                             *kind,
                             field_id,
                             stored_expression,
+                            focus_field == Some(spec.key.as_str()),
                         );
                         if number_changed {
                             value = Value::from(number);
@@ -2684,6 +2695,42 @@ mod tests {
                 "{node_type} description",
             );
         }
+    }
+
+    /// The transform gizmo's click asks the inspector to focus one field; the
+    /// number entry takes the focus so the clicked axis or angle is the field
+    /// the user is looking at.
+    #[test]
+    fn a_focus_request_focuses_the_number_entry() {
+        let ctx = egui::Context::default();
+        let mut value = 0.0;
+        let mut focused = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(248.0, 120.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                ui.set_width(248.0);
+                draw_number(
+                    ui,
+                    &mut value,
+                    1.0,
+                    None,
+                    None,
+                    nodecraft_node_contract::NumberKind::Unitless,
+                    egui::Id::new(("inspector-number", "translate", "x")),
+                    None,
+                    true,
+                );
+                focused = ui.memory(|memory| memory.focused());
+            },
+        );
+        output.textures_delta.clear();
+        assert!(focused.is_some(), "a focus request focuses the number entry");
     }
 
 }

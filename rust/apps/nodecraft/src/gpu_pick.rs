@@ -7,7 +7,9 @@ pub(crate) struct PickSegment {
     pub a: [f32; 3],
     pub id: u32,
     pub b: [f32; 3],
-    pub _pad: u32,
+    /// The same [`nodecraft_layers::PlanEdgeClass`] bits the visible ribbon
+    /// carries, so the pick mask follows the draw mask.
+    pub class: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<PickSegment>() == 32);
@@ -133,6 +135,11 @@ pub(crate) struct PickFrame {
     pub face_matrix: [[f32; 4]; 4],
     pub ghost_matrix: [[f32; 4]; 4],
     pub size_px: [f32; 2],
+    /// Standard edge width in physical pixels. The pick ribbon uses the same
+    /// value as the drawn ribbon, so drawn and pickable bands agree.
+    pub edge_width_px: f32,
+    /// The drawn ribbon's seam mask. Hidden seams are not pickable.
+    pub show_seam_edges: bool,
 }
 
 /// True cursor is the corner between cells 15 and 16; the marked cell is cosmetic.
@@ -479,7 +486,7 @@ mod tests {
     }
 
     fn segment(a: [f32; 3], b: [f32; 3], id: u32) -> PickSegment {
-        PickSegment { a, id, b, _pad: 0 }
+        PickSegment { a, id, b, class: 0 }
     }
 
     fn run_pick(
@@ -491,7 +498,7 @@ mod tests {
         request: PickRequest,
     ) -> Option<PickResult> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
-        picker.encode(device, queue, &mut encoder, uniforms, frame, request, |_, _, _| {});
+        picker.encode(device, queue, &mut encoder, uniforms, frame, request, |_, _, _| {}, None);
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
@@ -521,6 +528,8 @@ mod tests {
             face_matrix: crate::plan_math::identity_f32(),
             ghost_matrix: crate::plan_math::identity_f32(),
             size_px: [32.0, 32.0],
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let uniforms = PickUniforms {
             view_proj: crate::plan_math::identity_f32(),
@@ -586,7 +595,7 @@ mod tests {
         faces: impl FnOnce(&mut wgpu::RenderPass<'_>, &PickPasses<'_>, &PickBinds<'_>),
     ) -> Option<PickResult> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
-        picker.encode(device, queue, &mut encoder, uniforms, frame, request, faces);
+        picker.encode(device, queue, &mut encoder, uniforms, frame, request, faces, None);
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
@@ -617,7 +626,7 @@ mod tests {
         let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(vec![
             segment([-0.8, -0.8, 0.5], [0.8, 0.8, 0.5], 1),
         ]);
-        let frame = PickFrame { request: None, ghost_key: 11, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0] };
+        let frame = PickFrame { request: None, ghost_key: 11, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0], edge_width_px: 3.0, show_seam_edges: false };
         let uniforms = PickUniforms { view_proj: crate::plan_math::identity_f32(), back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
         let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 11, commit: false , kind: PickKind::Edges };
         let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, |_, _, _| {});
@@ -706,7 +715,7 @@ mod tests {
             ),
             true,
         );
-        let frame = PickFrame { request: None, ghost_key: 20, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size };
+        let frame = PickFrame { request: None, ghost_key: 20, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size, edge_width_px: 1.0, show_seam_edges: false };
         let uniforms = PickUniforms { view_proj: vp, back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
         let mesh = test_box(&device, &queue);
         let mut pick_at = |picker: &mut PickRenderer, id: u64, point: [f32; 3]| {
@@ -729,7 +738,7 @@ mod tests {
             true,
         );
         let px = project_px(grazing_vp, [1.0, 0.0, 1.0], size);
-        let grazing_frame = PickFrame { request: None, ghost_key: 21, segments: frame.segments.clone(), ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size };
+        let grazing_frame = PickFrame { request: None, ghost_key: 21, segments: frame.segments.clone(), ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size, edge_width_px: 1.0, show_seam_edges: false };
         let grazing_uniforms = PickUniforms { view_proj: grazing_vp, ..uniforms };
         let request = PickRequest { id: 4, px, radius_px: 7.0, ghost_key: 21, commit: false , kind: PickKind::Edges };
         let grazing = run_pick_with_faces(&mut picker, &device, &queue, &grazing_uniforms, &grazing_frame, request, |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &mesh)).map(|r| r.index).unwrap_or(0);
@@ -746,7 +755,7 @@ mod tests {
         let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(vec![
             segment([-0.8, 0.1, 0.5], [0.8, 0.1, 0.5], 1),
         ]);
-        let frame = PickFrame { request: None, ghost_key: 12, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0] };
+        let frame = PickFrame { request: None, ghost_key: 12, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0], edge_width_px: 1.0, show_seam_edges: false };
         let uniforms = PickUniforms { view_proj: crate::plan_math::identity_f32(), back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
         let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 12, commit: false , kind: PickKind::Edges };
         let near = test_quad(&device, &queue, 0.8);
@@ -873,6 +882,8 @@ mod tests {
             face_matrix: crate::plan_math::identity_f32(),
             ghost_matrix: crate::plan_math::identity_f32(),
             size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let uniforms = PickUniforms {
             view_proj: vp,
@@ -919,7 +930,7 @@ mod tests {
                 solidcore_record::Vec3::new(0.4, y, 0.0),
             ],
             midpoint: [0.0, y, 0.0],
-            normals: Vec::new(),
+            class: nodecraft_layers::PlanEdgeClass::NORMAL,
         };
         let data = crate::gpu_viewport::build_ghost_pick_data(&[
             edge("body:0:edge:0", 0.2),
@@ -937,6 +948,8 @@ mod tests {
             face_matrix: vp,
             ghost_matrix: vp,
             size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let uniforms = PickUniforms {
             view_proj: vp,
@@ -984,6 +997,8 @@ mod tests {
             face_matrix: crate::plan_math::identity_f32(),
             ghost_matrix: crate::plan_math::identity_f32(),
             size_px: [32.0, 32.0],
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 9, commit: false , kind: PickKind::Edges };
         let uniforms = PickUniforms {
@@ -994,7 +1009,7 @@ mod tests {
             extra_model: crate::plan_math::identity_f32(),
         };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
-        picker.encode(&device, &queue, &mut encoder, &uniforms, &frame, request, |_, _, _| {});
+        picker.encode(&device, &queue, &mut encoder, &uniforms, &frame, request, |_, _, _| {}, None);
         queue.submit([encoder.finish()]);
         let mut result = None;
         for _ in 0..200 {
@@ -1006,9 +1021,228 @@ mod tests {
         let result = result.expect("pick result");
         assert_eq!(result.index, 1, "nearest edge should be id 1");
     }
+
+    fn box_plan(size: f64) -> std::sync::Arc<nodecraft_layers::tess::TessPlan> {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let mut brep = api::create_box(
+            &mut kernel,
+            Point3::new(-size * 0.5, -size * 0.5, -size * 0.5),
+            size,
+            size,
+            size,
+        )
+        .expect("box");
+        nodecraft_layers::tessellate_kernel_preview(&mut kernel, &mut brep, 2)
+            .expect("box preview plan")
+            .plan
+    }
+
+    /// The plan-local edge pick path: the same local edge buffer and instance
+    /// matrices as the drawn ribbon, read through the shared vertex function.
+    #[test]
+    fn gpu_pick_plan_local_edges_resolve_through_the_ribbon() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = solidcraft_viewport_gpu::TessGpu::new("test", device.clone(), queue.clone())
+            .expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut plan = crate::gpu_plan::PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        plan.set_plans(
+            vec![nodecraft_display::PlanInstance {
+                target: "edges".into(),
+                plan: box_plan(1.0),
+                face_colors: Vec::new(),
+                body: 0,
+                placement: nodecraft_display::Placement::identity(),
+                edge_ids: std::sync::Arc::from(vec![Some("edge:front".to_owned())]),
+                edge_classes: std::sync::Arc::from(Vec::new()),
+            }],
+            true,
+            None,
+            1,
+        );
+        plan.prepare_chunks(&device, &queue);
+        let data = plan.edge_pick_data().clone();
+        assert!(data.edges.len() > 1, "plan edges have a pick table");
+        let (_, midpoint) = data.edges[1].clone();
+        let size = [512.0f32, 512.0];
+        let vp = solidcraft_viewport_gpu::view::gpu_view_proj(
+            crate::plan_math::multiply_f32(
+                perspective_rh(0.8, 1.0, 0.1, 100.0),
+                look_at_rh([3.0, 3.0, 3.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            ),
+            true,
+        );
+        let frame = PickFrame {
+            request: None,
+            ghost_key: 40,
+            segments: std::sync::Arc::from(Vec::new()),
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: size,
+            edge_width_px: 3.0,
+            show_seam_edges: false,
+        };
+        let uniforms = PickUniforms {
+            view_proj: vp,
+            back: [0.0; 4],
+            eye: [0.0; 4],
+            params: [0.0; 4],
+            extra_model: crate::plan_math::identity_f32(),
+        };
+        let px = project_px(vp, [midpoint[0] as f32, midpoint[1] as f32, midpoint[2] as f32], size);
+        let request = PickRequest { id: 1, px, radius_px: 7.0, ghost_key: 40, commit: false, kind: PickKind::Edges };
+        let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
+        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, |pass, passes, binds| {
+            plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
+        })
+        .expect("plan edge pick result");
+        assert!(result.index > 0, "an edge id was written");
+        let (id, _) = crate::gpu_viewport::resolve_pick(&data, result.index).expect("edge id resolves");
+        assert!(id.starts_with("edge:") || id.starts_with("body:"), "{id}");
+    }
+
+    /// A seam is not pickable while hidden and is pickable when shown: the pick
+    /// shader and the drawn ribbon share the class and the uniform mask.
+    #[test]
+    fn a_hidden_seam_is_not_pickable_until_the_setting_shows_it() {
+        use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let mut brep = api::create_cone(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 0.0, 40.0)
+            .expect("cone");
+        let display = nodecraft_layers::tessellate_kernel_preview(&mut kernel, &mut brep, 2)
+            .expect("cone preview plan");
+        let seam_index = display
+            .edge_classes
+            .iter()
+            .position(|class| class.is_seam())
+            .expect("the cone has a seam");
+        let seam = display.plan.edges[seam_index].clone();
+        let midpoint = seam[seam.len() / 2];
+        let tess = solidcraft_viewport_gpu::TessGpu::new("test", device.clone(), queue.clone())
+            .expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut plan = crate::gpu_plan::PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        plan.set_plans(
+            vec![nodecraft_display::PlanInstance {
+                target: "seams".into(),
+                plan: std::sync::Arc::clone(&display.plan),
+                face_colors: Vec::new(),
+                body: 0,
+                placement: nodecraft_display::Placement::identity(),
+                edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(display.edge_classes.clone()),
+            }],
+            true,
+            None,
+            1,
+        );
+        plan.prepare_chunks(&device, &queue);
+        let size = [512.0f32, 512.0];
+        let vp = solidcraft_viewport_gpu::view::gpu_view_proj(
+            crate::plan_math::multiply_f32(
+                perspective_rh(0.8, 1.0, 0.1, 300.0),
+                look_at_rh([70.0, 0.0, 10.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+            ),
+            true,
+        );
+        let uniforms = PickUniforms {
+            view_proj: vp,
+            back: [0.0; 4],
+            eye: [0.0; 4],
+            params: [0.0; 4],
+            extra_model: crate::plan_math::identity_f32(),
+        };
+        let px = project_px(
+            vp,
+            [midpoint.x as f32, midpoint.y as f32, midpoint.z as f32],
+            size,
+        );
+        let mut frame = PickFrame {
+            request: None,
+            ghost_key: 50,
+            segments: std::sync::Arc::from(Vec::new()),
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: size,
+            edge_width_px: 4.0,
+            show_seam_edges: false,
+        };
+        let request = PickRequest {
+            id: 1,
+            px,
+            radius_px: 7.0,
+            ghost_key: 50,
+            commit: false,
+            kind: PickKind::Edges,
+        };
+        let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
+        let hidden = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            |pass, passes, binds| {
+                plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
+            },
+        );
+        assert!(
+            hidden.is_none_or(|result| result.index == 0),
+            "a hidden seam has no pick id",
+        );
+        frame.show_seam_edges = true;
+        plan.set_show_seam_edges(true);
+        let shown = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            |pass, passes, binds| {
+                plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
+            },
+        )
+        .expect("the shown seam is pickable");
+        assert!(shown.index > 0, "the shown seam writes its edge id");
+    }
+
 }
 
 use egui_wgpu::wgpu;
+
+use crate::edge_ribbon::{
+    EDGE_RIBBON_WGSL, EdgeUniforms, edge_instance_layout, edge_vertex_layout,
+};
+use solidcraft_viewport_gpu::view::{FACE_BIAS, depth_bias};
 
 const PICK: u32 = 32;
 const FACE_SHADER: &str = r#"
@@ -1110,7 +1344,7 @@ fn vs(in: In) -> Out {
 @fragment
 fn fs(in: Out) -> @location(0) u32 { return in.id; }
 "#;
-const EDGE_SHADER: &str = r#"
+const EDGE_SHADER_BODY: &str = r#"
 struct U {
     view_proj: mat4x4<f32>,
     back: vec4<f32>,
@@ -1124,6 +1358,7 @@ struct In {
     @location(0) a: vec3<f32>,
     @location(1) id: u32,
     @location(2) b: vec3<f32>,
+    @location(3) edge_class: u32,
 };
 struct Out {
     @builtin(position) position: vec4<f32>,
@@ -1131,39 +1366,84 @@ struct Out {
 };
 @vertex
 fn vs(in: In, @builtin(vertex_index) vi: u32) -> Out {
-    var ca = u.view_proj * u.extra_model * vec4<f32>(in.a, 1.0);
-    var cb = u.view_proj * u.extra_model * vec4<f32>(in.b, 1.0);
     var out: Out;
-    if ca.w < 1e-4 && cb.w < 1e-4 {
-        out.position = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-        out.id = in.id;
+    // u.params.y is the same seam setting the visible ribbon's mask carries.
+    let seam_mask = select(0u, EDGE_CLASS_SEAM, u.params.y > 0.5);
+    if (edge_class_hidden(in.edge_class, seam_mask)) {
+        out.position = vec4<f32>(0.0);
+        out.id = 0u;
         return out;
     }
-    if ca.w < 1e-4 {
-        let t = (1e-4 - ca.w) / (cb.w - ca.w);
-        ca = mix(ca, cb, t);
-    } else if cb.w < 1e-4 {
-        let t = (1e-4 - cb.w) / (ca.w - cb.w);
-        cb = mix(cb, ca, t);
-    }
-    let sa = (ca.xy / ca.w * 0.5 + 0.5) * vec2<f32>(PICK, PICK);
-    let sb = (cb.xy / cb.w * 0.5 + 0.5) * vec2<f32>(PICK, PICK);
-    let dir = normalize(sb - sa + vec2<f32>(1e-5, 0.0));
-    let normal = vec2<f32>(-dir.y, dir.x);
-    let corner = vi % 6u;
-    let ts = array<f32, 6>(0.0, 1.0, 0.0, 1.0, 1.0, 0.0);
-    let sides = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
-    let t = ts[corner];
-    let side = sides[corner];
-    let pix = mix(sa, sb, t) + normal * side * 1.5 + dir * (2.0 * t - 1.0) * 1.5;
-    let w = mix(ca.w, cb.w, t);
-    out.position = vec4<f32>((pix / PICK * 2.0 - 1.0) * w, mix(ca.z, cb.z, t), w);
+    let ca = u.view_proj * u.extra_model * vec4<f32>(in.a, 1.0);
+    let cb = u.view_proj * u.extra_model * vec4<f32>(in.b, 1.0);
+    let ribbon = edge_ribbon(ca, cb, vec2<f32>(PICK, PICK), u.params.x, vi);
+    out.position = ribbon.position;
     out.id = in.id;
     return out;
 }
 @fragment
 fn fs(in: Out) -> @location(0) u32 { return in.id; }
 "#;
+
+/// Plan-local edge pick shader. It shares `EDGE_RIBBON_WGSL` with the visible
+/// pipeline, so the pick band is the same shape and width as the drawn band.
+const PLAN_EDGE_SHADER_BODY: &str = r#"
+struct U {
+    view_proj: mat4x4<f32>,
+    extra_model: mat4x4<f32>,
+    screen: vec4<f32>,
+    colour: vec4<f32>,
+    mask: vec4<u32>,
+};
+@group(0) @binding(0) var<uniform> u: U;
+struct In {
+    @location(0) a: vec3<f32>,
+    @location(1) b: vec3<f32>,
+    @location(2) edge: u32,
+    @location(3) model_0: vec4<f32>,
+    @location(4) model_1: vec4<f32>,
+    @location(5) model_2: vec4<f32>,
+    @location(6) model_3: vec4<f32>,
+    @location(12) edge_class: u32,
+    @location(13) edge_base: u32,
+};
+struct Out {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) id: u32,
+};
+@vertex
+fn vs(in: In, @builtin(vertex_index) vi: u32) -> Out {
+    var out: Out;
+    // Same class/mask rule as the visible ribbon: a hidden seam has no pick id.
+    if (edge_class_hidden(in.edge_class, u.mask.x)) {
+        out.position = vec4<f32>(0.0);
+        out.id = 0u;
+        return out;
+    }
+    let model = u.extra_model * mat4x4<f32>(in.model_0, in.model_1, in.model_2, in.model_3);
+    let ca = u.view_proj * model * vec4<f32>(in.a, 1.0);
+    let cb = u.view_proj * model * vec4<f32>(in.b, 1.0);
+    let ribbon = edge_ribbon(ca, cb, u.screen.xy, u.screen.z, vi);
+    out.position = ribbon.position;
+    out.id = in.edge_base + in.edge;
+    return out;
+}
+@fragment
+fn fs(in: Out) -> @location(0) u32 { return in.id; }
+"#;
+
+fn edge_base_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Uint32,
+        offset: 0,
+        shader_location: 13,
+    }];
+    wgpu::VertexBufferLayout {
+        array_stride: 4,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRS,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SlotPhase {
@@ -1269,11 +1549,15 @@ pub(crate) struct PickPasses<'a> {
     /// same shader as `face_id`, with the object vertex layout.
     pub object_face_id: &'a wgpu::RenderPipeline,
     pub ghost_depth: &'a wgpu::RenderPipeline,
+    /// Plan-local edge ids through the shared ribbon function.
+    pub plan_edge: &'a wgpu::RenderPipeline,
 }
 
 pub(crate) struct PickBinds<'a> {
     pub main: &'a wgpu::BindGroup,
     pub ghost: &'a wgpu::BindGroup,
+    /// Uniform bind for `PickPasses::plan_edge`.
+    pub plan_edge: &'a wgpu::BindGroup,
 }
 
 pub(crate) struct PickRenderer {
@@ -1286,6 +1570,9 @@ pub(crate) struct PickRenderer {
     object_face_id_pipeline: wgpu::RenderPipeline,
     ghost_depth_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    plan_edge_pipeline: wgpu::RenderPipeline,
+    plan_edge_uniforms: wgpu::Buffer,
+    plan_edge_bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     ghost_uniforms: wgpu::Buffer,
@@ -1384,11 +1671,7 @@ impl PickRenderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: if reversed { -2 } else { 2 },
-                    slope_scale: if reversed { -1.0 } else { 1.0 },
-                    clamp: 0.0,
-                },
+                bias: depth_bias(reversed, FACE_BIAS),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -1420,11 +1703,7 @@ impl PickRenderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: if reversed { -2 } else { 2 },
-                    slope_scale: if reversed { -1.0 } else { 1.0 },
-                    clamp: 0.0,
-                },
+                bias: depth_bias(reversed, FACE_BIAS),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -1455,11 +1734,7 @@ impl PickRenderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: if reversed { -2 } else { 2 },
-                    slope_scale: if reversed { -1.0 } else { 1.0 },
-                    clamp: 0.0,
-                },
+                bias: depth_bias(reversed, FACE_BIAS),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -1488,17 +1763,18 @@ impl PickRenderer {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: if reversed { -2 } else { 2 },
-                    slope_scale: if reversed { -1.0 } else { 1.0 },
-                    clamp: 0.0,
-                },
+                bias: depth_bias(reversed, FACE_BIAS),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
         });
-        let edge_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pick-edge"), source: wgpu::ShaderSource::Wgsl(EDGE_SHADER.into()) });
+        let edge_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pick-edge"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{EDGE_RIBBON_WGSL}\n{EDGE_SHADER_BODY}").into(),
+            ),
+        });
         let edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("pick-edge-pipeline"),
             layout: Some(&pipeline_layout),
@@ -1513,6 +1789,7 @@ impl PickRenderer {
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 12, shader_location: 1 },
                         wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 16, shader_location: 2 },
+                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 28, shader_location: 3 },
                     ],
                 })],
             },
@@ -1533,6 +1810,65 @@ impl PickRenderer {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
+        });
+        let plan_edge_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pick-plan-edge"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{EDGE_RIBBON_WGSL}\n{PLAN_EDGE_SHADER_BODY}").into(),
+            ),
+        });
+        let plan_edge_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("pick-plan-edge-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &plan_edge_module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[
+                    Some(edge_vertex_layout()),
+                    Some(edge_instance_layout()),
+                    Some(edge_base_layout()),
+                ],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &plan_edge_module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: depth_format,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(if reversed {
+                    wgpu::CompareFunction::GreaterEqual
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let plan_edge_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick-plan-edge-uniforms"),
+            size: std::mem::size_of::<EdgeUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let plan_edge_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pick-plan-edge-bind-group"),
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: plan_edge_uniforms.as_entire_binding(),
+            }],
         });
         let segments = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pick-segments"),
@@ -1559,6 +1895,9 @@ impl PickRenderer {
             object_face_id_pipeline,
             ghost_depth_pipeline,
             edge_pipeline,
+            plan_edge_pipeline,
+            plan_edge_uniforms,
+            plan_edge_bind_group,
             uniforms,
             bind_group,
             ghost_uniforms,
@@ -1656,6 +1995,7 @@ impl PickRenderer {
         frame: &PickFrame,
         request: PickRequest,
         faces: impl FnOnce(&mut wgpu::RenderPass<'_>, &PickPasses<'_>, &PickBinds<'_>),
+        mut profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>,
     ) {
         if request.ghost_key != frame.ghost_key {
             return;
@@ -1679,28 +2019,53 @@ impl PickRenderer {
         }
         let crop = crop_matrix(request.px[0], request.px[1], frame.size_px[0], frame.size_px[1], PICK as f32);
         let view_proj = crate::plan_math::multiply_f32(crop, uniforms.view_proj);
-        let main = PickUniforms { view_proj, extra_model: frame.face_matrix, ..*uniforms };
+        let mut main = PickUniforms { view_proj, extra_model: frame.face_matrix, ..*uniforms };
+        main.params = [
+            frame.edge_width_px,
+            if frame.show_seam_edges { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+        ];
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&main));
-        let ghost = PickUniforms { view_proj, extra_model: frame.ghost_matrix, ..*uniforms };
+        let mut ghost = PickUniforms { view_proj, extra_model: frame.ghost_matrix, ..*uniforms };
+        ghost.params = main.params;
         queue.write_buffer(&self.ghost_uniforms, 0, bytemuck::bytes_of(&ghost));
+        let plan_edge = EdgeUniforms::new(
+            view_proj,
+            frame.face_matrix,
+            [PICK as f32, PICK as f32],
+            frame.edge_width_px,
+            [0.0; 4],
+            true,
+        )
+        .show_seams(frame.show_seam_edges);
+        queue.write_buffer(&self.plan_edge_uniforms, 0, bytemuck::bytes_of(&plan_edge));
         let passes = PickPasses {
             face: &self.face_pipeline,
             face_id: &self.face_id_pipeline,
             object_face_id: &self.object_face_id_pipeline,
             ghost_depth: &self.ghost_depth_pipeline,
+            plan_edge: &self.plan_edge_pipeline,
         };
         let binds = PickBinds {
             main: &self.bind_group,
             ghost: &self.ghost_bind_group,
+            plan_edge: &self.plan_edge_bind_group,
         };
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pick-pass"),
+        crate::gpu_profiler::render_pass(
+            profiler.as_deref_mut(),
+            crate::gpu_profiler::pass::PICK,
+            encoder,
+            wgpu::RenderPassDescriptor {
+                label: Some(crate::gpu_profiler::pass::PICK),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.color_view,
                     depth_slice: None,
                     resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
@@ -1713,18 +2078,23 @@ impl PickRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
-            });
-
-            pass.set_bind_group(0, &self.bind_group, &[]);
-            faces(&mut pass, &passes, &binds);
-            if !frame.segments.is_empty() {
-                pass.set_pipeline(&self.edge_pipeline);
-                let edge_bind = if frame.ghost_edges { &self.ghost_bind_group } else { &self.bind_group };
-                pass.set_bind_group(0, edge_bind, &[]);
-                pass.set_vertex_buffer(0, self.segments.slice(..));
-                pass.draw(0..6, 0..frame.segments.len() as u32);
-            }
-        }
+            },
+            |pass| {
+                pass.set_bind_group(0, &self.bind_group, &[]);
+                faces(pass, &passes, &binds);
+                if !frame.segments.is_empty() {
+                    pass.set_pipeline(&self.edge_pipeline);
+                    let edge_bind = if frame.ghost_edges {
+                        &self.ghost_bind_group
+                    } else {
+                        &self.bind_group
+                    };
+                    pass.set_bind_group(0, edge_bind, &[]);
+                    pass.set_vertex_buffer(0, self.segments.slice(..));
+                    pass.draw(0..6, 0..frame.segments.len() as u32);
+                }
+            },
+        );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color,
@@ -1740,5 +2110,6 @@ impl PickRenderer {
         );
         self.ring.copied(slot_index, request);
     }
+
 
 }

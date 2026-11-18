@@ -103,6 +103,18 @@ pub(crate) fn map_error(error: OpsError) -> SessionError {
             "The kernel does not set back corner {corner}: it sets a corner back only where every edge meeting it is blended, all convex or all concave. Blend every edge meeting the corner, or blend fewer edges at once."
         )),
 
+        OpsError::TurnRefused { room, why, at } => {
+            let kind = if room {
+                "no radius builds the turn between these rounds"
+            } else {
+                "this kind of turn between rounds is not built yet"
+            };
+            SessionError::Invalid(format!(
+                "The blend's rounds cannot turn where they meet{}: {kind}. {why}. Blend fewer edges at once, or use a different corner treatment.",
+                near(at)
+            ))
+        }
+
         OpsError::RoundsCross { at, fit } => {
             let mut message = match at.split_first() {
                 Some((first, rest)) if rest.is_empty() => format!(
@@ -538,6 +550,8 @@ mod tests {
             OpsError::Unsupported("a variable radius that is zero inside its edge"),
             OpsError::CornerUnsupported,
             OpsError::CornerRefused { corner: 3 },
+            OpsError::TurnRefused { room: true, why: "the wall turns away".to_owned(), at: Some([1.0, 2.0, 3.0]) },
+            OpsError::TurnRefused { room: false, why: "the corner is a saddle".to_owned(), at: None },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], fit: Some(2.5) },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0]], fit: None },
             OpsError::RoundsCross { at: Vec::new(), fit: None },

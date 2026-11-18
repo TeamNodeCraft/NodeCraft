@@ -111,6 +111,17 @@ pub(super) struct AppSettings {
     pub(super) workload_profiler: bool,
     #[serde(default = "default_kernel_fixes")]
     pub(super) kernel_fixes: bool,
+    /// Settings > Diagnostics: the single Debug window switch. Off means no
+    /// window, no timestamp queries and no profiler ring writes.
+    ///
+    /// The old settings key `gpu_profiler` migrates through the alias. Unknown
+    /// legacy keys such as `show_view_matrix` and `show_gpu_info` are ignored,
+    /// like every other field this struct does not know.
+    #[serde(default, alias = "gpu_profiler")]
+    pub(super) debug_window: bool,
+    /// The Debug window tab to reopen. Frame is the default for old files.
+    #[serde(default)]
+    pub(super) debug_tab: DebugTab,
     /// Cable routing style: "j-routing" or "bezier-routing".
     #[serde(default = "default_cable_routing")]
     pub(super) cable_routing: String,
@@ -162,6 +173,8 @@ pub(super) fn save_app_settings(
     tessellation_threads: usize,
     workload_profiler: bool,
     kernel_fixes: bool,
+    debug_window: bool,
+    debug_tab: DebugTab,
     cable_routing: CableRouting,
     tool_dock_offset_y: f32,
     tool_dock_shortcut: &str,
@@ -181,6 +194,8 @@ pub(super) fn save_app_settings(
         tessellation_threads,
         workload_profiler,
         kernel_fixes,
+        debug_window,
+        debug_tab,
         cable_routing: cable_routing.setting_id().to_owned(),
         tool_dock_offset_y,
         tool_dock_shortcut: tool_dock_shortcut.to_owned(),

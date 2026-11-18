@@ -84,8 +84,8 @@ fn cadmpeg_pins_match_the_solidcraft_pin() {
             .find(|line| line.trim_start().starts_with(&format!("{name} =")))
             .unwrap_or_else(|| panic!("{name} is missing from the workspace dependencies"));
         assert!(
-            line.contains("\"=0.6.7\""),
-            "{name} must be pinned exactly to 0.6.7: {line}"
+            line.contains("\"=0.6.12\""),
+            "{name} must be pinned exactly to 0.6.12: {line}"
         );
     }
     let registry = workspace
@@ -109,8 +109,8 @@ fn cadmpeg_pins_match_the_solidcraft_pin() {
         assert!(found, "Cargo.lock has no {name}");
         assert_eq!(
             version.as_deref(),
-            Some("version = \"0.6.7\""),
-            "{name} in Cargo.lock must resolve to 0.6.7"
+            Some("version = \"0.6.12\""),
+            "{name} in Cargo.lock must resolve to 0.6.12"
         );
     }
 }

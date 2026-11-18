@@ -211,7 +211,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 if !self.bypass_cache
                     && let Some(cached) = self.display_plans.get(body_key, display_quality(tolerance, preview_detail))
                 {
-                    let display = nodecraft_layers::evaluate_plan(&cached.plan, &cached.edge_ids);
+                    let display = nodecraft_layers::evaluate_plan_with_classes(
+                        &cached.plan,
+                        &cached.edge_ids,
+                        &cached.edge_classes,
+                    );
                     let mut mesh = display.mesh;
                     apply_brep_face_colors(body.body.brep(), &mut mesh);
                     outputs.insert(index, crate::display::MeshInstance {
@@ -271,11 +275,17 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     let plan = instance.plan.clone();
                     let stats = instance.stats.clone();
                     let plan_for_cache = plan.clone().unwrap_or_default();
+                    let edge_classes = nodecraft_layers::plan_edge_classes_from_brep_edges(
+                        &plan_for_cache,
+                        &instance.plan_edge_ids,
+                        &instance.mesh.brep_edges,
+                    );
                     self.display_plans.insert(
                         plan_key(index),
                         display_quality(tolerance, preview_detail),
                         plan_for_cache,
                         instance.plan_edge_ids.clone(),
+                        edge_classes,
                         stats.clone().unwrap_or_default(),
                     );
                     let mut mesh = (*instance.mesh).clone();

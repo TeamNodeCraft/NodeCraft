@@ -78,7 +78,7 @@ pub struct OverlayPlans {
     pub kind: Option<OverlayKind>,
     pub plans: Vec<PlanInstance>,
     pub mesh: nodecraft_protocol::Mesh,
-    pub edge_mesh: nodecraft_protocol::Mesh,
+    pub bounds_mesh: nodecraft_protocol::Mesh,
     pub stats: Vec<nodecraft_layers::TessStats>,
 }
 
@@ -142,7 +142,7 @@ impl DisplayService {
                 frame.feature_plans = display.feature_plans;
                 frame.breakpoint.insert(
                     target.clone(),
-                    PartPlans { plans: display.plans, stats: display.stats, edge_mesh: display.mesh },
+                    PartPlans { plans: display.plans, stats: display.stats, bounds_mesh: display.mesh },
                 );
             } else if !gpu_tess_ready() {
                 // The background GPU tessellation compile is still running.
@@ -161,7 +161,7 @@ impl DisplayService {
                     PartPlans {
                         plans: display.plans,
                         stats: display.stats,
-                        edge_mesh: display.mesh,
+                        bounds_mesh: display.mesh,
                     },
                 );
             } else {
@@ -187,7 +187,7 @@ impl DisplayService {
                     )?;
                     frame.breakpoint.insert(
                         target.clone(),
-                        PartPlans { plans: Vec::new(), stats: display.stats, edge_mesh: display.mesh },
+                        PartPlans { plans: Vec::new(), stats: display.stats, bounds_mesh: display.mesh },
                     );
                 }
             }
@@ -213,7 +213,7 @@ impl DisplayService {
                 kind: Some(overlay.kind),
                 plans: display.plans,
                 mesh: display.mesh,
-                edge_mesh: nodecraft_protocol::Mesh::default(),
+                bounds_mesh: nodecraft_protocol::Mesh::default(),
                 stats: display.stats,
             });
         }
@@ -425,8 +425,10 @@ mod tests {
             target: "x".into(),
             plan,
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_exact::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         assert!(!gpu_plans_supported(&[instance]));
     }

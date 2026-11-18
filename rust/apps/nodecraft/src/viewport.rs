@@ -78,16 +78,37 @@ pub struct ViewSettings {
     pub pan_speed: f32,
     /// Multiplier for orbit interaction speed.
     pub orbit_speed: f32,
-    /// Display tessellation error budget in screen pixels. Per-body screen-space
-    /// LOD chooses each body's tolerance from this.
+    /// Display tessellation error budget in logical (on-screen) pixels.
+    /// Per-body screen-space LOD chooses each body's tolerance from this; the
+    /// display crate converts it to physical pixels once at `pixels_per_point`.
     #[serde(default = "default_display_error_px")]
     pub display_error_px: f64,
+    /// Standard B-rep edge width in screen pixels. Ghost and highlight edges
+    /// derive their widths from this one value. The GPU edge ribbon reads it
+    /// from a uniform, so changing it never rebuilds a plan or re-uploads an
+    /// edge. The viewport size is physical pixels, so this is one device pixel
+    /// at any HiDPI scale, exactly as the previous fixed width was.
+    #[serde(default = "default_edge_width_px")]
+    pub edge_width_px: f32,
+    /// Draw seam edges (a seam between two pieces of one smooth surface, such
+    /// as a cone's wall line or a sphere's meridian). Off by default, matching
+    /// SolidCore's shaded display. This is a uniform mask: toggling it never
+    /// rebuilds a plan or re-uploads an edge.
+    #[serde(default)]
+    pub show_seam_edges: bool,
 }
 
-/// Default screen-space display error budget, in pixels.
+/// Default screen-space display error budget, in logical (on-screen) pixels.
 #[must_use]
 pub fn default_display_error_px() -> f64 {
     0.75
+}
+
+/// The standard B-rep edge width in screen pixels. 1.0 is the width the
+/// viewport drew before the setting existed.
+#[must_use]
+pub fn default_edge_width_px() -> f32 {
+    1.0
 }
 
 impl Default for ViewSettings {
@@ -108,6 +129,8 @@ impl Default for ViewSettings {
             pan_speed: 1.0,
             orbit_speed: 1.0,
             display_error_px: default_display_error_px(),
+            edge_width_px: default_edge_width_px(),
+            show_seam_edges: false,
         }
     }
 }
@@ -129,8 +152,10 @@ impl ViewSettings {
             || self.face_colours
             || self.zebra
             || self.ignore_look_colors
+            || self.show_seam_edges
             || (self.ghost_opacity - 0.45).abs() > f32::EPSILON
             || (self.display_error_px - default_display_error_px()).abs() > f64::EPSILON
+            || (self.edge_width_px - default_edge_width_px()).abs() > f32::EPSILON
 
     }
 }
@@ -329,12 +354,6 @@ pub struct Viewport {
     /// The latest hover request. A result from an older request must not move
     /// the hover back to a stale pointer.
     latest_hover_pick: Option<u64>,
-    /// Development-only camera diagnostics. Deliberately not serialized.
-    show_view_matrix: bool,
-    /// Opt-in GPU/frame diagnostics overlay. Off by default.
-    show_gpu_info: bool,
-    /// Smoothed frame interval in milliseconds, for the GPU info overlay.
-    frame_ms: f32,
     selection_mode: SelectionMode,
     face_picks: Vec<String>,
     edge_picks: Vec<EdgePick>,
@@ -348,6 +367,13 @@ pub struct Viewport {
     /// Rectangles owned by viewport chrome (compass, home, projection and display
     /// settings) that must swallow pointer input before sketch overlays see it.
     chrome_blockers: Vec<egui::Rect>,
+    /// The Axes navigator's drag state across frames (including a pending
+    /// cursor warp at the window edge).
+    navigator_drag: crate::view_navigator::Drag,
+    /// The pointer gesture currently in flight and whether viewport chrome
+    /// owned it from its press. Every viewport consumer of the pointer reads
+    /// this one decision instead of re-testing the hover position.
+    chrome_pointer: Option<ChromePointer>,
     hovered_edge: Option<String>,
     hovered_face: Option<String>,
     selected_edges: std::collections::BTreeSet<String>,
@@ -385,6 +411,93 @@ pub struct Viewport {
     gpu: Option<GpuViewport>,
 }
 
+/// The 18-point Home icon under the compass, right-aligned with its box.
+fn navigator_home_icon_rect(outer: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(outer.right() - 18.0, outer.bottom() + 10.0),
+        egui::vec2(18.0, 18.0),
+    )
+}
+
+/// The Home button's 30-point round hit area around its icon.
+fn navigator_home_rect(outer: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(navigator_home_icon_rect(outer).center(), egui::vec2(30.0, 30.0))
+}
+
+/// The projection toggle's 18-point icon, anchored on the Home button.
+fn navigator_projection_icon_rect(outer: egui::Rect) -> egui::Rect {
+    let home_icon = navigator_home_icon_rect(outer);
+    egui::Rect::from_min_size(
+        egui::pos2(home_icon.right() - home_icon.width(), navigator_home_rect(outer).bottom() + 10.0),
+        home_icon.size(),
+    )
+}
+
+/// The projection toggle's 30-point hit area.
+fn navigator_projection_rect(outer: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(
+        navigator_projection_icon_rect(outer).center(),
+        egui::vec2(30.0, 30.0),
+    )
+}
+
+/// The display-settings cog's 18-point icon, anchored on the projection button.
+fn navigator_view_icon_rect(outer: egui::Rect) -> egui::Rect {
+    let projection_icon = navigator_projection_icon_rect(outer);
+    let projection = navigator_projection_rect(outer);
+    egui::Rect::from_min_size(
+        egui::pos2(projection_icon.right() - projection_icon.width(), projection.bottom() + 10.0),
+        projection_icon.size(),
+    )
+}
+
+/// The display-settings cog's 30-point hit area.
+fn navigator_view_rect(outer: egui::Rect) -> egui::Rect {
+    egui::Rect::from_center_size(navigator_view_icon_rect(outer).center(), egui::vec2(30.0, 30.0))
+}
+
+/// Every floating control in the viewport's top-right chrome. Drawing and hit
+/// testing both go through this one layout: the compass box, the Home button,
+/// the projection toggle and the display-settings cog.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NavigatorChrome {
+    layout: crate::view_navigator::Layout,
+    home: egui::Rect,
+    projection: egui::Rect,
+    display: egui::Rect,
+}
+
+impl NavigatorChrome {
+    fn at(viewport: egui::Rect, right_inset: f32) -> Self {
+        let layout = crate::view_navigator::layout(viewport, right_inset);
+        Self {
+            layout,
+            home: navigator_home_rect(layout.outer),
+            projection: navigator_projection_rect(layout.outer),
+            display: navigator_view_rect(layout.outer),
+        }
+    }
+
+    fn rects(self) -> [egui::Rect; 4] {
+        [self.layout.outer, self.home, self.projection, self.display]
+    }
+
+    fn contains(self, pointer: egui::Pos2) -> bool {
+        self.rects().iter().any(|rect| rect.contains(pointer))
+    }
+}
+
+/// Which button began the current pointer gesture, where it began, and whether
+/// the viewport's chrome owns it. The ownership decision is made once, from
+/// the press position, and held for the rest of the press, drag and release
+/// frame. Drawing, picking, selection and camera navigation all read it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ChromePointer {
+    button: egui::PointerButton,
+    origin: egui::Pos2,
+    owned: bool,
+}
+
 /// The projection toggle shows the projection in use: perspective lattice when
 /// perspective is active, square lattice when orthographic.
 fn projection_icon(perspective: bool) -> (&'static [u8], &'static str) {
@@ -401,31 +514,22 @@ fn projection_icon(perspective: bool) -> (&'static [u8], &'static str) {
     }
 }
 
-fn draw_debug_box(ui: &egui::Ui, pos: egui::Pos2, width: f32, lines: &[String]) -> f32 {
-    // Debug is the last layer egui paints, so the diagnostics stay above the
-    // node editor, inspector, tool dock and any other floating panel. They are
-    // painter-only and have no widgets, so nothing in them is clickable.
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Debug,
-        egui::Id::new("viewport-debug-overlay"),
-    ));
-    let height = 19.0 + 15.0 * lines.len() as f32;
-    painter.rect_filled(
-        egui::Rect::from_min_size(pos - egui::vec2(6.0, 6.0), egui::vec2(width, height)),
-        5.0,
-        // More transparent than the old 190-alpha diagnostic box.
-        egui::Color32::from_rgba_unmultiplied(0, 0, 0, 150),
-    );
-    for (index, line) in lines.iter().enumerate() {
-        painter.text(
-            pos + egui::vec2(0.0, 15.0 * index as f32),
-            egui::Align2::LEFT_TOP,
-            line,
-            egui::FontId::monospace(11.0),
-            egui::Color32::from_rgb(210, 225, 220),
-        );
+/// A labelled diagnostic row for the Debug window. The viewport reads live
+/// values into these; the window owns presentation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DebugRow {
+    pub label: &'static str,
+    pub value: String,
+}
+
+impl DebugRow {
+    fn new(label: &'static str, value: String) -> Self {
+        Self { label, value }
     }
-    height
+}
+
+fn debug_vec3(value: solidcore_record::Vec3) -> String {
+    format!("{:.3} {:.3} {:.3}", value.x, value.y, value.z)
 }
 
 impl Default for Viewport {
@@ -465,9 +569,6 @@ impl Default for Viewport {
             pending_gpu_pick: None,
             pending_face_empty: None,
             latest_hover_pick: None,
-            show_view_matrix: false,
-            show_gpu_info: false,
-            frame_ms: 0.0,
             selection_mode: SelectionMode::Object,
             face_picks: Vec::new(),
             edge_picks: Vec::new(),
@@ -475,6 +576,8 @@ impl Default for Viewport {
             quality_detail: None,
             selection_miss: false,
             chrome_blockers: Vec::new(),
+            navigator_drag: crate::view_navigator::Drag::default(),
+            chrome_pointer: None,
             hovered_edge: None,
             hovered_face: None,
             selected_edges: std::collections::BTreeSet::new(),
@@ -515,6 +618,30 @@ impl Viewport {
         #[cfg(not(feature = "gpu-viewport"))]
         {
             false
+        }
+    }
+
+    /// Tell the GPU callback whether pass scopes should be recorded. Off is a
+    /// plain bool it checks before touching the profiler slot.
+    pub fn set_gpu_profiler_enabled(&mut self, enabled: bool) {
+        #[cfg(feature = "gpu-viewport")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_gpu_profiler_enabled(enabled);
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        let _ = enabled;
+    }
+
+    /// Cumulative uploaded object bytes from the existing GPU debug snapshot.
+    /// The profiler differences consecutive samples; off never calls this.
+    pub fn gpu_object_bytes(&self) -> Option<u64> {
+        #[cfg(feature = "gpu-viewport")]
+        {
+            self.gpu.as_ref()?.debug_info().map(|info| info.object_bytes)
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        {
+            None
         }
     }
 
@@ -1102,6 +1229,11 @@ impl Viewport {
         if self.view.ignore_look_colors {
             display.face_colors.clear();
         }
+        // The merged display mesh's `body:N` index is the plan-list index. Give
+        // the CPU colour path the same stable identity the plan table uses.
+        if !self.plans.is_empty() {
+            display.body_ids = self.plans.iter().map(|plan| plan.body).collect();
+        }
         display
     }
 
@@ -1530,26 +1662,99 @@ impl Viewport {
         self.frame_origin(radius, aspect, lens);
     }
 
-    pub fn show_view_matrix(&self) -> bool {
-        self.show_view_matrix
+    /// Camera and view-matrix rows for the Debug window's Camera tab.
+    ///
+    /// These read the live camera and cost nothing until the window asks for
+    /// them; the viewport no longer paints a diagnostics overlay.
+    pub fn camera_debug_rows(&self) -> Vec<DebugRow> {
+        let camera = &self.camera;
+        let (right, up, back) = camera.basis();
+        let target = camera.target;
+        let eye = camera.eye();
+        let mut rows = vec![
+            DebugRow::new("Yaw", format!("{:.2}°", camera.yaw.to_degrees())),
+            DebugRow::new("Pitch", format!("{:.2}°", camera.pitch.to_degrees())),
+            DebugRow::new("Roll", format!("{:.2}°", camera.roll.to_degrees())),
+            DebugRow::new("FOV", format!("{:.3}", camera.fov)),
+            DebugRow::new("Distance", format!("{:.3}", camera.distance)),
+            DebugRow::new("Half height", format!("{:.3}", camera.half_height())),
+            DebugRow::new("Target", debug_vec3(target)),
+            DebugRow::new("Eye", debug_vec3(eye)),
+            DebugRow::new("Right", debug_vec3(right)),
+            DebugRow::new("Up", debug_vec3(up)),
+            DebugRow::new("Back", debug_vec3(back)),
+            DebugRow::new(
+                "Lens shift",
+                format!("{:.4} {:.4}", self.lens_shift[0], self.lens_shift[1]),
+            ),
+        ];
+        for (index, row) in camera.view().0.iter().enumerate() {
+            rows.push(DebugRow::new(
+                "View row",
+                format!(
+                    "{index}: {:.3} {:.3} {:.3} {:.3}",
+                    row[0], row[1], row[2], row[3]
+                ),
+            ));
+        }
+        rows
     }
 
-    pub fn show_gpu_info(&self) -> bool {
-        self.show_gpu_info
-    }
-
-    pub fn set_show_gpu_info(&mut self, show: bool) {
-        self.show_gpu_info = show;
-    }
-
-    fn tick_frame_stats(&mut self, ui: &egui::Ui) {
-        let dt = ui.ctx().input(|input| input.stable_dt).clamp(1.0e-4, 1.0);
-        let ms = dt * 1000.0;
-        self.frame_ms = if self.frame_ms > 0.0 {
-            self.frame_ms * 0.85 + ms * 0.15
-        } else {
-            ms
-        };
+    /// GPU/frame rows for the Debug window's GPU tab.
+    ///
+    /// `frame_ms` is the profiler's existing CPU frame series; this method never
+    /// starts a query or measures a frame itself.
+    pub fn gpu_debug_rows(&self, frame_ms: f32) -> Vec<DebugRow> {
+        let fps = if frame_ms > 0.0 { 1000.0 / frame_ms } else { 0.0 };
+        let mut rows = Vec::new();
+        if let Some(full) = self.last_full {
+            rows.push(DebugRow::new(
+                "Viewport",
+                format!(
+                    "{}×{}",
+                    full.width().round() as i32,
+                    full.height().round() as i32
+                ),
+            ));
+        }
+        rows.push(DebugRow::new(
+            "Frame",
+            format!("{frame_ms:.1} ms  {fps:.0} fps"),
+        ));
+        #[cfg(feature = "gpu-viewport")]
+        {
+            if let Some(gpu) = self.gpu.as_ref().and_then(|gpu| gpu.debug_info()) {
+                rows.push(DebugRow::new(
+                    "Adapter",
+                    format!("{} ({}, {})", gpu.adapter, gpu.backend, gpu.device_type),
+                ));
+                rows.push(DebugRow::new(
+                    "Object",
+                    format!(
+                        "{} tris  {} chunks  {:.1} MB",
+                        gpu.triangles,
+                        gpu.chunks,
+                        gpu.object_bytes as f64 / (1024.0 * 1024.0)
+                    ),
+                ));
+                rows.push(DebugRow::new(
+                    "MSAA",
+                    format!("{}x", crate::gpu_viewport::msaa_samples()),
+                ));
+            } else {
+                rows.push(DebugRow::new("GPU", "viewport not initialized".to_owned()));
+            }
+        }
+        #[cfg(not(feature = "gpu-viewport"))]
+        rows.push(DebugRow::new("GPU", "viewport feature off".to_owned()));
+        rows.push(DebugRow::new(
+            "Tessellation warnings",
+            self.tessellation_diagnostics.len().to_string(),
+        ));
+        for diagnostic in self.tessellation_diagnostics.iter().take(6) {
+            rows.push(DebugRow::new("Warning", diagnostic.clone()));
+        }
+        rows
     }
 
     /// NDC offset used to compose the camera into the visible viewport.
@@ -1600,10 +1805,6 @@ impl Viewport {
         if snapshot.lens_shift != [0.0, 0.0] {
             self.lens_shift = lens_shift_for_visible(full, visible);
         }
-    }
-
-    pub fn set_show_view_matrix(&mut self, show: bool) {
-        self.show_view_matrix = show;
     }
 
     pub fn mark_dirty(&mut self) {
@@ -1776,8 +1977,12 @@ impl Viewport {
                     id,
                     points,
                     midpoint: [midpoint.x, midpoint.y, midpoint.z],
-                    normals: Vec::new(),
-                });
+                    class: instance
+                        .edge_classes
+                        .get(index)
+                        .copied()
+                        .unwrap_or_default(),
+                        });
             }
         }
         if !edges.is_empty() {
@@ -1932,6 +2137,129 @@ impl Viewport {
         self.dirty = true;
     }
 
+    /// The top-right chrome's one hit test: the compass box, Home, the
+    /// projection toggle and the display cog. `axis_gizmo` draws from the same
+    /// [`NavigatorChrome`] value.
+    fn navigator_chrome(&self, viewport: egui::Rect) -> NavigatorChrome {
+        NavigatorChrome::at(viewport, self.chrome_right_inset)
+    }
+
+    /// Whether `pointer` is in the view navigator's chrome, which takes the
+    /// press before viewport picking or navigation sees it.
+    pub(crate) fn navigator_pointer_blocked(&self, viewport: egui::Rect, pointer: egui::Pos2) -> bool {
+        self.chrome_visible && self.navigator_chrome(viewport).contains(pointer)
+    }
+
+    /// Whether `point` is over a triad handle. The triad's drawing and this
+    /// hit test both go through [`viewer_gizmo`]'s `Proj` and `shapes`.
+    fn transform_gizmo_contains_point(&self, rect: egui::Rect, point: egui::Pos2) -> bool {
+        let Some(display) = self.display.as_ref() else { return false };
+        let Some(gizmo) = self.transform_gizmo.as_ref() else { return false };
+        viewer_gizmo::contains_pointer(
+            gizmo,
+            &self.camera,
+            rect,
+            self.lens_shift,
+            display.radius,
+            point,
+        )
+    }
+
+    /// Whether viewport chrome owns `point`: the triad or the navigator block.
+    fn chrome_contains_point(&self, rect: egui::Rect, point: egui::Pos2) -> bool {
+        self.transform_gizmo_contains_point(rect, point)
+            || (self.chrome_visible && self.navigator_chrome(rect).contains(point))
+    }
+
+    fn chrome_contains_pointer(&self, ui: &egui::Ui, rect: egui::Rect) -> bool {
+        ui.ctx()
+            .pointer_hover_pos()
+            .is_some_and(|pointer| self.chrome_contains_point(rect, pointer))
+    }
+
+    /// Decide once, from the press position, whether viewport chrome owns the
+    /// pointer gesture, and hold that decision until the button is released.
+    ///
+    /// Picking, selection misses and camera navigation all read
+    /// [`Self::pointer_owned_by_chrome`] instead of re-testing the current
+    /// hover position. A pointer that starts on a handle and ends over the
+    /// model (or vice versa) therefore cannot hand the click to the viewport.
+    fn update_chrome_pointer(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        overlay: egui::Rect,
+        blockers: &[egui::Rect],
+    ) {
+        let (press, release, pointer_gone, focused, buttons_down) = ui.input(|input| {
+            let mut press = None;
+            let mut release = None;
+            let mut gone = false;
+            for event in &input.events {
+                match event {
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed: true,
+                        ..
+                    } if press.is_none() => press = Some((*button, *pos)),
+                    egui::Event::PointerButton {
+                        button,
+                        pressed: false,
+                        ..
+                    } => release = Some(*button),
+                    egui::Event::PointerGone => gone = true,
+                    _ => {}
+                }
+            }
+            (
+                press,
+                release,
+                gone,
+                input.focused,
+                [
+                    input.pointer.button_down(egui::PointerButton::Primary),
+                    input.pointer.button_down(egui::PointerButton::Middle),
+                    input.pointer.button_down(egui::PointerButton::Secondary),
+                ],
+            )
+        });
+        let is_down = |button: egui::PointerButton| match button {
+            egui::PointerButton::Primary => buttons_down[0],
+            egui::PointerButton::Middle => buttons_down[1],
+            egui::PointerButton::Secondary => buttons_down[2],
+            _ => false,
+        };
+        if let Some(gesture) = self.chrome_pointer {
+            let released = release == Some(gesture.button);
+            // Hold through the release frame so the click's consumers see the
+            // same decision as the press frame; drop it on the next frame or
+            // when the gesture is lost.
+            if pointer_gone || !focused || (!is_down(gesture.button) && !released) {
+                self.chrome_pointer = None;
+            }
+        }
+        if let Some((button, origin)) = press {
+            let blocked = overlay.contains(origin)
+                || blockers.iter().any(|blocker| blocker.contains(origin))
+                || self.chrome_contains_point(rect, origin);
+            self.chrome_pointer = Some(ChromePointer { button, origin, owned: blocked });
+        }
+    }
+
+    /// Whether the pointer gesture in flight began on viewport chrome (or an
+    /// overlay). Held for the whole press/drag/release.
+    pub(crate) fn pointer_owned_by_chrome(&self) -> bool {
+        self.chrome_pointer.is_some_and(|gesture| gesture.owned)
+    }
+
+    /// The held press position and ownership, for tests and diagnostics.
+    #[cfg(test)]
+    fn chrome_pointer(&self) -> Option<(egui::PointerButton, egui::Pos2, bool)> {
+        self.chrome_pointer
+            .map(|gesture| (gesture.button, gesture.origin, gesture.owned))
+    }
+
     fn draw_transform_gizmo(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
         let Some(display) = self.display.as_ref() else { return };
         let Some(gizmo) = self.transform_gizmo.as_mut() else { return };
@@ -1950,6 +2278,9 @@ impl Viewport {
                 pending.started |= update.started;
                 pending.dragging = update.dragging;
                 pending.ended |= update.ended;
+                if update.focus.is_some() {
+                    pending.focus = update.focus;
+                }
             }
             None => self.gizmo_update = Some(update),
         }
@@ -1986,9 +2317,6 @@ impl Viewport {
     ) {
         self.sync_activated_display();
         self.poll_display_prep();
-        if self.show_gpu_info {
-            self.tick_frame_stats(ui);
-        }
         let available = ui.available_size();
         let width = available.x.max(32.0) as usize;
         let height = available.y.max(32.0) as usize;
@@ -2001,6 +2329,11 @@ impl Viewport {
         self.last_visible = Some(visible);
         self.apply_pending_view_restore(rect, visible);
         self.chrome_blockers.clear();
+        // One decision for the whole gesture: did the press land on viewport
+        // chrome or an overlay? Picking, selection and camera navigation read
+        // this, not the current hover position.
+        self.update_chrome_pointer(ui, rect, overlay, blockers);
+        let chrome_owned = self.pointer_owned_by_chrome();
 
         let modifiers = ui.ctx().input(|input| input.modifiers);
         let middle = response.dragged_by(egui::PointerButton::Middle);
@@ -2011,7 +2344,7 @@ impl Viewport {
         } else {
             middle || secondary
         };
-        if orbit_drag || pan_drag {
+        if (orbit_drag || pan_drag) && !chrome_owned {
             let delta = response.drag_delta();
             if orbit_drag {
                 self.camera.orbit(
@@ -2033,7 +2366,17 @@ impl Viewport {
             blocked.push(overlay);
             HoverMap::new(rect, &blocked, Some(pointer)).over_blocker()
         });
-        if response.hovered() && !pointer_over_overlay && gesture.has_navigation() {
+        // Viewport chrome owns pointer buttons, not navigation gestures. A
+        // press that starts on the triad or navigator (and its drag/release)
+        // must not pick the model behind it, but a trackpad pan/orbit, pinch
+        // or wheel over those controls is still a viewport camera gesture.
+        // Only real overlay panels own gestures as well; the two rules stay
+        // separate instead of reusing one over-broad flag.
+        let pointer_button_blocked = pointer_over_overlay
+            || chrome_owned
+            || self.chrome_contains_pointer(ui, rect);
+        let navigation_blocked = pointer_over_overlay;
+        if response.hovered() && !navigation_blocked && gesture.has_navigation() {
             if (gesture.zoom - 1.0).abs() > f32::EPSILON {
                 // egui's zoom_delta grows when pinching out; camera distance shrinks.
                 self.camera.zoom_at(f64::from(1.0 / gesture.zoom), None);
@@ -2087,7 +2430,8 @@ impl Viewport {
         }
 
         #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_ref() {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.set_edge_selection(&self.selected_edges, self.hovered_edge.as_deref());
             let pixels_per_point = ui.ctx().pixels_per_point();
             let bounds = *gpu.bounds();
             let frame = gpu.frame(
@@ -2122,20 +2466,18 @@ impl Viewport {
                 self.axis_gizmo(ui, rect);
                 // Top selection dock intentionally disabled for the inspector-driven
                 // selection experiment. Keep `selection_dock` for a future opt-in.
-                self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
-                self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+                self.pick_face(ui, rect, response.clicked(), pointer_button_blocked);
+                self.update_edge_selection(ui, rect, response.clicked(), pointer_button_blocked);
                 self.draw_face_hover(ui, rect);
                 self.draw_comparison_overlay(ui, rect);
                 // The feature-input edge field is a quiet guide; selected edges
-                // are painted fully opaque afterwards.
+                // are part of the GPU ribbon pass.
                 if !self.gpu_active() {
                     self.draw_edit_ghost_edges(ui, rect);
                 }
-                self.draw_edge_highlights(ui, rect);
                 self.draw_comparison_edges(ui, rect);
                 self.draw_transform_gizmo(ui, rect);
             }
-            self.draw_debug_overlays(ui, rect);
             return;
         }
 
@@ -2155,12 +2497,11 @@ impl Viewport {
                 ui.visuals().weak_text_color(),
             );
         }
-        self.draw_debug_overlays(ui, rect);
         if self.chrome_visible {
             self.axis_gizmo(ui, rect);
             // Top selection dock intentionally disabled; see inspector edit action.
-            self.pick_face(ui, rect, response.clicked(), pointer_over_overlay);
-            self.update_edge_selection(ui, rect, response.clicked(), pointer_over_overlay);
+            self.pick_face(ui, rect, response.clicked(), pointer_button_blocked);
+            self.update_edge_selection(ui, rect, response.clicked(), pointer_button_blocked);
             self.draw_face_hover(ui, rect);
             self.draw_comparison_overlay(ui, rect);
             self.draw_edge_highlights(ui, rect);
@@ -2274,7 +2615,7 @@ impl Viewport {
                                     && Some(result.id) == self.latest_hover_pick
                                 {
                                     let id = crate::gpu_viewport::resolve_pick(
-                                        gpu.pick_data(),
+                                        &gpu.pick_data(),
                                         index,
                                     )
                                     .map(|(id, _)| id);
@@ -2290,7 +2631,7 @@ impl Viewport {
                                     EdgeClickAction::Apply(index) => {
                                         if let Some((edge_id, center)) =
                                             crate::gpu_viewport::resolve_pick(
-                                                gpu.pick_data(),
+                                                &gpu.pick_data(),
                                                 index,
                                             )
                                         {
@@ -2474,93 +2815,6 @@ impl Viewport {
             viewport.min.x + x as f32 + self.lens_shift[0] * viewport.width() * 0.5,
             viewport.min.y + y as f32 - self.lens_shift[1] * viewport.height() * 0.5,
         ))
-    }
-
-    /// Debug overlays stack from the top-left: GPU info first, then the camera /
-    /// view-matrix block underneath it. Both are paint-only, so they never take
-    /// pointer input from the viewport.
-    fn debug_overlays_enabled(&self) -> bool {
-        self.show_gpu_info || self.show_view_matrix
-    }
-
-    fn draw_debug_overlays(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
-        if !self.debug_overlays_enabled() {
-            return;
-        }
-        let mut pos = viewport.min + egui::vec2(12.0, 12.0);
-        if self.show_gpu_info {
-            let lines = self.gpu_info_lines(viewport);
-            let height = draw_debug_box(ui, pos, 365.0, &lines);
-            pos.y += height + 8.0;
-        }
-        if self.show_view_matrix {
-            let camera = &self.camera;
-            let (right, up, back) = camera.basis();
-            let view = camera.view().0;
-            let target = camera.target;
-            let eye = camera.eye();
-            let lines = [
-                format!(
-                    "camera yaw {:.2}  pitch {:.2}  roll {:.2}",
-                    camera.yaw.to_degrees(), camera.pitch.to_degrees(), camera.roll.to_degrees()
-                ),
-                format!("fov {:.3}  distance {:.3}  half_h {:.3}", camera.fov, camera.distance, camera.half_height()),
-                format!("target {:.3} {:.3} {:.3}", target.x, target.y, target.z),
-                format!("eye    {:.3} {:.3} {:.3}", eye.x, eye.y, eye.z),
-                format!("right  {:.3} {:.3} {:.3}", right.x, right.y, right.z),
-                format!("up     {:.3} {:.3} {:.3}", up.x, up.y, up.z),
-                format!("back   {:.3} {:.3} {:.3}", back.x, back.y, back.z),
-                format!("lens   {:.4} {:.4}", self.lens_shift[0], self.lens_shift[1]),
-                "view matrix".to_owned(),
-            ]
-            .into_iter()
-            .chain(view.iter().map(|row| {
-                format!("{:.3} {:.3} {:.3} {:.3}", row[0], row[1], row[2], row[3])
-            }))
-            .collect::<Vec<_>>();
-            draw_debug_box(ui, pos, 365.0, &lines);
-        }
-    }
-
-    fn gpu_info_lines(&self, viewport: egui::Rect) -> Vec<String> {
-        let fps = if self.frame_ms > 0.0 { 1000.0 / self.frame_ms } else { 0.0 };
-        let mut lines = vec![format!(
-            "frame {:.1} ms  {:.0} fps  {}x{}",
-            self.frame_ms,
-            fps,
-            viewport.width().round() as i32,
-            viewport.height().round() as i32
-        )];
-        #[cfg(feature = "gpu-viewport")]
-        {
-            if let Some(gpu) = self.gpu.as_ref().and_then(|gpu| gpu.debug_info()) {
-                lines.push(format!(
-                    "gpu {} ({}, {})",
-                    gpu.adapter, gpu.backend, gpu.device_type
-                ));
-                lines.push(format!(
-                    "object {} tris  {} chunks  {:.1} MB",
-                    gpu.triangles,
-                    gpu.chunks,
-                    gpu.object_bytes as f64 / (1024.0 * 1024.0)
-                ));
-                lines.push(format!("msaa {}x", crate::gpu_viewport::msaa_samples()));
-            } else {
-                lines.push("gpu viewport not initialized".to_owned());
-            }
-        }
-        #[cfg(not(feature = "gpu-viewport"))]
-        lines.push("gpu viewport feature off".to_owned());
-        if !self.tessellation_diagnostics.is_empty() {
-            lines.push(format!(
-                "tessellation warnings: {}",
-                self.tessellation_diagnostics.len()
-            ));
-            for diagnostic in self.tessellation_diagnostics.iter().take(6) {
-                lines.push(format!("  {diagnostic}"));
-            }
-        }
-        lines
     }
 
     fn draw_face_hover(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -2903,116 +3157,65 @@ impl Viewport {
         }
     }
 
-    /// SolidCraft-style signed XYZ compass in the viewport's top-right corner.
-    /// Clicking a positive tip chooses that standard view; dragging the compass orbits.
+    /// SolidCraft's Axes view navigator in the viewport's top-right corner:
+    /// six signed world axes and a drag anywhere on the navigator to orbit.
+    /// Clicking a tip looks along that axis. NodeCraft's Home button sits
+    /// under the compass, above the projection and display controls.
+    ///
+    /// Adapted from SolidCraft's view compass and `view.navigate` (synced with
+    /// c2ffd48e, MIT OR Apache-2.0). NodeCraft keeps its own placement,
+    /// camera, lens shift, theme and viewport chrome below the compass.
     fn axis_gizmo(&mut self, ui: &mut egui::Ui, viewport: egui::Rect) {
         let theme = crate::theme::get();
-        const SIZE: f32 = 94.0;
-        const MARGIN: f32 = 14.0;
-        const ART: f32 = 0.84;
-        const AXIS_LENGTH: f32 = 38.0;
+        let chrome = self.navigator_chrome(viewport);
+        let layout = chrome.layout;
 
-        let rect = egui::Rect::from_min_size(
-            egui::Pos2::new(
-                viewport.right() - SIZE - MARGIN - self.chrome_right_inset,
-                viewport.top() + MARGIN,
-            ),
-            egui::Vec2::splat(SIZE),
-        );
-        // Click a tip to choose a standard view, or drag the compass to orbit.
-        let response = ui.interact(
-            rect,
-            egui::Id::new("viewport-axis-gizmo"),
-            egui::Sense::click_and_drag(),
-        );
-        let center = rect.center();
-        let (right, up, back) = self.camera.basis();
-        let axes = [
-            ("x", solidcore_record::Vec3::X),
-            ("-x", -solidcore_record::Vec3::X),
-            ("y", solidcore_record::Vec3::Y),
-            ("-y", -solidcore_record::Vec3::Y),
-            ("z", solidcore_record::Vec3::Z),
-            ("-z", -solidcore_record::Vec3::Z),
-        ];
-        let mut tips: Vec<(&'static str, egui::Pos2, f32)> = axes
-            .iter()
-            .map(|(name, direction)| {
-                let dir = egui::vec2(
-                    direction.dot(right) as f32,
-                    -(direction.dot(up) as f32),
-                ) * AXIS_LENGTH
-                    * ART;
-                (*name, center + dir, direction.dot(back) as f32)
-            })
-            .collect();
-        tips.sort_by(|a, b| a.2.total_cmp(&b.2));
-
-        let hover = ui.input(|input| input.pointer.hover_pos()).filter(|pointer| rect.contains(*pointer));
-        let hovered = hover.and_then(|pointer| {
-            tips.iter().enumerate().rev().find(|(_, (_, tip, _))| tip.distance(pointer) <= 10.0).map(|(index, _)| index)
+        // A drag anywhere in the navigator's reserved box orbits; a stationary
+        // press on a tip is the tip's click in `show`.
+        let may_start = ui.is_enabled() && ui.rect_contains_pointer(layout.outer);
+        let mut drag = self.navigator_drag;
+        let orbit = crate::view_navigator::orbit(ui, &mut drag, may_start, |p| {
+            crate::view_navigator::contains(&layout, p)
         });
-        if response.dragged_by(egui::PointerButton::Primary) {
-            let delta = response.drag_delta();
-            if delta != egui::Vec2::ZERO {
-                self.camera.orbit(f64::from(delta.x), f64::from(delta.y));
+        self.navigator_drag = drag;
+        if let Some(step) = orbit.step
+            && (step.dx != 0.0 || step.dy != 0.0)
+        {
+            self.camera.orbit(step.dx, step.dy);
+            self.dirty = true;
+            ui.ctx().request_repaint();
+        }
+
+        let hover = ui
+            .input(|i| i.pointer.hover_pos())
+            .filter(|p| ui.is_enabled() && ui.rect_contains_pointer(layout.outer));
+        let compass = crate::view_navigator::Compass {
+            clip: viewport,
+            centre: layout.centre,
+            axes: crate::view_navigator::view_axes(&self.camera),
+            hover,
+            orbiting: orbit.orbiting,
+        };
+        // The compass returns a tip or Home; its drag came from `orbit` above.
+        match crate::view_navigator::show(ui, &compass) {
+            Some(crate::view_navigator::ViewAction::Snap { direction, .. }) => {
+                // NodeCraft has no in-flight camera glide, so the current
+                // camera is the "from" a rapid second click starts from.
+                self.camera = crate::view_navigator::snap(&self.camera, direction);
                 self.dirty = true;
                 ui.ctx().request_repaint();
             }
-        }
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(if response.dragged() {
-                egui::CursorIcon::Grabbing
-            } else {
-                egui::CursorIcon::PointingHand
-            });
-        }
-        if response.clicked() {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                if let Some((name, _, _)) = tips.iter().rev().find(|(_, tip, _)| tip.distance(pointer) <= 12.0) {
-                    let view = match *name {
-                        "x" => StandardView::Right,
-                        "-x" => StandardView::Left,
-                        "y" => StandardView::Back,
-                        "-y" => StandardView::Front,
-                        "z" => StandardView::Top,
-                        _ => StandardView::Bottom,
-                    };
-                    self.set_standard_view(view);
-                    ui.ctx().request_repaint();
-                }
-            }
+            None => {}
         }
 
         let painter = ui.painter().with_clip_rect(viewport);
-        painter.circle_filled(center, SIZE * 0.5, theme.with_alpha(theme.window, 150));
-        painter.circle_stroke(center, SIZE * 0.5, egui::Stroke::new(1.0, theme.with_alpha(theme.border, 180)));
-        for (index, (name, at, _depth)) in tips.iter().enumerate() {
-            let positive = !name.starts_with('-');
-            let colour = match name.trim_start_matches('-') {
-                "x" => theme.color(theme.axis_x),
-                "y" => theme.color(theme.axis_y),
-                _ => theme.color(theme.axis_z),
-            };
-            let colour = if positive { colour } else { colour.gamma_multiply(0.45) };
-            painter.line_segment([center, *at], egui::Stroke::new(1.6, colour.gamma_multiply(0.8)));
-            let radius = if hovered == Some(index) { 10.0 } else { 8.0 };
-            painter.circle_filled(*at, radius, colour);
-            painter.circle_stroke(*at, radius, egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 180)));
-            if positive {
-                painter.text(*at, egui::Align2::CENTER_CENTER, name.to_uppercase(), egui::FontId::proportional(8.0), theme.color(theme.window));
-            }
-        }
-        painter.circle_filled(center, 3.5, egui::Color32::from_rgb(200, 200, 204));
-
-        // Home / isometric button directly under the compass. Its right edge
-        // shares the gizmo's viewport padding; chrome appears only on hover.
         let icon_size = 18.0;
-        let icon_rect = egui::Rect::from_min_size(
-            egui::Pos2::new(rect.right() - icon_size, rect.bottom() + 10.0),
-            egui::Vec2::splat(icon_size),
-        );
-        let home_rect = egui::Rect::from_center_size(icon_rect.center(), egui::Vec2::splat(30.0));
+
+        // Home / isometric button directly under the compass, as before the
+        // navigator port. Its right edge shares the compass box's right edge
+        // and its 30-point hit area carries only a hover highlight.
+        let icon_rect = navigator_home_icon_rect(layout.outer);
+        let home_rect = chrome.home;
         let home = ui
             .interact(home_rect, egui::Id::new("viewport-axis-home"), egui::Sense::click())
             .on_hover_text("Home / isometric view");
@@ -3047,15 +3250,9 @@ impl Viewport {
             .fit_to_exact_size(egui::Vec2::splat(icon_size));
         ui.put(icon_rect, image);
 
-        // Projection toggle directly below the home button.
-        let perspective_icon = egui::Rect::from_min_size(
-            egui::Pos2::new(icon_rect.right() - icon_size, home_rect.bottom() + 10.0),
-            egui::Vec2::splat(icon_size),
-        );
-        let perspective_rect = egui::Rect::from_center_size(
-            perspective_icon.center(),
-            egui::Vec2::splat(30.0),
-        );
+        // Projection toggle directly below the Home button.
+        let perspective_icon = navigator_projection_icon_rect(layout.outer);
+        let perspective_rect = chrome.projection;
         let perspective = ui
             .interact(
                 perspective_rect,
@@ -3102,11 +3299,8 @@ impl Viewport {
         ui.put(perspective_icon, image);
 
         // Display-mode list below the projection toggle.
-        let view_icon = egui::Rect::from_min_size(
-            egui::Pos2::new(perspective_icon.right() - icon_size, perspective_rect.bottom() + 10.0),
-            egui::Vec2::splat(icon_size),
-        );
-        let view_rect = egui::Rect::from_center_size(view_icon.center(), egui::Vec2::splat(30.0));
+        let view_icon = navigator_view_icon_rect(layout.outer);
+        let view_rect = chrome.display;
         let view = ui
             .interact(view_rect, egui::Id::new("viewport-view-modes"), egui::Sense::click())
             .on_hover_text("Display modes");
@@ -3131,7 +3325,15 @@ impl Viewport {
             .fit_to_exact_size(egui::Vec2::splat(icon_size));
         ui.put(view_icon, image);
         self.show_view_settings_menu(ui, &view);
-        self.chrome_blockers = vec![rect, home_rect, perspective_rect, view_rect];
+        self.chrome_blockers = chrome.rects().to_vec();
+
+        // One drag state owns the cursor: hide it only while the press has
+        // passed the drag threshold; a release or a lost drag shows it again.
+        if self.navigator_drag.moving {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+        } else if orbit.restored {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
     }
 
     fn settings_popup() -> f32 {
@@ -3389,7 +3591,11 @@ fn scene_for(
         std::sync::Arc::new(display.render_mesh(lod_index).clone()),
         Rgb(151, 162, 176),
     ));
-    for edge in &display.mesh.edges {
+    for (index, edge) in display.mesh.edges.iter().enumerate() {
+        let seam = display.mesh.seams.get(index).copied().unwrap_or(false);
+        if seam && !view.show_seam_edges {
+            continue;
+        }
         scene.lines.push(SceneLine {
             points: edge.clone(),
             color: Rgb(30, 35, 40),
@@ -3407,14 +3613,697 @@ fn scene_for(
 mod tests {
     use super::*;
 
-    #[test]
-    fn gpu_info_overlay_is_opt_in() {
+    struct AxisFrame {
+        cursor: egui::CursorIcon,
+        commands: Vec<egui::ViewportCommand>,
+    }
+
+    fn run_axis_frame_focused(
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        viewport: &mut Viewport,
+        events: Vec<egui::Event>,
+        focused: bool,
+    ) -> AxisFrame {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                events,
+                focused,
+                ..Default::default()
+            },
+            |ui| viewport.axis_gizmo(ui, rect),
+        );
+        let cursor = output.platform_output.cursor_icon;
+        let commands = output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|viewport| viewport.commands.clone())
+            .unwrap_or_default();
+        output.textures_delta.clear();
+        AxisFrame { cursor, commands }
+    }
+
+    fn run_axis_frame(
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        viewport: &mut Viewport,
+        events: Vec<egui::Event>,
+    ) -> AxisFrame {
+        run_axis_frame_focused(ctx, rect, viewport, events, true)
+    }
+
+    fn navigator_press(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn cursor_warps(frame: &AxisFrame) -> Vec<egui::Pos2> {
+        frame
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                egui::ViewportCommand::CursorPosition(at) => Some(*at),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn navigator_drag_target(viewport: &Viewport, rect: egui::Rect) -> egui::Pos2 {
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        layout.centre + egui::vec2(35.0, 35.0)
+    }
+
+    fn test_quad_mesh() -> NodeMesh {
+        NodeMesh {
+            vertices: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            ..Default::default()
+        }
+    }
+
+    fn test_gizmo() -> Gizmo {
+        Gizmo {
+            node_id: "move".into(),
+            pivot: [0.0, 0.0, 0.0],
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            rx: 0.0,
+            ry: 0.0,
+            rz: 0.0,
+            world_to_local: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            axes: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            local_axes: false,
+        }
+    }
+
+    /// A viewport with a display and a triad, so the full show path runs the
+    /// same picking and chrome geometry as the app.
+    fn framed_viewport() -> Viewport {
         let mut viewport = Viewport::default();
-        assert!(!viewport.show_gpu_info());
-        assert!(!viewport.show_view_matrix());
-        assert!(!viewport.debug_overlays_enabled());
-        viewport.set_show_gpu_info(true);
-        assert!(viewport.debug_overlays_enabled());
+        viewport.set_mesh(Some(&test_quad_mesh()));
+        viewport.set_transform_gizmo(Some(test_gizmo()));
+        viewport
+    }
+
+    fn test_rect() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0))
+    }
+
+    fn pointer_button(at: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: at,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+
+    fn run_viewport_frame(
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        viewport: &mut Viewport,
+        events: Vec<egui::Event>,
+    ) {
+        run_viewport_frame_blocked(ctx, rect, viewport, egui::Rect::NOTHING, &[], events);
+    }
+
+    fn run_viewport_frame_blocked(
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        viewport: &mut Viewport,
+        overlay: egui::Rect,
+        blockers: &[egui::Rect],
+        events: Vec<egui::Event>,
+    ) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| {
+                viewport.show_with_backdrop_blockers(ui, overlay, blockers, rect);
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    fn drag_from(
+        ctx: &egui::Context,
+        rect: egui::Rect,
+        viewport: &mut Viewport,
+        start: egui::Pos2,
+        end: egui::Pos2,
+    ) {
+        let middle = egui::PointerButton::Middle;
+        run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(start)]);
+        run_viewport_frame(ctx, rect, viewport, vec![pointer_button(start, middle, true)]);
+        run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(start.lerp(end, 0.5))]);
+        run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(end)]);
+        run_viewport_frame(ctx, rect, viewport, vec![pointer_button(end, middle, false)]);
+    }
+
+    /// The navigation gestures winit/egui deliver without a pointer button:
+    /// two-finger pan, two-finger orbit (shift-pan), pinch and mouse wheel.
+    #[derive(Clone, Copy, Debug)]
+    enum ViewGesture {
+        Pan,
+        Orbit,
+        Pinch,
+        Wheel,
+    }
+
+    impl ViewGesture {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Pan => "two-finger pan",
+                Self::Orbit => "two-finger orbit",
+                Self::Pinch => "pinch",
+                Self::Wheel => "wheel",
+            }
+        }
+
+        fn events(self) -> Vec<egui::Event> {
+            let drag = |unit, delta| egui::Event::MouseWheel {
+                unit,
+                delta,
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            };
+            match self {
+                Self::Pan => vec![drag(egui::MouseWheelUnit::Point, egui::vec2(12.0, -6.0))],
+                Self::Orbit => vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers {
+                        shift: true,
+                        ..Default::default()
+                    }),
+                    drag(egui::MouseWheelUnit::Point, egui::vec2(9.0, 4.0)),
+                ],
+                Self::Pinch => vec![egui::Event::Zoom(1.25)],
+                Self::Wheel => vec![drag(egui::MouseWheelUnit::Line, egui::vec2(0.0, -2.0))],
+            }
+        }
+    }
+
+    /// Run one navigation gesture with the pointer resting at `at`, after the
+    /// two settling frames the app gets from moving the pointer there. Returns
+    /// the camera before and after, so a test can prove the gesture was live
+    /// without assuming the fitted starting camera.
+    fn gesture_camera(rect: egui::Rect, at: egui::Pos2, gesture: ViewGesture) -> (Camera, Camera) {
+        gesture_camera_blocked(rect, at, gesture, egui::Rect::NOTHING, &[])
+    }
+
+    fn gesture_camera_blocked(
+        rect: egui::Rect,
+        at: egui::Pos2,
+        gesture: ViewGesture,
+        overlay: egui::Rect,
+        blockers: &[egui::Rect],
+    ) -> (Camera, Camera) {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let mut viewport = framed_viewport();
+        run_viewport_frame_blocked(
+            &ctx,
+            rect,
+            &mut viewport,
+            overlay,
+            blockers,
+            vec![egui::Event::PointerMoved(at)],
+        );
+        run_viewport_frame_blocked(&ctx, rect, &mut viewport, overlay, blockers, Vec::new());
+        let before = viewport.camera;
+        run_viewport_frame_blocked(
+            &ctx,
+            rect,
+            &mut viewport,
+            overlay,
+            blockers,
+            gesture.events(),
+        );
+        (before, viewport.camera)
+    }
+
+    fn gesture_controls(rect: egui::Rect, viewport: &Viewport) -> Vec<(&'static str, egui::Pos2)> {
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        vec![
+            ("gizmo centre ball", rect.center()),
+            ("compass", chrome.layout.centre),
+            ("navigator drag box", navigator_drag_target(viewport, rect)),
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+            ("display cog", chrome.display.center()),
+        ]
+    }
+
+    #[test]
+    fn every_navigator_control_blocks_viewport_picking() {
+        let viewport = Viewport::default();
+        let rect = test_rect();
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        for point in [
+            chrome.layout.centre,
+            chrome.layout.outer.min,
+            chrome.home.center(),
+            chrome.projection.center(),
+            chrome.display.center(),
+        ] {
+            assert!(
+                viewport.navigator_pointer_blocked(rect, point),
+                "the navigator's drawn control at {point:?} must own the press",
+            );
+        }
+        assert!(!viewport.navigator_pointer_blocked(rect, egui::pos2(20.0, 20.0)));
+    }
+
+    #[test]
+    fn drawing_and_hit_testing_share_one_navigator_chrome_layout() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = test_rect();
+        let mut viewport = Viewport::default();
+        run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        assert_eq!(
+            viewport.interaction_blockers(),
+            chrome.rects(),
+            "the blockers must be exactly the rects axis_gizmo draws",
+        );
+        for point in [
+            chrome.home.center(),
+            chrome.projection.center(),
+            chrome.display.center(),
+        ] {
+            assert!(
+                viewport.navigator_pointer_blocked(rect, point),
+                "the drawn control at {point:?} must also block picking",
+            );
+        }
+    }
+
+    #[test]
+    fn a_middle_drag_starting_on_viewport_chrome_never_orbits_the_camera() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = test_rect();
+        let mut viewport = framed_viewport();
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        let controls = [
+            ("gizmo centre ball", rect.center()),
+            ("navigator tip", chrome.layout.centre),
+            ("navigator box", navigator_drag_target(&viewport, rect)),
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+            ("display cog", chrome.display.center()),
+        ];
+        for (name, start) in controls {
+            let before = viewport.camera;
+            drag_from(&ctx, rect, &mut viewport, start, rect.min + egui::vec2(40.0, 40.0));
+            assert_eq!(
+                viewport.camera, before,
+                "a camera drag that starts on {name} must not orbit or pan the viewport",
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_ownership_is_taken_at_the_press_and_held_to_the_release() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = test_rect();
+        let mut viewport = framed_viewport();
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        let controls = [
+            ("gizmo centre ball", rect.center()),
+            ("navigator tip", chrome.layout.centre),
+            ("navigator box", navigator_drag_target(&viewport, rect)),
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+            ("display cog", chrome.display.center()),
+        ];
+        let primary = egui::PointerButton::Primary;
+        for (name, start) in controls {
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(start, primary, true)]);
+            assert_eq!(
+                viewport.chrome_pointer(),
+                Some((primary, start, true)),
+                "the press on {name} is owned by chrome",
+            );
+            let elsewhere = rect.min + egui::vec2(40.0, 40.0);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(elsewhere)]);
+            assert!(
+                viewport.pointer_owned_by_chrome(),
+                "{name}: ownership must survive moving the pointer into the viewport",
+            );
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(elsewhere, primary, false)]);
+            assert!(
+                viewport.pointer_owned_by_chrome(),
+                "{name}: the release frame still sees chrome ownership",
+            );
+            run_viewport_frame(&ctx, rect, &mut viewport, Vec::new());
+            assert!(!viewport.pointer_owned_by_chrome(), "{name}: the next gesture is free");
+        }
+
+        // A press in the viewport is still a viewport gesture, even if the
+        // pointer later moves over chrome.
+        let start = rect.min + egui::vec2(80.0, 80.0);
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(start, primary, true)]);
+        assert_eq!(viewport.chrome_pointer(), Some((primary, start, false)));
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(rect.center())]);
+        assert!(!viewport.pointer_owned_by_chrome());
+    }
+
+    #[cfg(not(feature = "gpu-viewport"))]
+    #[test]
+    fn primary_clicks_on_viewport_chrome_never_pick_or_clear_selection() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = test_rect();
+        let mut viewport = framed_viewport();
+        viewport.set_selection_mode(SelectionMode::Face);
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        let primary = egui::PointerButton::Primary;
+        let gizmo_point = rect.center();
+        // Clear of the triad's 110 px arrows, rings and ball, but still on the
+        // body, so this point is a normal viewport click.
+        let viewport_point = rect.center() + egui::vec2(0.0, 120.0);
+        let controls = [
+            ("gizmo centre ball", gizmo_point),
+            ("navigator tip", chrome.layout.centre),
+            ("navigator box", navigator_drag_target(&viewport, rect)),
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+            ("display cog", chrome.display.center()),
+        ];
+        let click = |ctx: &egui::Context, viewport: &mut Viewport, at: egui::Pos2| {
+            run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(at)]);
+            run_viewport_frame(ctx, rect, viewport, vec![pointer_button(at, primary, true)]);
+            run_viewport_frame(ctx, rect, viewport, vec![pointer_button(at, primary, false)]);
+        };
+        for (name, point) in controls {
+            viewport.take_face_picks();
+            viewport.take_selection_miss();
+            click(&ctx, &mut viewport, point);
+            assert!(
+                viewport.take_face_picks().is_empty(),
+                "{name}: a click on chrome must not pick a face",
+            );
+            assert!(
+                !viewport.take_selection_miss(),
+                "{name}: a click on chrome must not clear the selection or edit target",
+            );
+        }
+
+        // The click threshold is wider than each control's hit test, so a
+        // short drag can start on a control and end just outside it (or the
+        // reverse) while egui still calls it a click. The press owner must
+        // hold, and the release over a control must not pick either.
+        let short = [
+            (
+                "gizmo ball edge",
+                gizmo_point + egui::vec2(-8.0, 0.0),
+                gizmo_point + egui::vec2(-13.0, 0.0),
+            ),
+            (
+                "navigator box edge",
+                chrome.layout.outer.min + egui::vec2(1.0, 1.0),
+                chrome.layout.outer.min - egui::vec2(2.0, 2.0),
+            ),
+            (
+                "Home edge",
+                chrome.home.center() + egui::vec2(14.0, 0.0),
+                chrome.home.center() + egui::vec2(19.0, 0.0),
+            ),
+            (
+                "projection edge",
+                chrome.projection.center() + egui::vec2(14.0, 0.0),
+                chrome.projection.center() + egui::vec2(19.0, 0.0),
+            ),
+            (
+                "display edge",
+                chrome.display.center() + egui::vec2(14.0, 0.0),
+                chrome.display.center() + egui::vec2(19.0, 0.0),
+            ),
+            (
+                "Home edge from viewport",
+                chrome.home.center() - egui::vec2(19.0, 0.0),
+                chrome.home.center() - egui::vec2(14.0, 0.0),
+            ),
+            (
+                "projection edge from viewport",
+                chrome.projection.center() - egui::vec2(19.0, 0.0),
+                chrome.projection.center() - egui::vec2(14.0, 0.0),
+            ),
+            (
+                "display edge from viewport",
+                chrome.display.center() - egui::vec2(19.0, 0.0),
+                chrome.display.center() - egui::vec2(14.0, 0.0),
+            ),
+        ];
+        for (name, press, release) in short {
+            viewport.take_face_picks();
+            viewport.take_selection_miss();
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(press)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(press, primary, true)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(release)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(release, primary, false)]);
+            assert!(
+                viewport.take_face_picks().is_empty(),
+                "{name}: a short drag across the control edge must not pick a face",
+            );
+            assert!(
+                !viewport.take_selection_miss(),
+                "{name}: a short drag across the control edge must not clear the selection",
+            );
+        }
+
+        // Press on chrome, release in the viewport: the gesture still belongs
+        // to the chrome, so no pick is requested at the release point.
+        for (name, point) in [
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+        ] {
+            viewport.take_face_picks();
+            viewport.take_selection_miss();
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(point)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(point, primary, true)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(viewport_point)]);
+            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(viewport_point, primary, false)]);
+            assert!(
+                viewport.take_face_picks().is_empty(),
+                "{name}: a press on chrome must not pick when released over the model",
+            );
+            assert!(!viewport.take_selection_miss());
+        }
+
+        // Press in the viewport, release on chrome: the release is over a
+        // control, so it must not be treated as a viewport click either.
+        viewport.take_face_picks();
+        viewport.take_selection_miss();
+        let point = chrome.projection.center();
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(viewport_point)]);
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(viewport_point, primary, true)]);
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(point)]);
+        run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(point, primary, false)]);
+        assert!(viewport.take_face_picks().is_empty());
+        assert!(!viewport.take_selection_miss());
+
+        // A plain click elsewhere still picks normally.
+        viewport.take_face_picks();
+        viewport.take_selection_miss();
+        click(&ctx, &mut viewport, viewport_point);
+        assert!(
+            !viewport.take_face_picks().is_empty(),
+            "a click in the viewport must still pick the model",
+        );
+    }
+
+    #[test]
+    fn a_camera_drag_that_starts_in_the_viewport_still_orbits() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = test_rect();
+        let mut viewport = framed_viewport();
+        let before = viewport.camera;
+        let start = rect.min + egui::vec2(80.0, 80.0);
+        drag_from(&ctx, rect, &mut viewport, start, rect.center());
+        assert_ne!(
+            viewport.camera, before,
+            "a drag that starts in the viewport keeps navigating even if it ends on chrome",
+        );
+    }
+
+    #[test]
+    fn navigation_gestures_over_viewport_chrome_move_the_camera_like_empty_viewport() {
+        let rect = test_rect();
+        let viewport = Viewport::default();
+        let controls = gesture_controls(rect, &viewport);
+        let empty = rect.min + egui::vec2(20.0, 20.0);
+        for gesture in [
+            ViewGesture::Pan,
+            ViewGesture::Orbit,
+            ViewGesture::Pinch,
+            ViewGesture::Wheel,
+        ] {
+            let (empty_before, expected) = gesture_camera(rect, empty, gesture);
+            assert_ne!(
+                expected,
+                empty_before,
+                "{} over empty viewport must move the camera",
+                gesture.name(),
+            );
+            for (name, at) in &controls {
+                let (control_before, actual) = gesture_camera(rect, *at, gesture);
+                assert_eq!(
+                    control_before, empty_before,
+                    "each run must start from the same fitted camera",
+                );
+                assert_eq!(
+                    actual,
+                    expected,
+                    "a {} over {} must navigate the viewport exactly like empty space",
+                    gesture.name(),
+                    name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn navigation_gestures_over_overlay_panels_still_do_not_move_the_camera() {
+        let rect = test_rect();
+        let overlay = egui::Rect::from_min_max(egui::pos2(300.0, rect.min.y), rect.max);
+        let panel = egui::Rect::from_min_max(egui::pos2(600.0, 350.0), egui::pos2(780.0, 580.0));
+        let at = panel.center();
+        for gesture in [
+            ViewGesture::Pan,
+            ViewGesture::Orbit,
+            ViewGesture::Pinch,
+            ViewGesture::Wheel,
+        ] {
+            let (open_before, open) = gesture_camera(rect, at, gesture);
+            assert_ne!(
+                open,
+                open_before,
+                "{}: the same point off the panel must be a live viewport gesture",
+                gesture.name(),
+            );
+            let (blocked_before, blocked) =
+                gesture_camera_blocked(rect, at, gesture, overlay, &[panel]);
+            assert_eq!(
+                blocked,
+                blocked_before,
+                "a {} over an overlay panel must not move the camera",
+                gesture.name(),
+            );
+        }
+    }
+
+    #[test]
+    fn wheel_and_pinch_over_the_navigator_do_not_act_on_the_navigator() {
+        let rect = test_rect();
+        let viewport = Viewport::default();
+        let chrome = NavigatorChrome::at(rect, viewport.chrome_right_inset);
+        let controls = [
+            ("compass", chrome.layout.centre),
+            ("navigator drag box", navigator_drag_target(&viewport, rect)),
+            ("Home", chrome.home.center()),
+            ("projection toggle", chrome.projection.center()),
+            ("display cog", chrome.display.center()),
+        ];
+        for gesture in [ViewGesture::Pinch, ViewGesture::Wheel] {
+            for (name, at) in controls {
+                let ctx = egui::Context::default();
+                egui_extras::install_image_loaders(&ctx);
+                let mut viewport = framed_viewport();
+                viewport.camera.yaw = 0.4;
+                viewport.camera.pitch = 0.2;
+                let before = viewport.camera;
+                let before_view = viewport.view;
+                let before_drag = viewport.navigator_drag;
+                run_viewport_frame(
+                    &ctx,
+                    rect,
+                    &mut viewport,
+                    vec![egui::Event::PointerMoved(at)],
+                );
+                run_viewport_frame(&ctx, rect, &mut viewport, Vec::new());
+                run_viewport_frame(&ctx, rect, &mut viewport, gesture.events());
+                assert_eq!(
+                    viewport.navigator_drag,
+                    before_drag,
+                    "a {} over {} must not start or turn the navigator",
+                    gesture.name(),
+                    name,
+                );
+                assert_eq!(
+                    viewport.view,
+                    before_view,
+                    "a {} over {} must not change the display settings",
+                    gesture.name(),
+                    name,
+                );
+                assert_eq!(
+                    viewport.camera.target,
+                    before.target,
+                    "a {} over {} must not snap or orbit the view",
+                    gesture.name(),
+                    name,
+                );
+                assert_eq!(viewport.camera.yaw, before.yaw);
+                assert_eq!(viewport.camera.pitch, before.pitch);
+                assert_eq!(viewport.camera.fov, before.fov);
+                assert_ne!(
+                    viewport.camera.distance,
+                    before.distance,
+                    "the viewport still receives the {} over {}",
+                    gesture.name(),
+                    name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_viewport_no_longer_paints_debug_text_overlays() {
+        // The Debug window is the only place the camera/GPU diagnostics appear.
+        // This guards against the old painter-only overlay coming back.
+        let source = include_str!("viewport.rs");
+        // Build the names so this test does not match its own literals.
+        let layer = ["viewport", "-debug", "-overlay"].concat();
+        let draw = ["draw", "_debug", "_overlays"].concat();
+        let lines = ["gpu", "_info", "_lines"].concat();
+        assert!(!source.contains(&layer));
+        assert!(!source.contains(&draw));
+        assert!(!source.contains(&lines));
+    }
+
+    #[test]
+    fn debug_rows_read_the_live_camera_and_existing_gpu_snapshot() {
+        let viewport = Viewport::default();
+        let camera = viewport.camera_debug_rows();
+        assert!(camera.iter().any(|row| row.label == "Yaw"));
+        assert_eq!(
+            camera.iter().filter(|row| row.label == "View row").count(),
+            4
+        );
+        let gpu = viewport.gpu_debug_rows(16.7);
+        assert!(gpu.iter().any(|row| row.label == "Frame" && row.value.contains("16.7 ms")));
+        assert!(gpu.iter().any(|row| row.label == "Tessellation warnings"));
     }
 
     #[test]
@@ -3434,6 +4323,252 @@ mod tests {
         assert_eq!(viewport.camera.yaw, -yaw);
         assert_eq!(viewport.camera.pitch, pitch);
         assert!(viewport.camera.distance > 0.0);
+    }
+
+    #[test]
+    fn navigator_hit_area_blocks_viewport_picking() {
+        let viewport = Viewport::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        assert_eq!(layout.outer.width(), crate::view_navigator::AXIS_VIEW_SIZE);
+        assert!(viewport.navigator_pointer_blocked(rect, layout.centre));
+        assert!(viewport.navigator_pointer_blocked(rect, navigator_home_rect(layout.outer).center()));
+        assert!(viewport.navigator_pointer_blocked(rect, layout.outer.min));
+        assert!(viewport.navigator_pointer_blocked(rect, layout.outer.max));
+        assert!(!viewport.navigator_pointer_blocked(rect, layout.outer.min - egui::vec2(1.0, 0.0)));
+        assert!(!viewport.navigator_pointer_blocked(rect, egui::pos2(20.0, 20.0)));
+
+        let mut hidden = Viewport::default();
+        hidden.set_chrome_visible(false);
+        assert!(!hidden.navigator_pointer_blocked(rect, layout.centre));
+    }
+
+    #[test]
+    fn axis_gizmo_click_uses_the_ported_compass_and_records_its_blockers() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        viewport.last_full = Some(rect);
+        viewport.last_visible = Some(rect);
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        let axes = crate::view_navigator::view_axes(&viewport.camera);
+        let x_tip = crate::view_navigator::tips(&axes, layout.centre)
+            .into_iter()
+            .find(|tip| tip.0 == "x")
+            .expect("x tip")
+            .2;
+
+        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(x_tip)]);
+        assert_eq!(hover.cursor, egui::CursorIcon::PointingHand);
+        let press = run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(x_tip, true)]);
+        let release = run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(x_tip, false)]);
+        assert_ne!(press.cursor, egui::CursorIcon::None);
+        assert_ne!(release.cursor, egui::CursorIcon::None);
+        assert!(
+            cursor_warps(&release).is_empty(),
+            "a plain tip click never warps the pointer"
+        );
+        assert!(!viewport.navigator_drag.moving);
+        assert!(
+            viewport.camera.back().dist(solidcore_record::Vec3::X) < 1e-5,
+            "the X tip looks from +X: {:?}",
+            viewport.camera.back()
+        );
+        let blockers = viewport.interaction_blockers();
+        assert!(blockers.contains(&layout.outer), "the whole navigator box blocks picking");
+        let home_rect = navigator_home_rect(layout.outer);
+        assert!(blockers.contains(&home_rect), "the Home button blocks picking");
+
+        // Home returns to the isometric framing through our camera path.
+        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(home_rect.center())]);
+        assert_eq!(hover.cursor, egui::CursorIcon::PointingHand);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home_rect.center(), true)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home_rect.center(), false)]);
+        assert_eq!(viewport.camera.yaw, Camera::default().yaw);
+        assert_eq!(viewport.camera.pitch, Camera::default().pitch);
+        assert!(!viewport.navigator_drag.moving);
+    }
+
+    fn expected_home_rect(outer: egui::Rect) -> egui::Rect {
+        let icon = egui::Rect::from_min_size(
+            egui::pos2(outer.right() - 18.0, outer.bottom() + 10.0),
+            egui::vec2(18.0, 18.0),
+        );
+        egui::Rect::from_center_size(icon.center(), egui::vec2(30.0, 30.0))
+    }
+
+    fn expected_perspective_rect(home: egui::Rect, outer: egui::Rect) -> egui::Rect {
+        let icon = egui::Rect::from_min_size(
+            egui::pos2(outer.right() - 18.0, home.bottom() + 10.0),
+            egui::vec2(18.0, 18.0),
+        );
+        egui::Rect::from_center_size(icon.center(), egui::vec2(30.0, 30.0))
+    }
+
+    #[test]
+    fn home_button_sits_under_the_navigator_and_above_the_projection_toggle() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
+        let blockers = viewport.interaction_blockers();
+        assert_eq!(blockers.len(), 4, "compass, Home, projection and display: {blockers:?}");
+        let home = blockers[1];
+        let perspective = blockers[2];
+        assert_eq!(home, expected_home_rect(layout.outer));
+        assert_eq!(perspective, expected_perspective_rect(home, layout.outer));
+        let icon = egui::Rect::from_center_size(home.center(), egui::vec2(18.0, 18.0));
+        assert_eq!(icon.right(), layout.outer.right(), "the icon shares the compass box's right edge");
+        assert_eq!(icon.top(), layout.outer.bottom() + 10.0, "10 points below the compass box");
+        let perspective_icon = egui::Rect::from_center_size(perspective.center(), egui::vec2(18.0, 18.0));
+        assert_eq!(
+            perspective_icon.top(),
+            home.bottom() + 10.0,
+            "the projection icon follows Home's 30-point rect by 10 points"
+        );
+    }
+
+    #[test]
+    fn clicking_the_home_button_frames_the_isometric_view() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        viewport.last_full = Some(rect);
+        viewport.last_visible = Some(rect);
+        viewport.camera.yaw = 0.7;
+        viewport.camera.pitch = 0.2;
+        viewport.camera.distance = 900.0;
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        let home = expected_home_rect(layout.outer);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(home.center())]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home.center(), true)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home.center(), false)]);
+        assert_eq!(viewport.camera.yaw, Camera::default().yaw);
+        assert_eq!(viewport.camera.pitch, Camera::default().pitch);
+        assert_eq!(viewport.camera.distance, Camera::default().distance);
+    }
+
+    #[test]
+    fn the_home_button_blocks_viewport_picking() {
+        let viewport = Viewport::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        let home = expected_home_rect(layout.outer);
+        assert!(viewport.navigator_pointer_blocked(rect, home.center()));
+    }
+
+    #[test]
+    fn the_compass_no_longer_owns_a_home_click() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        viewport.last_full = Some(rect);
+        viewport.last_visible = Some(rect);
+        viewport.camera.yaw = 0.7;
+        viewport.camera.pitch = 0.2;
+        viewport.camera.distance = 900.0;
+        let before = viewport.camera;
+        let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
+        let old_chip = layout.centre + egui::vec2(-37.0, -37.0);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(old_chip)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(old_chip, true)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(old_chip, false)]);
+        assert_eq!(viewport.camera, before, "the compass has no Home hit area");
+    }
+
+    #[test]
+    fn navigator_hover_shows_the_grab_cursor_over_its_box() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        let at = navigator_drag_target(&viewport, rect);
+        let frame = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(at)]);
+        assert_eq!(frame.cursor, egui::CursorIcon::Grab);
+    }
+
+    #[test]
+    fn navigator_drag_hides_the_pointer_and_release_warp_restores_it() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        let start = navigator_drag_target(&viewport, rect);
+        let moved = start + egui::vec2(45.0, 8.0);
+        let press = |at, pressed| navigator_press(at, pressed);
+
+        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        assert_eq!(hover.cursor, egui::CursorIcon::Grab);
+        let pressed = run_axis_frame(&ctx, rect, &mut viewport, vec![press(start, true)]);
+        assert_ne!(pressed.cursor, egui::CursorIcon::None, "a press alone shows the pointer");
+        assert!(!viewport.navigator_drag.moving, "the threshold has not been passed");
+
+        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        assert_eq!(dragging.cursor, egui::CursorIcon::None, "the orbit drag hides the pointer");
+        assert!(viewport.navigator_drag.moving);
+        assert_eq!(viewport.navigator_drag.start, Some(start));
+
+        let held = run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
+        assert_eq!(held.cursor, egui::CursorIcon::None, "hidden on every frame of the drag");
+
+        let released = run_axis_frame(&ctx, rect, &mut viewport, vec![press(moved, false)]);
+        assert_ne!(released.cursor, egui::CursorIcon::None, "release shows the pointer again");
+        assert!(!viewport.navigator_drag.moving);
+        assert!(viewport.navigator_drag.at.is_none());
+        assert_eq!(
+            cursor_warps(&released),
+            vec![start],
+            "release warps to where the drag began"
+        );
+
+        let after = run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
+        assert_ne!(after.cursor, egui::CursorIcon::None);
+        assert!(cursor_warps(&after).is_empty());
+    }
+
+    #[test]
+    fn a_lost_or_unfocused_drag_shows_the_pointer_again() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
+        let mut viewport = Viewport::default();
+        let start = navigator_drag_target(&viewport, rect);
+        let moved = start + egui::vec2(45.0, 8.0);
+
+        // The pointer is lost mid-drag.
+        run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
+        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        assert_eq!(dragging.cursor, egui::CursorIcon::None);
+        let gone = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerGone]);
+        assert_ne!(gone.cursor, egui::CursorIcon::None, "a lost drag shows the pointer");
+        assert!(!viewport.navigator_drag.moving);
+        assert!(viewport.navigator_drag.at.is_none());
+        assert!(viewport.navigator_drag.start.is_none());
+
+        // The window loses focus mid-drag.
+        run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
+        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        assert_eq!(dragging.cursor, egui::CursorIcon::None);
+        let unfocused = run_axis_frame_focused(&ctx, rect, &mut viewport, Vec::new(), false);
+        assert_ne!(unfocused.cursor, egui::CursorIcon::None, "focus loss shows the pointer");
+        assert!(!viewport.navigator_drag.moving);
+        assert!(viewport.navigator_drag.at.is_none());
+
+        // A drag state reset is the same one-state path: hiding follows it.
+        run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
+        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        assert_eq!(dragging.cursor, egui::CursorIcon::None);
+        viewport.navigator_drag = crate::view_navigator::Drag::default();
+        let reset = run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
+        assert_ne!(reset.cursor, egui::CursorIcon::None, "a reset drag shows the pointer");
     }
 
     #[test]
@@ -3509,6 +4644,7 @@ mod tests {
             face_ids: Vec::new(),
             exact_normals: false,
             face_colors: Vec::new(),
+            body_ids: Vec::new(),
             edges: Vec::new(),
             comparison: None,
             selection_edges: None,
@@ -3657,15 +4793,19 @@ mod tests {
             target: "old-project".into(),
             plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         }];
         viewport.set_feature_ghost_plans(vec![nodecraft_display::PlanInstance {
             target: "old-ghost".into(),
             plan: std::sync::Arc::new(nodecraft_layers::tess::TessPlan::default()),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         }]);
         viewport.clear_document_display();
         assert!(viewport.plans.is_empty(), "closed project kept its plans");
@@ -3708,6 +4848,7 @@ mod tests {
             face_ids: vec!["display-only".into()],
             exact_normals: false,
             face_colors: Vec::new(),
+            body_ids: Vec::new(),
             edges: Vec::new(),
             comparison: None,
             selection_edges: None,
@@ -3720,8 +4861,10 @@ mod tests {
             target: "input".into(),
             plan: std::sync::Arc::new(plan),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         }];
         assert_eq!(viewport.plan_face_ids().expect("ids"), vec!["face:7"]);
     }
@@ -3742,8 +4885,10 @@ mod tests {
             target: "input".into(),
             plan: std::sync::Arc::new(plan),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(vec![Some("edge:0".to_owned())]),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let mut viewport = Viewport::default();
         viewport.set_edit_ghost_plans(vec![plan(first), plan(second)]);
@@ -3760,6 +4905,7 @@ mod tests {
             face_ids: Vec::new(),
             exact_normals: false,
             face_colors: Vec::new(),
+            body_ids: Vec::new(),
             edges: vec![crate::adapter::DisplayEdge {
                 id: "edge:downstream".into(),
                 points: vec![
@@ -3767,8 +4913,8 @@ mod tests {
                     solidcore_record::Vec3::X,
                 ],
                 midpoint: [0.5, 0.0, 0.0],
-                normals: Vec::new(),
-            }],
+                class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                }],
             comparison: None,
             selection_edges: None,
             radius: 1.0,
@@ -3789,7 +4935,7 @@ mod tests {
                 solidcore_record::Vec3::Y,
             ],
             midpoint: [0.0, 0.5, 0.0],
-            normals: Vec::new(),
+            class: nodecraft_layers::PlanEdgeClass::NORMAL,
         }];
         let ids = viewport.edge_ids();
         assert_eq!(ids.len(), 1);
@@ -3805,6 +4951,7 @@ mod tests {
             face_ids: Vec::new(),
             exact_normals: false,
             face_colors: Vec::new(),
+            body_ids: Vec::new(),
             edges: Vec::new(),
             comparison: None,
             selection_edges: None,
@@ -3878,6 +5025,36 @@ mod tests {
         let visible = egui::Rect::from_min_max(egui::pos2(200.0, 0.0), egui::pos2(1000.0, 700.0));
         viewport.apply_pending_view_restore(full, visible);
         assert_eq!(viewport.lens_shift, lens_shift_for_visible(full, visible));
+    }
+
+
+    #[test]
+    fn edge_width_defaults_to_the_old_standard_width() {
+        assert_eq!(ViewSettings::default().edge_width_px, 1.0);
+        assert_eq!(default_edge_width_px(), 1.0);
+    }
+
+    #[test]
+    fn old_settings_without_edge_width_get_the_default() {
+        let view: ViewSettings =
+            serde_json::from_value(serde_json::json!({})).expect("old settings");
+        assert_eq!(view.edge_width_px, default_edge_width_px());
+        assert!(
+            !view.any_extra(),
+            "the default edge width must not switch on an extra display path",
+        );
+    }
+
+    #[test]
+    fn old_settings_without_show_seam_edges_default_off() {
+        let view: ViewSettings =
+            serde_json::from_value(serde_json::json!({})).expect("old settings");
+        assert!(!view.show_seam_edges);
+        assert!(!view.any_extra(), "the default must not look like a custom view");
+        let explicit: ViewSettings =
+            serde_json::from_str(r#"{"show_seam_edges":true}"#).expect("seam setting parses");
+        assert!(explicit.show_seam_edges);
+        assert!(explicit.any_extra(), "showing seams is an active display override");
     }
 
 }

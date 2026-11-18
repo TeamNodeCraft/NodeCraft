@@ -1,9 +1,11 @@
 //! Screen-space level of detail for the GPU display path.
 //!
 //! A display plan's chord tolerance is chosen so the body's projected error
-//! stays inside a fixed number of physical pixels. The same body therefore gets
-//! a finer plan when the camera moves closer and a coarser one on a denser
-//! screen, without any per-node tuning.
+//! stays inside a fixed number of logical (on-screen) pixels. The budget is
+//! converted to physical pixels once, against the viewport's
+//! `pixels_per_point`, so the same on-screen size selects the same rung at any
+//! display scale. The same body therefore gets a finer plan when the camera
+//! moves closer, without any per-node tuning.
 
 use nodecraft_solidcore::solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
 use nodecraft_solidcore::solidcore::topology::Brep;
@@ -36,37 +38,133 @@ impl BodyBounds {
     }
 }
 
-/// World-space bounding sphere of a B-rep before placement (uses the approximate
-/// solidcore query box, not the tight box).
+/// World-space bounding sphere of a B-rep before placement.
+///
+/// The bound is measured from the B-rep's own geometry, not from a display
+/// plan: every vertex, a fixed sample of every edge curve, and a fixed grid on
+/// every face surface. Sampling the exact surfaces catches the body's real
+/// extent (an r20 sphere gets centre `(0, 0, 0)` and radius 20) without
+/// tessellating it, and the fixed sample counts keep the cost independent of
+/// the display tolerance. The result is inflated by 0.1% of the measured
+/// diagonal so the chord between any display plan's vertices is inside too.
+///
+/// This replaces the old approximate solidcore query box, which sampled a seam
+/// edge (an r20 sphere got centre `(10, 0, 0)` and radius 22.36) and avoids the
+/// extra coarse display plan the previous version built just for bounds.
 #[must_use]
 pub fn body_bounds(brep: &Brep) -> Option<BodyBounds> {
+    /// Curve samples per edge, including both ends.
+    const EDGE_SAMPLES: usize = 8;
+    /// Surface samples per face direction, including both domain ends.
+    const FACE_SAMPLES: usize = 4;
+
     let kernel = nodecraft_solidcore::kernel::kernel();
-    // Display only needs a conservative extent. The tight box evaluates every
-    // edge and face; the approximate query box is cheap and never smaller than
-    // the body.
-    let extent = calculate_bounding_box(
-        &kernel,
-        brep,
-        BoundingBoxOptions {
-            approx: true,
-            tight: false,
-            expand_by_zone_tol_3d: true,
-        },
-    )
-    .ok()?;
-    let mut center = [0.0; 3];
-    let mut diagonal_sq = 0.0;
-    for (axis, slot) in center.iter_mut().enumerate() {
-        let min = extent.min_at(axis);
-        let max = extent.max_at(axis);
-        if !min.is_finite() || !max.is_finite() {
-            return None;
-        }
-        *slot = (min + max) * 0.5;
-        let span = max - min;
-        diagonal_sq += span * span;
+    let mut points = Vec::with_capacity(
+        brep.vertex_list().len()
+            + brep.edge_list().len() * (EDGE_SAMPLES + 1)
+            + brep.face_list().len() * (FACE_SAMPLES + 1) * (FACE_SAMPLES + 1),
+    );
+    for &vertex in brep.vertex_list() {
+        let point = brep.vertex(vertex).ok()?.point;
+        points.push([point.x, point.y, point.z]);
     }
-    let radius = 0.5 * diagonal_sq.sqrt();
+    for &edge in brep.edge_list() {
+        let edge = brep.edge(edge).ok()?;
+        let Some(curve) = edge.curve.as_ref() else { continue };
+        let (start, end) = (edge.interval.min(), edge.interval.max());
+        if !start.is_finite() || !end.is_finite() {
+            continue;
+        }
+        for step in 0..=EDGE_SAMPLES {
+            let t = start + (end - start) * (step as f64 / EDGE_SAMPLES as f64);
+            if let Ok(point) = curve.evaluate_point(&kernel, t) {
+                points.push([point.x, point.y, point.z]);
+            }
+        }
+    }
+    for &face in brep.face_list() {
+        let face = brep.face(face).ok()?;
+        let Some(surface) = face.surface.as_ref() else { continue };
+        let domain = face.uv_domain;
+        let (u0, u1, v0, v1) =
+            (domain.u_min(), domain.u_max(), domain.v_min(), domain.v_max());
+        if ![u0, u1, v0, v1].iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        for i in 0..=FACE_SAMPLES {
+            let u = u0 + (u1 - u0) * (i as f64 / FACE_SAMPLES as f64);
+            for j in 0..=FACE_SAMPLES {
+                let v = v0 + (v1 - v0) * (j as f64 / FACE_SAMPLES as f64);
+                let uv = nodecraft_solidcore::solidcore::math::Point2::new(u, v);
+                if let Ok(point) = surface.evaluate_point(&kernel, uv) {
+                    points.push([point.x, point.y, point.z]);
+                }
+            }
+        }
+    }
+    if points.is_empty() {
+        // No finite geometry to sample (an empty or wholly unbounded B-rep):
+        // keep the old conservative box rather than inventing a bound.
+        let extent = calculate_bounding_box(
+            &kernel,
+            brep,
+            BoundingBoxOptions {
+                approx: true,
+                tight: false,
+                expand_by_zone_tol_3d: true,
+            },
+        )
+        .ok()?;
+        let mut center = [0.0; 3];
+        let mut diagonal_sq = 0.0;
+        for axis in 0..3 {
+            let (min, max) = (extent.min_at(axis), extent.max_at(axis));
+            if !min.is_finite() || !max.is_finite() {
+                return None;
+            }
+            center[axis] = (min + max) * 0.5;
+            diagonal_sq += (max - min).powi(2);
+        }
+        let radius = 0.5 * diagonal_sq.sqrt();
+        return radius.is_finite().then_some(BodyBounds { center, radius });
+    }
+    let bounds = bounds_of_points(&points, 0.0)?;
+    let diagonal = 2.0 * bounds.radius;
+    let inflation = (diagonal * 1.0e-3).max(1.0e-9);
+    bounds_of_points(&points, inflation)
+}
+
+/// Bounding sphere of sampled B-rep points, inflated by the sampling slack so
+/// surface between the samples stays inside. The point set is the body's own
+/// geometry, not an approximate topological box or a display plan.
+fn bounds_of_points(points: &[[f64; 3]], inflation: f64) -> Option<BodyBounds> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for point in points {
+        for (axis, value) in point.iter().copied().enumerate() {
+            if !value.is_finite() {
+                return None;
+            }
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+    if points.is_empty() {
+        return None;
+    }
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let mut radius_sq: f64 = 0.0;
+    for point in points {
+        let dx = point[0] - center[0];
+        let dy = point[1] - center[1];
+        let dz = point[2] - center[2];
+        radius_sq = radius_sq.max(dx * dx + dy * dy + dz * dz);
+    }
+    let radius = radius_sq.sqrt() + inflation.max(0.0);
     if !radius.is_finite() || center.iter().any(|value| !value.is_finite()) {
         return None;
     }
@@ -98,19 +196,27 @@ pub struct LodView {
     pub ortho_height: f64,
     pub viewport: [f64; 2],
     pub pixels_per_point: f64,
-    /// Requested screen-space error budget in physical pixels. Included so a
-    /// settings change re-runs the level computation without moving the camera.
+    /// Requested screen-space error budget in logical (on-screen) pixels.
+    /// Included so a settings change re-runs the level computation without
+    /// moving the camera.
     pub error_px: f64,
 }
 
 /// One screen-space tolerance choice.
+///
+/// Every pixel value here is logical (on-screen) pixels. [`quality_for`]
+/// converts them to physical pixels once, using the viewport's
+/// `pixels_per_point`; no caller converts them itself.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LodParams {
     pub error_px: f64,
     pub min_tolerance: f64,
     pub max_tolerance: f64,
+    /// Diameter below which a body always takes the coarsest allowed rung.
     pub tiny_body_px: f64,
+    /// Refine when the current rung's projected error is above this.
     pub refine_error_px: f64,
+    /// Coarsen when the current rung's projected error is below this.
     pub coarsen_error_px: f64,
     /// Previous level for hysteresis; `None` means first choice.
     pub current_tolerance: Option<f64>,
@@ -305,14 +411,20 @@ fn first_choice(pixel: f64, error_px: f64, allowed: (usize, usize)) -> usize {
     clamp_index(index, allowed)
 }
 
-fn hysteresis(current: f64, pixel: f64, params: &LodParams, allowed: (usize, usize)) -> usize {
+/// One hysteresis step. `refine_px` and `coarsen_px` are physical pixels,
+/// converted once by [`quality_for`].
+fn hysteresis(
+    current: f64,
+    pixel: f64,
+    refine_px: f64,
+    coarsen_px: f64,
+    allowed: (usize, usize),
+) -> usize {
     let index = ladder_index(current);
     let projected = current / pixel;
-    let refine = sanitize_tolerance(params.refine_error_px, 1.0);
-    let coarsen = sanitize_tolerance(params.coarsen_error_px, 0.35);
-    let moved = if projected > refine {
+    let moved = if projected > refine_px {
         index.saturating_sub(1)
-    } else if projected < coarsen {
+    } else if projected < coarsen_px {
         (index + 1).min(LOD_LADDER.len() - 1)
     } else {
         index
@@ -320,12 +432,41 @@ fn hysteresis(current: f64, pixel: f64, params: &LodParams, allowed: (usize, usi
     clamp_index(moved, allowed)
 }
 
+/// Step hysteresis until it reaches its fixed point (`LOD_LADDER[index]` is
+/// unchanged by one more step). The refine/coarsen band is wider than one
+/// ladder doubling, so a step never overshoots into a reversal and this
+/// converges in a few iterations. The ladder-length bound only stops a
+/// pathological parameter set from looping forever.
+fn settled_hysteresis(
+    current: f64,
+    pixel: f64,
+    refine_px: f64,
+    coarsen_px: f64,
+    allowed: (usize, usize),
+) -> usize {
+    let mut index = ladder_index(current);
+    for _ in 0..LOD_LADDER.len() {
+        let next = hysteresis(LOD_LADDER[index], pixel, refine_px, coarsen_px, allowed);
+        if next == index {
+            return index;
+        }
+        index = next;
+    }
+    index
+}
+
 /// Choose the tolerance for one body from its projected size.
 ///
 /// The first choice is the finest plan that keeps the projected error within
-/// `params.error_px`. Once a level exists, hysteresis moves at most one rung per
-/// call so a slow zoom crosses each boundary once. Bodies smaller than
-/// `params.tiny_body_px` always take the coarsest allowed rung.
+/// `params.error_px` logical pixels. Once a level exists, hysteresis settles to
+/// the rung it would converge on after repeated one-rung steps: a fast zoom
+/// that stops must reach the same level as a slow zoom, not stay one rung too
+/// fine. Bodies smaller than `params.tiny_body_px` logical pixels always take
+/// the coarsest allowed rung.
+///
+/// This is the one unit-conversion site: the logical budgets are multiplied by
+/// `pixels_per_point` here, then every comparison below is in physical pixels
+/// (the unit [`world_per_pixel`] and [`projected_diameter_px`] return).
 #[must_use]
 pub fn quality_for(
     bounds: BodyBounds,
@@ -334,6 +475,7 @@ pub fn quality_for(
     pixels_per_point: f64,
     params: LodParams,
 ) -> DisplayQuality {
+    let pixels_per_point = pixels_per_point.max(1.0e-9);
     let pixel = world_per_pixel(bounds, camera, viewport, pixels_per_point);
     let allowed = allowed_range(&params);
     let tiny_px = projected_diameter_px(bounds, camera, viewport, pixels_per_point);
@@ -342,13 +484,19 @@ pub fn quality_for(
     } else {
         0.0
     };
-    if tiny_px < tiny_limit {
+    // The one conversion from logical to physical pixels. Every threshold
+    // below, including the tiny-body test and both hysteresis edges, uses the
+    // converted value.
+    let error_px =
+        sanitize_tolerance(params.error_px, LodParams::DEFAULT_ERROR_PX) * pixels_per_point;
+    let refine_px = sanitize_tolerance(params.refine_error_px, 1.0) * pixels_per_point;
+    let coarsen_px = sanitize_tolerance(params.coarsen_error_px, 0.35) * pixels_per_point;
+    if tiny_px < tiny_limit * pixels_per_point {
         return DisplayQuality::Full(LOD_LADDER[allowed.1]);
     }
-    let error_px = sanitize_tolerance(params.error_px, LodParams::DEFAULT_ERROR_PX);
     let index = match params.current_tolerance {
         Some(current) if current.is_finite() && current > 0.0 => {
-            hysteresis(current, pixel, &params, allowed)
+            settled_hysteresis(current, pixel, refine_px, coarsen_px, allowed)
         }
         _ => first_choice(pixel, error_px, allowed),
     };
@@ -463,24 +611,160 @@ mod tests {
     }
 
     #[test]
-    fn retina_is_one_step_finer() {
+    fn fast_zoom_out_lands_on_the_slow_zoom_fixed_point() {
         let radius = 10.0;
         let body = bounds(radius);
         let view = viewport_height(1000.0);
         let params = LodParams::default();
-        let camera = perspective_at(distance_for_ideal(0.13, radius));
+        let start_ideal = LOD_LADDER[0];
+        let end_ideal = LOD_LADDER[4];
+        let start_depth = distance_for_ideal(start_ideal, radius) - radius;
+        let end_depth = distance_for_ideal(end_ideal, radius) - radius;
 
-        let at_one = tolerance(quality_for(body, camera, view, 1.0, params));
-        let at_two = tolerance(quality_for(body, camera, view, 2.0, params));
+        // Slow zoom: many small view changes, one decision each.
+        let mut current = None;
+        for step in 0..80 {
+            let t = f64::from(step) / 79.0;
+            let depth = start_depth * (end_depth / start_depth).powf(t);
+            let quality = quality_for(
+                body,
+                perspective_at(depth + radius),
+                view,
+                1.0,
+                LodParams {
+                    current_tolerance: current,
+                    ..params
+                },
+            );
+            current = Some(tolerance(quality));
+        }
+        let slow = current.expect("slow zoom reached a level");
 
-        assert!(
-            at_two < at_one,
-            "retina tolerance {at_two} is not finer than {at_one}"
+        // Fast zoom: one 16x view change from the close-up. Hysteresis must
+        // settle to the same fixed point in this single decision.
+        let fast = tolerance(quality_for(
+            body,
+            perspective_at(end_depth + radius),
+            view,
+            1.0,
+            LodParams {
+                current_tolerance: Some(LOD_LADDER[0]),
+                ..params
+            },
+        ));
+        assert_eq!(fast, slow, "one fast zoom-out must match the slow sequence");
+        // The fixed point is the hysteresis band's choice, not first_choice:
+        // 0.05 projects to 0.375 px here, still above the 0.35 coarsen edge.
+        assert_eq!(fast, LOD_LADDER[3]);
+    }
+
+    #[test]
+    fn hysteresis_does_not_flap_around_a_boundary() {
+        let body = bounds(10.0);
+        let view = viewport_height(1000.0);
+        let params = LodParams::default();
+        let camera_at_pixel = |pixel: f64| LodCamera {
+            eye: [0.0, 0.0, 10.0],
+            fov_y: 0.0,
+            ortho_height: pixel * 1000.0,
+        };
+
+        // 0.05 stays inside its deadband from the refine edge (pixel 0.05)
+        // through the coarsen edge (pixel 0.05 / 0.35).
+        let mut current = LOD_LADDER[3];
+        for pixel in [0.050001, 0.0500005, 0.06, 0.1, 0.14] {
+            let quality = quality_for(
+                body,
+                camera_at_pixel(pixel),
+                view,
+                1.0,
+                LodParams {
+                    current_tolerance: Some(current),
+                    ..params
+                },
+            );
+            assert_eq!(
+                tolerance(quality),
+                LOD_LADDER[3],
+                "pixel {pixel} is inside the 0.05 deadband"
+            );
+            current = tolerance(quality);
+        }
+
+        // Just across the refine edge it settles one rung finer, and a small
+        // oscillation back across the edge must not flip it again.
+        let refined = tolerance(quality_for(
+            body,
+            camera_at_pixel(0.049),
+            view,
+            1.0,
+            LodParams {
+                current_tolerance: Some(LOD_LADDER[3]),
+                ..params
+            },
+        ));
+        assert_eq!(refined, LOD_LADDER[2]);
+        for pixel in [0.049, 0.051, 0.049, 0.051] {
+            let quality = quality_for(
+                body,
+                camera_at_pixel(pixel),
+                view,
+                1.0,
+                LodParams {
+                    current_tolerance: Some(refined),
+                    ..params
+                },
+            );
+            assert_eq!(
+                tolerance(quality),
+                refined,
+                "pixel {pixel} must not flap back to 0.05"
+            );
+        }
+    }
+
+    #[test]
+    fn same_logical_on_screen_size_picks_the_same_rung_at_any_scale() {
+        // A 1000-point-tall viewport at ppp 1 and ppp 2 shows the same logical
+        // body size; only the physical pixel count changes. The budget is in
+        // logical pixels, so the chosen world tolerance must not change.
+        let body = bounds(10.0);
+        let view = viewport_height(1000.0);
+        let camera = LodCamera {
+            eye: [0.0, 0.0, 100.0],
+            fov_y: 0.0,
+            ortho_height: 100.0,
+        };
+        let at_one = tolerance(quality_for(body, camera, view, 1.0, LodParams::default()));
+        let at_two = tolerance(quality_for(body, camera, view, 2.0, LodParams::default()));
+        assert_eq!(
+            at_two, at_one,
+            "the same logical on-screen size must pick the same rung at ppp 1 and ppp 2"
         );
-        let one = ladder_index(at_one);
-        let two = ladder_index(at_two);
-        assert!(two <= one);
-        assert!(one - two <= 1, "retina moved from rung {one} to {two}");
+    }
+
+    #[test]
+    fn recorded_mid_zoom_sphere_picks_the_005_rung() {
+        // The report's mid-zoom frame: a radius-20 sphere across 440 logical
+        // px in a 1100x559 logical viewport at ppp 2, ortho height 50.82. The
+        // 0.75-logical-pixel budget is 1.5 physical px, so the ideal world
+        // tolerance is 0.0682 and the largest rung inside it is 0.05 (3,968
+        // triangles in the report), not 0.025 (10,784).
+        let body = BodyBounds {
+            center: [0.0; 3],
+            radius: 20.0,
+        };
+        let camera = LodCamera {
+            eye: [0.0, 0.0, 100.0],
+            fov_y: 0.0,
+            ortho_height: 50.82,
+        };
+        let view = ViewportSize {
+            width: 1100.0,
+            height: 559.0,
+        };
+        let chosen = tolerance(quality_for(body, camera, view, 2.0, LodParams::default()));
+        assert_eq!(chosen, 0.05, "0.75 logical px at ppp 2 must choose the 0.05 rung");
     }
 
     #[test]
@@ -650,6 +934,113 @@ mod tests {
             assert!(
                 (actual[axis] - expected[axis]).abs() < 1.0e-12,
                 "axis {axis}: {actual:?} != {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn body_bounds_do_not_plan_or_tessellate() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_sphere;
+
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
+            .expect("r20 sphere");
+        nodecraft_layers::plan_stats::reset();
+        let bounds = body_bounds(&brep).expect("body bounds");
+        assert!(bounds.radius > 0.0);
+        assert_eq!(
+            nodecraft_layers::plan_stats::calls(),
+            0,
+            "LOD bounds must come from the B-rep, not from a display plan",
+        );
+    }
+
+    #[test]
+    fn body_bounds_contain_a_display_plan_for_sphere_box_and_moon_buggy() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
+
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let sphere = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
+            .expect("r20 sphere");
+        let box_ = api::create_box(
+            &mut kernel,
+            Point3::new(-10.0, -10.0, -10.0),
+            20.0,
+            20.0,
+            20.0,
+        )
+        .expect("box");
+        let path = format!(
+            "{}/../../../tests/Sample AP203 Data Files/moon_buggy.stp",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let bytes = std::fs::read(&path).expect("read moon_buggy.stp");
+        let import = nodecraft_step::read_cad(&bytes, &path).expect("moon_buggy.stp imports");
+        let (moon_buggy, _) = solidcore_convert::brep::to_kernel(
+            &mut kernel,
+            &import.bodies[0].brep,
+            true,
+        )
+        .expect("moon_buggy kernel body");
+
+        for (name, brep) in [("sphere", sphere), ("box", box_), ("moon_buggy", moon_buggy)] {
+            let bounds = body_bounds(&brep).expect("body bounds");
+            let planned = nodecraft_layers::plan_kernel(
+                &mut kernel,
+                &brep,
+                // A normal display plan: 0.1% of the body diameter, capped at
+                // 0.5 mm so the imported moon_buggy plan stays a test, not a
+                // stress run.
+                (bounds.radius * 2.0 * 1.0e-3).min(0.5).max(1.0e-6),
+                None,
+            )
+            .expect("display plan");
+            let (mesh, _) = planned.plan.evaluate();
+            assert!(!mesh.positions.is_empty(), "{name} plan has no vertices");
+            for point in &mesh.positions {
+                let distance = distance3(
+                    [f64::from(point.x), f64::from(point.y), f64::from(point.z)],
+                    bounds.center,
+                );
+                assert!(
+                    distance <= bounds.radius + 1.0e-6,
+                    "{name} plan vertex {distance} is outside radius {}",
+                    bounds.radius,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_body_bounds_come_from_the_real_geometry() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_sphere;
+
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
+            .expect("r20 sphere");
+        let bounds = body_bounds(&brep).expect("body bounds");
+
+        let centre_error = distance3(bounds.center, [0.0; 3]);
+        assert!(centre_error < 1.0e-6, "centre {:?} is not the sphere centre", bounds.center);
+        assert!(
+            (bounds.radius - 20.0).abs() < 0.1,
+            "radius {} is not the r20 sphere's real extent",
+            bounds.radius
+        );
+
+        // Every vertex of a normal display plan is inside the LOD bound.
+        let planned = nodecraft_layers::plan_kernel(&mut kernel, &brep, 0.1, None)
+            .expect("display plan");
+        let (mesh, _) = planned.plan.evaluate();
+        for point in &mesh.positions {
+            let distance = distance3([point.x, point.y, point.z], bounds.center);
+            assert!(
+                distance <= bounds.radius + 1.0e-6,
+                "plan vertex {distance} is outside radius {}",
+                bounds.radius
             );
         }
     }

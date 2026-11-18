@@ -33,6 +33,9 @@ pub struct DisplayMesh {
     pub exact_normals: bool,
     /// Optional per-triangle sRGB colour, parallel to `mesh.triangles`.
     pub face_colors: Vec<[f32; 3]>,
+    /// Stable identity per body index (the `body:N` prefix in `face_ids`),
+    /// supplied by the plan set. Empty falls back to a synthetic per-index id.
+    pub body_ids: Vec<u64>,
     /// Pickable B-rep edges in world coordinates, with body-scoped ids.
     pub edges: Vec<DisplayEdge>,
     /// Feature-comparison layers, if this display is a before/after view.
@@ -70,8 +73,8 @@ pub struct DisplayEdge {
     /// Midpoint of the selected edge in display coordinates, used as a robust
     /// geometric fallback when resolving the exact B-rep edge.
     pub midpoint: [f64; 3],
-    /// Adjacent triangle normals for depth-lifting each polyline point.
-    pub normals: Vec<[f32; 3]>,
+    /// The one tessellator class, carried to the CPU/world edge path.
+    pub class: nodecraft_layers::PlanEdgeClass,
 }
 
 #[must_use]
@@ -202,69 +205,6 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         if let Some(slot) = face_ids.get_mut(index as usize) { *slot = name; }
     }
 
-    // Average the normals of triangles incident on each quantized edge segment.
-    // `lifted_line` uses these to pull the line toward the eye by half its width,
-    // which avoids z-fighting while keeping hidden edges depth-tested.
-    let quantized = |point: [f32; 3]| {
-        [
-            (point[0] * 1.0e5).round() as i64,
-            (point[1] * 1.0e5).round() as i64,
-            (point[2] * 1.0e5).round() as i64,
-        ]
-    };
-    let mut edge_normals: std::collections::HashMap<[i64; 6], ([f32; 3], usize)> =
-        std::collections::HashMap::new();
-    for [a, b, c] in &raw.faces {
-        let (Some(pa), Some(pb), Some(pc)) = (
-            raw.vertices.get(*a as usize),
-            raw.vertices.get(*b as usize),
-            raw.vertices.get(*c as usize),
-        ) else {
-            continue;
-        };
-        let u = [pb[0] - pa[0], pb[1] - pa[1], pb[2] - pa[2]];
-        let v = [pc[0] - pa[0], pc[1] - pa[1], pc[2] - pa[2]];
-        let normal = [
-            u[1] * v[2] - u[2] * v[1],
-            u[2] * v[0] - u[0] * v[2],
-            u[0] * v[1] - u[1] * v[0],
-        ];
-        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-        if length <= 1.0e-12 {
-            continue;
-        }
-        let normal = [normal[0] / length, normal[1] / length, normal[2] / length];
-        for pair in [[*a, *b], [*b, *c], [*c, *a]] {
-            let (Some(first), Some(second)) = (raw.vertices.get(pair[0] as usize), raw.vertices.get(pair[1] as usize)) else {
-                continue;
-            };
-            let (ka, kb) = (quantized(*first), quantized(*second));
-            let key = if ka < kb {
-                [ka[0], ka[1], ka[2], kb[0], kb[1], kb[2]]
-            } else {
-                [kb[0], kb[1], kb[2], ka[0], ka[1], ka[2]]
-            };
-            let entry = edge_normals.entry(key).or_insert(([0.0; 3], 0));
-            entry.0[0] += normal[0];
-            entry.0[1] += normal[1];
-            entry.0[2] += normal[2];
-            entry.1 += 1;
-        }
-    }
-    let edge_normal = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
-        let (ka, kb) = (quantized(a), quantized(b));
-        let key = if ka < kb {
-            [ka[0], ka[1], ka[2], kb[0], kb[1], kb[2]]
-        } else {
-            [kb[0], kb[1], kb[2], ka[0], ka[1], ka[2]]
-        };
-        let Some((normal, count)) = edge_normals.get(&key) else { return [0.0; 3] };
-        let count = (*count).max(1) as f32;
-        let normal = [normal[0] / count, normal[1] / count, normal[2] / count];
-        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-        if length <= 1.0e-6 { [0.0; 3] } else { [normal[0] / length, normal[1] / length, normal[2] / length] }
-    };
-
     let pick_edges: Vec<DisplayEdge> = raw
         .brep_edges
         .iter()
@@ -274,23 +214,12 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         .filter(|edge| edge.kind != "mesh" && !edge.id.starts_with("mesh-edge:"))
         .filter_map(|edge| {
             let mut points = Vec::new();
-            let mut normals = Vec::new();
             for segment in &edge.segments {
                 for index in segment {
                     let point = raw.vertices.get(*index as usize)?;
                     let point = Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]));
                     if points.last().copied() != Some(point) {
                         points.push(point);
-                        let next = raw.vertices.get(*index as usize)?;
-                        let key_sorted = edge.segments.iter().find_map(|candidate| {
-                            if candidate.contains(index) {
-                                let other = if candidate[0] == *index { candidate[1] } else { candidate[0] };
-                                raw.vertices.get(other as usize).map(|other| (*next, *other))
-                            } else {
-                                None
-                            }
-                        });
-                        normals.push(key_sorted.map_or([0.0; 3], |(a, b)| edge_normal(a, b)));
                     }
                 }
             }
@@ -302,7 +231,12 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
                     let point = points[points.len() / 2];
                     [point.x, point.y, point.z]
                 };
-                DisplayEdge { id: edge.id.clone(), points, midpoint, normals }
+                DisplayEdge {
+                    id: edge.id.clone(),
+                    points,
+                    midpoint,
+                    class: nodecraft_layers::PlanEdgeClass::from_bits(edge.class),
+                }
             })
         })
         .collect();
@@ -312,6 +246,9 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         .iter()
         .map(|edge| edge.points.clone())
         .collect();
+    // The CPU scene path reads the same per-edge classes as the GPU ribbon.
+    let seams: Vec<bool> = pick_edges.iter().map(|edge| edge.class.is_seam()).collect();
+    let smooth_edges: Vec<bool> = pick_edges.iter().map(|edge| edge.class.is_smooth()).collect();
 
     let mesh = CraftMesh {
         positions,
@@ -320,14 +257,31 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         tri_face,
         edges,
         display_only_edges: true,
-        seams: Vec::new(),
-        smooth_edges: Vec::new(),
+        seams,
+        smooth_edges,
         sharp_edges: Vec::new(),
         edge_faces: Vec::new(),
     };
     let bounds = mesh.bounds();
     let center = bounds.center();
     let radius = (bounds.diagonal() * 0.5).max(1.0);
+    // Plan-backed displays replace these with the plans' real identities in
+    // `Viewport::display_mesh_for_view`; imports and other plan-less meshes use
+    // the synthetic per-body key from `body_instance_id`.
+    let body_count = face_ids
+        .iter()
+        .filter_map(|name| {
+            name.strip_prefix("body:")
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(body, _)| body.parse::<u32>().ok())
+        })
+        .max()
+        .map_or(1, |body| body.saturating_add(1));
+    let body_ids = (0..body_count)
+        .map(|body| {
+            nodecraft_display::body_instance_id(nodecraft_display::BodyKey::new(0, body), 0)
+        })
+        .collect();
     DisplayMesh {
         mesh: Arc::new(mesh),
         lods: Vec::new(),
@@ -338,6 +292,7 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         } else {
             Vec::new()
         },
+        body_ids,
         edges: pick_edges,
         comparison: None,
         selection_edges: None,
@@ -389,7 +344,6 @@ fn comparison_edges(mesh: &NodeMesh) -> Vec<DisplayEdge> {
                 }
             }
             if points.len() < 2 { return None; }
-            let point_count = points.len();
             let midpoint = points.iter().fold([0.0; 3], |mut sum, point| {
                 sum[0] += point.x / points.len() as f64;
                 sum[1] += point.y / points.len() as f64;
@@ -400,7 +354,7 @@ fn comparison_edges(mesh: &NodeMesh) -> Vec<DisplayEdge> {
                 id: format!("comparison:{}", edge.id),
                 points,
                 midpoint,
-                normals: vec![[0.0, 1.0, 0.0]; point_count],
+                class: nodecraft_layers::PlanEdgeClass::from_bits(edge.class),
             })
         })
         .collect()
@@ -445,7 +399,7 @@ fn boundary_edges(triangles: &[([Vec3; 3], [Vec3; 3])]) -> Vec<DisplayEdge> {
                     (pa.y + pb.y) * 0.5,
                     (pa.z + pb.z) * 0.5,
                 ],
-                normals: vec![[0.0, 1.0, 0.0]; 2],
+                class: nodecraft_layers::PlanEdgeClass::NORMAL,
             }
         })
         .collect()
@@ -494,6 +448,7 @@ mod tests {
                 id: "edge:0".into(),
                 kind: "edge".into(),
                 segments: vec![[0, 1], [1, 2], [2, 3], [3, 0]],
+                class: 0,
             }],
             ..Mesh::default()
         };
@@ -515,11 +470,13 @@ mod tests {
                     id: "edge:0".into(),
                     kind: "edge".into(),
                     segments: vec![[0, 1]],
+                    class: 0,
                 },
                 BrepEdge {
                     id: "mesh-edge:0".into(),
                     kind: "mesh".into(),
                     segments: vec![[1, 2]],
+                    class: 0,
                 },
             ],
             ..Mesh::default()

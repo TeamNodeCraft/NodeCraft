@@ -14,17 +14,17 @@ impl NodeCraftApp {
         let mut theme_rename_focus = self.theme_rename_focus;
         let mut tab = self.settings_tab;
         let mut view = self.viewport.view();
-        let mut show_view_matrix = self.viewport.show_view_matrix();
-        let mut show_gpu_info = self.viewport.show_gpu_info();
         let mut engine_threads = self.engine_threads;
         let mut tessellation_threads = self.tessellation_threads;
         let mut workload_profiler = self.workload_profiler;
         let mut kernel_fixes = self.kernel_fixes;
+        let mut debug_window = self.debug_window;
         let mut activity = self.activity;
         let mut feature_overlay = self.feature_overlay;
         let mut cable_routing = self.cable_routing;
         let mut close = false;
-        let mut builder = settings_viewport_builder();
+        let mut builder =
+            auxiliary_viewport_builder("NodeCraft Settings", SETTINGS_SIZE, SETTINGS_MIN_SIZE);
         let parent_outer = ctx.input(|input| input.viewport().outer_rect);
         let monitor_size = ctx.input(|input| input.viewport().monitor_size);
         let mut center_once = !self.settings_open_last;
@@ -64,14 +64,14 @@ impl NodeCraftApp {
                     }
                 }
                 let full_rect = ui.max_rect();
-                if let Some(direction) = titlebar::resize_direction(ui.ctx()) {
-                    ui.ctx().set_cursor_icon(titlebar::resize_cursor(direction));
-                    if ui.ctx().input(|input| input.pointer.primary_pressed()) {
-                        ui.ctx()
-                            .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
-                    }
-                }
-                let chrome = settings_title_bar(ui, &theme, full_rect);
+                let chrome = auxiliary_window_shell(
+                    ui,
+                    &theme,
+                    full_rect,
+                    "NodeCraft Settings",
+                    "settings",
+                    crate::window_chrome::AuxiliaryWindow::Settings,
+                );
                 close |= chrome.close;
                 let panel = chrome.content;
                 let left = egui::Rect::from_min_max(
@@ -297,14 +297,26 @@ impl NodeCraftApp {
                                 .max_decimals(2),
                         );
                         let mut display_error_px = view.display_error_px;
+                        content
+                            .add(
+                                egui::Slider::new(&mut display_error_px, 0.1..=3.0)
+                                    .text("Screen error (px)")
+                                    .max_decimals(2),
+                            )
+                            .on_hover_text("in on-screen points");
+                        view.display_error_px = display_error_px;
                         content.add(
-                            egui::Slider::new(&mut display_error_px, 0.1..=3.0)
-                                .text("Screen error (px)")
+                            egui::Slider::new(&mut view.edge_width_px, 0.5..=4.0)
+                                .text("Edge width (px)")
                                 .max_decimals(2),
                         );
-                        view.display_error_px = display_error_px;
                         crate::widgets::switch_row(&mut content, "Translucent", &mut view.translucent);
                         crate::widgets::switch_row(&mut content, "Edges", &mut view.edges);
+                        crate::widgets::switch_row(
+                            &mut content,
+                            "Show seam edges",
+                            &mut view.show_seam_edges,
+                        );
                         crate::widgets::switch_row(&mut content, "Triangles", &mut view.triangles);
                         crate::widgets::switch_row(&mut content, "Face normals", &mut view.normals);
                         crate::widgets::switch_row(&mut content, "Face colours", &mut view.face_colours);
@@ -420,13 +432,12 @@ impl NodeCraftApp {
                         content.monospace(format!("MSAA: {}x", crate::gpu_viewport::msaa_samples()));
                         crate::widgets::switch_row(
                             &mut content,
-                            "Show view matrix / camera debug",
-                            &mut show_view_matrix,
+                            "Debug window",
+                            &mut debug_window,
                         );
-                        crate::widgets::switch_row(
-                            &mut content,
-                            "Show GPU / frame debug",
-                            &mut show_gpu_info,
+                        content.small(
+                            "Frame timings, GPU timestamps and camera diagnostics in one \
+                             window. Off adds no timestamp queries, ring writes or window.",
                         );
                         content.add_space(8.0);
                         content.heading("Node activity glow");
@@ -448,8 +459,6 @@ impl NodeCraftApp {
                         );
                     }
                 }
-                #[cfg(target_os = "macos")]
-                nodecraft_macos::round_settings_window();
             },
         );
         self.theme_rename_id = theme_rename_id;
@@ -474,8 +483,6 @@ impl NodeCraftApp {
         if view != self.viewport.view() {
             self.viewport.set_view(view);
         }
-        self.viewport.set_show_view_matrix(show_view_matrix);
-        self.viewport.set_show_gpu_info(show_gpu_info);
         if cable_routing != self.cable_routing {
             self.cable_routing = cable_routing;
             self.node_editor.set_cable_routing(cable_routing);
@@ -511,6 +518,10 @@ impl NodeCraftApp {
             self.view_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             ctx.request_repaint();
         }
+        if debug_window != self.debug_window {
+            self.set_debug_window(debug_window);
+            self.schedule_debug_window_save(ctx);
+        }
         if activity != self.activity {
             self.activity = activity;
             self.node_editor.set_activity_timings(
@@ -533,7 +544,6 @@ impl NodeCraftApp {
 
 const SETTINGS_SIZE: egui::Vec2 = egui::vec2(760.0, 620.0);
 const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(520.0, 400.0);
-const SETTINGS_TITLEBAR_HEIGHT: f32 = 40.0;
 const SETTINGS_SIDEBAR_WIDTH: f32 = 124.0;
 
 const SETTINGS_TABS: [SettingsTab; 5] = [
@@ -544,78 +554,52 @@ const SETTINGS_TABS: [SettingsTab; 5] = [
     SettingsTab::Keys,
 ];
 
-fn settings_viewport_builder() -> egui::ViewportBuilder {
-    let builder = egui::ViewportBuilder::default()
-        .with_title("NodeCraft Settings")
-        .with_inner_size(SETTINGS_SIZE)
-        .with_min_inner_size(SETTINGS_MIN_SIZE)
-        .with_resizable(true)
-        // Settings must stay readable above the main window.
-        .with_always_on_top()
-        .with_decorations(cfg!(target_os = "macos"));
-    #[cfg(target_os = "macos")]
-    let builder = builder
-        .with_fullsize_content_view(true)
-        .with_title_shown(false)
-        .with_titlebar_buttons_shown(false)
-        .with_titlebar_shown(false);
-    builder
-}
-
-struct SettingsTitleBar {
-    content: egui::Rect,
-    close: bool,
-}
-
-fn settings_title_bar(
+/// One tab, in the app's single tab style: an accent-filled active tab with
+/// window-coloured text, muted inactive tabs. Settings' sidebar and the Debug
+/// window's row both use this painter, so tabs cannot drift apart.
+pub(super) fn tab_button(
     ui: &mut egui::Ui,
+    rect: egui::Rect,
+    id: egui::Id,
+    label: &str,
+    active: bool,
     theme: &crate::theme::Theme,
-    full_rect: egui::Rect,
-) -> SettingsTitleBar {
-    let titlebar = egui::Rect::from_min_max(
-        full_rect.min,
-        egui::pos2(full_rect.max.x, full_rect.min.y + SETTINGS_TITLEBAR_HEIGHT),
-    );
-    ui.painter()
-        .rect_filled(titlebar, 0.0, theme.color(theme.window));
-    crate::window_chrome::prepare_settings_window();
-    let close_center = egui::pos2(titlebar.min.x + 22.0, titlebar.center().y);
-    let close = if crate::window_chrome::settings_uses_native_close() {
-        false
-    } else {
-        titlebar::close_light(
-            ui,
-            close_center,
-            ui.make_persistent_id("settings-title-close"),
-        )
-    };
-    let title_start = crate::window_chrome::settings_title_start();
-    let drag_rect = egui::Rect::from_min_max(
-        egui::pos2(title_start, titlebar.min.y),
-        titlebar.max,
-    );
-    if titlebar::drag_response(
-        ui,
-        drag_rect,
-        ui.make_persistent_id("settings-title-drag"),
-    )
-    .drag_started()
-    {
-        titlebar::start_drag(ui);
+) -> egui::Response {
+    let response = ui.interact(rect, id, egui::Sense::click());
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    titlebar::title(
-        ui,
-        egui::pos2(title_start + 4.0, titlebar.center().y),
-        "NodeCraft Settings",
-        theme.color(theme.text),
-    );
-    SettingsTitleBar {
-        content: egui::Rect::from_min_max(
-            egui::pos2(full_rect.min.x, titlebar.max.y),
-            full_rect.max,
-        ),
-        close,
+    paint_tab(ui, rect, label, active, theme);
+    response
+}
+
+/// Paint a tab without owning its interaction. Layout-driven tab rows allocate
+/// their response first and then paint through this same style.
+pub(super) fn paint_tab(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    label: &str,
+    active: bool,
+    theme: &crate::theme::Theme,
+) {
+    if active {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(7),
+            theme.color(theme.accent),
+        );
     }
+    ui.painter().text(
+        egui::pos2(rect.min.x + 10.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        if active {
+            theme.color(theme.window)
+        } else {
+            theme.color(theme.muted)
+        },
+    );
 }
 
 fn settings_navigation(
@@ -630,36 +614,34 @@ fn settings_navigation(
             egui::pos2(left.min.x + 10.0, tab_y),
             egui::vec2(SETTINGS_SIDEBAR_WIDTH - 20.0, 30.0),
         );
-        let response = ui.interact(
+        let response = tab_button(
+            ui,
             button,
             ui.make_persistent_id(("settings-tab", candidate.label())),
-            egui::Sense::click(),
+            candidate.label(),
+            active == candidate,
+            theme,
         );
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
         if response.clicked() {
             active = candidate;
         }
-        if active == candidate {
-            ui.painter().rect_filled(
-                button,
-                egui::CornerRadius::same(7),
-                theme.color(theme.accent),
-            );
-        }
-        ui.painter().text(
-            egui::pos2(button.min.x + 10.0, button.center().y),
-            egui::Align2::LEFT_CENTER,
-            candidate.label(),
-            egui::FontId::proportional(13.0),
-            if active == candidate {
-                theme.color(theme.window)
-            } else {
-                theme.color(theme.muted)
-            },
-        );
         tab_y += 36.0;
     }
     active
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn diagnostics_has_one_debug_window_switch_and_no_legacy_toggles() {
+        let source = include_str!("settings_ui.rs");
+        assert!(source.contains("\"Debug window\""));
+        // Built from fragments so this test does not match its own literals.
+        let camera = ["Show view matrix", " / camera debug"].concat();
+        let gpu = ["Show GPU", " / frame debug"].concat();
+        let profiler = ["GPU ", "profiler"].concat();
+        assert!(!source.contains(&camera));
+        assert!(!source.contains(&gpu));
+        assert!(!source.contains(&profiler));
+    }
 }

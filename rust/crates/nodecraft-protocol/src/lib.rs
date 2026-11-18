@@ -153,6 +153,15 @@ pub struct BrepEdge {
     pub kind: String,
     #[serde(default)]
     pub segments: Vec<[u32; 2]>,
+    /// Display class from the tessellator's per-edge flags: bit 0 is a seam
+    /// between two pieces of one smooth surface, bit 1 a smooth/tangent join.
+    /// Zero is an ordinary edge. The GPU and CPU edge paths read the same value.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub class: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

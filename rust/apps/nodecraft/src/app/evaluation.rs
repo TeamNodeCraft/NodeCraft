@@ -115,11 +115,16 @@ fn map_eval_errors(
 pub(super) struct DisplaySubmission<'a> {
     pub evaluation: &'a engine_bridge::Evaluation,
     pub feature_ghost: bool,
-    pub edit_preview: Option<&'a str>,
-    pub ghost_input: Option<&'a str>,
-    pub comparison: Option<(&'a str, &'a str)>,
+    /// Exact snapshot built by the caller, so display-only LOD state can be
+    /// reconciled against the same snapshot that is submitted.
+    pub snapshot: std::sync::Arc<nodecraft_display::service::ExactSnapshot>,
     pub run_exporters: bool,
-    pub quality: Option<u8>,
+    /// Fallback quality for bodies absent from `body_quality`.
+    pub quality: nodecraft_display::DisplayQuality,
+    /// Per-body screen-space levels from [`LodState`].
+    pub body_quality: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::DisplayQuality>,
+    /// Nearest-first planning order.
+    pub body_priority: Vec<nodecraft_display::BodyKey>,
 }
 
 /// Hand one exact snapshot to the display service. Every exact result for the
@@ -137,12 +142,7 @@ pub(super) fn submit_exact_snapshot(
     if submission.run_exporters {
         return false;
     }
-    let snapshot = build_display(
-        submission.evaluation,
-        submission.edit_preview,
-        submission.ghost_input,
-        submission.comparison,
-    );
+    let snapshot = submission.snapshot;
     *next = next.wrapping_add(1);
     let revision = *next;
     let target = submission.evaluation.target.clone();
@@ -157,9 +157,9 @@ pub(super) fn submit_exact_snapshot(
     worker.submit(nodecraft_display::service::DisplayRequest {
         revision,
         snapshot_id: revision,
-        quality: display_quality(submission.quality),
-        body_quality: Default::default(),
-        body_priority: Vec::new(),
+        quality: submission.quality,
+        body_quality: submission.body_quality,
+        body_priority: submission.body_priority,
         feature_ghost: submission.feature_ghost,
         snapshot,
     });
@@ -526,6 +526,7 @@ impl NodeCraftApp {
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
             eprintln!("[t {id}] app sent");
         }
+        let submit_started = std::time::Instant::now();
         self.eval_worker.send_evaluation(
             EvalJob {
                 id,
@@ -548,6 +549,10 @@ impl NodeCraftApp {
                 token: nodecraft_engine::kernel_pool::RevisionToken::new(),
             },
             validation_jobs,
+        );
+        self.profiler_record(
+            crate::gpu_profiler::Series::EvalSubmit,
+            submit_started.elapsed().as_secs_f64() * 1000.0,
         );
         self.egui_ctx.request_repaint();
     }
@@ -850,39 +855,237 @@ pub(super) struct DisplaySnapshot {
     pub snapshot: std::sync::Arc<nodecraft_display::service::ExactSnapshot>,
 }
 
-/// Display-space bounds for every body in one exact snapshot.
+/// Display-space bounds for one body identity at one placement.
 ///
-/// A body key can appear more than once when one source is placed several
-/// times. Keep the instance with the smaller radius so a shared body is
-/// planned at the finest level any placement needs.
-pub(super) fn lod_bounds_for_snapshot(
-    snapshot: &nodecraft_display::service::ExactSnapshot,
-) -> std::collections::BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds> {
-    let mut bounds: std::collections::BTreeMap<
-        nodecraft_display::BodyKey,
-        nodecraft_display::BodyBounds,
-    > = std::collections::BTreeMap::new();
-    let parts = snapshot
-        .breakpoint
-        .values()
-        .chain(snapshot.overlays.iter().map(|overlay| overlay.part.as_ref()));
-    for part in parts {
-        for body in &part.bodies {
-            let Some(local) = nodecraft_display::body_bounds(&body.brep) else { continue };
-            let placed = local.placed(&body.placement);
-            match bounds.entry(body.key) {
-                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                    if placed.radius < entry.get().radius {
-                        entry.insert(placed);
+/// Geometry identity of one body for the local-bounds cache.
+///
+/// `BodyKey` is the producing node's content key plus the body index. The exact
+/// evaluator derives it from the node's content seed, so the same key names the
+/// same B-rep geometry across evaluations (a Look keeps it while changing only
+/// face attributes) and a geometry edit changes it. Placement is separate
+/// instance data and is deliberately not in this key; the local bound is placed
+/// on every use with `BodyBounds::placed`.
+fn lod_bounds_key(body: &nodecraft_exact::ExactBody) -> nodecraft_display::BodyKey {
+    body.key
+}
+
+/// Per-body screen-space level state that survives exact snapshot changes.
+///
+/// An exact result is a new snapshot of the same scene, not a new camera. A
+/// colour edit therefore keeps every body's level and placed bounds; a geometry
+/// edit changes only the edited body's `BodyKey` and plans only that body. The
+/// levels are updated here, before the snapshot is submitted, so the display
+/// worker receives each body's final quality on its first (and only) request.
+#[derive(Debug, Default)]
+pub(super) struct LodState {
+    pub(super) levels: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::DisplayQuality>,
+    /// Local (unplaced) bounds by body geometry identity. Placement changes
+    /// reuse the measurement; every use places the local bound cheaply.
+    bounds: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds>,
+    /// The finest bound for each body key: a shared body can be placed several
+    /// times, and the finest placement is the one that must not undersample.
+    placed: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds>,
+    /// Camera/viewport the installed levels were computed for. Equal to the
+    /// next frame's view means nothing moved and no LOD request is needed.
+    pub(super) view: Option<nodecraft_display::LodView>,
+    #[cfg(test)]
+    pub(super) bounds_built: usize,
+}
+
+/// One display request's per-body levels, ready to submit.
+#[derive(Clone, Debug)]
+pub(super) struct LodRequest {
+    /// Quality for bodies absent from `body_quality` (headless/first frame).
+    pub quality: nodecraft_display::DisplayQuality,
+    pub body_quality: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::DisplayQuality>,
+    pub body_priority: Vec<nodecraft_display::BodyKey>,
+}
+
+impl Default for LodRequest {
+    fn default() -> Self {
+        Self {
+            quality: nodecraft_display::default_quality(),
+            body_quality: BTreeMap::new(),
+            body_priority: Vec::new(),
+        }
+    }
+}
+
+impl LodState {
+    /// Reconcile the installed levels with a new exact snapshot.
+    ///
+    /// Levels for body keys that still exist are kept untouched, vanished keys
+    /// are dropped, and only a new geometry (or a body whose placed bounds
+    /// moved) is given a level. Local bounds are reused across every placement,
+    /// so a colour-only edit and every move do no geometry sampling and no new
+    /// tessellation.
+    pub(super) fn reconcile(
+        &mut self,
+        snapshot: &nodecraft_display::service::ExactSnapshot,
+        view: Option<nodecraft_display::LodView>,
+    ) -> LodRequest {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut placed: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds> =
+            BTreeMap::new();
+        let mut bounds: BTreeMap<nodecraft_display::BodyKey, nodecraft_display::BodyBounds> =
+            BTreeMap::new();
+        let mut moved = std::collections::BTreeSet::new();
+        let parts = snapshot
+            .breakpoint
+            .values()
+            .chain(snapshot.overlays.iter().map(|overlay| overlay.part.as_ref()));
+        for part in parts {
+            for body in &part.bodies {
+                seen.insert(body.key);
+                let key = lod_bounds_key(body);
+                let local = match bounds
+                    .get(&key)
+                    .or_else(|| self.bounds.get(&key))
+                    .copied()
+                {
+                    Some(cached) => cached,
+                    None => {
+                        let Some(local) = nodecraft_display::body_bounds(&body.brep) else {
+                            continue;
+                        };
+                        #[cfg(test)]
+                        {
+                            self.bounds_built += 1;
+                        }
+                        local
                     }
+                };
+                let value = local.placed(&body.placement);
+                // The level depends on the placed bound, not on the placement
+                // value itself: a move that leaves every instance's bound the
+                // same needs no new choice, and a new geometry always does.
+                if self.placed.get(&body.key) != Some(&value) {
+                    moved.insert(body.key);
                 }
-                std::collections::btree_map::Entry::Vacant(entry) => {
-                    entry.insert(placed);
+                bounds.insert(key, local);
+                match placed.entry(body.key) {
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if value.radius < entry.get().radius {
+                            entry.insert(value);
+                        }
+                    }
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(value);
+                    }
                 }
             }
         }
+        self.levels.retain(|key, _| seen.contains(key));
+        self.bounds = bounds;
+        self.placed = placed;
+
+        let mut request = LodRequest::default();
+        if let Some(view) = view {
+            let camera = nodecraft_display::LodCamera {
+                eye: view.eye,
+                fov_y: view.fov_y,
+                ortho_height: view.ortho_height,
+            };
+            let viewport = nodecraft_display::ViewportSize {
+                width: view.viewport[0],
+                height: view.viewport[1],
+            };
+            for (key, body_bounds) in &self.placed {
+                let quality = match self.levels.get(key).copied() {
+                    // The camera did not move on an edit: keep the installed
+                    // level. Hysteresis is for camera moves, not colour edits.
+                    Some(existing) if !moved.contains(key) => existing,
+                    // A new body, or one whose placement changed, needs its
+                    // level chosen from its current placed bounds.
+                    _ => nodecraft_display::quality_for(
+                        *body_bounds,
+                        camera,
+                        viewport,
+                        view.pixels_per_point,
+                        nodecraft_display::LodParams::new(view.error_px),
+                    ),
+                };
+                self.levels.insert(*key, quality);
+                request.body_quality.insert(*key, quality);
+            }
+            request.body_priority = self.priority(view.eye);
+            // Only claim this view is installed when every body got a level. A
+            // body with no usable bounds falls back to `request.quality` and
+            // the next frame retries.
+            self.view = (request.body_quality.len() == seen.len()).then_some(view);
+        } else {
+            // No camera has been fitted yet (first frame/headless). There is no
+            // screen-space level to choose; use the normal full-plan tolerance
+            // instead of a preview pass. Any levels already installed are still
+            // reused, and the next frame with a camera fills in the rest.
+            request.body_quality = self.levels.clone();
+            request.body_priority = seen.into_iter().collect();
+            self.view = None;
+        }
+        request
     }
-    bounds
+
+    /// Recompute every body's level for a moved camera/viewport.
+    ///
+    /// This is the hysteresis path: each level jumps directly to the rung the
+    /// refine/coarsen band would settle on, so a fast zoom that stops is not
+    /// left one rung too fine. Bounds come from the snapshot cache; no geometry
+    /// is sampled and no plan is built here.
+    pub(super) fn levels_for_view(&mut self, view: nodecraft_display::LodView) -> LodRequest {
+        let camera = nodecraft_display::LodCamera {
+            eye: view.eye,
+            fov_y: view.fov_y,
+            ortho_height: view.ortho_height,
+        };
+        let viewport = nodecraft_display::ViewportSize {
+            width: view.viewport[0],
+            height: view.viewport[1],
+        };
+        let mut body_quality = BTreeMap::new();
+        for (key, body_bounds) in &self.placed {
+            let current_tolerance = match self.levels.get(key).copied() {
+                Some(nodecraft_display::DisplayQuality::Full(tolerance)) => Some(tolerance),
+                _ => None,
+            };
+            let quality = nodecraft_display::quality_for(
+                *body_bounds,
+                camera,
+                viewport,
+                view.pixels_per_point,
+                nodecraft_display::LodParams {
+                    current_tolerance,
+                    ..nodecraft_display::LodParams::new(view.error_px)
+                },
+            );
+            body_quality.insert(*key, quality);
+        }
+        self.levels = body_quality.clone();
+        self.view = Some(view);
+        LodRequest {
+            quality: nodecraft_display::default_quality(),
+            body_quality,
+            body_priority: self.priority(view.eye),
+        }
+    }
+
+    /// Nearest-first planning order. The distance is centre depth minus radius,
+    /// so a large body that reaches the camera is planned early too.
+    fn priority(&self, eye: [f64; 3]) -> Vec<nodecraft_display::BodyKey> {
+        let mut order: Vec<(f64, nodecraft_display::BodyKey)> = self
+            .placed
+            .iter()
+            .map(|(key, bounds)| {
+                let distance = ((eye[0] - bounds.center[0]).powi(2)
+                    + (eye[1] - bounds.center[1]).powi(2)
+                    + (eye[2] - bounds.center[2]).powi(2))
+                .sqrt()
+                    - bounds.radius;
+                (distance, *key)
+            })
+            .collect();
+        order.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        order.into_iter().map(|(_, key)| key).collect()
+    }
 }
 
 /// Position of one display frame in the order the viewer shows geometry.
@@ -973,13 +1176,6 @@ pub(super) fn build_display(
         breakpoint,
         overlays,
     })
-}
-
-fn display_quality(preview_detail: Option<u8>) -> nodecraft_display::DisplayQuality {
-    match preview_detail {
-        Some(detail) => nodecraft_display::DisplayQuality::Preview(detail),
-        None => nodecraft_display::default_quality(),
-    }
 }
 
 enum WorkerMessage {
@@ -1546,15 +1742,26 @@ impl NodeCraftApp {
         comparison: Option<(&str, &str)>,
         run_exporters: bool,
     ) {
+        if run_exporters {
+            return;
+        }
+        let snapshot = build_display(evaluation, edit_preview, ghost_input, comparison);
+        let view = self.viewport.lod_view(self.egui_ctx.pixels_per_point());
+        // Reconcile the display-only levels with this snapshot before the
+        // submission. A colour edit keeps both the levels and the placed
+        // bounds; a geometry edit changes only the edited body's key. The
+        // display worker therefore receives every body's final level on this
+        // one request instead of a coarse preview followed by a quality tier.
+        let lod = self.lod.reconcile(&snapshot, view);
         let submitted = submit_exact_snapshot(
             DisplaySubmission {
                 evaluation,
                 feature_ghost,
-                edit_preview,
-                ghost_input,
-                comparison,
+                snapshot,
                 run_exporters,
-                quality: self.preview_detail,
+                quality: lod.quality,
+                body_quality: lod.body_quality,
+                body_priority: lod.body_priority,
             },
             &self.display_worker,
             &mut self.display_next,
@@ -1563,12 +1770,6 @@ impl NodeCraftApp {
             &mut self.quality_display,
         );
         if submitted {
-            // A new exact snapshot invalidates the installed per-body levels
-            // and their cached bounds. The next update recomputes both against
-            // the new snapshot and its camera.
-            self.lod_levels.clear();
-            self.lod_bounds = None;
-            self.lod_view = None;
             self.egui_ctx.request_repaint();
         }
     }
@@ -1779,7 +1980,7 @@ impl NodeCraftApp {
         }
         let had_mesh = self.mesh.is_some();
         let same_target = self.viewport.displayed_target() == Some(display_target.as_str());
-        self.mesh = Some(planned.edge_mesh.clone());
+        self.mesh = Some(planned.bounds_mesh.clone());
         let diagnostics = planned
             .stats
             .iter()
@@ -1966,17 +2167,26 @@ impl NodeCraftApp {
             self.status = format!("Display failed: {error}");
             // Let the next update retry the per-body levels instead of
             // treating the failed level set as installed.
-            self.lod_view = None;
+            self.lod.view = None;
             self.egui_ctx.request_repaint();
             return;
         }
         let started = std::time::Instant::now();
         if self.apply_display_frame(&frame, &target, feature_ghost, false) {
-            self.last_display_us = Some((frame.plan_us, started.elapsed().as_micros() as u64));
+            let apply_us = started.elapsed().as_micros() as u64;
+            self.last_display_us = Some((frame.plan_us, apply_us));
+            self.profiler_record(
+                crate::gpu_profiler::Series::DisplayApply,
+                apply_us as f64 / 1000.0,
+            );
+            self.profiler_record(
+                crate::gpu_profiler::Series::PlanBuild,
+                frame.plan_us as f64 / 1000.0,
+            );
         } else {
             // A stale or unapplicable frame did not install its plans. Recompute
             // the view level on the next frame so the request retries.
-            self.lod_view = None;
+            self.lod.view = None;
         }
     }
 
@@ -1996,12 +2206,25 @@ impl NodeCraftApp {
         if let Some(error) = &frame.error {
             self.display_error = Some(error.clone());
             self.status = format!("Display failed: {error}");
+            // The installed view did not produce a frame. Let the next update
+            // recompute the per-body levels and retry instead of treating the
+            // failed level set as applied.
+            self.lod.view = None;
             self.egui_ctx.request_repaint();
             return;
         }
         let started = std::time::Instant::now();
         self.apply_display_frame(&frame, &target, feature_ghost, false);
-        self.last_display_us = Some((frame.plan_us, started.elapsed().as_micros() as u64));
+        let apply_us = started.elapsed().as_micros() as u64;
+        self.last_display_us = Some((frame.plan_us, apply_us));
+        self.profiler_record(
+            crate::gpu_profiler::Series::DisplayApply,
+            apply_us as f64 / 1000.0,
+        );
+        self.profiler_record(
+            crate::gpu_profiler::Series::PlanBuild,
+            frame.plan_us as f64 / 1000.0,
+        );
     }
 
     pub(super) fn poll_evaluation(&mut self) {

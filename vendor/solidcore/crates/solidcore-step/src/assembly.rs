@@ -269,20 +269,6 @@ impl<'t> Assembly<'t> {
         Ok((i, along))
     }
 
-    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
-    /// interval is where the vertices lie on the curve (the whole of a closed curve when both
-    /// ends are one vertex or one point), the edge running from `ends[0]` along the curve, as a
-    /// STEP edge is read. Then as [`Assembly::add_edge`].
-    pub fn add_edge_on(&mut self, origin: u64, curve: BCurve, ends: [u32; 2]) -> R<(u32, bool)> {
-        let (ps, pe) = (self.point(ends[0])?, self.point(ends[1])?);
-        let closed = ends[0] == ends[1];
-        let full = closed || ps == pe;
-        let (curve, interval, with) =
-            crate::topology::record_edge(curve, ps, pe, closed, full, self.tol).map_err(|m| format!("edge #{origin}: {m}"))?;
-        let (e, along) = self.add_edge(origin, curve, interval, if with { ends } else { [ends[1], ends[0]] })?;
-        Ok((e, along == with))
-    }
-
     /// A sphere face bounded by vertex loops alone, each at one of its poles (a face of a closed
     /// surface bounded by vertices is all of the surface): the whole sphere, its loop a meridian
     /// from the south pole to the north and back, which [`Assembly::complete_slits`] keeps as its
@@ -314,6 +300,20 @@ impl<'t> Assembly<'t> {
         let half = std::f64::consts::FRAC_PI_2;
         self.edges.push(EdgeB { curve: BCurve::Circle { frame, radius }, interval: [-half, half], vertices: ends, tolerance: self.tol, form: None });
         Ok(vec![Bound::Edges(vec![(e, true), (e, false)])])
+    }
+
+    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
+    /// interval is where the vertices lie on the curve (the whole of a closed curve when both
+    /// ends are one vertex or one point), the edge running from `ends[0]` along the curve, as a
+    /// STEP edge is read. Then as [`Assembly::add_edge`].
+    pub fn add_edge_on(&mut self, origin: u64, curve: BCurve, ends: [u32; 2]) -> R<(u32, bool)> {
+        let (ps, pe) = (self.point(ends[0])?, self.point(ends[1])?);
+        let closed = ends[0] == ends[1];
+        let full = closed || ps == pe;
+        let (curve, interval, with) =
+            crate::topology::record_edge(curve, ps, pe, closed, full, self.tol).map_err(|m| format!("edge #{origin}: {m}"))?;
+        let (e, along) = self.add_edge(origin, curve, interval, if with { ends } else { [ends[1], ends[0]] })?;
+        Ok((e, along == with))
     }
 
     /// A face on `surface` bounded by `bounds`, its index. Each bound is relative to the
@@ -501,6 +501,34 @@ impl<'t> Assembly<'t> {
             if let Some(vx) = self.vertices.get_mut(v as usize) {
                 vx.tolerance = vx.tolerance.max(tolerance);
             }
+        }
+        Ok(())
+    }
+
+    /// The edges and vertices of `bound` hold `deviation` (mm): how far, as their producer states
+    /// it, the curves or the surface they stand on may lie from what they stand for (a sampled
+    /// curve's chordal deflection, a fitted cache's fit tolerance), so the record keeps that
+    /// allowance instead of taking the fit for the exact geometry. More than [`MAX_TOLERANCE`]
+    /// is refused, as a gap that large is.
+    pub fn hold_deviation(&mut self, bound: &Bound, deviation: f64) -> R<()> {
+        if !(deviation <= MAX_TOLERANCE) {
+            return Err(format!("a fit stated within {deviation} mm, more than an edge's tolerance holds"));
+        }
+        let mut vertices = Vec::new();
+        match bound {
+            Bound::Edges(uses) => {
+                for &(e, _) in uses {
+                    let Some(x) = self.edges.get_mut(e as usize) else { return Err("edge reference".into()) };
+                    x.tolerance = x.tolerance.max(deviation);
+                    vertices.extend(x.vertices);
+                }
+            }
+            Bound::Vertex(v) => vertices.push(*v),
+        }
+        // A vertex's tolerance covers every edge that meets it, as in any tolerant record.
+        for v in vertices {
+            let Some(x) = self.vertices.get_mut(v as usize) else { return Err("vertex reference".into()) };
+            x.tolerance = x.tolerance.max(deviation);
         }
         Ok(())
     }
@@ -1555,8 +1583,9 @@ pub(crate) fn onto_form(form: &BSurface, label: &BSurface, domain: [[f64; 2]; 2]
 /// that moves the surface within their edge's tolerance (`tolerances`, as `pcs`): the parameter
 /// tolerance that edge has on this patch. The kernel moves the control points and proves the
 /// bound, along u and v at once ([`SurfaceEval::pcurve_onto_knots`]); the gap to the edge is then
-/// measured and covered (`raise_edges`). A pcurve it refuses (farther past, on a rational or
-/// closed patch) is left as it is, for the record check to refuse. The number of moves made.
+/// measured and covered (`raise_edges`). A pcurve it refuses (farther past, past both ranges of
+/// a rational patch, or on a closed patch) is left as it is, for the record check to refuse. The
+/// number of moves made.
 pub(crate) fn onto_knots(surface: &BSurface, tolerances: &[Vec<f64>], pcs: &mut [Vec<Curve2>]) -> usize {
     let Ok(on) = SurfaceEval::new(surface) else { return 0 };
     let mut moved = 0;

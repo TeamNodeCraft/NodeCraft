@@ -26,6 +26,7 @@ pub(crate) fn plan_identity_hash(plans: &[PlanInstance]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for instance in plans {
         instance.target.hash(&mut hasher);
+        instance.body.hash(&mut hasher);
         (std::sync::Arc::as_ptr(&instance.plan) as usize).hash(&mut hasher);
         let mut transform_hash = 0u64;
         for row in instance.placement.matrix().rows() {

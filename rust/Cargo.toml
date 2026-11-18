@@ -51,21 +51,21 @@ license = "MIT OR Apache-2.0"
 serde = { version = "1", features = ["derive"] }
 rayon = "1"
 serde_json = "1"
-solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
+solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
 # cadmpeg (CADIR) is pinned to exactly the versions and features SolidCraft pins.
-cadmpeg-core = "=0.6.7"
-cadmpeg-ir = "=0.6.7"
-cadmpeg-registry = { version = "=0.6.7", default-features = false, features = ["fcstd", "rhino", "step"] }
-cadmpeg-codec-step = "=0.6.7"
-# solidcore-cadir is in SolidCraft PR 16906 but not at the pinned revision, so a
-# [patch] cannot add it (Cargo only patches existing packages). Use the seam path
-# until the pin contains it; see docs/solidcore-sync.md.
-solidcore-cadir = { path = "../vendor/solidcore/crates/solidcore-cadir" }
+cadmpeg-core = "=0.6.12"
+cadmpeg-ir = "=0.6.12"
+cadmpeg-registry = { version = "=0.6.12", default-features = false, features = ["fcstd", "rhino", "step"] }
+cadmpeg-codec-step = "=0.6.12"
+# solidcore-cadir is in the pinned revision: SolidCraft PR 16906 merged, so the
+# crate now comes from the same git pin as the rest of the kernel and only the
+# ops seam remains local. See docs/solidcore-sync.md.
+solidcore-cadir = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
 
 
 # Run scripts/setup-solidcore-seam.sh first; it creates the local seam checkout.
@@ -77,3 +77,4 @@ solidcore-record = { path = "../vendor/solidcore/crates/solidcore-record" }
 solidcore-convert = { path = "../vendor/solidcore/crates/solidcore-convert" }
 solidcore-tess = { path = "../vendor/solidcore/crates/solidcore-tess" }
 solidcore-ops = { path = "../vendor/solidcore/crates/solidcore-ops" }
+solidcore-cadir = { path = "../vendor/solidcore/crates/solidcore-cadir" }

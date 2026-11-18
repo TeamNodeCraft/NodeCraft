@@ -3,19 +3,26 @@
 //! Plans come from the engine worker with local-body transforms. This module
 //! evaluates the plans with `solidcraft-viewport-gpu`'s `TessGpu`, applies each
 //! body's placement/mirror/scale as a per-plan instance matrix, and draws the
-//! resulting `GpuMesh` through NodeCraft's existing PBR shader. The CPU display
-//! mesh remains the authority for edges, faces, ghosts, picking and the fallback
-//! path.
+//! resulting `GpuMesh` through NodeCraft's existing PBR shader. B-rep edges are
+//! uploaded once per plan in local space and drawn as screen-width ribbons with
+//! the same per-instance placement matrices; picking reuses those buffers and
+//! the same ribbon vertex function. The CPU object path remains only as the
+//! fallback for plans the GPU mesher refuses.
 
 use egui_wgpu::wgpu;
 use solidcraft_viewport_gpu::{GpuMesh, TessGpu};
 use nodecraft_layers::tess::TessPlan;
 
 use nodecraft_display::PlanInstance;
+use crate::edge_ribbon::{
+    EdgeCpuBatch, EdgeRenderer, EdgeStyle, EdgeUniforms, GpuEdgeBatch,
+};
+use crate::gpu_viewport::GhostPickData;
 use crate::plan_math::{instance_matrix, multiply_f32, plan_identity_hash};
 
 use crate::gpu_viewport::{
-    face_colour, object_instance_layout, plan_object_shader, GpuInstance, ObjectUniforms,
+    edge_depth, face_colour, ghost_face_depth, identity_matrix, object_instance_layout,
+    opaque_face_depth, plan_object_shader, translucent_face_depth, GpuInstance, ObjectUniforms,
     DEFAULT_FACE_COLOUR, GHOST_SHADER,
 };
 
@@ -50,6 +57,27 @@ fn fs() -> @location(0) vec4<f32> {
     return vec4<f32>(0.12, 0.14, 0.17, 0.72);
 }
 "#;
+
+/// The one edge-width source. Every edge kind's width is a ratio of
+/// `ViewSettings::edge_width_px`, using the ratios the previous fixed widths
+/// had (standard 1.0, ghost 2.0, selected 3.0, hover 2.5).
+pub(crate) fn edge_widths(base_px: f32) -> (f32, f32, f32, f32) {
+    (
+        base_px,
+        base_px * 2.0,
+        base_px * 3.0,
+        base_px * 2.5,
+    )
+}
+
+fn theme_colour(colour: [u8; 4]) -> [f32; 4] {
+    [
+        f32::from(colour[0]) / 255.0,
+        f32::from(colour[1]) / 255.0,
+        f32::from(colour[2]) / 255.0,
+        f32::from(colour[3]) / 255.0,
+    ]
+}
 
 /// Plan vertex layout in `GpuMesh`: position, normal.
 pub(crate) fn plan_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -195,17 +223,7 @@ impl PlanRenderer {
                 targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed {
-                    wgpu::CompareFunction::GreaterEqual
-                } else {
-                    wgpu::CompareFunction::LessEqual
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(opaque_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -230,17 +248,7 @@ impl PlanRenderer {
                 })],
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(if reversed {
-                    wgpu::CompareFunction::GreaterEqual
-                } else {
-                    wgpu::CompareFunction::LessEqual
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(translucent_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -269,17 +277,7 @@ impl PlanRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(if reversed {
-                    wgpu::CompareFunction::GreaterEqual
-                } else {
-                    wgpu::CompareFunction::LessEqual
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(edge_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -304,13 +302,7 @@ impl PlanRenderer {
                 })],
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(ghost_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -474,6 +466,52 @@ struct TriangleLines {
     ranges: Vec<(u32, u32)>,
 }
 
+/// Build the triangle-edge index list shared by the batch and resident line
+/// overlays.
+///
+/// `vertex_face` is `GpuMesh::vertex_face` and `part_vertices` is the plan's
+/// slice of it. A plan face's triangle indices are local to that face's
+/// vertices, and the GPU mesh stores every face's vertices contiguously in plan
+/// order, so recover each face's first global vertex instead of assuming one
+/// part-wide base.
+fn triangle_line_indices(
+    plan: &TessPlan,
+    vertex_face: &[u32],
+    part_vertices: std::ops::Range<u32>,
+) -> Vec<u32> {
+    let mut indices: Vec<u32> = Vec::new();
+    let mut face_bases = std::collections::BTreeMap::new();
+    for global in part_vertices.clone() {
+        let Some(face) = vertex_face.get(global as usize) else { continue };
+        face_bases.entry(*face).or_insert(global);
+    }
+    for face in &plan.faces {
+        let Some(&base) = face_bases.get(&face.face) else { continue };
+        let vertex_count = part_vertices.end - base;
+        // Every triangle edge is legitimate displayed geometry: the pole fan is
+        // a real part of the display mesh, not an artifact to hide. The old
+        // valence >= 10 / declared-pole skip blanked the whole sphere cap; the
+        // fan's converging edges only looked like a dark disc because shared
+        // triangle edges were emitted twice. Emit each undirected edge once per
+        // face so duplicate overdraw goes away without hiding any geometry.
+        let mut edges = std::collections::BTreeSet::new();
+        for triangle in &face.triangles {
+            let [a, b, c] = *triangle;
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                edges.insert((from.min(to), from.max(to)));
+            }
+        }
+        for (from, to) in edges {
+            if from >= vertex_count || to >= vertex_count {
+                continue;
+            }
+            indices.push(base + from);
+            indices.push(base + to);
+        }
+    }
+    indices
+}
+
 fn prepare_triangle_lines(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -488,52 +526,11 @@ fn prepare_triangle_lines(
             continue;
         };
         let start = indices.len() as u32;
-        // A plan face's triangle indices are local to that face's vertices.
-        // The GpuMesh stores every face's vertices in that face's order, so find
-        // each face's first global vertex instead of assuming one part-wide base.
-        let mut face_bases = std::collections::BTreeMap::new();
-        for global in part.vertices.clone() {
-            let Some(face) = mesh.vertex_face.get(global as usize) else { continue };
-            if global >= part.vertices.start && global < part.vertices.end {
-                face_bases.entry(*face).or_insert(global);
-            }
-        }
-        for face in &plan.faces {
-            let Some(&base) = face_bases.get(&face.face) else { continue };
-            let poles: std::collections::BTreeSet<u32> =
-                face.poles.iter().map(|pole| pole.node).collect();
-            // A pole fan can be represented by several coincident vertices (one
-            // per seam side), so face.poles alone does not catch every fan. A
-            // vertex shared by many triangles is a fan centre; skip its
-            // triangles so their converging edges cannot become a dark disc.
-            let mut valence = vec![0u32; face.uv.len()];
-            for triangle in &face.triangles {
-                for node in triangle {
-                    if let Some(count) = valence.get_mut(*node as usize) {
-                        *count += 1;
-                    }
-                }
-            }
-            for triangle in &face.triangles {
-                let [a, b, c] = *triangle;
-                let fan_centre = [a, b, c].iter().any(|node| {
-                    poles.contains(node)
-                        || valence.get(*node as usize).is_some_and(|count| *count >= 10)
-                });
-                if fan_centre {
-                    continue;
-                }
-                // Each triangle contributes its three boundary edges.
-                for (from, to) in [(a, b), (b, c), (c, a)] {
-                    let vertex_count = part.vertices.end - base;
-                    if from >= vertex_count || to >= vertex_count {
-                        continue;
-                    }
-                    indices.push(base + from);
-                    indices.push(base + to);
-                }
-            }
-        }
+        indices.extend_from_slice(&triangle_line_indices(
+            plan,
+            &mesh.vertex_face,
+            part.vertices.clone(),
+        ));
         ranges.push((start, indices.len() as u32 - start));
     }
     if indices.is_empty() {
@@ -555,6 +552,9 @@ struct ResidentMesh {
     /// the resident entry is still alive.
     plan: std::sync::Arc<TessPlan>,
     mesh: std::sync::Arc<GpuMesh>,
+    /// Local-space edge ribbons, uploaded once for this plan and shared by
+    /// every body instance.
+    edges: Option<std::sync::Arc<GpuEdgeBatch>>,
     lines: Option<std::sync::Arc<TriangleLines>>,
     /// One buffer pair per pass. A plan is one instanced draw per pass now that
     /// face colouring is looked up in the shared table.
@@ -687,6 +687,8 @@ struct DrawGroup {
     /// prefix, one instance at a time.
     bodies: Vec<u32>,
     plan: std::sync::Arc<TessPlan>,
+    /// The one class per plan edge, shared with the plan and uploaded once.
+    edge_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]>,
     /// One placement per body, in the same order as `bodies`. A group never
     /// loses a body: `matrices.len() == bodies.len()` is the invariant that
     /// keeps a shared plan from collapsing a mirror back onto its input.
@@ -722,6 +724,7 @@ fn plan_draw_groups(
                 groups.push(DrawGroup {
                     bodies: vec![body as u32],
                     plan: std::sync::Arc::clone(&instance.plan),
+                    edge_classes: std::sync::Arc::clone(&instance.edge_classes),
                     matrices: vec![matrix],
                 });
             }
@@ -736,47 +739,10 @@ fn prepare_triangle_lines_for_plan(
     mesh: &GpuMesh,
     plan: &TessPlan,
 ) -> Option<TriangleLines> {
-    let mut indices: Vec<u32> = Vec::new();
     // A resident mesh contains exactly one plan, so there is one part and one
     // line range; every instance reuses that range.
     let part = mesh.parts.first()?;
-    let start = 0u32;
-    let mut face_bases = std::collections::BTreeMap::new();
-    for global in part.vertices.clone() {
-        let Some(face) = mesh.vertex_face.get(global as usize) else { continue };
-        face_bases.entry(*face).or_insert(global);
-    }
-    for face in &plan.faces {
-        let Some(&base) = face_bases.get(&face.face) else { continue };
-        let poles: std::collections::BTreeSet<u32> =
-            face.poles.iter().map(|pole| pole.node).collect();
-        let mut valence = vec![0u32; face.uv.len()];
-        for triangle in &face.triangles {
-            for node in triangle {
-                if let Some(count) = valence.get_mut(*node as usize) {
-                    *count += 1;
-                }
-            }
-        }
-        for triangle in &face.triangles {
-            let [a, b, c] = *triangle;
-            let fan_centre = [a, b, c].iter().any(|node| {
-                poles.contains(node)
-                    || valence.get(*node as usize).is_some_and(|count| *count >= 10)
-            });
-            if fan_centre {
-                continue;
-            }
-            for (from, to) in [(a, b), (b, c), (c, a)] {
-                let vertex_count = part.vertices.end - base;
-                if from >= vertex_count || to >= vertex_count {
-                    continue;
-                }
-                indices.push(base + from);
-                indices.push(base + to);
-            }
-        }
-    }
+    let indices = triangle_line_indices(plan, &mesh.vertex_face, part.vertices.clone());
     if indices.is_empty() {
         return None;
     }
@@ -787,7 +753,7 @@ fn prepare_triangle_lines_for_plan(
         mapped_at_creation: false,
     });
     queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&indices));
-    Some(TriangleLines { indices: buffer, ranges: vec![(start, indices.len() as u32)] })
+    Some(TriangleLines { indices: buffer, ranges: vec![(0, indices.len() as u32)] })
 }
 
 /// Compute fills created during one prepare pass.
@@ -830,12 +796,22 @@ fn resident_mesh(
     tess: &TessGpu,
     cache: &mut std::collections::HashMap<usize, ResidentMesh>,
     plan: &std::sync::Arc<TessPlan>,
+    edge_classes: &[nodecraft_layers::PlanEdgeClass],
     triangles: bool,
+    edge_renderer: &mut EdgeRenderer,
     residency: &mut Residency,
 ) -> Option<std::sync::Arc<GpuMesh>> {
     let key = std::sync::Arc::as_ptr(plan) as usize;
     if let Some(resident) = cache.get_mut(&key) {
         residency.touch(key);
+        if resident.edges.is_none() {
+            let batch = EdgeCpuBatch::from_plan(plan.as_ref(), &[], edge_classes);
+            resident.edges = GpuEdgeBatch::upload(edge_renderer, device, queue, &batch);
+            if let Some(edges) = resident.edges.as_ref() {
+                resident.bytes = resident.bytes.saturating_add(edges.bytes);
+                residency.add_bytes(key, edges.bytes);
+            }
+        }
         if triangles && resident.lines.is_none() {
             resident.lines = prepare_triangle_lines_for_plan(device, queue, &resident.mesh, plan.as_ref())
                 .map(std::sync::Arc::new);
@@ -863,14 +839,19 @@ fn resident_mesh(
     let lines_bytes = lines
         .as_ref()
         .map_or(0, |lines| lines.indices.size() + lines.ranges.len() as u64 * 8);
+    let edge_batch = EdgeCpuBatch::from_plan(plan.as_ref(), &[], edge_classes);
+    let edges = GpuEdgeBatch::upload(edge_renderer, device, queue, &edge_batch);
+    let edge_bytes = edges.as_ref().map_or(0, |edges| edges.bytes);
     let bytes = mesh.vertex_count as u64 * solidcraft_viewport_gpu::VERTEX_STRIDE
         + mesh.index_count as u64 * 4
-        + lines_bytes;
+        + lines_bytes
+        + edge_bytes;
     cache.insert(
         key,
         ResidentMesh {
             plan: std::sync::Arc::clone(plan),
             mesh: std::sync::Arc::clone(&mesh),
+            edges,
             lines,
             instances: std::collections::HashMap::new(),
             faces: std::collections::HashMap::new(),
@@ -943,6 +924,8 @@ fn prepare_plan_chunks(
     extra: Option<[[f32; 4]; 4]>,
     triangles: bool,
     pass: InstanceSlot,
+    edge_renderer: &mut EdgeRenderer,
+    mut edge_pick_next: Option<&mut u32>,
     residency: &mut Residency,
 ) -> Vec<PlanChunk> {
     let multiple_faces = plans.len() > 1;
@@ -956,7 +939,9 @@ fn prepare_plan_chunks(
             tess,
             cache,
             &group.plan,
+            &group.edge_classes,
             triangles,
+            edge_renderer,
             residency,
         ) else {
             continue;
@@ -1068,11 +1053,41 @@ fn prepare_plan_chunks(
         queue.write_buffer(&body_buffer, 0, bytemuck::cast_slice(&group.bodies));
         let key = std::sync::Arc::as_ptr(&group.plan) as usize;
         let lines = cache.get(&key).and_then(|resident| resident.lines.clone());
+        let edges = cache.get(&key).and_then(|resident| resident.edges.clone());
+        let edge_count = edges.as_ref().map_or(0, |edges| edges.ranges.len() as u32);
+        let bases: Vec<u32> = {
+            let mut next = 0;
+            if let Some(value) = edge_pick_next.as_deref() {
+                next = *value;
+            }
+            (0..needed)
+                .map(|slot| next + slot * edge_count)
+                .collect()
+        };
+        if let Some(value) = edge_pick_next.as_deref_mut() {
+            *value = value.saturating_add(needed.saturating_mul(edge_count));
+        }
+        let edge_bases = (edge_count > 0 && pass == InstanceSlot::Main).then(|| {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("viewport-plan-edge-pick-bases"),
+                size: (bases.len().max(1) * std::mem::size_of::<u32>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&bases));
+            std::sync::Arc::new(buffer)
+        });
+        let edge_pick_base = bases.first().copied().unwrap_or(0);
         chunks.push(PlanChunk {
             mesh,
             face_ids,
             instances: instance_buffer,
             bodies: body_buffer,
+            body_list: group.bodies.clone(),
+            edges,
+            edge_bases,
+            edge_count,
+            edge_pick_base,
             table: std::sync::Arc::clone(&table),
             instance_count: needed,
             instance_hash,
@@ -1093,6 +1108,15 @@ struct PlanChunk {
     instances: std::sync::Arc<wgpu::Buffer>,
     /// Global body index per instance, parallel to `instances`.
     bodies: std::sync::Arc<wgpu::Buffer>,
+    /// Global body indices in instance order, for edge highlights and picking.
+    body_list: Vec<u32>,
+    /// Local-space ribbons shared by every body of this plan.
+    edges: Option<std::sync::Arc<GpuEdgeBatch>>,
+    /// Edge pick id base per instance, parallel to `instances`.
+    edge_bases: Option<std::sync::Arc<wgpu::Buffer>>,
+    /// Number of edges in the plan and this chunk's first pick index.
+    edge_count: u32,
+    edge_pick_base: u32,
     /// Shared colour table for the whole plan set. It changes only on a colour
     /// edit, never on a transform or mesh edit.
     table: std::sync::Arc<PlanColourTable>,
@@ -1117,7 +1141,9 @@ fn same_plan_geometry(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(old, new)| {
             old.target == new.target
+                && old.body == new.body
                 && std::sync::Arc::ptr_eq(&old.plan, &new.plan)
+                && old.edge_classes == new.edge_classes
                 && old.placement == new.placement
         })
 }
@@ -1137,7 +1163,7 @@ fn same_plan_set(a: &[PlanInstance], b: &[PlanInstance]) -> bool {
 /// plan's face count even when the display only authored some faces. Face
 /// colouring and the ignore-look override are table fills too, so every draw
 /// path uses the same lookup.
-fn colour_table_data(
+pub(crate) fn colour_table_data(
     plans: &[PlanInstance],
     colour: Option<[f32; 3]>,
     face_colours: bool,
@@ -1153,7 +1179,7 @@ fn colour_table_data(
             .max(1);
         for face in 0..count {
             let value = if face_colours {
-                face_colour(face as u32)
+                face_colour(instance.body, face as u32)
             } else if let Some(value) = colour {
                 value
             } else {
@@ -1282,6 +1308,30 @@ pub(crate) struct PlanState {
     ghost_dirty: bool,
     ghost_enabled: bool,
     ghost_matrix: Option<[[f32; 4]; 4]>,
+    /// Standard edge width in screen pixels. It reaches the ribbon shader through
+    /// a uniform only: changing it never touches a plan, chunk or edge buffer.
+    edge_width_px: f32,
+    /// `ViewSettings.edges && !zebra`, the same gate the old scene path used.
+    edges_enabled: bool,
+    /// `ViewSettings.show_seam_edges`, reaching the ribbon shader as a uniform
+    /// mask only. Changing it never rebuilds a plan, chunk or edge buffer.
+    show_seam_edges: bool,
+    /// The one ribbon renderer for plan edges, world fallback edges and
+    /// selection/hover highlights.
+    edges: EdgeRenderer,
+    world_edges: Option<std::sync::Arc<GpuEdgeBatch>>,
+    world_edge_ids: Vec<String>,
+    world_ghost_edges: Option<std::sync::Arc<GpuEdgeBatch>>,
+    world_ghost_edge_ids: Vec<String>,
+    /// New world-space edge data, uploaded by the next `prepare_chunks` when
+    /// the device and queue are available. Plan edges do not use this slot.
+    pending_world_edges: Option<EdgeCpuBatch>,
+    pending_world_ghost_edges: Option<EdgeCpuBatch>,
+    selected_edges: Vec<String>,
+    hovered_edge: Option<String>,
+    /// Pick-id table for the plan's local edges. Pick index 0 is "none"; the
+    /// rest follow chunk order, body slot and plan edge order.
+    edge_pick: GhostPickData,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -1305,6 +1355,10 @@ pub(crate) struct PlanDebug {
     pub table_uploads: u64,
     pub painted_chunks: u32,
     pub painted_instances: u32,
+    pub edge_width_px: f32,
+    pub edge_uploads: u64,
+    pub edge_draws: u64,
+    pub edge_pick_entries: usize,
     pub resident_count: usize,
     pub resident_bytes: u64,
 }
@@ -1351,6 +1405,19 @@ impl PlanState {
             ghost_dirty: false,
             ghost_enabled: false,
             ghost_matrix: None,
+            edge_width_px: crate::viewport::default_edge_width_px(),
+            edges_enabled: true,
+            show_seam_edges: false,
+            edges: EdgeRenderer::install(device, format, samples, depth, reversed),
+            world_edges: None,
+            world_edge_ids: Vec::new(),
+            world_ghost_edges: None,
+            world_ghost_edge_ids: Vec::new(),
+            pending_world_edges: None,
+            pending_world_ghost_edges: None,
+            selected_edges: Vec::new(),
+            hovered_edge: None,
+            edge_pick: GhostPickData::default(),
         }
     }
 
@@ -1485,6 +1552,107 @@ impl PlanState {
         self.translucent = translucent;
     }
 
+    /// A width change is a uniform value, not geometry. The plan chunks, their
+    /// edge buffers and every instance buffer stay exactly as they are.
+    pub(crate) fn set_edge_width(&mut self, width_px: f32) {
+        self.edge_width_px = width_px.clamp(0.1, 16.0);
+    }
+
+    pub(crate) fn set_edges_enabled(&mut self, enabled: bool) {
+        self.edges_enabled = enabled;
+    }
+
+    /// Seams are a uniform mask over the class already in each edge vertex. No
+    /// plan, chunk, edge buffer or pick table changes.
+    pub(crate) fn set_show_seam_edges(&mut self, show: bool) {
+        self.show_seam_edges = show;
+    }
+
+    /// Install world-space fallback edges (the CPU renderer or a comparison
+    /// overlay). Plan edges never come through here: they are already resident
+    /// with their plan.
+    pub(crate) fn set_world_edges(&mut self, edges: EdgeCpuBatch) {
+        self.pending_world_edges = Some(edges);
+    }
+
+    pub(crate) fn set_world_ghost_edges(&mut self, edges: EdgeCpuBatch) {
+        self.pending_world_ghost_edges = Some(edges);
+    }
+
+    /// The drawn selection and hover. This is CPU-side id lookup; the GPU only
+    /// gets a handful of extra range draws, never a rebuilt buffer.
+    pub(crate) fn set_edge_selection(&mut self, selected: Vec<String>, hovered: Option<String>) {
+        if self.selected_edges == selected && self.hovered_edge == hovered {
+            return;
+        }
+        self.selected_edges = selected;
+        self.hovered_edge = hovered;
+    }
+
+    pub(crate) fn edge_pick_data(&self) -> &GhostPickData {
+        &self.edge_pick
+    }
+
+    /// Rebuild the plan-edge pick id table. The index of an edge here is the
+    /// same number the plan edge pick shader writes, so a readback index resolves
+    /// without any CPU world-space point list.
+    fn rebuild_edge_pick_data(&mut self) {
+        let multiple = self.plans.len() > 1;
+        let mut edges = vec![(String::new(), [0.0; 3])];
+        for chunk in &self.chunks {
+            if chunk.edge_count == 0 {
+                continue;
+            }
+            for (slot, body) in chunk.body_list.iter().enumerate() {
+                let Some(instance) = self.plans.get(*body as usize) else { continue };
+                debug_assert_eq!(
+                    chunk.edge_pick_base as usize + slot * chunk.edge_count as usize,
+                    edges.len(),
+                    "edge pick bases must follow the resolution table order",
+                );
+                for edge_index in 0..chunk.edge_count as usize {
+                    let id = instance
+                        .edge_ids
+                        .get(edge_index)
+                        .and_then(Clone::clone)
+                        .unwrap_or_else(|| format!("edge:{edge_index}"));
+                    let id = if multiple {
+                        format!("body:{body}:{id}")
+                    } else {
+                        id
+                    };
+                    edges.push((id, plan_edge_midpoint(instance, edge_index)));
+                }
+            }
+        }
+        self.edge_pick = GhostPickData {
+            multi_body: multiple,
+            segments: std::sync::Arc::from(Vec::new()),
+            edges,
+        };
+    }
+
+    /// Draw plan-local edge ids into the pick target with the shared ribbon
+    /// vertex function. Every body instance carries its own pick base.
+    pub(crate) fn paint_edge_ids(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+    ) {
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, bind, &[]);
+        for chunk in &self.chunks {
+            let (Some(edges), Some(bases)) = (chunk.edges.as_ref(), chunk.edge_bases.as_ref()) else {
+                continue;
+            };
+            pass.set_vertex_buffer(0, edges.buffer.slice(..));
+            pass.set_vertex_buffer(1, chunk.instances.slice(..));
+            pass.set_vertex_buffer(2, bases.slice(..));
+            pass.draw(0..edges.vertex_count, 0..chunk.instance_count);
+        }
+    }
+
     /// The View menu's face-colours mode is a table fill on the plan path. It
     /// does not rebuild chunks, meshes or instance buffers.
     pub(crate) fn set_face_colours(&mut self, enabled: bool) {
@@ -1562,6 +1730,7 @@ impl PlanState {
         self.colour_table = None;
         self.colour_table_dirty = false;
         self.clear_transient();
+        self.edge_pick = GhostPickData::default();
         self.dirty = false;
         // Resident meshes deliberately survive; they hold their plan Arcs and
         // are bounded by the LRU budget (Step 2).
@@ -1609,6 +1778,10 @@ impl PlanState {
             table_uploads: self.table_uploads,
             painted_chunks: self.painted_chunks.load(std::sync::atomic::Ordering::Relaxed),
             painted_instances: self.painted_instances.load(std::sync::atomic::Ordering::Relaxed),
+            edge_width_px: self.edge_width_px,
+            edge_uploads: self.edges.uploads,
+            edge_draws: self.edges.draws,
+            edge_pick_entries: self.edge_pick.edges.len(),
             resident_count: self.resident.len(),
             resident_bytes: self.residency.bytes,
         }
@@ -1629,10 +1802,54 @@ impl PlanState {
         queue: &wgpu::Queue,
         uniforms: &ObjectUniforms,
         preview: Option<[[f32; 4]; 4]>,
+        size_px: [f32; 2],
     ) {
         if let Some(renderer) = self.renderer.as_ref() {
             renderer.prepare(queue, uniforms, preview, self.ghost_matrix);
         }
+        let theme = crate::theme::get();
+        let main_transform = preview.unwrap_or_else(identity_matrix);
+        let ghost_transform = self.ghost_matrix.unwrap_or_else(identity_matrix);
+        let (standard, ghost, selected, hover) = edge_widths(self.edge_width_px);
+        self.edges.write_uniforms(
+            queue,
+            EdgeUniforms::new(
+                uniforms.view_proj(),
+                main_transform,
+                size_px,
+                standard,
+                [0.0, 0.0, 0.0, 1.0],
+                true,
+            )
+            .show_seams(self.show_seam_edges),
+            EdgeUniforms::new(
+                uniforms.view_proj(),
+                ghost_transform,
+                size_px,
+                ghost,
+                theme_colour(theme.ghost_edge),
+                false,
+            )
+            .show_seams(self.show_seam_edges),
+            EdgeUniforms::new(
+                uniforms.view_proj(),
+                main_transform,
+                size_px,
+                selected,
+                theme_colour(theme.accent),
+                true,
+            )
+            .show_seams(self.show_seam_edges),
+            EdgeUniforms::new(
+                uniforms.view_proj(),
+                main_transform,
+                size_px,
+                hover,
+                theme_colour(theme.highlight),
+                true,
+            )
+            .show_seams(self.show_seam_edges),
+        );
     }
 
     /// Advance the staged plan set. The uniform upload is a separate step
@@ -1643,6 +1860,14 @@ impl PlanState {
     pub(crate) fn prepare_chunks(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         let started = std::time::Instant::now();
         self.last_uploads = 0;
+        if let Some(edges) = self.pending_world_edges.take() {
+            self.world_edge_ids.clone_from(&edges.ids);
+            self.world_edges = GpuEdgeBatch::upload(&mut self.edges, device, queue, &edges);
+        }
+        if let Some(edges) = self.pending_world_ghost_edges.take() {
+            self.world_ghost_edge_ids.clone_from(&edges.ids);
+            self.world_ghost_edges = GpuEdgeBatch::upload(&mut self.edges, device, queue, &edges);
+        }
         if self.tess.is_none() {
             self.tess = self.tess_ready.as_ref().and_then(|ready| ready.get().cloned());
         }
@@ -1652,6 +1877,7 @@ impl PlanState {
             return;
         };
         let mut fills = PlanFills::new();
+        let mut edge_pick_next = 1u32;
         if let Some(mut pending) = self.pending.take() {
             if !pending.enabled || pending.plans.is_empty() {
                 self.plans = pending.plans;
@@ -1694,7 +1920,9 @@ impl PlanState {
                         &tess,
                         &mut self.resident,
                         &instance.plan,
+                        &instance.edge_classes,
                         pending.triangles,
+                        &mut self.edges,
                         &mut self.residency,
                     )
                     .is_some()
@@ -1747,6 +1975,8 @@ impl PlanState {
                         None,
                         pending.triangles,
                         InstanceSlot::Main,
+                        &mut self.edges,
+                        Some(&mut edge_pick_next),
                         &mut self.residency,
                     );
                     self.chunk_builds = self.chunk_builds.saturating_add(1);
@@ -1763,6 +1993,7 @@ impl PlanState {
                         .map(|instance| std::sync::Arc::as_ptr(&instance.plan) as usize)
                         .collect();
                     self.residency.touch_set(&keys);
+                    self.rebuild_edge_pick_data();
                 } else {
                     self.pending = Some(pending);
                 }
@@ -1794,10 +2025,13 @@ impl PlanState {
                 None,
                 self.triangles,
                 InstanceSlot::Main,
+                &mut self.edges,
+                Some(&mut edge_pick_next),
                 &mut self.residency,
             );
             self.chunk_builds = self.chunk_builds.saturating_add(1);
             self.colour_table_dirty = false;
+            self.rebuild_edge_pick_data();
         } else if self.enabled && self.colour_table_dirty {
             self.colour_table_dirty = false;
             let table = {
@@ -1852,6 +2086,8 @@ impl PlanState {
                     None,
                     false,
                     InstanceSlot::Ghost,
+                    &mut self.edges,
+                    None,
                     &mut self.residency,
                 );
                 self.chunk_builds = self.chunk_builds.saturating_add(1);
@@ -1994,6 +2230,171 @@ impl PlanState {
             );
         }
     }
+
+    /// Draw every B-rep edge through the one ribbon pipeline. Plan edges are
+    /// local-space buffers instanced with the plan's own instance buffer; world
+    /// fallback edges use the identity instance. Selection and hover ranges are
+    /// extra draws over the same buffers, never a second expansion.
+    pub(crate) fn paint_edges(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'static>,
+        plan_active: bool,
+    ) {
+        if self.edges_enabled {
+            if plan_active {
+                for chunk in &self.chunks {
+                    if let Some(edges) = &chunk.edges {
+                        self.edges.paint(
+                            pass,
+                            edges,
+                            &chunk.instances,
+                            chunk.instance_count,
+                            EdgeStyle::Standard,
+                        );
+                    }
+                }
+                for chunk in &self.ghost_chunks {
+                    if let Some(edges) = &chunk.edges {
+                        self.edges.paint(
+                            pass,
+                            edges,
+                            &chunk.instances,
+                            chunk.instance_count,
+                            EdgeStyle::Ghost,
+                        );
+                    }
+                }
+            } else {
+                if let Some(edges) = &self.world_edges {
+                    self.edges.paint_world(pass, edges, EdgeStyle::Standard);
+                }
+                if let Some(edges) = &self.world_ghost_edges {
+                    self.edges.paint_world(pass, edges, EdgeStyle::Ghost);
+                }
+            }
+        }
+        self.paint_edge_highlights(pass, plan_active);
+    }
+
+    fn paint_edge_highlights(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'static>,
+        plan_active: bool,
+    ) {
+        let selected = self.selected_edges.clone();
+        let hovered = self
+            .hovered_edge
+            .clone()
+            .filter(|id| !selected.iter().any(|selected| selected == id));
+        if plan_active {
+            for id in &selected {
+                self.paint_plan_edge_id(pass, id, EdgeStyle::Selected);
+            }
+            if let Some(id) = hovered.as_deref() {
+                self.paint_plan_edge_id(pass, id, EdgeStyle::Hover);
+            }
+        } else {
+            for id in &selected {
+                self.paint_world_edge_id(pass, id, EdgeStyle::Selected);
+            }
+            if let Some(id) = hovered.as_deref() {
+                self.paint_world_edge_id(pass, id, EdgeStyle::Hover);
+            }
+        }
+    }
+
+    fn paint_plan_edge_id(&mut self, pass: &mut wgpu::RenderPass<'static>, id: &str, style: EdgeStyle) {
+        let Some((batch, instances, instance, range)) = self.plan_edge_id(id) else {
+            return;
+        };
+        self.edges.paint_range(pass, &batch, &instances, instance, range, style);
+    }
+
+    fn plan_edge_id(
+        &self,
+        id: &str,
+    ) -> Option<(std::sync::Arc<GpuEdgeBatch>, std::sync::Arc<wgpu::Buffer>, u32, (u32, u32))> {
+        let multiple = self.plans.len() > 1;
+        let (body, edge_id) = split_body_id(id, multiple);
+        let instance = self.plans.get(body)?;
+        let edge_index = plan_edge_index(instance, edge_id, 0)?;
+        for chunk in &self.chunks {
+            let Some(slot) = chunk.body_list.iter().position(|candidate| *candidate as usize == body) else {
+                continue;
+            };
+            let batch = chunk.edges.as_ref()?;
+            let range = batch.range(edge_index)?;
+            return Some((
+                std::sync::Arc::clone(batch),
+                std::sync::Arc::clone(&chunk.instances),
+                slot as u32,
+                range,
+            ));
+        }
+        None
+    }
+
+    fn paint_world_edge_id(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'static>,
+        id: &str,
+        style: EdgeStyle,
+    ) {
+        let Some(batch) = self.world_edges.as_ref() else { return };
+        let Some(index) = self.world_edge_ids.iter().position(|candidate| candidate == id) else {
+            return;
+        };
+        let Some(range) = batch.range(index) else { return };
+        self.edges.paint_world_range(pass, batch, range, style);
+    }
+}
+
+fn plan_edge_midpoint(instance: &PlanInstance, edge_index: usize) -> [f64; 3] {
+    let Some(points) = instance.plan.edges.get(edge_index) else {
+        return [0.0; 3];
+    };
+    let Some(point) = points.get(points.len() / 2).copied().or_else(|| points.first().copied()) else {
+        return [0.0; 3];
+    };
+    let matrix = instance_matrix(&instance.placement);
+    [
+        f64::from(matrix[0][0]) * point.x
+            + f64::from(matrix[1][0]) * point.y
+            + f64::from(matrix[2][0]) * point.z
+            + f64::from(matrix[3][0]),
+        f64::from(matrix[0][1]) * point.x
+            + f64::from(matrix[1][1]) * point.y
+            + f64::from(matrix[2][1]) * point.z
+            + f64::from(matrix[3][1]),
+        f64::from(matrix[0][2]) * point.x
+            + f64::from(matrix[1][2]) * point.y
+            + f64::from(matrix[2][2]) * point.z
+            + f64::from(matrix[3][2]),
+    ]
+}
+
+/// `body:N:edge:M` for a multi-body display; otherwise the bare edge id.
+fn split_body_id(id: &str, multiple: bool) -> (usize, &str) {
+    if multiple && let Some(rest) = id.strip_prefix("body:")
+        && let Some((body, edge)) = rest.split_once(':')
+        && let Ok(body) = body.parse()
+    {
+        return (body, edge);
+    }
+    (0, id)
+}
+
+fn plan_edge_index(instance: &PlanInstance, id: &str, fallback_base: usize) -> Option<usize> {
+    if let Some(index) = instance
+        .edge_ids
+        .iter()
+        .position(|candidate| candidate.as_deref() == Some(id))
+    {
+        return Some(index);
+    }
+    id.strip_prefix("edge:")
+        .and_then(|index| index.parse::<usize>().ok())
+        .filter(|index| *index >= fallback_base)
 }
 
 #[cfg(test)]
@@ -2005,8 +2406,10 @@ mod tests {
             target: String::new(),
             plan: std::sync::Arc::new(TessPlan::default()),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         }
     }
 
@@ -2017,8 +2420,10 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors: Vec::new(),
+            body: 0,
             placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let placements = vec![
             nodecraft_display::Placement::identity(),
@@ -2102,29 +2507,23 @@ mod tests {
             assert_eq!(*matrix, instance_matrix(&instance.placement));
         }
 
-        // The CPU display path turns the same transforms into edge points.
-        let mut expected = Vec::new();
+        // Edge geometry is no longer transformed per point on the CPU. Each
+        // copy shares the plan's local-space polylines and the same instance
+        // matrix that places its triangles.
+        assert_eq!(
+            planned.bounds_mesh.vertices.len(),
+            8,
+            "the display payload is a bounds carrier, not an edge copy",
+        );
+        assert!(planned.bounds_mesh.brep_edges.is_empty());
+        let edge_segments = |instance: &PlanInstance| -> usize {
+            instance.plan.edges.iter().map(|edge| edge.len().saturating_sub(1)).sum()
+        };
+        let shared_segments = edge_segments(&planned.plans[0]);
+        assert!(shared_segments > 0);
         for instance in &planned.plans {
-            let matrix = glam::Mat4::from_cols_array_2d(&instance_matrix(&instance.placement));
-            for edge in &instance.plan.edges {
-                for point in edge {
-                    let transformed = matrix.transform_point3(glam::Vec3::new(
-                        point.x as f32,
-                        point.y as f32,
-                        point.z as f32,
-                    ));
-                    expected.push([transformed.x, transformed.y, transformed.z]);
-                }
-            }
-        }
-        assert_eq!(expected.len(), planned.edge_mesh.vertices.len());
-        for (index, (expected, actual)) in expected.iter().zip(&planned.edge_mesh.vertices).enumerate() {
-            for axis in 0..3 {
-                assert!(
-                    (expected[axis] - actual[axis]).abs() < 1.0e-3,
-                    "edge point {index} axis {axis}: plan_math {expected:?} != display {actual:?}",
-                );
-            }
+            assert_eq!(edge_segments(instance), shared_segments);
+            assert!(std::sync::Arc::ptr_eq(&planned.plans[0].plan, &instance.plan));
         }
     }
 
@@ -2132,11 +2531,13 @@ mod tests {
     fn draw_groups_instance_bodies_with_different_colourings() {
         let plan = std::sync::Arc::new(TessPlan::default());
         let instance = |face_colors: Vec<[f32; 3]>| PlanInstance {
+            body: 0,
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let red = vec![[1.0, 0.0, 0.0]];
         let green = vec![[0.0, 1.0, 0.0]];
@@ -2162,8 +2563,10 @@ mod tests {
             target: "t".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let moved = PlanInstance {
             placement: nodecraft_display::Placement::from_ops([nodecraft_display::DisplayTransform::Place {
@@ -2192,20 +2595,22 @@ mod tests {
             faces: vec![Default::default(); 2],
             ..Default::default()
         });
-        let instance = |face_colors: Vec<[f32; 3]>| PlanInstance {
+        let instance = |body: u64, face_colors: Vec<[f32; 3]>| PlanInstance {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan),
             face_colors,
+            body,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let red = [1.0, 0.0, 0.0];
         let green = [0.0, 1.0, 0.0];
         let blue = [0.0, 0.0, 1.0];
         let plans = vec![
-            instance(vec![red, green]),
-            instance(vec![blue]),
-            instance(Vec::new()),
+            instance(11, vec![red, green]),
+            instance(22, vec![blue]),
+            instance(33, Vec::new()),
         ];
         let (colours, offsets) = colour_table_data(&plans, None, false);
         assert_eq!(offsets, vec![0, 2, 4], "each body starts its own slice");
@@ -2226,16 +2631,77 @@ mod tests {
         let (colours, _) = colour_table_data(&plans, Some([0.4, 0.5, 0.6]), false);
         assert!(colours.iter().all(|colour| *colour == [0.4, 0.5, 0.6, 0.0]));
 
-        // Face-colours mode fills the table from the shared palette, per face.
-        let (colours, _) = colour_table_data(&plans, None, true);
-        for (face, colour) in colours.iter().enumerate() {
-            let expected = face_colour((face % 2) as u32);
-            assert_eq!(
-                *colour,
-                [expected[0], expected[1], expected[2], 0.0],
-                "face {face} must use the palette colour, not a body colour",
-            );
+        // Face-colours mode fills the table from the shared hash, per body and
+        // per face.
+        let (colours, offsets) = colour_table_data(&plans, None, true);
+        for (body, instance) in plans.iter().enumerate() {
+            for face in 0..2u32 {
+                let expected = face_colour(instance.body, face);
+                assert_eq!(
+                    colours[offsets[body] as usize + face as usize],
+                    [expected[0], expected[1], expected[2], 0.0],
+                    "body {body} face {face} must use its own hashed colour",
+                );
+            }
         }
+        assert_ne!(
+            face_colour(plans[0].body, 0),
+            face_colour(plans[1].body, 0),
+            "two bodies must not share face 0's colour",
+        );
+        assert_ne!(
+            face_colour(plans[0].body, 0),
+            face_colour(plans[0].body, 1),
+            "adjacent faces of one body must differ",
+        );
+    }
+
+    /// Face colours are a function of the body identity and face number, not of
+    /// the plan's position in the list. Two evaluations of the same plan set,
+    /// and the same set with its plan list reordered, must produce identical
+    /// tables.
+    #[test]
+    fn face_colour_table_is_deterministic_across_evaluations_and_plan_order() {
+        let shared = std::sync::Arc::new(TessPlan {
+            faces: vec![Default::default(); 2],
+            ..Default::default()
+        });
+        let instance = |body: u64| PlanInstance {
+            target: "test".into(),
+            plan: std::sync::Arc::clone(&shared),
+            face_colors: Vec::new(),
+            body,
+            placement: nodecraft_display::Placement::identity(),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
+        };
+        let first = vec![instance(1), instance(2)];
+        let again = vec![instance(1), instance(2)];
+        let reordered = vec![instance(2), instance(1)];
+        let table = |plans: &[PlanInstance]| {
+            let (colours, offsets) = colour_table_data(plans, None, true);
+            plans
+                .iter()
+                .enumerate()
+                .map(|(index, instance)| {
+                    let start = offsets[index] as usize;
+                    (instance.body, colours[start..start + 2].to_vec())
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let first_table = table(&first);
+        assert_eq!(first_table, table(&again), "the same identities re-evaluate");
+        assert_eq!(first_table, table(&reordered), "reordering must not recolour");
+        assert_ne!(
+            first_table[&1][0],
+            first_table[&2][0],
+            "two instances of one shared plan differ on face 0",
+        );
+        assert_ne!(
+            first_table[&1][0],
+            first_table[&1][1],
+            "adjacent faces of one instance differ",
+        );
     }
 
     #[test]
@@ -2326,8 +2792,10 @@ mod tests {
             target: "test".into(),
             plan,
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         state.set_plans(vec![instance(std::sync::Arc::clone(&old))], true, None, 1);
         state.prepare_chunks(&device, &queue);
@@ -2381,6 +2849,7 @@ mod tests {
         let shared = box_plan_sized(10.0);
         let faces = shared.faces.len();
         let instance = |face_colors: Vec<[f32; 3]>, x: f64| PlanInstance {
+            body: 0,
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors,
@@ -2389,6 +2858,7 @@ mod tests {
                 rotation: [0.0; 3],
             }]),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let red = vec![[0.8, 0.05, 0.05]; faces];
         let green = vec![[0.05, 0.8, 0.05]; faces];
@@ -2500,8 +2970,10 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors: Vec::new(),
+            body: 0,
             placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let mirror = nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Mirror {
             plane: "yz",
@@ -2569,8 +3041,10 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors: Vec::new(),
+            body: 0,
             placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let placements = vec![
             nodecraft_display::Placement::identity(),
@@ -2637,6 +3111,7 @@ mod tests {
                 target: "scatter".into(),
                 plan: std::sync::Arc::clone(&shared),
                 face_colors: Vec::new(),
+                body: 0,
                 placement: if body == 0 {
                     nodecraft_display::Placement::identity()
                 } else {
@@ -2646,6 +3121,7 @@ mod tests {
                     })
                 },
                 edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
             })
             .collect();
         state.set_plans(plans, true, None, 1);
@@ -2689,8 +3165,10 @@ mod tests {
             target: format!("snapshot-{snapshot}"),
             plan,
             face_colors: Vec::new(),
+            body: 0,
             placement: nodecraft_display::Placement::identity(),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let first = box_plan_sized(10.0);
         state.set_plans(
@@ -2766,6 +3244,104 @@ mod tests {
         box_plan_sized(10.0)
     }
 
+    /// Every undirected triangle edge is drawn exactly once, including the
+    /// sphere pole fans the old valence skip blanked. The expected edges come
+    /// straight from the plan's faces, so the test is independent of the
+    /// helper's emission order.
+    #[test]
+    fn triangle_lines_emit_every_unique_sphere_edge_including_pole_fans() {
+        use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
+        const RADIUS: f64 = 20.0;
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let brep = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), RADIUS)
+            .expect("sphere");
+        // 0.025 keeps the pole fan well above the old valence >= 10 threshold.
+        let plan = nodecraft_layers::plan_kernel(&mut kernel, &brep, 0.025, None)
+            .expect("sphere display plan")
+            .plan;
+
+        // GpuMesh packs each plan face's vertices contiguously in plan order.
+        let mut vertex_face = Vec::new();
+        let mut face_bases = Vec::with_capacity(plan.faces.len());
+        for face in &plan.faces {
+            face_bases.push(vertex_face.len() as u32);
+            vertex_face.extend(std::iter::repeat_n(face.face, face.uv.len()));
+        }
+        let indices = triangle_line_indices(&plan, &vertex_face, 0..vertex_face.len() as u32);
+
+        let mut expected: std::collections::BTreeSet<(u32, u32)> =
+            std::collections::BTreeSet::new();
+        let mut triangles = 0usize;
+        let mut max_valence = 0usize;
+        let mut fan_node = 0u32;
+        for (face, &base) in plan.faces.iter().zip(&face_bases) {
+            let mut valence = vec![0usize; face.uv.len()];
+            for triangle in &face.triangles {
+                for node in triangle {
+                    if let Some(count) = valence.get_mut(*node as usize) {
+                        *count += 1;
+                    }
+                }
+            }
+            if let Some((node, &count)) =
+                valence.iter().enumerate().max_by_key(|(_, count)| **count)
+            {
+                if count > max_valence {
+                    max_valence = count;
+                    fan_node = base + node as u32;
+                }
+            }
+            for triangle in &face.triangles {
+                let [a, b, c] = *triangle;
+                for (from, to) in [(a, b), (b, c), (c, a)] {
+                    expected.insert((base + from.min(to), base + from.max(to)));
+                }
+                triangles += 1;
+            }
+        }
+        assert!(triangles > 0, "sphere plan has no triangles");
+        assert!(
+            max_valence >= 10,
+            "sphere pole fan must exercise the old valence >= 10 skip (max valence {max_valence})"
+        );
+
+        assert_eq!(
+            indices.len(),
+            2 * expected.len(),
+            "one index pair per unique triangle edge: {} indices for {} unique edges ({} triangles)",
+            indices.len(),
+            expected.len(),
+            triangles,
+        );
+        assert!(
+            indices.len() > 3 * triangles / 2,
+            "unique-edge emission must not duplicate shared edges: {} indices for {} triangles",
+            indices.len(),
+            triangles,
+        );
+
+        let emitted: std::collections::BTreeSet<(u32, u32)> = indices
+            .chunks_exact(2)
+            .map(|pair| (pair[0].min(pair[1]), pair[0].max(pair[1])))
+            .collect();
+        assert_eq!(emitted, expected, "emitted edges differ from the plan's unique edges");
+
+        // Every edge incident on the pole copy is a fan spoke or cap-ring edge;
+        // the old skip emitted none of them.
+        let expected_fan: std::collections::BTreeSet<(u32, u32)> = expected
+            .iter()
+            .filter(|(a, b)| *a == fan_node || *b == fan_node)
+            .copied()
+            .collect();
+        assert!(!expected_fan.is_empty(), "pole node {fan_node} has no plan edges");
+        let emitted_fan = expected_fan.iter().filter(|edge| emitted.contains(edge)).count();
+        assert_eq!(
+            emitted_fan,
+            expected_fan.len(),
+            "pole fan edges are missing from the wire indices (node {fan_node}, valence {max_valence})",
+        );
+    }
+
     fn read_buffer(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -2821,8 +3397,10 @@ mod tests {
                 target: "test".into(),
                 plan,
                 face_colors: Vec::new(),
+                body: 0,
                 placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
             }],
             true,
             None,
@@ -2848,4 +3426,232 @@ mod tests {
             "the resident GPU mesh must be filled even when no paint frame is submitted",
         );
     }
+
+    #[test]
+    fn changing_the_edge_width_only_updates_the_uniform_value() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        state.set_plans(vec![instance()], true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        let before = state.debug_counts();
+        state.set_edge_width(3.5);
+        let after = state.debug_counts();
+        assert_eq!(after.edge_width_px, 3.5);
+        assert_eq!(
+            after.chunk_builds, before.chunk_builds,
+            "an edge-width change must not rebuild a chunk",
+        );
+        assert_eq!(after.uploads, before.uploads);
+    }
+
+    #[test]
+    fn toggling_show_seam_edges_only_updates_the_uniform_mask() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let plan = box_plan();
+        state.set_plans(
+            vec![PlanInstance {
+                target: "seams".into(),
+                plan,
+                face_colors: Vec::new(),
+                body: 0,
+                placement: nodecraft_display::Placement::identity(),
+                edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
+            }],
+            true,
+            None,
+            1,
+        );
+        state.prepare_chunks(&device, &queue);
+        let before = state.debug_counts();
+        state.set_show_seam_edges(true);
+        let after = state.debug_counts();
+        assert_eq!(
+            after.chunk_builds, before.chunk_builds,
+            "a seam setting must not rebuild a chunk",
+        );
+        assert_eq!(
+            after.edge_uploads, before.edge_uploads,
+            "a seam setting must not re-upload an edge",
+        );
+        assert_eq!(after.uploads, before.uploads);
+        assert_eq!(after.edge_pick_entries, before.edge_pick_entries);
+    }
+
+
+    #[test]
+    fn moving_a_body_uploads_no_edge_data() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let plan = box_plan_sized(10.0);
+        let at = |x: f64| PlanInstance {
+            target: "move".into(),
+            plan: std::sync::Arc::clone(&plan),
+            face_colors: Vec::new(),
+            body: 0,
+            placement: nodecraft_display::Placement::from_ops([
+                nodecraft_display::DisplayTransform::Place {
+                    offset: [x, 0.0, 0.0],
+                    rotation: [0.0; 3],
+                },
+            ]),
+            edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
+        };
+        state.set_plans(vec![at(0.0)], true, None, 1);
+        state.prepare_chunks(&device, &queue);
+        let before = state.debug_counts();
+        assert!(before.edge_uploads > 0, "the plan's edges upload once");
+        assert!(before.edge_pick_entries > 1, "plan edges are pickable");
+
+        state.set_plans(vec![at(25.0)], true, None, 2);
+        state.prepare_chunks(&device, &queue);
+        let after = state.debug_counts();
+        assert_eq!(
+            after.edge_uploads, before.edge_uploads,
+            "a placement-only move must not upload edge data",
+        );
+        assert_eq!(after.edge_pick_entries, before.edge_pick_entries);
+        assert!(after.chunk_builds > before.chunk_builds, "instances were rebuilt");
+    }
+
+    #[test]
+    fn all_edge_draws_come_from_the_ribbon_pipeline() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let tess = TessGpu::new("test", device.clone(), queue.clone()).expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut state = PlanState::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            false,
+            Some(ready),
+        );
+        let plan = box_plan_sized(10.0);
+        state.set_plans(
+            vec![PlanInstance {
+                target: "edges".into(),
+                plan,
+                face_colors: Vec::new(),
+                body: 0,
+                placement: nodecraft_display::Placement::identity(),
+                edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
+            }],
+            true,
+            None,
+            1,
+        );
+        state.prepare_chunks(&device, &queue);
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("edge-draw-color"),
+            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("edge-draw-depth"),
+            size: wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("edge-draw"),
+        });
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("edge-draw-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            state.paint_edges(&mut pass, true);
+            state.set_edge_selection(vec!["edge:0".into()], None);
+            state.paint_edges(&mut pass, true);
+        }
+        queue.submit([encoder.finish()]);
+        let debug = state.debug_counts();
+        assert!(debug.edge_draws >= 2, "standard and highlighted edges both draw");
+    }
+
+
+    #[test]
+    fn every_edge_kind_width_derives_from_the_one_setting() {
+        assert_eq!(edge_widths(1.0), (1.0, 2.0, 3.0, 2.5));
+        assert_eq!(edge_widths(2.0), (2.0, 4.0, 6.0, 5.0));
+    }
+
 }

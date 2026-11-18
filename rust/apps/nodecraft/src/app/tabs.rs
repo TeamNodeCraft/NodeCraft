@@ -700,7 +700,6 @@ impl NodeCraftApp {
         self.cache_hits = cache_hits;
         self.cache_misses = cache_misses;
         if let Some(view) = view {
-            self.preview_detail = view.quality_detail;
             self.viewport.restore_view(view);
             self.camera_initialized = true;
         } else {

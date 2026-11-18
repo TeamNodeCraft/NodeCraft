@@ -512,6 +512,7 @@ impl BackdropRenderer {
         view_proj: [[f32; 4]; 4],
         blur_scale: [f32; 4],
         external_source: Option<(&wgpu::TextureView, [f32; 4])>,
+        mut profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>,
     ) {
                 let theme = crate::theme::get();
         // A neutral theme surface used as the frosted film; high coverage keeps
@@ -583,53 +584,80 @@ impl BackdropRenderer {
             self.renderer.prepare(device, queue, encoder, &backdrop);
         }
         if external_source.is_none() {
-            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("node-backdrop-scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 28.0 / 255.0,
-                            g: 28.0 / 255.0,
-                            b: 30.0 / 255.0,
-                            a: 1.0,
+            crate::gpu_profiler::render_pass(
+                profiler.as_deref_mut(),
+                crate::gpu_profiler::pass::BACKDROP_SCENE,
+                encoder,
+                wgpu::RenderPassDescriptor {
+                    label: Some(crate::gpu_profiler::pass::BACKDROP_SCENE),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.scene_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 28.0 / 255.0,
+                                g: 28.0 / 255.0,
+                                b: 30.0 / 255.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
                         }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let mut pass = pass.forget_lifetime();
-            self.renderer.paint(&backdrop, &mut pass, [0.0, 0.0, WIDTH as f32, HEIGHT as f32]);
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                },
+                |pass| {
+                    self.renderer.paint(
+                        &backdrop,
+                        pass,
+                        [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
+                    );
+                },
+            );
         }
 
-        let blur_pass = |encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, label: &str| {
-            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            let mut pass = pass.forget_lifetime();
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind, &[]);
-            pass.draw(0..3, 0..1);
+        let blur_pass = |encoder: &mut wgpu::CommandEncoder,
+                         view: &wgpu::TextureView,
+                         pipeline: &wgpu::RenderPipeline,
+                         bind: &wgpu::BindGroup,
+                         label: &'static str,
+                         profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>| {
+            crate::gpu_profiler::render_pass(
+                profiler,
+                label,
+                encoder,
+                wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                },
+                |pass| {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.draw(0..3, 0..1);
+                },
+            );
         };
 
         let bind_scene = external_bind.as_ref().unwrap_or(&self.bind_scene);
@@ -639,7 +667,8 @@ impl BackdropRenderer {
                 &self.final_view,
                 &self.scene_gamma,
                 bind_scene,
-                "node-backdrop-sharp",
+                crate::gpu_profiler::pass::BACKDROP_SHARP,
+                profiler.as_deref_mut(),
             );
             return;
         }
@@ -647,9 +676,30 @@ impl BackdropRenderer {
         // Apple-style backdrop: quarter-resolution separable Gaussian,
         // normalized edges, then a tinted upscale. No multi-level
         // reconstruction, so blur cannot accumulate apparent scale.
-        blur_pass(encoder, &self.blur_a_view, &self.gaussian_h, bind_scene, "node-backdrop-gaussian-h");
-        blur_pass(encoder, &self.blur_b_view, &self.gaussian_v, &self.bind_blur_a, "node-backdrop-gaussian-v");
-        blur_pass(encoder, &self.final_view, &self.gaussian_final, &self.bind_blur_b, "node-backdrop-gaussian-final");
+        blur_pass(
+            encoder,
+            &self.blur_a_view,
+            &self.gaussian_h,
+            bind_scene,
+            crate::gpu_profiler::pass::BACKDROP_BLUR_H,
+            profiler.as_deref_mut(),
+        );
+        blur_pass(
+            encoder,
+            &self.blur_b_view,
+            &self.gaussian_v,
+            &self.bind_blur_a,
+            crate::gpu_profiler::pass::BACKDROP_BLUR_V,
+            profiler.as_deref_mut(),
+        );
+        blur_pass(
+            encoder,
+            &self.final_view,
+            &self.gaussian_final,
+            &self.bind_blur_b,
+            crate::gpu_profiler::pass::BACKDROP_BLUR_FINAL,
+            profiler.as_deref_mut(),
+        );
         let _ = (&self._scene, &self._final_texture, &self.levels, &self.blur_a_view, &self.blur_b_view);        let _ = (&self._scene, &self._final_texture);
     }
 }

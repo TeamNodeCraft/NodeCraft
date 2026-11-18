@@ -15,12 +15,15 @@ use solidcore_record::Vec3;
 
 use crate::viewport::{ViewSettings, draws_grid};
 use solidcraft_viewport_gpu::depth_format;
-use solidcraft_viewport_gpu::view::{gpu_view_proj, reversed_depth};
-use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, MovingLayer, Palette, PaletteIndex, Renderer, SceneSlot, clip_hatches, clip_planes};
+use solidcraft_viewport_gpu::view::{
+    FACE_BIAS, depth_bias, depth_compare, gpu_view_proj, reversed_depth,
+};
+use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Palette, PaletteIndex, Renderer, SceneSlot, clip_hatches, clip_planes};
 use solidcraft_viewport::surface::OpaqueSurface;
 use solidcraft_viewport::Camera;
 
 use crate::adapter::DisplayMesh;
+use crate::edge_ribbon::EdgeCpuBatch;
 use crate::viewport_grid::grid_step;
 use crate::gpu_backdrop::BackdropRenderer;
 use solidcraft_geom::prelude::*;
@@ -379,6 +382,11 @@ pub(crate) struct PreparedObject {
 struct ObjectFaceIds {
     /// Pick id by display face index (`tri_face` value).
     by_face: Vec<u32>,
+    /// Body index by display face index, parsed from the `body:N:` prefix.
+    by_face_body: Vec<u32>,
+    /// B-rep face number by display face index (`face:N`). Synthetic names
+    /// fall back to the display face index, matching the pick id fallback.
+    by_face_number: Vec<u32>,
     /// Whether this display mesh names more than one body.
     multiple: bool,
 }
@@ -391,23 +399,21 @@ impl ObjectFaceIds {
         let bodies: std::collections::BTreeSet<u32> =
             display.face_ids.iter().map(|name| display_face_body(name)).collect();
         let multiple = bodies.len() > 1;
-        let by_face = display
-            .face_ids
-            .iter()
-            .enumerate()
-            .map(|(index, name)| match parse_display_face(name) {
-                Some((body, face)) => crate::gpu_pick::face_pick_id(body, face, multiple),
+        let mut by_face = Vec::with_capacity(display.face_ids.len());
+        let mut by_face_body = Vec::with_capacity(display.face_ids.len());
+        let mut by_face_number = Vec::with_capacity(display.face_ids.len());
+        for (index, name) in display.face_ids.iter().enumerate() {
+            let (body, face) = parse_display_face(name).unwrap_or_else(|| {
                 // A synthetic group name has no numeric B-rep face. Keep the
                 // body pickable by its display face index instead of dropping
                 // every id in the mesh.
-                None => crate::gpu_pick::face_pick_id(
-                    display_face_body(name),
-                    index as u32,
-                    multiple,
-                ),
-            })
-            .collect();
-        Self { by_face, multiple }
+                (display_face_body(name), index as u32)
+            });
+            by_face.push(crate::gpu_pick::face_pick_id(body, face, multiple));
+            by_face_body.push(body);
+            by_face_number.push(face);
+        }
+        Self { by_face, by_face_body, by_face_number, multiple }
     }
 
     /// A mesh with no display face strings (the coarse LOD upload). Its
@@ -417,20 +423,53 @@ impl ObjectFaceIds {
         let by_face = (0..=faces)
             .map(|face| crate::gpu_pick::face_pick_id(0, face, false))
             .collect();
-        Self { by_face, multiple: false }
+        Self {
+            by_face,
+            by_face_body: vec![0; faces as usize + 1],
+            by_face_number: (0..=faces).collect(),
+            multiple: false,
+        }
     }
 
     fn pick(&self, mesh: &CraftMesh, triangle: usize) -> u32 {
-        let face = mesh
-            .tri_face
-            .get(triangle)
-            .copied()
-            .unwrap_or(triangle as u32);
+        let face = self.face_index(mesh, triangle);
         self.by_face
             .get(face as usize)
             .copied()
             .unwrap_or_else(|| crate::gpu_pick::face_pick_id(0, face, self.multiple))
     }
+
+    /// `(body index, B-rep face number)` for a triangle.
+    fn body_face(&self, mesh: &CraftMesh, triangle: usize) -> (u32, u32) {
+        let face = self.face_index(mesh, triangle) as usize;
+        (
+            self.by_face_body.get(face).copied().unwrap_or(0),
+            self.by_face_number.get(face).copied().unwrap_or(face as u32),
+        )
+    }
+
+    fn face_index(&self, mesh: &CraftMesh, triangle: usize) -> u32 {
+        mesh.tri_face
+            .get(triangle)
+            .copied()
+            .unwrap_or(triangle as u32)
+    }
+}
+
+/// A display mesh without plan identities (an import or a coarse LOD) still
+/// needs deterministic per-body colours. This synthetic key keeps bodies
+/// distinct; plan-backed meshes carry the real identity in `body_ids`.
+fn fallback_body_id(body: u32) -> u64 {
+    nodecraft_display::body_instance_id(nodecraft_display::BodyKey::new(0, body), 0)
+}
+
+/// The stable identity for one body of a display mesh.
+fn display_body_id(display: &DisplayMesh, body: u32) -> u64 {
+    display
+        .body_ids
+        .get(body as usize)
+        .copied()
+        .unwrap_or_else(|| fallback_body_id(body))
 }
 
 /// The body a display face string belongs to, even when its face part is not
@@ -730,22 +769,54 @@ pub(crate) fn plan_object_shader() -> String {
 
 pub(crate) use crate::viewport::DEFAULT_FACE_COLOUR;
 
-pub(crate) fn face_colour(face: u32) -> [f32; 3] {
-    const PALETTE: [[f32; 3]; 12] = [
-        [0.78, 0.25, 0.25],
-        [0.25, 0.50, 0.82],
-        [0.30, 0.65, 0.38],
-        [0.86, 0.58, 0.18],
-        [0.55, 0.30, 0.72],
-        [0.20, 0.65, 0.65],
-        [0.82, 0.40, 0.55],
-        [0.40, 0.55, 0.75],
-        [0.65, 0.55, 0.25],
-        [0.50, 0.40, 0.70],
-        [0.25, 0.55, 0.55],
-        [0.70, 0.45, 0.35],
-    ];
-    PALETTE[(face as usize) % PALETTE.len()]
+/// HSL hue step between adjacent faces. The golden-ratio conjugate spreads
+/// successive face indices as far apart as possible, so a fan of faces never
+/// lands on two neighbouring hues.
+const FACE_HUE_STEP: f64 = 0.618_033_988_749_894_9;
+/// Saturation and lightness stay fixed inside the old palette's brightness
+/// band, so bodies and faces vary in hue only (the renderer's PBR lighting then
+/// supplies shading).
+const FACE_SATURATION: f64 = 0.58;
+const FACE_LIGHTNESS: f64 = 0.52;
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> [f32; 3] {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue.rem_euclid(1.0) * 6.0;
+    let x = chroma * (1.0 - (sector % 2.0 - 1.0).abs());
+    let (red, green, blue) = match sector as u32 {
+        0 => (chroma, x, 0.0),
+        1 => (x, chroma, 0.0),
+        2 => (0.0, chroma, x),
+        3 => (0.0, x, chroma),
+        4 => (x, 0.0, chroma),
+        _ => (chroma, 0.0, x),
+    };
+    let offset = lightness - chroma * 0.5;
+    [
+        (red + offset) as f32,
+        (green + offset) as f32,
+        (blue + offset) as f32,
+    ]
+}
+
+/// One body's face colour in Face colours mode.
+///
+/// The hue is a hash of the stable body instance identity (the Part's
+/// provenance key plus the copy ordinal, see
+/// [`nodecraft_display::body_instance_id`]) offset by golden-ratio steps per
+/// face. Colours therefore differ per body *and* per face, and the same
+/// `(body, face)` keeps its colour when the plan list is rebuilt or reordered.
+pub(crate) fn face_colour(body: u64, face: u32) -> [f32; 3] {
+    // SplitMix64 finalizer: a stable, well-mixed hue seed from the body id.
+    let mut seed = body;
+    seed ^= seed >> 30;
+    seed = seed.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    seed ^= seed >> 27;
+    seed = seed.wrapping_mul(0x94d0_49bb_1331_11eb);
+    seed ^= seed >> 31;
+    let body_hue = seed as f64 / u64::MAX as f64;
+    let hue = body_hue + f64::from(face) * FACE_HUE_STEP;
+    hsl_to_rgb(hue, FACE_SATURATION, FACE_LIGHTNESS)
 }
 
 /// Split a display mesh into chunks small enough for wgpu's per-buffer limit.
@@ -840,7 +911,8 @@ pub(crate) fn prepare_object(display: &DisplayMesh, view: &ViewSettings) -> Prep
         let fallback = (*pb - *pa).cross(*pc - *pa);
         let fallback = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z);
         let colour = if view.face_colours {
-            face_colour(mesh.tri_face.get(triangle_index).copied().unwrap_or(0))
+            let (body, face) = faces.body_face(mesh, triangle_index);
+            face_colour(display_body_id(display, body), face)
         } else if ignore_look {
             DEFAULT_FACE_COLOUR
         } else {
@@ -1226,17 +1298,7 @@ impl ObjectRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed {
-                    wgpu::CompareFunction::GreaterEqual
-                } else {
-                    wgpu::CompareFunction::LessEqual
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(opaque_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -1261,17 +1323,7 @@ impl ObjectRenderer {
                 })],
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(if reversed {
-                    wgpu::CompareFunction::GreaterEqual
-                } else {
-                    wgpu::CompareFunction::LessEqual
-                }),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(translucent_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -1296,15 +1348,7 @@ impl ObjectRenderer {
                 })],
             }),
             primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth,
-                depth_write_enabled: Some(false),
-                // The ghost is an overlay layer: never z-fight with the opaque
-                // breakpoint body underneath it.
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: Some(ghost_face_depth(reversed).state(depth)),
             multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
             multiview_mask: None,
             cache: None,
@@ -1548,6 +1592,7 @@ impl ObjectRenderer {
 /// plan pass over the object pass, so picking cannot disagree with the picture.
 fn paint_pick_face_ids(
     plan_active: bool,
+    plan_edges: bool,
     plan: Option<&crate::gpu_plan::PlanState>,
     object: Option<&ObjectRenderer>,
     pass: &mut wgpu::RenderPass<'_>,
@@ -1558,6 +1603,9 @@ fn paint_pick_face_ids(
         if let Some(plan) = plan {
             plan.paint_face_ids(pass, passes.face_id, binds.main);
             plan.paint_ghost_depth(pass, passes.ghost_depth, binds.ghost);
+            if plan_edges {
+                plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
+            }
         }
     } else if let Some(object) = object {
         object.paint_face_ids(pass, passes.object_face_id, binds.main);
@@ -1571,6 +1619,100 @@ pub(crate) fn identity_matrix() -> [[f32; 4]; 4] {
         [0.0, 0.0, 1.0, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ]
+}
+
+/// A pipeline's depth state, kept as a value so tests can assert the model
+/// directly instead of inspecting a compiled pipeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DepthPlan {
+    pub write: bool,
+    pub compare: wgpu::CompareFunction,
+    pub bias: wgpu::DepthBiasState,
+}
+
+impl DepthPlan {
+    pub(crate) fn state(self, format: wgpu::TextureFormat) -> wgpu::DepthStencilState {
+        wgpu::DepthStencilState {
+            format,
+            depth_write_enabled: Some(self.write),
+            depth_compare: Some(self.compare),
+            stencil: wgpu::StencilState::default(),
+            bias: self.bias,
+        }
+    }
+}
+
+/// Highlights sit on the face they copy, so they are pulled a few depth steps
+/// toward the eye. SolidCraft's `HIGHLIGHT_BIAS` is the same value; it is
+/// private there, so derive it from the public face bias instead of copying a
+/// second magic number.
+pub(crate) const HIGHLIGHT_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: -FACE_BIAS.constant,
+    slope_scale: -FACE_BIAS.slope_scale,
+    clamp: 0.0,
+};
+
+/// Removed preview material is pushed twice as far as an opaque face, so it
+/// stays behind the material it shares with the new shape. Matches SolidCraft's
+/// private `GHOST_BIAS`.
+pub(crate) const GHOST_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
+    constant: 2 * FACE_BIAS.constant,
+    slope_scale: 2.0 * FACE_BIAS.slope_scale,
+    clamp: 0.0,
+};
+
+/// Opaque faces are pushed away from the eye, so edges and other things on the
+/// face draw over them at any angle while an edge behind another body stays
+/// hidden. This is SolidCraft's `FACE_BIAS` model (#1434) applied to the
+/// NodeCraft plan and object passes.
+pub(crate) fn opaque_face_depth(reversed: bool) -> DepthPlan {
+    DepthPlan {
+        write: true,
+        compare: depth_compare(reversed, wgpu::CompareFunction::LessEqual),
+        bias: depth_bias(reversed, FACE_BIAS),
+    }
+}
+
+/// Ghost faces are an overlay: NodeCraft has always drawn them with `Always`
+/// and no depth write so the breakpoint body underneath cannot z-fight with
+/// them. The map in agents/review/2026-11-18-edge-ribbon-unify-map.md records
+/// this as the one deliberate difference from SolidCraft's ghost pass.
+pub(crate) fn ghost_face_depth(_reversed: bool) -> DepthPlan {
+    DepthPlan {
+        write: false,
+        compare: wgpu::CompareFunction::Always,
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Translucent faces are depth-tested but write no depth, so edges behind them
+/// remain visible. No bias: they are not a surface edges must win against.
+pub(crate) fn translucent_face_depth(reversed: bool) -> DepthPlan {
+    DepthPlan {
+        write: false,
+        compare: depth_compare(reversed, wgpu::CompareFunction::LessEqual),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Edges are tested against the same depth buffer as the faces but never
+/// write or bias it: the faces are pushed back, not the lines pulled forward.
+pub(crate) fn edge_depth(reversed: bool) -> DepthPlan {
+    DepthPlan {
+        write: false,
+        compare: depth_compare(reversed, wgpu::CompareFunction::LessEqual),
+        bias: wgpu::DepthBiasState::default(),
+    }
+}
+
+/// Selected and hovered edge copies are pulled slightly toward the eye so they
+/// cover the body's own edge at the same place.
+pub(crate) fn edge_highlight_depth(reversed: bool) -> DepthPlan {
+    DepthPlan {
+        write: false,
+        compare: depth_compare(reversed, wgpu::CompareFunction::LessEqual),
+        bias: depth_bias(reversed, HIGHLIGHT_BIAS),
+    }
 }
 
 /// Inverse transpose of the upper-left 3x3 of a column-major model matrix.
@@ -2184,13 +2326,13 @@ pub(crate) fn resolve_pick(
     data.edges.get(index as usize).cloned()
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct GhostPickData {
     pub multi_body: bool,
     /// POD segments; `id` is the pick index (0 = none).
     pub segments: std::sync::Arc<[crate::gpu_pick::PickSegment]>,
     /// Pick index 0 is reserved for "none"; use `resolve_pick`.
-    edges: Vec<(String, [f64; 3])>,
+    pub edges: Vec<(String, [f64; 3])>,
 }
 
 pub(crate) fn build_ghost_pick_data(edges: &[crate::adapter::DisplayEdge]) -> GhostPickData {
@@ -2222,7 +2364,7 @@ pub(crate) fn build_ghost_pick_data(edges: &[crate::adapter::DisplayEdge]) -> Gh
                 a: [a.x as f32, a.y as f32, a.z as f32],
                 id: index,
                 b: [b.x as f32, b.y as f32, b.z as f32],
-                _pad: 0,
+                class: edge.class.bits(),
             });
         }
     }
@@ -2263,6 +2405,9 @@ struct StagedEdges {
     key_serial: u64,
     display: Option<Arc<DisplayMesh>>,
     scene: GpuScene,
+    /// World-space fallback edge data for the CPU renderer. The plan path
+    /// carries its own local-space edge buffer with each resident plan.
+    edge_batch: EdgeCpuBatch,
 }
 
 #[derive(Clone)]
@@ -2384,8 +2529,6 @@ pub struct GpuViewport {
     /// Allocation order of `key`, so an already-drawn activation cannot roll
     /// back a newer immediate upload during that sync.
     key_serial: u64,
-    ghost_edge_slot: SceneSlot,
-    ghost_edge_key: u64,
     ghost_edge_matrix: Option<[[f32; 4]; 4]>,
     ghost_edge_present: bool,
     ghost_pick: GhostPickData,
@@ -2428,30 +2571,9 @@ pub struct GpuViewport {
     background: [u8; 4],
     target_format: wgpu::TextureFormat,
     reversed_depth: bool,
-}
-
-const GHOST_EDGE_WIDTH: f32 = 2.0;
-
-pub(crate) fn ghost_edge_scene(
-    edges: &[crate::adapter::DisplayEdge],
-    rgba: [u8; 4],
-    width: f32,
-) -> (GpuScene, usize) {
-    let mut scene = GpuScene::with_palette(Palette::with_stable(vec![rgba]));
-    let colour = PaletteIndex(0);
-    let mut segments = 0;
-    for edge in edges {
-        for pair in edge.points.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            let d = b - a;
-            if d.dot(d) <= 1.0e-20 {
-                continue;
-            }
-            scene.line(a.to_f32(), b.to_f32(), colour, width, true);
-            segments += 1;
-        }
-    }
-    (scene, segments)
+    /// Mirrors Settings > Diagnostics so the callback can skip all profiler
+    /// resources with a plain bool check when the switch is off.
+    profiler_enabled: bool,
 }
 
 impl GpuViewport {
@@ -2613,8 +2735,6 @@ impl GpuViewport {
             next_key: 1,
             key: 0,
             key_serial: 0,
-            ghost_edge_slot: Arc::new(Mutex::new(None)),
-            ghost_edge_key: 1 << 60,
             ghost_edge_matrix: None,
             ghost_edge_present: false,
             ghost_pick: GhostPickData::default(),
@@ -2653,7 +2773,12 @@ impl GpuViewport {
             background: crate::theme::get().viewport_background,
             target_format: rs.target_format,
             reversed_depth,
+            profiler_enabled: false,
         })
+    }
+
+    pub fn set_gpu_profiler_enabled(&mut self, enabled: bool) {
+        self.profiler_enabled = enabled;
     }
 
     pub fn plan_ready(&self) -> bool {
@@ -2730,6 +2855,10 @@ impl GpuViewport {
             self.display_swap.lock().ok().and_then(|swap| swap.preview.clone())
         };
         let mut scene = Self::build_scene(display.as_ref(), &self.view, true);
+        let edge_batch = display
+            .as_ref()
+            .map(|display| EdgeCpuBatch::from_display_edges(&display.edges))
+            .unwrap_or_default();
         // The custom object renderer owns the main solid, as in set_prepared_mesh.
         scene.pbr.clear();
         // Reserve the key with the payload, but do not make it the key of frames
@@ -2753,6 +2882,7 @@ impl GpuViewport {
                     key_serial,
                     display: display.map(Arc::new),
                     scene,
+                    edge_batch,
                 },
                 source_mesh,
                 prepared,
@@ -2855,6 +2985,9 @@ impl GpuViewport {
         if let Ok(mut plan) = self.plan.lock() {
             plan.set_triangles(view.triangles);
             plan.set_translucent(view.translucent);
+            plan.set_edge_width(view.edge_width_px);
+            plan.set_edges_enabled(view.edges && !view.zebra);
+            plan.set_show_seam_edges(view.show_seam_edges);
             // Face-colours is a table fill, not a different renderer: the plan
             // chunks keep their meshes and instance buffers and only the
             // colour table is rewritten.
@@ -2917,6 +3050,12 @@ impl GpuViewport {
                 renderer.set_transform(Some(preview.transform), preview.alpha);
             }
         }
+        if let Ok(mut plan) = self.plan.lock() {
+            let edges = display
+                .map(|display| EdgeCpuBatch::from_display_edges(&display.edges))
+                .unwrap_or_default();
+            plan.set_world_edges(edges);
+        }
         let mut scene = Self::build_scene(display, &self.view, true);
         if let Ok(mut backdrop) = self.backdrop.lock() {
             backdrop.set_scene(scene.clone());
@@ -2952,10 +3091,6 @@ impl GpuViewport {
         if let Ok(mut plan) = self.plan.lock() {
             plan.clear_document();
         }
-    }
-
-    pub fn ghost_edge_key(&self) -> u64 {
-        self.ghost_edge_key
     }
 
     /// Generation of the active pick scene (display or edit-ghost edges).
@@ -3011,18 +3146,31 @@ impl GpuViewport {
         self.pick.lock().ok()?.take_result()
     }
 
-    pub fn set_ghost_edges(&mut self, edges: &[crate::adapter::DisplayEdge]) {
-        let theme = crate::theme::get().ghost_edge;
-        let (scene, n) = ghost_edge_scene(edges, theme, GHOST_EDGE_WIDTH);
-        if let Ok(mut slot) = self.ghost_edge_slot.lock() {
-            *slot = (n > 0).then_some(scene);
+    /// Hand the current selection/hover to the ribbon pass. This is id lookup
+    /// only: no buffer is rebuilt when the pointer moves.
+    pub fn set_edge_selection(
+        &mut self,
+        selected: &std::collections::BTreeSet<String>,
+        hovered: Option<&str>,
+    ) {
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_edge_selection(
+                selected.iter().cloned().collect(),
+                hovered.map(ToOwned::to_owned),
+            );
         }
-        self.ghost_edge_present = n > 0;
+    }
+
+    pub fn set_ghost_edges(&mut self, edges: &[crate::adapter::DisplayEdge]) {
+        let batch = EdgeCpuBatch::from_display_edges(edges);
+        self.ghost_edge_present = !batch.is_empty();
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_world_ghost_edges(batch);
+        }
         self.ghost_pick = build_ghost_pick_data(edges);
-        self.ghost_edge_key = self.ghost_edge_key.wrapping_add(1);
         self.pick_key = self.pick_key.wrapping_add(1);
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-            eprintln!("[ghost-edges] rebuild {n} segments");
+            eprintln!("[ghost-edges] rebuild {} edges", edges.len());
         }
     }
 
@@ -3031,13 +3179,20 @@ impl GpuViewport {
     }
 
     /// The edge ids and segments the pick pass is currently drawing: the edit
-    /// ghost while it is shown, otherwise the displayed body's edges.
-    pub(crate) fn pick_data(&self) -> &GhostPickData {
+    /// ghost while it is shown, otherwise the displayed body's edges. Plan
+    /// edges are local-space and pick through the same buffers as the visible
+    /// ribbons, so their id table comes from the plan state.
+    pub(crate) fn pick_data(&self) -> GhostPickData {
         if self.ghost_edge_present {
-            &self.ghost_pick
-        } else {
-            &self.display_pick
+            return self.ghost_pick.clone();
         }
+        if let Ok(plan) = self.plan.lock() {
+            let data = plan.edge_pick_data();
+            if data.edges.len() > 1 {
+                return data.clone();
+            }
+        }
+        self.display_pick.clone()
     }
 
     pub fn set_ghost_edge_matrix(&mut self, matrix: Option<[[f32; 4]; 4]>) {
@@ -3045,13 +3200,12 @@ impl GpuViewport {
     }
 
     pub fn clear_ghost_edges(&mut self) {
-        if let Ok(mut slot) = self.ghost_edge_slot.lock() {
-            *slot = None;
+        if let Ok(mut plan) = self.plan.lock() {
+            plan.set_world_ghost_edges(EdgeCpuBatch::default());
         }
         self.ghost_edge_matrix = None;
         self.ghost_edge_present = false;
         self.ghost_pick = GhostPickData::default();
-        self.ghost_edge_key = self.ghost_edge_key.wrapping_add(1);
         self.pick_key = self.pick_key.wrapping_add(1);
     }
 
@@ -3141,8 +3295,6 @@ impl GpuViewport {
             [76, 201, 245, 230],
         ]);
         let mut scene = GpuScene::with_palette(palette);
-        let edge = PaletteIndex(1);
-        let edge_width = 1.0;
         let triangle_edge = PaletteIndex(3);
         let face_normal = PaletteIndex(4);
         if let Some(display) = display {
@@ -3150,6 +3302,9 @@ impl GpuViewport {
             if include_pbr {
                 let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
                     .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
+                let face_ids = view
+                    .face_colours
+                    .then(|| ObjectFaceIds::from_display(display));
                 for (triangle_index, triangle) in mesh.triangles.iter().enumerate().step_by(backdrop_pbr_stride(mesh.triangles.len())) {
                     let [a, b, c] = triangle.map(|index| index as usize);
                     let (Some(pa), Some(pb), Some(pc)) =
@@ -3157,9 +3312,13 @@ impl GpuViewport {
                     else {
                         continue;
                     };
-                    let surface = display
-                        .face_colors
-                        .get(triangle_index)
+                    let colour = if let Some(face_ids) = face_ids.as_ref() {
+                        let (body, face) = face_ids.body_face(mesh, triangle_index);
+                        Some(face_colour(display_body_id(display, body), face))
+                    } else {
+                        display.face_colors.get(triangle_index).copied()
+                    };
+                    let surface = colour
                         .and_then(|color| {
                             OpaqueSurface::new(
                                 Vec3::new(f64::from(color[0]), f64::from(color[1]), f64::from(color[2])),
@@ -3175,32 +3334,6 @@ impl GpuViewport {
                     scene.pbr_tri(pa.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pb.to_f32(), fallback.to_f32(), surface);
                     scene.pbr_tri(pc.to_f32(), fallback.to_f32(), surface);
-                }
-            }
-            // Zebra is a continuity view: B-rep edge overlays are suppressed so
-            // their dark strokes are not mistaken for stripe breaks.
-            if view.edges && !view.zebra {
-                for display_edge in &display.edges {
-                    for (index, pair) in display_edge.points.windows(2).enumerate() {
-                        let [a, b] = [pair[0], pair[1]];
-                        // A zero-length segment is a vertex marker in the line
-                        // shader: it draws a square/ball at the vertex.
-                        let delta = b - a;
-                        if delta.dot(delta) <= 1.0e-20 {
-                            continue;
-                        }
-                        let normals = [
-                            display_edge.normals.get(index).copied().unwrap_or([0.0; 3]),
-                            display_edge.normals.get(index + 1).copied().unwrap_or([0.0; 3]),
-                        ];
-                        scene.lifted_line(
-                            a.to_f32(),
-                            b.to_f32(),
-                            edge,
-                            edge_width,
-                            normals,
-                        );
-                    }
                 }
             }
             if view.triangles {
@@ -3394,8 +3527,17 @@ impl GpuViewport {
             ],
             extra_model: identity_matrix(),
         };
+        let plan_available = self
+            .plan
+            .lock()
+            .map(|plan| plan.is_available())
+            .unwrap_or(false);
         let (pick_segments, ghost_edges) = if self.ghost_edge_present {
             (self.ghost_pick.segments.clone(), true)
+        } else if plan_available {
+            // Plan edges are picked from their local-space buffers with the
+            // plan instances, not from world-space CPU segments.
+            (std::sync::Arc::<[crate::gpu_pick::PickSegment]>::from(Vec::new()), false)
         } else {
             (self.display_pick.segments.clone(), false)
         };
@@ -3410,6 +3552,8 @@ impl GpuViewport {
                 .unwrap_or_else(identity_matrix),
             ghost_matrix: self.ghost_edge_matrix.unwrap_or_else(identity_matrix),
             size_px: [width * pixels_per_point, height * pixels_per_point],
+            edge_width_px: self.view.edge_width_px,
+            show_seam_edges: self.view.show_seam_edges,
         });
         GpuCallback {
             object,
@@ -3419,14 +3563,9 @@ impl GpuViewport {
             frame: Mutex::new(Frame {
             product: false,
             preview_bounds: None,
-            moving: self
-                .ghost_edge_matrix
-                .filter(|_| self.ghost_edge_present)
-                .map(|transform| MovingLayer {
-                    key: self.ghost_edge_key,
-                    slot: self.ghost_edge_slot.clone(),
-                    transform,
-                }),
+            // Ghost edges are part of the same ribbon pass: the ghost matrix
+            // is a uniform, so there is no separate moving scene slot.
+            moving: None,
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),
@@ -3472,6 +3611,7 @@ impl GpuViewport {
             pick: self.pick.clone(),
             pick_frame,
             pick_request: self.pick_request.clone(),
+            profiler_enabled: self.profiler_enabled,
         }
     }
 }
@@ -3523,6 +3663,9 @@ pub struct GpuCallback {
     pub pick_request: Arc<Mutex<Option<crate::gpu_pick::PickRequest>>>,
     pub grid: Option<GridUniforms>,
     pub axis: Option<AxisUniforms>,
+    /// Copied from the viewport each frame; checked before touching any
+    /// profiler resource.
+    pub profiler_enabled: bool,
 }
 
 impl GpuCallback {
@@ -3534,6 +3677,16 @@ impl GpuCallback {
         encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        // Off: one bool check, no resources lookup and no lock. On: one lock
+        // for the whole callback, then pass scopes on the shared slot.
+        let profiler_slot = self.profiler_enabled.then(|| {
+            resources
+                .get::<std::sync::Arc<std::sync::Mutex<crate::gpu_profiler::GpuProfilerSlot>>>()
+                .cloned()
+        });
+        let profiler_slot = profiler_slot.flatten();
+        let mut profiler_guard = profiler_slot.as_ref().and_then(|slot| slot.lock().ok());
+        let mut profiler = profiler_guard.as_deref_mut();
         if let Some(clear) = resources.get::<ViewportClear>() {
             clear.set_background(queue, self.background);
         }
@@ -3589,6 +3742,9 @@ impl GpuCallback {
             // The scene and its key must reach the renderer in one call: a new
             // scene under the captured key is skipped as already uploaded.
             apply_activated_display(&pending, &mut frame);
+            if let Ok(mut plan) = self.plan.lock() {
+                plan.set_world_edges(pending.edges.edge_batch.clone());
+            }
             // Object vertices and the edge scene become drawable in this same
             // callback, before the paint pass runs.
             if let Some(object) = resources.get::<Arc<Mutex<ObjectRenderer>>>()
@@ -3619,7 +3775,7 @@ impl GpuCallback {
         // Both consumers take the same value for this frame: the plan shader
         // matrix and the scene projection come from `drawn`.
         if let Ok(plan) = self.plan.lock() {
-            plan.write_uniforms(queue, &self.object, drawn.plan_transform());
+            plan.write_uniforms(queue, &self.object, drawn.plan_transform(), frame.size_px);
         }
         if let Some(object) = resources.get::<Arc<Mutex<ObjectRenderer>>>() {
             if let Ok(mut object) = object.lock() {
@@ -3660,60 +3816,78 @@ impl GpuCallback {
                     external_view = Some(target.resolve_view.clone());
                     let (view, resolve_target) =
                         scene_color_attachment(samples, &target.color_view, &target.resolve_view);
-                    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("viewport-scene-offscreen"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view,
-                            depth_slice: None,
-                            resolve_target,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &target.depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Discard,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-                    let mut pass = pass.forget_lifetime();
-                    pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
-                    pass.set_pipeline(&clear.pipeline);
-                    pass.set_bind_group(0, &clear.bind_group, &[]);
-                    pass.draw(0..3, 0..1);
-                    if plan_active {
-                        if let Ok(plan) = self.plan.lock() {
-                            plan.paint(&mut pass);
-                        }
-                    }
-                    if let Ok(object) = object.lock() {
-                        object.paint(
-                            &mut pass,
-                            self.view.translucent && !plan_active,
-                            !plan_active,
-                        );
-                    }
-                    renderer.paint(
-                        &frame,
-                        &mut pass,
-                        [0.0, 0.0, size[0] as f32, size[1] as f32],
+                    crate::gpu_profiler::render_pass(
+                        profiler.as_deref_mut(),
+                        crate::gpu_profiler::pass::SCENE,
+                        encoder,
+                        wgpu::RenderPassDescriptor {
+                            label: Some(crate::gpu_profiler::pass::SCENE),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view,
+                                depth_slice: None,
+                                resolve_target,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: &target.depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Discard,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                        |pass| {
+                            pass.set_viewport(
+                                0.0,
+                                0.0,
+                                size[0] as f32,
+                                size[1] as f32,
+                                0.0,
+                                1.0,
+                            );
+                            pass.set_pipeline(&clear.pipeline);
+                            pass.set_bind_group(0, &clear.bind_group, &[]);
+                            pass.draw(0..3, 0..1);
+                            if plan_active
+                                && let Ok(plan) = self.plan.lock()
+                            {
+                                plan.paint(pass);
+                            }
+                            if let Ok(object) = object.lock() {
+                                object.paint(
+                                    pass,
+                                    self.view.translucent && !plan_active,
+                                    !plan_active,
+                                );
+                            }
+                            if let Ok(mut plan) = self.plan.lock() {
+                                plan.paint_edges(pass, plan_active);
+                            }
+                            renderer.paint(
+                                &frame,
+                                pass,
+                                [0.0, 0.0, size[0] as f32, size[1] as f32],
+                            );
+                            // The axis lines belong to the XY ground grid: the
+                            // grid toggle hides the grid shader's X/Y axes and
+                            // the world Z axis together.
+                            if self.grid.is_some() {
+                                grid.paint(pass);
+                            }
+                            if self.axis.is_some() {
+                                axis.paint(pass);
+                            }
+                        },
                     );
-                    // The axis lines belong to the XY ground grid: the grid
-                    // toggle hides the grid shader's X/Y axes and the world Z
-                    // axis together.
-                    if self.grid.is_some() {
-                        grid.paint(&mut pass);
-                    }
-                    if self.axis.is_some() {
-                        axis.paint(&mut pass);
-                    }
                 }
             }
         }
@@ -3764,13 +3938,18 @@ impl GpuCallback {
                     pick.encode(device, queue, encoder, &uniforms, &pick_frame, request, |pass, passes, binds| {
                         paint_pick_face_ids(
                             plan_active,
+                            plan_active
+                                && !self
+                                    .pick_frame
+                                    .as_ref()
+                                    .is_some_and(|frame| frame.ghost_edges),
                             plan_state.as_deref(),
                             object_state.as_deref(),
                             pass,
                             passes,
                             binds,
                         );
-                    });
+                    }, profiler.as_deref_mut());
                 }
             }
         }
@@ -3784,6 +3963,7 @@ impl GpuCallback {
                     drawn.backdrop_view_proj(),
                     self.backdrop_blur_scale,
                     external_view.as_ref().map(|view| (view, self.backdrop_crop)),
+                    profiler.as_deref_mut(),
                 );
             }
         }
@@ -4080,27 +4260,9 @@ mod tests {
         crate::adapter::DisplayEdge {
             id: "edge:0".into(),
             midpoint: [0.0, 0.0, 0.0],
-            normals: Vec::new(),
             points,
+            class: nodecraft_layers::PlanEdgeClass::NORMAL,
         }
-    }
-
-    #[test]
-    fn ghost_edge_scene_counts_non_degenerate_segments() {
-        let edge = ghost_edge(vec![
-            solidcore_record::Vec3::new(0.0, 0.0, 0.0),
-            solidcore_record::Vec3::new(1.0, 0.0, 0.0),
-            solidcore_record::Vec3::new(1.0, 0.0, 0.0),
-            solidcore_record::Vec3::new(1.0, 1.0, 0.0),
-        ]);
-        let (_, segments) = ghost_edge_scene(&[edge], [255, 255, 255, 80], 1.6);
-        assert_eq!(segments, 2);
-    }
-
-    #[test]
-    fn ghost_edge_scene_is_empty_for_no_edges() {
-        let (_, segments) = ghost_edge_scene(&[], [255, 255, 255, 80], 1.6);
-        assert_eq!(segments, 0);
     }
 
     #[test]
@@ -4109,7 +4271,7 @@ mod tests {
             id: id.into(),
             points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
             midpoint: [0.5, 0.0, 0.0],
-            normals: Vec::new(),
+            class: nodecraft_layers::PlanEdgeClass::NORMAL,
         };
         assert!(build_ghost_pick_data(&[edge("body:0:edge:0"), edge("body:1:edge:0")]).multi_body);
         assert!(!build_ghost_pick_data(&[edge("body:0:edge:0")]).multi_body);
@@ -4131,14 +4293,14 @@ mod tests {
                 id: "preview-edge:1".into(),
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Y],
                 midpoint: [0.0, 0.5, 0.0],
-                normals: Vec::new(),
-            },
+                class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                },
             crate::adapter::DisplayEdge {
                 id: "edge:2".into(),
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Z],
                 midpoint: [0.0, 0.0, 0.5],
-                normals: Vec::new(),
-            },
+                class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                },
         ];
         let data = build_ghost_pick_data(&edges);
         assert_eq!(data.edges.get(2).map(|entry| entry.0.as_str()), Some("edge:2"));
@@ -4163,17 +4325,24 @@ mod tests {
                 face_ids: Vec::new(),
                 exact_normals: false,
                 face_colors: Vec::new(),
+                body_ids: Vec::new(),
                 edges: vec![crate::adapter::DisplayEdge {
                     id: edge_id.to_owned(),
                     points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
                     midpoint: [0.5, 0.0, 0.0],
-                    normals: Vec::new(),
-                }],
+                    class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                        }],
                 comparison: None,
                 selection_edges: None,
                 radius: 1.0,
                 center: solidcore_record::Vec3::ZERO,
                 })),
+                edge_batch: EdgeCpuBatch::from_display_edges(&[crate::adapter::DisplayEdge {
+                    id: edge_id.to_owned(),
+                    points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
+                    midpoint: [0.5, 0.0, 0.0],
+                    class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                        }]),
                 scene: GpuScene::default(),
             },
             source_mesh: None,
@@ -4257,12 +4426,13 @@ mod tests {
                     face_ids: Vec::new(),
                     exact_normals: false,
                     face_colors: Vec::new(),
+                    body_ids: Vec::new(),
                     edges: vec![crate::adapter::DisplayEdge {
                         id: "old".to_owned(),
                         points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
                         midpoint: [0.5, 0.0, 0.0],
-                        normals: Vec::new(),
-                    }],
+                        class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                                }],
                     comparison: None,
                     selection_edges: None,
                     radius: 1.0,
@@ -4315,12 +4485,8 @@ mod tests {
         ));
         swap.serial = 1;
 
-        let mut pending = staged_display("new", 2, 2, 2, None);
-        let edge = pending.edges.display.as_ref().expect("display").edges[0].clone();
-        let scene = ghost_edge_scene(&[edge], [255, 0, 0, 255], 1.0).0;
-        let expected_lines = scene.overlay.clone();
-        assert!(!expected_lines.is_empty(), "the new scene must carry the new edges");
-        pending.edges.scene = scene;
+        let pending = staged_display("new", 2, 2, 2, None);
+        assert!(!pending.edges.edge_batch.is_empty(), "the staged pair carries its edges");
         swap.stage(pending);
 
         // The frame built for this paint still carries the old key.
@@ -4331,7 +4497,7 @@ mod tests {
         assert_ne!(frame.key, uploaded_key, "the renderer would skip an unchanged key");
         assert_eq!(frame.key, pending.edges.key);
         let activated = frame.slot.lock().unwrap().take().expect("activated scene");
-        assert_eq!(activated.overlay, expected_lines);
+        assert!(activated.overlay.is_empty(), "edges no longer travel in the scene");
 
         // The next sync adopts the activated key so later frames keep it.
         let mut synced = 0;
@@ -4359,20 +4525,6 @@ mod tests {
         }
     }
 
-    fn scene_lines(bytes: &[u8]) -> Vec<([f32; 3], [f32; 3])> {
-        bytes
-            .chunks_exact(32)
-            .map(|record| {
-                let word = |index: usize| {
-                    f32::from_le_bytes(record[index * 4..index * 4 + 4].try_into().unwrap())
-                };
-                (
-                    [word(0), word(1), word(2)],
-                    [word(3), word(4), word(5)],
-                )
-            })
-            .collect()
-    }
 
     /// The snap-back bug: the app used to clear the plan preview right after
     /// `set_display`, while the already-built frame still carried the preview in
@@ -4394,11 +4546,8 @@ mod tests {
         assert_eq!(drawn.plan_transform(), Some(preview_matrix));
         assert_eq!(frame.view_proj, multiply_matrix(base, preview_matrix));
 
-        let mut pending = staged_display("new", 2, 2, 2, None);
-        let edge = pending.edges.display.as_ref().expect("display").edges[0].clone();
-        let new_scene = ghost_edge_scene(&[edge], [255, 0, 0, 255], 1.0).0;
-        let new_lines = new_scene.overlay.clone();
-        pending.edges.scene = new_scene;
+        let pending = staged_display("new", 2, 2, 2, None);
+        assert!(!pending.edges.edge_batch.is_empty());
         swap.stage(pending);
 
         // One prepare: the staged pair installs the new scene and its key and
@@ -4412,7 +4561,7 @@ mod tests {
         assert_eq!(frame.view_proj, base, "scene projection must drop it too");
         assert_eq!(frame.key, pending.edges.key);
         let activated = frame.slot.lock().unwrap().take().expect("activated scene");
-        assert_eq!(activated.overlay, new_lines);
+        assert!(activated.overlay.is_empty(), "edges are a ribbon pass, not scene lines");
     }
 
     /// During a drag the plan uniform and the scene projection of one prepared
@@ -4475,8 +4624,8 @@ mod tests {
                 id: "preview-edge:1".into(),
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Y],
                 midpoint: [0.0, 0.5, 0.0],
-                normals: Vec::new(),
-            },
+                class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                },
         ];
         let data = build_ghost_pick_data(&edges);
         assert_eq!(data.segments.len(), 1);
@@ -4570,6 +4719,7 @@ mod tests {
             face_ids,
             exact_normals: false,
             face_colors: Vec::new(),
+            body_ids: Vec::new(),
             edges: Vec::new(),
             comparison: None,
             selection_edges: None,
@@ -4608,8 +4758,8 @@ mod tests {
     ) -> Option<crate::gpu_pick::PickResult> {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("face-pick test") });
         picker.encode(device, queue, &mut encoder, uniforms, frame, request, |pass, passes, binds| {
-            paint_pick_face_ids(plan_active, plan, object, pass, passes, binds);
-        });
+            paint_pick_face_ids(plan_active, plan_active, plan, object, pass, passes, binds);
+        }, None);
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
@@ -4718,7 +4868,7 @@ mod tests {
         size: [u32; 2],
         uniforms: &ObjectUniforms,
     ) -> (Vec<u8>, u32) {
-        plan.write_uniforms(queue, uniforms, None);
+        plan.write_uniforms(queue, uniforms, None, [64.0, 64.0]);
         let colour = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("plan colour test colour"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
@@ -4860,6 +5010,7 @@ mod tests {
         let mut green = vec![DEFAULT_FACE_COLOUR; faces];
         green[plus_z] = [0.04, 0.8, 0.04];
         let instance = |face_colors: Vec<[f32; 3]>, x: f64| nodecraft_display::PlanInstance {
+            body: 0,
             target: "test".into(),
             plan: std::sync::Arc::clone(&shared),
             face_colors,
@@ -4870,6 +5021,7 @@ mod tests {
                 },
             ),
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         plan.set_plans(
             vec![
@@ -4963,9 +5115,10 @@ mod tests {
         let shared = box_plan_sized(10.0);
         let plus_z = plan_face_toward(&shared, [0.0, 0.0, 1.0]);
         let plus_x = plan_face_toward(&shared, [1.0, 0.0, 0.0]);
+        let body = 0x1234_5678_9abc_def0;
         assert_ne!(
-            face_colour(plus_z),
-            face_colour(plus_x),
+            face_colour(body, plus_z),
+            face_colour(body, plus_x),
             "the fixture's adjacent faces need distinct palette colours",
         );
         plan.set_plans(
@@ -4973,8 +5126,10 @@ mod tests {
                 target: "test".into(),
                 plan: std::sync::Arc::clone(&shared),
                 face_colors: Vec::new(),
+                body,
                 placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
             }],
             true,
             None,
@@ -4997,6 +5152,45 @@ mod tests {
         assert!(
             difference > 20,
             "adjacent faces must get their distinct table colours: +z={z_px:?} +x={x_px:?}",
+        );
+    }
+
+    /// The CPU object mesh and the plan colour table must derive the same
+    /// colour from the same `(body, face)` pair. The display mesh carries the
+    /// plan's body identity, and both paths parse the B-rep face number out of
+    /// the display face string.
+    #[test]
+    fn cpu_and_plan_face_colours_agree_for_the_same_body_and_face() {
+        let body = 0xfeed_face_cafe_beef;
+        let face = 3u32;
+        let mut display = face_box_display(vec![format!("face:{face}")], vec![0; 12]);
+        display.body_ids = vec![body];
+        let prepared = prepare_object(
+            &display,
+            &ViewSettings { face_colours: true, ..ViewSettings::default() },
+        );
+        let plan = std::sync::Arc::new(nodecraft_layers::tess::TessPlan {
+            faces: vec![Default::default(); face as usize + 1],
+            ..Default::default()
+        });
+        let (colours, offsets) = crate::gpu_plan::colour_table_data(
+            &[nodecraft_display::PlanInstance {
+                target: "test".into(),
+                plan,
+                face_colors: Vec::new(),
+                body,
+                placement: nodecraft_display::Placement::identity(),
+                edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
+            }],
+            None,
+            true,
+        );
+        let expected = colours[offsets[0] as usize + face as usize];
+        assert_eq!(
+            prepared.vertices[0].colour,
+            [expected[0], expected[1], expected[2]],
+            "CPU and plan paths must agree on (body, face)",
         );
     }
 
@@ -5026,8 +5220,10 @@ mod tests {
             target: "test".into(),
             plan: std::sync::Arc::clone(&plan_arc),
             face_colors: Vec::new(),
+            body: 0,
             placement,
             edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes: std::sync::Arc::from(Vec::new()),
         };
         let four = || {
             shared_plan_placements()
@@ -5084,7 +5280,7 @@ mod tests {
             extra_model: identity_matrix(),
         };
         let plan = mirrored_plan_pair(&device, &queue, immediate);
-        plan.write_uniforms(&queue, &uniforms, None);
+        plan.write_uniforms(&queue, &uniforms, None, [64.0, 64.0]);
 
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mirror render test color"),
@@ -5246,6 +5442,8 @@ mod tests {
             face_matrix: identity_matrix(),
             ghost_matrix: identity_matrix(),
             size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let mut picker = crate::gpu_pick::PickRenderer::install(
             &device,
@@ -5383,6 +5581,8 @@ mod tests {
             face_matrix: identity_matrix(),
             ghost_matrix: identity_matrix(),
             size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
         };
         let uniforms = crate::gpu_pick::PickUniforms {
             view_proj: vp,
@@ -5446,8 +5646,10 @@ mod tests {
                 target: "test".into(),
                 plan: box_plan_sized(1.0),
                 face_colors: Vec::new(),
+                body: 0,
                 placement: nodecraft_display::Placement::identity(),
                 edge_ids: std::sync::Arc::from(Vec::new()),
+                edge_classes: std::sync::Arc::from(Vec::new()),
             }],
             true,
             None,
@@ -5462,6 +5664,707 @@ mod tests {
         assert_ne!(plan_id, 0, "the plan box must be under the cursor");
         assert_ne!(plan_id, object_pick, "plan chunks must own the face id when active");
         assert!(crate::gpu_pick::resolve_face_id(plan_id).is_some());
+    }
+
+
+    #[test]
+    fn depth_model_matches_solidcraft() {
+        use wgpu::CompareFunction::{Always, Greater, GreaterEqual, LessEqual};
+
+        let face = opaque_face_depth(false);
+        assert!(face.write, "opaque faces write depth");
+        assert_eq!(face.compare, LessEqual);
+        assert_eq!(face.bias.constant, 8, "SolidCraft FACE_STEPS");
+        assert_eq!(face.bias.slope_scale, 1.0, "SolidCraft FACE_SLOPE");
+
+        let reversed = opaque_face_depth(true);
+        assert_eq!(reversed.compare, GreaterEqual);
+        assert_eq!(
+            reversed.bias.constant, -8,
+            "reversed depth keeps the push away from the eye",
+        );
+        assert_eq!(reversed.bias.slope_scale, -1.0);
+
+        let translucent = translucent_face_depth(false);
+        assert!(!translucent.write, "translucent faces must not hide edges behind them");
+        assert_eq!(translucent.compare, LessEqual);
+        assert_eq!(translucent.bias, wgpu::DepthBiasState::default());
+
+        let edge = edge_depth(false);
+        assert!(!edge.write, "edges never write depth");
+        assert_eq!(edge.compare, LessEqual, "edges are tested against the shaded model");
+        assert_eq!(
+            edge.bias,
+            wgpu::DepthBiasState::default(),
+            "edges are not pulled toward the eye; the face is pushed back instead",
+        );
+
+        let highlight = edge_highlight_depth(false);
+        assert!(!highlight.write);
+        assert_eq!(highlight.compare, LessEqual);
+        assert_eq!(highlight.bias.constant, -8, "highlights move toward the eye");
+        assert_eq!(edge_highlight_depth(true).bias.constant, 8);
+
+        let ghost = ghost_face_depth(false);
+        assert!(!ghost.write, "the ghost overlay writes no depth");
+        assert_eq!(ghost.compare, Always, "the ghost overlay never z-fights the body");
+        assert_eq!(GHOST_BIAS.constant, 16, "twice FACE_STEPS");
+        assert_eq!(GHOST_BIAS.slope_scale, 2.0, "twice FACE_SLOPE");
+
+        assert_eq!(depth_compare(false, Greater), Greater);
+        assert_eq!(depth_compare(true, Greater), wgpu::CompareFunction::Less);
+    }
+
+
+    /// A one-pixel ribbon that falls between two rows of pixel centres covers
+    /// none of them and the edge disappears for that segment. The shared ribbon
+    /// now draws a narrow edge at least 1.3 px wide, so a curved edge covers
+    /// every segment; SolidCraft's standard edge uses the same floor.
+    #[test]
+    fn a_one_pixel_edge_covers_a_curved_polyline() {
+        use crate::edge_ribbon::{EdgeCpuBatch, EdgeRenderer, EdgeStyle, EdgeUniforms, GpuEdgeBatch};
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let size = [128u32, 128u32];
+        let vp = identity_matrix();
+        let mut renderer = EdgeRenderer::install(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            true,
+        );
+        let black = [0.0, 0.0, 0.0, 1.0];
+        renderer.write_uniforms(
+            &queue,
+            EdgeUniforms::new(vp, identity_matrix(), [128.0, 128.0], 1.0, black, true),
+            EdgeUniforms::new(vp, identity_matrix(), [128.0, 128.0], 2.0, black, false),
+            EdgeUniforms::new(vp, identity_matrix(), [128.0, 128.0], 3.0, black, true),
+            EdgeUniforms::new(vp, identity_matrix(), [128.0, 128.0], 2.5, black, true),
+        );
+        // A closed 24-segment circle: every screen angle and phase appears.
+        let points: Vec<solidcore_record::Vec3> = (0..=24)
+            .map(|step| {
+                let angle = std::f64::consts::TAU * f64::from(step) / 24.0;
+                solidcore_record::Vec3::new(0.75 * angle.cos(), 0.75 * angle.sin(), 0.0)
+            })
+            .collect();
+        let edge = crate::adapter::DisplayEdge {
+            id: "circle".into(),
+            points: points.clone(),
+            midpoint: [0.0; 3],
+            class: nodecraft_layers::PlanEdgeClass::NORMAL,
+        };
+        let cpu = EdgeCpuBatch::from_display_edges(&[edge]);
+        let Some(batch) = GpuEdgeBatch::upload(&mut renderer, &device, &queue, &cpu) else { return };
+        let colour = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("edge coverage colour"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let colour_view = colour.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("edge coverage depth"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("edge coverage") });
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("edge coverage pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &colour_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            renderer.paint_world(&mut pass, &batch, EdgeStyle::Standard);
+        }
+        let row = size[0] * 4;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("edge coverage readback"),
+            size: (row * size[1]) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &colour, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size[1]) } },
+            wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        receiver.recv().expect("map callback").expect("map");
+        let pixels = slice.get_mapped_range().expect("map range").to_vec();
+        readback.unmap();
+        let at = |x: f32, y: f32| -> [u8; 4] {
+            let x = x.round().clamp(0.0, size[0] as f32 - 1.0) as usize;
+            let y = y.round().clamp(0.0, size[1] as f32 - 1.0) as usize;
+            let i = y * row as usize + x * 4;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+        let mut total = 0usize;
+        let mut covered = 0usize;
+        for pair in points.windows(2) {
+            let a = [pair[0].x as f32, pair[0].y as f32];
+            let b = [pair[1].x as f32, pair[1].y as f32];
+            for step in 1..=7 {
+                let t = step as f32 / 8.0;
+                let px = project_px(vp, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.0], [size[0] as f32, size[1] as f32]);
+                let mut dark = false;
+                for dx in -1..=1 {
+                    for dy in -1..=1 {
+                        let c = at(px[0] + dx as f32, px[1] + dy as f32);
+                        if c[0] < 70 && c[1] < 70 && c[2] < 70 {
+                            dark = true;
+                        }
+                    }
+                }
+                total += 1;
+                if dark { covered += 1; }
+            }
+        }
+        let coverage = covered as f64 / total as f64;
+        assert!(coverage >= 0.95, "curved 1 px edge coverage {coverage:.3} ({covered}/{total})");
+    }
+
+    #[test]
+    fn body_edges_no_longer_use_the_scene_lifted_line_path() {
+        let source = include_str!("gpu_viewport.rs");
+        let lifted = ["scene", ".lifted", "_line"].concat();
+        let ghost_scene = ["ghost", "_edge", "_scene"].concat();
+        let ghost_width = ["GHOST", "_EDGE", "_WIDTH"].concat();
+        assert!(
+            !source.contains(&lifted),
+            "standard B-rep edges must go through the GPU ribbon, not scene lines",
+        );
+        assert!(
+            !source.contains(&ghost_scene),
+            "ghost edges must not build a second GpuScene layer",
+        );
+        assert!(
+            !source.contains(&ghost_width),
+            "ghost width is a ratio of the one edge-width setting",
+        );
+    }
+
+
+    /// The cone in the seam report: one primitive cone with the contract's
+    /// defaults, planned through the same preview path the viewport uses, with
+    /// the edge classes that path derives.
+    fn seam_cone_display() -> nodecraft_layers::TessDisplay {
+        use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let mut brep = api::create_cone(
+            &mut kernel,
+            Point3::new(0.0, 0.0, -20.0),
+            20.0,
+            0.0,
+            40.0,
+        )
+        .expect("cone");
+        nodecraft_layers::tessellate_kernel_preview(&mut kernel, &mut brep, 2)
+            .expect("cone preview plan")
+    }
+
+    /// The report's orthographic camera: yaw -90, pitch 0, up Z, looking along
+    /// -x from (103.923, 11.259, -20.709), with a sub-pixel target offset. The
+    /// report fixes the camera but not which pixel centre the seam lands on;
+    /// the tests sweep that phase so a phase-dependent rasterisation defect
+    /// cannot hide. The target is 1664x1640 physical, the screenshot's
+    /// viewport at two device pixels per logical pixel.
+    fn seam_camera_phase(aspect: f64, target_y_offset: f64) -> [[f32; 4]; 4] {
+        let camera = solidcraft_viewport::Camera {
+            target: solidcore_record::Vec3::new(0.0, 11.259 + target_y_offset, -20.709),
+            yaw: -std::f64::consts::FRAC_PI_2,
+            pitch: 0.0,
+            roll: 0.0,
+            distance: 103.923,
+            fov: 0.0,
+            up: solidcraft_viewport::UpAxis::Z,
+        };
+        let mut vp = identity_matrix();
+        for (column, values) in camera.view_proj(aspect, 28.284_271).0.iter().enumerate() {
+            for (row, value) in values.iter().enumerate() {
+                vp[column][row] = *value as f32;
+            }
+        }
+        gpu_view_proj(vp, false)
+    }
+
+    fn read_scene_colour(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        colour: &wgpu::Texture,
+        size: [u32; 2],
+        row: u32,
+    ) -> Vec<u8> {
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cone seam readback"),
+            size: (row * size[1]) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cone seam readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: colour, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size[1]) } },
+            wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+        );
+        queue.submit([encoder.finish()]);
+        let slice = readback.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        receiver.recv().expect("map callback").expect("map");
+        let pixels = slice.get_mapped_range().expect("map range").to_vec();
+        readback.unmap();
+        pixels
+    }
+
+    /// Draw plans and their edges exactly as the viewport's callback does:
+    /// faces first, then the one ribbon pass.
+    fn render_seam_scene(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        plans: Vec<nodecraft_display::PlanInstance>,
+        size: [u32; 2],
+        edge_width_px: f32,
+        translucent: bool,
+        reversed: bool,
+        phase: f64,
+        show_seams: bool,
+    ) -> (Vec<u8>, [[f32; 4]; 4]) {
+        let tess = solidcraft_viewport_gpu::TessGpu::new("test", device.clone(), queue.clone())
+            .expect("tess pipeline");
+        let ready = std::sync::Arc::new(std::sync::OnceLock::new());
+        ready.set(tess).ok().expect("tess once");
+        let mut plan = crate::gpu_plan::PlanState::new(
+            device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            1,
+            wgpu::TextureFormat::Depth32Float,
+            reversed,
+            Some(ready),
+        );
+        let aspect = f64::from(size[0]) / f64::from(size[1]);
+        let normal = seam_camera_phase(aspect, phase);
+        let vp = if reversed { gpu_view_proj(normal, true) } else { normal };
+        let uniforms = ObjectUniforms {
+            view_proj: vp,
+            back: [1.0, 0.0, 0.0, 1.0],
+            eye: [103.923, 11.259, -20.709, 1.0],
+            params: [1.0, 0.0, 0.45, 0.0],
+            extra_model: identity_matrix(),
+        };
+        plan.set_plans(plans, true, None, 1);
+        plan.prepare_chunks(device, queue);
+        plan.set_edge_width(edge_width_px);
+        plan.set_show_seam_edges(show_seams);
+        plan.set_translucent(translucent);
+        plan.write_uniforms(queue, &uniforms, None, [size[0] as f32, size[1] as f32]);
+        let colour = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cone seam colour"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let colour_view = colour.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cone seam depth"),
+            size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("cone seam scene"),
+        });
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cone seam pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &colour_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.9, g: 0.9, b: 0.9, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(if reversed { 0.0 } else { 1.0 }),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let mut pass = pass.forget_lifetime();
+            plan.paint(&mut pass);
+            plan.paint_edges(&mut pass, true);
+        }
+        queue.submit([encoder.finish()]);
+        let row = size[0] * 4;
+        let pixels = read_scene_colour(device, queue, &colour, size, row);
+        (pixels, vp)
+    }
+
+    fn seam_plan_instance(
+        plan: std::sync::Arc<nodecraft_layers::tess::TessPlan>,
+        edge_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]>,
+        body: u64,
+        placement: nodecraft_display::Placement,
+    ) -> nodecraft_display::PlanInstance {
+        nodecraft_display::PlanInstance {
+            target: "seam".into(),
+            plan,
+            face_colors: Vec::new(),
+            body,
+            placement,
+            edge_ids: std::sync::Arc::from(Vec::new()),
+            edge_classes,
+        }
+    }
+
+    /// Every pixel of the ribbon's cross-section at this point is dark. A
+    /// single dark neighbour is not enough: a gap on one side of a four-pixel
+    /// band must still count as a gap.
+    fn seam_is_dark(pixels: &[u8], size: [u32; 2], vp: [[f32; 4]; 4], point: [f32; 3]) -> bool {
+        let px = project_px(vp, point, [size[0] as f32, size[1] as f32]);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let x = (px[0] + dx as f32).round().clamp(0.0, size[0] as f32 - 1.0) as usize;
+                let y = (px[1] + dy as f32).round().clamp(0.0, size[1] as f32 - 1.0) as usize;
+                let at = y * size[0] as usize * 4 + x * 4;
+                if !(pixels[at] < 70 && pixels[at + 1] < 70 && pixels[at + 2] < 70) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// The seam is the cone's straight apex-to-base edge. At a wide edge width
+    /// the old segment quads carried each endpoint's depth half a width past
+    /// the vertex, which bent the depth ramp behind the face for the first
+    /// pixels after every ring row: the seam read as a dashed line. The ribbon
+    /// now extrapolates the depth along the segment, so every sample between
+    /// apex and base draws over the face.
+    #[test]
+    fn a_cone_seam_covers_every_ring_row_at_a_wide_edge_width() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let display = seam_cone_display();
+        let plan = std::sync::Arc::clone(&display.plan);
+        let classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(display.edge_classes.clone());
+        let seam_index = display
+            .edge_classes
+            .iter()
+            .position(|class| class.is_seam())
+            .expect("the cone has a seam");
+        let seam = plan.edges[seam_index].clone();
+        assert!(seam.len() > 2, "the cone seam is a polyline through ring rows");
+        let size = [1664u32, 1640u32];
+        for reversed in [false, true] {
+            for phase in [-0.4f64, 0.0, 0.4] {
+                let (pixels, vp) = render_seam_scene(
+                    &device,
+                    &queue,
+                    vec![seam_plan_instance(
+                        std::sync::Arc::clone(&plan),
+                        std::sync::Arc::clone(&classes),
+                        0,
+                        nodecraft_display::Placement::identity(),
+                    )],
+                    size,
+                    4.0,
+                    false,
+                    reversed,
+                    phase,
+                    true,
+                );
+                let mut total = 0usize;
+                let mut covered = 0usize;
+                let mut row_gaps = Vec::new();
+                for (index, pair) in seam.windows(2).enumerate() {
+                    for step in 0..=8 {
+                        let t = step as f64 / 8.0;
+                        let point = [
+                            (pair[0].x + (pair[1].x - pair[0].x) * t) as f32,
+                            (pair[0].y + (pair[1].y - pair[0].y) * t) as f32,
+                            (pair[0].z + (pair[1].z - pair[0].z) * t) as f32,
+                        ];
+                        total += 1;
+                        if seam_is_dark(&pixels, size, vp, point) {
+                            covered += 1;
+                        } else if step == 0 {
+                            row_gaps.push(index);
+                        }
+                    }
+                }
+                let coverage = covered as f64 / total as f64;
+                assert!(
+                    row_gaps.is_empty(),
+                    "reversed={reversed}: the seam is missing at ring rows {row_gaps:?}",
+                );
+                assert!(
+                    coverage >= 0.98,
+                    "reversed={reversed} phase={phase}: cone seam coverage {coverage:.3} ({covered}/{total})",
+                );
+            }
+        }
+    }
+
+    /// The default setting hides the wall seam but keeps the base circle: both
+    /// are ordinary plan edges, classified once and toggled by the uniform mask.
+    #[test]
+    fn the_default_setting_hides_only_the_cone_seam() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let display = seam_cone_display();
+        let plan = std::sync::Arc::clone(&display.plan);
+        let classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(display.edge_classes.clone());
+        let seam_index = display
+            .edge_classes
+            .iter()
+            .position(|class| class.is_seam())
+            .expect("the cone has a seam");
+        let base_index = (0..plan.edges.len())
+            .find(|index| !display.edge_classes[*index].is_seam())
+            .expect("the cone has an end circle");
+        let seam_point = plan.edges[seam_index][plan.edges[seam_index].len() / 2];
+        let base_point = plan.edges[base_index][plan.edges[base_index].len() / 2];
+        let seam_point = [seam_point.x as f32, seam_point.y as f32, seam_point.z as f32];
+        let base_point = [base_point.x as f32, base_point.y as f32, base_point.z as f32];
+        let size = [832u32, 820u32];
+        let instance = || {
+            vec![seam_plan_instance(
+                std::sync::Arc::clone(&plan),
+                std::sync::Arc::clone(&classes),
+                0,
+                nodecraft_display::Placement::identity(),
+            )]
+        };
+        let (hidden, vp) = render_seam_scene(
+            &device, &queue, instance(), size, 4.0, false, false, 0.0, false,
+        );
+        assert!(
+            !seam_is_dark(&hidden, size, vp, seam_point),
+            "the default setting must not draw the cone's seam",
+        );
+        assert!(
+            seam_is_dark(&hidden, size, vp, base_point),
+            "the cone's base circle is not a seam and stays drawn",
+        );
+        let (shown, vp) = render_seam_scene(
+            &device, &queue, instance(), size, 4.0, false, false, 0.0, true,
+        );
+        assert!(
+            seam_is_dark(&shown, size, vp, seam_point),
+            "the setting draws the same edge without re-uploading it",
+        );
+    }
+
+    /// The base circle is seen edge-on in the same view. Its vertices sit on
+    /// the same shared-node depth path, so every sample over the full circle
+    /// must draw, with no break at a polyline vertex.
+    #[test]
+    fn a_cone_base_circle_covers_every_ring_row_at_a_wide_edge_width() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let display = seam_cone_display();
+        let plan = std::sync::Arc::clone(&display.plan);
+        let classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(display.edge_classes.clone());
+        let base_index = (0..plan.edges.len())
+            .find(|index| !display.edge_classes[*index].is_seam())
+            .expect("the cone has an end circle");
+        let base = plan.edges[base_index].clone();
+        assert!(base.len() > 2, "the base circle is a closed polyline");
+        let size = [1664u32, 1640u32];
+        let (pixels, vp) = render_seam_scene(
+            &device,
+            &queue,
+            vec![seam_plan_instance(
+                std::sync::Arc::clone(&plan),
+                classes,
+                0,
+                nodecraft_display::Placement::identity(),
+            )],
+            size,
+            4.0,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        let mut total = 0usize;
+        let mut covered = 0usize;
+        for pair in base.windows(2) {
+            for step in 0..=8 {
+                let t = step as f64 / 8.0;
+                let point = [
+                    (pair[0].x + (pair[1].x - pair[0].x) * t) as f32,
+                    (pair[0].y + (pair[1].y - pair[0].y) * t) as f32,
+                    (pair[0].z + (pair[1].z - pair[0].z) * t) as f32,
+                ];
+                total += 1;
+                if seam_is_dark(&pixels, size, vp, point) {
+                    covered += 1;
+                }
+            }
+        }
+        let coverage = covered as f64 / total as f64;
+        assert!(coverage >= 0.98, "cone base circle coverage {coverage:.3} ({covered}/{total})");
+    }
+
+    /// An opaque body between the camera and the seam still hides it. The
+    /// ribbon only changes its screen footprint; it must not disable depth.
+    #[test]
+    fn an_edge_behind_an_opaque_body_stays_hidden() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let cone_display = seam_cone_display();
+        let cone = std::sync::Arc::clone(&cone_display.plan);
+        let cone_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(cone_display.edge_classes.clone());
+        let box_plan = box_plan_sized(20.0);
+        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> = std::sync::Arc::from(
+            vec![nodecraft_layers::PlanEdgeClass::NORMAL; box_plan.edges.len()],
+        );
+        let box_placement = nodecraft_display::Placement::from(
+            nodecraft_display::DisplayTransform::Place {
+                offset: [40.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+            },
+        );
+        let size = [1664u32, 1640u32];
+        let (pixels, vp) = render_seam_scene(
+            &device,
+            &queue,
+            vec![
+                seam_plan_instance(
+                    std::sync::Arc::clone(&cone),
+                    cone_classes,
+                    0,
+                    nodecraft_display::Placement::identity(),
+                ),
+                seam_plan_instance(box_plan, box_classes, 1, box_placement),
+            ],
+            size,
+            4.0,
+            false,
+            false,
+            0.0,
+            true,
+        );
+        // (20, 0, 0) is on the seam and behind the box's near face at x = 30.
+        assert!(
+            !seam_is_dark(&pixels, size, vp, [20.0, 0.0, 0.0]),
+            "an edge behind an opaque body must be hidden by that body's depth",
+        );
+    }
+
+    /// A translucent body writes no depth, so the edge behind it stays
+    /// visible. This is the viewport's existing translucent contract.
+    #[test]
+    fn a_translucent_body_lets_the_edge_behind_it_show() {
+        let Some((device, queue)) = headless_device() else {
+            eprintln!("skip: no adapter");
+            return;
+        };
+        let cone_display = seam_cone_display();
+        let cone = std::sync::Arc::clone(&cone_display.plan);
+        let cone_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(cone_display.edge_classes.clone());
+        let box_plan = box_plan_sized(20.0);
+        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> = std::sync::Arc::from(
+            vec![nodecraft_layers::PlanEdgeClass::NORMAL; box_plan.edges.len()],
+        );
+        let box_placement = nodecraft_display::Placement::from(
+            nodecraft_display::DisplayTransform::Place {
+                offset: [40.0, 0.0, 0.0],
+                rotation: [0.0; 3],
+            },
+        );
+        let size = [1664u32, 1640u32];
+        let (pixels, vp) = render_seam_scene(
+            &device,
+            &queue,
+            vec![
+                seam_plan_instance(
+                    std::sync::Arc::clone(&cone),
+                    cone_classes,
+                    0,
+                    nodecraft_display::Placement::identity(),
+                ),
+                seam_plan_instance(box_plan, box_classes, 1, box_placement),
+            ],
+            size,
+            4.0,
+            true,
+            false,
+            0.0,
+            true,
+        );
+        assert!(
+            seam_is_dark(&pixels, size, vp, [20.0, 0.0, 0.0]),
+            "a translucent body must not hide the edge behind it",
+        );
     }
 
 }

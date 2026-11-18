@@ -1192,6 +1192,7 @@ fn add_preview_feature_edges(mesh: &mut Mesh, triangles: &[Tri], center: [f64; 3
             id: format!("preview-edge:{index}"),
             kind: "preview".into(),
             segments: vec![[base, base + 1]],
+            class: 0,
         });
         index += 1;
     }

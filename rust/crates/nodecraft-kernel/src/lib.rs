@@ -60,6 +60,7 @@ fn box_mesh(length: f64, width: f64, height: f64) -> Mesh {
             id: format!("mesh-edge:{index}"),
             kind: "mesh".into(),
             segments: Vec::new(),
+            class: 0,
         })
         .collect();
     mesh.lightweight = true;

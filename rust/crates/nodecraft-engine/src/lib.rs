@@ -6063,12 +6063,14 @@ mod tests {
         let part = output.exact_parts.get("s").expect("embedded part");
         assert_eq!(part.bodies.len(), 2, "every body in the embedded copy is kept");
         let warnings = output.response.node_warnings.get("s").expect("fallback warning");
-        assert_eq!(
-            warnings,
-            &[String::from(
-                "Original not found; using the embedded copy of \u{201c}part.step\u{201d}."
-            )],
-            "the warning names the embedded copy without a hash"
+        // cadmpeg 0.6.12 also reports a product definition whose shape representation
+        // carries no body of its own (the assembly product above the two parts), so the
+        // fallback warning is asserted by its exact wording rather than as the only line.
+        let fallback =
+            "Original not found; using the embedded copy of \u{201c}part.step\u{201d}.";
+        assert!(
+            warnings.iter().any(|warning| warning == fallback),
+            "the warning names the embedded copy without a hash: {warnings:?}"
         );
         std::fs::remove_dir_all(directory).ok();
     }

@@ -1,5 +1,6 @@
 //! macOS keeps the native traffic lights over a fullsize custom app bar.
 
+use super::AuxiliaryWindow;
 use egui::ViewportBuilder;
 
 pub(crate) fn configure_main_viewport(viewport: ViewportBuilder) -> ViewportBuilder {
@@ -21,16 +22,26 @@ pub(crate) fn prepare_main_window() {
     nodecraft_macos::show_main_traffic_lights();
 }
 
-pub(crate) fn settings_uses_native_close() -> bool {
+pub(crate) fn auxiliary_window_uses_native_close() -> bool {
     true
 }
 
-pub(crate) fn settings_title_start() -> f32 {
+pub(crate) fn auxiliary_window_title_start() -> f32 {
     42.0
 }
 
-pub(crate) fn prepare_settings_window() {
-    nodecraft_macos::show_settings_close_light();
+pub(crate) fn prepare_auxiliary_window(window: AuxiliaryWindow) {
+    match window {
+        AuxiliaryWindow::Settings => nodecraft_macos::show_settings_close_light(),
+        AuxiliaryWindow::Debug => nodecraft_macos::show_debug_close_light(),
+    }
+}
+
+pub(crate) fn round_auxiliary_window(window: AuxiliaryWindow) {
+    match window {
+        AuxiliaryWindow::Settings => nodecraft_macos::round_settings_window(),
+        AuxiliaryWindow::Debug => nodecraft_macos::round_debug_window(),
+    }
 }
 
 pub(crate) fn set_main_window_draggable(draggable: bool) {

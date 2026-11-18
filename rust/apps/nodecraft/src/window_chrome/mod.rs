@@ -1,5 +1,12 @@
 //! Platform window-chrome policy with one entry point set per OS.
 
+/// The secondary native windows that share the auxiliary chrome policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AuxiliaryWindow {
+    Settings,
+    Debug,
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

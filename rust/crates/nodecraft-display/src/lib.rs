@@ -23,10 +23,57 @@ pub struct PlanInstance {
     pub plan: Arc<solidcore_tess::TessPlan>,
     /// sRGB colour by B-rep face index, from the display mesh's face groups.
     pub face_colors: Vec<[f32; 3]>,
+    /// Stable identity of this body *instance*, used to seed face colours.
+    ///
+    /// This is [`body_instance_id`] of the body's provenance key plus an
+    /// ordinal among bodies that share that key, so every copy of a shared
+    /// plan gets its own colours and the value survives plan-list reordering.
+    pub body: u64,
     /// The body's one composed placement value.
     pub placement: Placement,
     /// Kernel edge id by plan/record edge index, for selection.
     pub edge_ids: std::sync::Arc<[Option<String>]>,
+    /// The one display class by plan/record edge index, from the tessellation.
+    /// Uploaded once with the plan's edge ribbons; the setting is a mask.
+    pub edge_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]>,
+}
+
+/// Stable identity of one body instance for face-colour hashing.
+///
+/// `key` is the exact body's provenance (`source` content key plus body index
+/// in that node's Part). `instance` is the ordinal among bodies in the same
+/// Part that carry that identical key: copies produced by a pattern keep their
+/// source provenance, so the ordinal is what makes each copy's colours
+/// different. Both values come from the Part, not from the display list, so the
+/// identity survives re-evaluation and reordering.
+#[must_use]
+pub fn body_instance_id(key: BodyKey, instance: u32) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    fn mix(mut hash: u64, value: u64) -> u64 {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+    let hash = mix(FNV_OFFSET, key.source);
+    let hash = mix(hash, u64::from(key.body));
+    mix(hash, u64::from(instance))
+}
+
+/// The instance identity for every body in a Part, in body order.
+fn part_body_ids(part: &ExactPart) -> Vec<u64> {
+    let mut ordinals: HashMap<BodyKey, u32> = HashMap::new();
+    part.bodies
+        .iter()
+        .map(|body| {
+            let ordinal = ordinals.entry(body.key).or_default();
+            let id = body_instance_id(body.key, *ordinal);
+            *ordinal = ordinal.saturating_add(1);
+            id
+        })
+        .collect()
 }
 
 /// Map a display mesh's per-face-group colours back to B-rep face indices.
@@ -84,6 +131,8 @@ pub struct CachedBodyPlan {
     pub plan: Arc<solidcore_tess::TessPlan>,
     /// Kernel edge id by record edge index.
     pub edge_ids: Vec<Option<String>>,
+    /// The one class per plan edge, derived once with the plan.
+    pub edge_classes: Vec<nodecraft_layers::PlanEdgeClass>,
     pub stats: nodecraft_layers::TessStats,
 }
 
@@ -140,11 +189,12 @@ impl PlanCache {
         quality: DisplayQuality,
         plan: Arc<solidcore_tess::TessPlan>,
         edge_ids: Vec<Option<String>>,
+        edge_classes: Vec<nodecraft_layers::PlanEdgeClass>,
         stats: nodecraft_layers::TessStats,
     ) {
         let (tolerance, detail) = quality.key();
         let key = (body, tolerance, detail);
-        if self.entries.insert(key, CachedBodyPlan { plan, edge_ids, stats }).is_none() {
+        if self.entries.insert(key, CachedBodyPlan { plan, edge_ids, edge_classes, stats }).is_none() {
             self.order.push_back(key);
         }
         while self.entries.len() > self.limit {
@@ -470,13 +520,17 @@ pub struct PartDisplay {
     pub stats: Vec<nodecraft_layers::TessStats>,
 }
 
-/// Plan-only display data: GPU plans plus the edge polylines needed for
-/// picking/overlays. No CPU triangle mesh is evaluated.
+/// Plan-only display data: GPU plans plus a bounds carrier for the plan's
+/// edges. No CPU triangle mesh and no world-space edge polylines are built: the
+/// edge polylines stay local to each plan and are uploaded once with it.
 #[derive(Clone, Debug, Default)]
 pub struct PartPlans {
     pub plans: Vec<PlanInstance>,
     pub stats: Vec<nodecraft_layers::TessStats>,
-    pub edge_mesh: nodecraft_protocol::Mesh,
+    /// Eight bounds corners, no faces and no brep edges. The viewport uses it
+    /// for camera fit/grid radius; the GPU ribbon pass uses the plan's own
+    /// local-space edges.
+    pub bounds_mesh: nodecraft_protocol::Mesh,
 }
 
 /// Apply a body's one composed placement value to a display mesh.
@@ -534,8 +588,8 @@ fn brep_face_colours(brep: &nodecraft_solidcore::solidcore::topology::Brep, coun
     colours
 }
 
-/// Plan each body without evaluating the plan into triangles. The returned
-/// `edge_mesh` contains only plan edge polylines and is used for picking.
+/// Plan each body without evaluating the plan into triangles. Edges stay in
+/// each plan's local space, ready for one GPU upload and per-body instancing.
 pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCache) -> Result<PartPlans, String> {
     plan_part_with_qualities(part, quality, &BTreeMap::new(), &[], cache)
 }
@@ -621,6 +675,7 @@ pub fn plan_part_with_qualities(
                         out.push((body.key, *quality, CachedBodyPlan {
                             plan: data.plan,
                             edge_ids: data.plan_edge_ids,
+                            edge_classes: data.edge_classes,
                             stats: data.stats,
                         }));
                     }
@@ -641,6 +696,7 @@ pub fn plan_part_with_qualities(
                 quality,
                 data.plan.clone(),
                 data.edge_ids.clone(),
+                data.edge_classes.clone(),
                 data.stats.clone(),
             );
             let (tolerance, detail) = quality.key();
@@ -653,39 +709,24 @@ pub fn plan_part_with_qualities(
     }
     let mut plans = Vec::new();
     let mut stats = Vec::new();
-    let mut edge_mesh = nodecraft_protocol::Mesh::default();
+    let body_ids = part_body_ids(part);
+    // Only the bounds are derived from the edges. The polylines themselves stay
+    // in `cached.plan.edges` and are uploaded once per plan by the GPU path.
+    let mut edge_min = [f64::INFINITY; 3];
+    let mut edge_max = [f64::NEG_INFINITY; 3];
     for (body_index, body) in part.bodies.iter().enumerate() {
         let cached = planned[body_index]
             .take()
             .ok_or("display plan missing after planning")?;
         stats.push(cached.stats.clone());
-        // Edge polylines in display space, for the CPU picking/overlay layer.
-        for (edge_index, polyline) in cached.plan.edges.iter().enumerate() {
-            if polyline.is_empty() {
-                continue;
-            }
-            let base = edge_mesh.vertices.len() as u32;
-            let matrix = *body.placement.matrix();
+        let matrix = *body.placement.matrix();
+        for polyline in &cached.plan.edges {
             for point in polyline {
                 let p = matrix.apply_point([point.x, point.y, point.z]);
-                edge_mesh.vertices.push([p[0] as f32, p[1] as f32, p[2] as f32]);
-            }
-            let mut segments = Vec::with_capacity(polyline.len().saturating_sub(1));
-            for index in 0..polyline.len().saturating_sub(1) {
-                segments.push([base + index as u32, base + index as u32 + 1]);
-            }
-            if !segments.is_empty() {
-                let id = cached
-                    .edge_ids
-                    .get(edge_index)
-                    .and_then(Clone::clone)
-                    .unwrap_or_else(|| format!("edge:{edge_index}"));
-                let id = if part.bodies.len() > 1 {
-                    format!("body:{body_index}:{id}")
-                } else {
-                    id
-                };
-                edge_mesh.brep_edges.push(nodecraft_protocol::BrepEdge { id, kind: "edge".into(), segments });
+                for axis in 0..3 {
+                    edge_min[axis] = edge_min[axis].min(p[axis]);
+                    edge_max[axis] = edge_max[axis].max(p[axis]);
+                }
             }
         }
         let face_colors = brep_face_colours(body.brep.as_ref(), cached.plan.faces.len());
@@ -693,9 +734,23 @@ pub fn plan_part_with_qualities(
             target: String::new(),
             plan: cached.plan,
             face_colors,
+            body: body_ids[body_index],
             placement: body.placement.clone(),
             edge_ids: std::sync::Arc::from(cached.edge_ids),
+            edge_classes: std::sync::Arc::from(cached.edge_classes),
         });
+    }
+    let mut bounds_mesh = nodecraft_protocol::Mesh::default();
+    if edge_min[0].is_finite() && edge_max[0].is_finite() {
+        let mut corners = Vec::with_capacity(8);
+        for corner in 0..8 {
+            corners.push([
+                if corner & 1 == 0 { edge_min[0] } else { edge_max[0] } as f32,
+                if corner & 2 == 0 { edge_min[1] } else { edge_max[1] } as f32,
+                if corner & 4 == 0 { edge_min[2] } else { edge_max[2] } as f32,
+            ]);
+        }
+        bounds_mesh.vertices = corners;
     }
     if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
         eprintln!(
@@ -704,7 +759,7 @@ pub fn plan_part_with_qualities(
             started.elapsed().as_secs_f64() * 1000.0
         );
     }
-    Ok(PartPlans { plans, stats, edge_mesh })
+    Ok(PartPlans { plans, stats, bounds_mesh })
 }
 
 /// Build the display mesh and GPU plans for an exact Part, reusing cached plans.
@@ -757,10 +812,15 @@ fn mesh_part_impl(
     let mut plans = Vec::new();
     let mut feature_plans = Vec::new();
     let mut stats = Vec::new();
-    for body in &part.bodies {
+    let body_ids = part_body_ids(part);
+    for (body_index, body) in part.bodies.iter().enumerate() {
         let quality = by_body.get(&body.key).copied().unwrap_or(default);
         let mut display = match cache.get(body.key, quality) {
-            Some(cached) => nodecraft_layers::evaluate_plan(&cached.plan, &cached.edge_ids),
+            Some(cached) => nodecraft_layers::evaluate_plan_with_classes(
+                &cached.plan,
+                &cached.edge_ids,
+                &cached.edge_classes,
+            ),
             None => {
                 // `tessellate_body` already evaluated the plan into its display
                 // mesh. Do not call `evaluate_plan` a second time on a miss.
@@ -770,6 +830,7 @@ fn mesh_part_impl(
                     quality,
                     display.plan.clone(),
                     display.plan_edge_ids.clone(),
+                    display.edge_classes.clone(),
                     display.stats.clone(),
                 );
                 display
@@ -782,6 +843,7 @@ fn mesh_part_impl(
                 body.brep.as_ref(),
                 &display.plan,
                 &body.placement,
+                body_ids[body_index],
             )
         {
             feature_plans.push(feature);
@@ -791,8 +853,10 @@ fn mesh_part_impl(
             target: String::new(),
             plan: std::sync::Arc::clone(&display.plan),
             face_colors: face_colors_by_index(&display.mesh),
+            body: body_ids[body_index],
             placement: body.placement.clone(),
             edge_ids: std::sync::Arc::from(display.plan_edge_ids.clone()),
+            edge_classes: std::sync::Arc::from(display.edge_classes.clone()),
         });
         meshes.push(display.mesh);
     }
@@ -808,6 +872,7 @@ fn blend_feature_plan(
     brep: &nodecraft_solidcore::solidcore::topology::Brep,
     plan: &std::sync::Arc<solidcore_tess::TessPlan>,
     placement: &Placement,
+    body: u64,
 ) -> Option<PlanInstance> {
     use nodecraft_solidcore::solidcore::blend::definition_check::blend_face_marks;
     let marked = blend_face_marks(brep).ok()?;
@@ -831,8 +896,10 @@ fn blend_feature_plan(
         target: "feature".into(),
         plan: std::sync::Arc::new(filtered),
         face_colors: Vec::new(),
+        body,
         placement: placement.clone(),
         edge_ids: std::sync::Arc::from(Vec::new()),
+        edge_classes: std::sync::Arc::from(Vec::new()),
     })
 }
 
@@ -977,6 +1044,24 @@ mod tests {
         assert_eq!(planned.plans.len(), 3);
         assert!(std::sync::Arc::ptr_eq(&planned.plans[0].plan, &planned.plans[1].plan));
         assert!(std::sync::Arc::ptr_eq(&planned.plans[1].plan, &planned.plans[2].plan));
+        assert_eq!(planned.plans[0].body, body_instance_id(key, 0));
+        assert_eq!(planned.plans[1].body, body_instance_id(key, 1));
+        assert_eq!(planned.plans[2].body, body_instance_id(key, 2));
+        assert_ne!(
+            planned.plans[0].body, planned.plans[1].body,
+            "copies of one shared plan need distinct colour identities",
+        );
+    }
+
+    #[test]
+    fn body_instance_identity_is_per_provenance_and_per_copy() {
+        let first = BodyKey::new(41, 0);
+        let other_body = BodyKey::new(41, 1);
+        let other_source = BodyKey::new(42, 0);
+        assert_eq!(body_instance_id(first, 0), body_instance_id(first, 0));
+        assert_ne!(body_instance_id(first, 0), body_instance_id(first, 1));
+        assert_ne!(body_instance_id(first, 0), body_instance_id(other_body, 0));
+        assert_ne!(body_instance_id(first, 0), body_instance_id(other_source, 0));
     }
 
     #[test]
@@ -1034,16 +1119,12 @@ mod tests {
             "the fine level must carry more triangles than the coarse level",
         );
         assert_eq!(triangles(&planned), triangles(&fine_only) + triangles(&coarse_only));
-        // The edge payload is built from each body's own plan, never a second
-        // tolerance: the merged polylines are exactly the two per-level sets.
-        assert_eq!(
-            planned.edge_mesh.vertices.len(),
-            fine_only.edge_mesh.vertices.len() + coarse_only.edge_mesh.vertices.len(),
-        );
-        assert_eq!(
-            planned.edge_mesh.brep_edges.len(),
-            fine_only.edge_mesh.brep_edges.len() + coarse_only.edge_mesh.brep_edges.len(),
-        );
+        // No world-space edge copy is built. The display payload is a bounds
+        // carrier only; each plan keeps its local-space polylines for the one
+        // GPU ribbon upload.
+        assert_eq!(planned.bounds_mesh.vertices.len(), 8, "eight bounds corners");
+        assert!(planned.bounds_mesh.brep_edges.is_empty());
+        assert!(planned.plans.iter().all(|instance| !instance.plan.edges.is_empty()));
         assert_eq!(
             planned.plans[0].plan.edges.len(),
             fine_only.plans[0].plan.edges.len(),
@@ -1051,6 +1132,47 @@ mod tests {
         assert_eq!(
             planned.plans[1].plan.edges.len(),
             coarse_only.plans[0].plan.edges.len(),
+        );
+    }
+
+    #[test]
+    fn plan_instances_and_meshes_carry_the_tessellation_edge_classes() {
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let brep = nodecraft_solidcore::solidcore::primitive::api_primitives::create_cone(
+            &mut kernel,
+            nodecraft_solidcore::solidcore::math::Point3::new(0.0, 0.0, -20.0),
+            20.0,
+            0.0,
+            40.0,
+        )
+        .expect("cone");
+        let part = ExactPart {
+            bodies: vec![ExactBody {
+                key: BodyKey::new(4, 0),
+                brep: Arc::new(brep),
+                placement: Placement::identity(),
+            }],
+        };
+        let mut cache = PlanCache::new(4);
+        let first = mesh_part(&part, DisplayQuality::Full(0.2), &mut cache).expect("cone");
+        let seam_bit = nodecraft_layers::PlanEdgeClass::SEAM.bits();
+        assert!(
+            first.plans[0].edge_classes.iter().any(|class| class.is_seam()),
+            "the plan instance carries the cone's seam class",
+        );
+        assert!(
+            first.mesh.brep_edges.iter().any(|edge| edge.class & seam_bit != 0),
+            "the CPU mesh carries the same seam class",
+        );
+        let second = mesh_part(&part, DisplayQuality::Full(0.2), &mut cache).expect("cached cone");
+        assert_eq!(
+            second.plans[0].edge_classes.as_ref(),
+            first.plans[0].edge_classes.as_ref(),
+            "a cache hit keeps the classes without recomputing them",
+        );
+        assert!(
+            second.mesh.brep_edges.iter().any(|edge| edge.class & seam_bit != 0),
+            "a cache hit's CPU mesh keeps the seam class",
         );
     }
 
@@ -1089,6 +1211,7 @@ mod tests {
             key,
             DisplayQuality::Full(0.35),
             plan(),
+            Vec::new(),
             Vec::new(),
             nodecraft_layers::TessStats::default(),
         );

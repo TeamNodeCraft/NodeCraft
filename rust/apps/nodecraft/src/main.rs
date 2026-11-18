@@ -21,6 +21,7 @@ mod source_service;
 mod ui_shape;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_backdrop;
+mod gpu_profiler;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_pick;
 mod plan_math;
@@ -28,10 +29,13 @@ mod plan_math;
 mod gpu_viewport;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_plan;
+#[cfg(feature = "gpu-viewport")]
+mod edge_ribbon;
 // Measurement-only harness; its test is `#[ignore]`d and never runs by default.
 #[cfg(test)]
 mod edit_overhead;
 mod inspector;
+mod view_navigator;
 mod viewport;
 mod viewport_grid;
 mod viewer_gizmo;
@@ -109,6 +113,7 @@ fn run() -> eframe::Result {
     let viewport = window_chrome::configure_main_viewport(viewport);
     let options = eframe::NativeOptions {
         viewport,
+        wgpu_options: wgpu_options_with_timestamps(),
         // The SolidCraft viewport needs a depth buffer in eframe's pass. Matching the
         // scene and window depth targets lets it draw directly into the egui pass
         // instead of relying on an offscreen blit that can stay hidden on first show.
@@ -130,6 +135,29 @@ fn run() -> eframe::Result {
             )))
         }),
     )
+}
+
+/// Ask for the pass-boundary timestamp feature only when this adapter exposes
+/// it. The frame profiler is optional, but a device's enabled features cannot
+/// change after creation, so this request is made unconditionally (and cheaply)
+/// for every device that can support it. Backends without it (GL/WebGL) simply
+/// leave the bit out and the profiler shows CPU timings only.
+fn wgpu_options_with_timestamps() -> egui_wgpu::WgpuConfiguration {
+    let mut options = egui_wgpu::WgpuConfiguration::default();
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+        let base = setup.device_descriptor.clone();
+        setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+            let mut descriptor = base(adapter);
+            if adapter
+                .features()
+                .contains(eframe::wgpu::Features::TIMESTAMP_QUERY)
+            {
+                descriptor.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY;
+            }
+            descriptor
+        });
+    }
+    options
 }
 
 /// Headless smoke check used by CI and by the first-port acceptance test.

@@ -21,6 +21,35 @@ use solidcore::topology::FaceId;
 use solidcore_record::Vec3;
 use solidcore_record::brep::Brep as RecordBrep;
 
+/// Test-visible proof that LOD bounds do not tessellate.
+///
+/// `body_bounds` must measure the B-rep, never build a display plan. A test
+/// resets this thread's counter, measures bounds, and asserts the counter is
+/// still zero. Thread-local because display planning itself runs on worker
+/// threads and unrelated tests may plan concurrently.
+pub mod plan_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CALLS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// Reset this thread's plan/tessellation counter.
+    pub fn reset() {
+        CALLS.with(|value| value.set(0));
+    }
+
+    /// Plans or tessellations started on this thread since [`reset`].
+    #[must_use]
+    pub fn calls() -> u64 {
+        CALLS.with(Cell::get)
+    }
+
+    pub(super) fn note() {
+        CALLS.with(|value| value.set(value.get() + 1));
+    }
+}
+
 /// Re-export the plan types used by the app/GPU adapters so application code
 /// stays behind the NodeCraft layers boundary.
 pub mod tess {
@@ -54,6 +83,72 @@ pub fn configure_session_fixes(fixes: &[&str]) -> Result<(), String> {
         .map_err(|error| format!("solidcore-ops fixes: {error}"))
 }
 
+/// How one plan edge is drawn and picked.
+///
+/// The bits are the one per-edge class shared by the GPU ribbon, the edge pick
+/// pass and the CPU fallback. They are derived once from the tessellator's
+/// flags (SolidCore's rule: a seam is `seams[i] && !sharp_edges[i]`) and then
+/// uploaded with the edge. A setting only changes the uniform mask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PlanEdgeClass(u32);
+
+impl PlanEdgeClass {
+    /// An ordinary sharp or boundary edge.
+    pub const NORMAL: Self = Self(0);
+    /// A seam between two pieces of one smooth surface (hidden by default).
+    pub const SEAM: Self = Self(1 << 0);
+    /// A display-only tangent join. Stored now so a later setting can use the
+    /// same mask without re-plumbing; it is drawn today.
+    pub const SMOOTH: Self = Self(1 << 1);
+
+    /// The class from the tessellator's per-edge flags. A certified crease
+    /// (`sharp`) overrides a coarse seam fit, exactly as `Mesh::edge_visible`
+    /// does upstream.
+    #[must_use]
+    pub const fn from_tess_flags(seam: bool, smooth: bool, sharp: bool) -> Self {
+        let mut bits = 0;
+        if seam && !sharp {
+            bits |= Self::SEAM.0;
+        }
+        if smooth {
+            bits |= Self::SMOOTH.0;
+        }
+        Self(bits)
+    }
+
+    #[must_use]
+    pub const fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    #[must_use]
+    pub const fn bits(self) -> u32 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn is_seam(self) -> bool {
+        self.0 & Self::SEAM.0 != 0
+    }
+
+    #[must_use]
+    pub const fn is_smooth(self) -> bool {
+        self.0 & Self::SMOOTH.0 != 0
+    }
+
+    /// Whether this edge is drawn and picked under the seam setting.
+    #[must_use]
+    pub const fn visible(self, show_seam_edges: bool) -> bool {
+        !self.is_seam() || show_seam_edges
+    }
+
+    /// The uniform mask the shaders test against this class.
+    #[must_use]
+    pub const fn mask(show_seam_edges: bool) -> u32 {
+        if show_seam_edges { Self::SEAM.0 } else { 0 }
+    }
+}
+
 /// A tessellated record in the shape NodeCraft needs: protocol triangle data
 /// plus the display-only edge polylines the viewport will draw once the record
 /// is the rendering source of truth.
@@ -68,6 +163,10 @@ pub struct TessDisplay {
     /// Per edge: the seam / tangent-join flags `solidcore-tess` reports.
     pub seam_edges: Vec<bool>,
     pub smooth_edges: Vec<bool>,
+    /// Protected creases, which override a coarse seam fit.
+    pub sharp_edges: Vec<bool>,
+    /// The one class per plan edge, derived from the flags above.
+    pub edge_classes: Vec<PlanEdgeClass>,
     pub stats: TessStats,
     /// Display-edge id by record edge index, after the kernel-edge remap.
     pub plan_edge_ids: Vec<Option<String>>,
@@ -178,7 +277,16 @@ pub fn tessellate_record(
                 .collect()
         })
         .collect();
-    let mesh = protocol_mesh(&tess, &edge_polylines);
+    let edge_classes: Vec<PlanEdgeClass> = (0..plan.edges.len())
+        .map(|index| {
+            PlanEdgeClass::from_tess_flags(
+                tess.seams.get(index).copied().unwrap_or(false),
+                tess.smooth_edges.get(index).copied().unwrap_or(false),
+                tess.sharp_edges.get(index).copied().unwrap_or(false),
+            )
+        })
+        .collect();
+    let mesh = protocol_mesh(&tess, &edge_polylines, &edge_classes);
     let mut diagnostics = Vec::new();
     for face in &stats.lenient {
         diagnostics.push(format!("face {} lenient: {}", face.face, face.reason));
@@ -238,6 +346,8 @@ pub fn tessellate_record(
         plan_edge_ids,
         seam_edges: tess.seams.clone(),
         smooth_edges: tess.smooth_edges.clone(),
+        sharp_edges: tess.sharp_edges.clone(),
+        edge_classes,
         stats: TessStats {
             faces: record.faces.len(),
             triangles: tess.triangles.len(),
@@ -256,7 +366,11 @@ pub fn tessellate_record(
     })
 }
 
-fn protocol_mesh(tess: &solidcore_tess::Mesh, edge_polylines: &[Vec<[f32; 3]>]) -> Mesh {
+fn protocol_mesh(
+    tess: &solidcore_tess::Mesh,
+    edge_polylines: &[Vec<[f32; 3]>],
+    edge_classes: &[PlanEdgeClass],
+) -> Mesh {
     let mut mesh = Mesh::default();
     // `solidcore-tess` evaluated these normals from the surface, split per
     // B-rep face and per incident triangle at a pole. They are the shading
@@ -300,6 +414,7 @@ fn protocol_mesh(tess: &solidcore_tess::Mesh, edge_polylines: &[Vec<[f32; 3]>]) 
                 id: format!("edge:{edge_index}"),
                 kind: "edge".into(),
                 segments,
+                class: edge_classes.get(edge_index).copied().unwrap_or_default().bits(),
             });
         }
     }
@@ -616,7 +731,85 @@ pub struct TessPlanData {
     pub plan: std::sync::Arc<solidcore_tess::TessPlan>,
     pub plan_edge_ids: Vec<Option<String>>,
     pub edge_polylines: Vec<Vec<[f32; 3]>>,
+    /// The one class per plan edge, from the same tessellation.
+    pub edge_classes: Vec<PlanEdgeClass>,
     pub stats: TessStats,
+}
+
+/// The record edge index `id` names, if it names one.
+fn edge_index(id: &str) -> Option<usize> {
+    id.strip_prefix("edge:").and_then(|index| index.parse::<usize>().ok())
+}
+
+/// Derive each plan edge's class once, at the tessellation source. Seams come
+/// from the kernel's own seam test (the low-level record path has no evaluated
+/// `Mesh` to read `seams` from); smooth and sharp flags are carried when the
+/// tessellator supplied them. The GPU never recomputes this.
+fn kernel_edge_classes(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    order: &solidcore_convert::brep::Order,
+    edge_count: usize,
+    smooth: &[bool],
+    sharp: &[bool],
+) -> Vec<PlanEdgeClass> {
+    (0..edge_count)
+        .map(|index| {
+            let seam = order.edges.get(index).is_some_and(|edge| {
+                solidcore::topology::edge::is_seam(kernel, brep, *edge).unwrap_or(false)
+            });
+            PlanEdgeClass::from_tess_flags(
+                seam,
+                smooth.get(index).copied().unwrap_or(false),
+                sharp.get(index).copied().unwrap_or(false),
+            )
+        })
+        .collect()
+}
+
+/// Put the derived classes on a display: the per-edge list, the existing flag
+/// vectors (one source), and every protocol B-rep edge the CPU path sees.
+fn apply_edge_classes(display: &mut TessDisplay, edge_classes: Vec<PlanEdgeClass>) {
+    display.seam_edges = edge_classes.iter().map(|class| class.is_seam()).collect();
+    display.smooth_edges = edge_classes.iter().map(|class| class.is_smooth()).collect();
+    for edge in &mut display.mesh.brep_edges {
+        if let Some(index) = edge_index(&edge.id) {
+            if let Some(class) = edge_classes.get(index) {
+                edge.class = class.bits();
+            }
+        }
+    }
+    display.edge_classes = edge_classes;
+}
+
+/// Recover the class of each plan edge from a protocol mesh's B-rep edges.
+/// Engine-side cache hits use this to keep the one source after the tessellation
+/// value has travelled through the mesh.
+#[must_use]
+pub fn plan_edge_classes_from_brep_edges(
+    plan: &solidcore_tess::TessPlan,
+    edge_ids: &[Option<String>],
+    edges: &[nodecraft_protocol::BrepEdge],
+) -> Vec<PlanEdgeClass> {
+    let mut by_id = std::collections::HashMap::new();
+    for (index, id) in edge_ids.iter().enumerate() {
+        if let Some(id) = id {
+            by_id.entry(id.as_str()).or_insert(index);
+        }
+    }
+    let mut classes = vec![PlanEdgeClass::NORMAL; plan.edges.len()];
+    for edge in edges {
+        let index = by_id
+            .get(edge.id.as_str())
+            .copied()
+            .or_else(|| edge_index(&edge.id));
+        if let Some(index) = index {
+            if let Some(slot) = classes.get_mut(index) {
+                *slot = PlanEdgeClass::from_bits(edge.class);
+            }
+        }
+    }
+    classes
 }
 
 /// Plan a kernel B-rep without evaluating it. `preview_detail` selects the
@@ -627,6 +820,7 @@ pub fn plan_kernel(
     tolerance: f64,
     preview_detail: Option<u8>,
 ) -> Result<TessPlanData, String> {
+    plan_stats::note();
     let size = kernel_body_size(kernel, brep)?;
     let display = match preview_detail {
         None => MeshTolerance::display(tolerance.max(1.0e-5)),
@@ -688,7 +882,8 @@ pub fn plan_kernel(
         .iter()
         .map(|polyline| polyline.iter().map(|point| [point.x as f32, point.y as f32, point.z as f32]).collect())
         .collect();
-    Ok(TessPlanData { plan, plan_edge_ids, edge_polylines, stats })
+    let edge_classes = kernel_edge_classes(kernel, &mut copy, &order, plan.edges.len(), &[], &[]);
+    Ok(TessPlanData { plan, plan_edge_ids, edge_polylines, edge_classes, stats })
 }
 
 fn tessellate_kernel_with(
@@ -697,9 +892,19 @@ fn tessellate_kernel_with(
     tolerance: MeshTolerance,
     size: f64,
 ) -> Result<TessDisplay, String> {
+    plan_stats::note();
     let (record, order) = solidcore_convert::brep::to_record(kernel, brep)
         .map_err(|error| format!("kernel to record: {error}"))?;
     let mut display = tessellate_record(&record, &tolerance, size)?;
+    let classes = kernel_edge_classes(
+        kernel,
+        brep,
+        &order,
+        display.plan.edges.len(),
+        &display.smooth_edges,
+        &display.sharp_edges,
+    );
+    apply_edge_classes(&mut display, classes);
     // `protocol_mesh` keeps the record edge index in each display edge's id,
     // and skips empty polylines. Index into `order.edges` instead of zipping the
     // shorter display list against it; zipping shifted every id after the first
@@ -738,6 +943,18 @@ fn tessellate_kernel_with(
 /// keep their kernel ids after a plan-cache hit.
 #[must_use]
 pub fn evaluate_plan(plan: &std::sync::Arc<solidcore_tess::TessPlan>, edge_ids: &[Option<String>]) -> TessDisplay {
+    evaluate_plan_with_classes(plan, edge_ids, &[])
+}
+
+/// [`evaluate_plan`] carrying the per-edge classes derived at plan time. The
+/// classes come from the same tessellation that produced the plan, so a cache
+/// hit never recomputes them.
+#[must_use]
+pub fn evaluate_plan_with_classes(
+    plan: &std::sync::Arc<solidcore_tess::TessPlan>,
+    edge_ids: &[Option<String>],
+    edge_classes: &[PlanEdgeClass],
+) -> TessDisplay {
     let (tess, refused) = plan.evaluate();
     let edge_polylines: Vec<Vec<[f32; 3]>> = tess
         .edges
@@ -749,13 +966,12 @@ pub fn evaluate_plan(plan: &std::sync::Arc<solidcore_tess::TessPlan>, edge_ids: 
                 .collect()
         })
         .collect();
-    let mut mesh = protocol_mesh(&tess, &edge_polylines);
+    let classes: Vec<PlanEdgeClass> = (0..plan.edges.len())
+        .map(|index| edge_classes.get(index).copied().unwrap_or_default())
+        .collect();
+    let mut mesh = protocol_mesh(&tess, &edge_polylines, &classes);
     for edge in &mut mesh.brep_edges {
-        if let Some(index) = edge
-            .id
-            .strip_prefix("edge:")
-            .and_then(|index| index.parse::<usize>().ok())
-        {
+        if let Some(index) = edge_index(&edge.id) {
             if let Some(Some(id)) = edge_ids.get(index) {
                 edge.id.clone_from(id);
             }
@@ -768,8 +984,10 @@ pub fn evaluate_plan(plan: &std::sync::Arc<solidcore_tess::TessPlan>, edge_ids: 
         mesh,
         edge_polylines,
         plan_edge_ids: edge_ids.to_vec(),
-        seam_edges: tess.seams.clone(),
-        smooth_edges: tess.smooth_edges.clone(),
+        seam_edges: classes.iter().map(|class| class.is_seam()).collect(),
+        smooth_edges: classes.iter().map(|class| class.is_smooth()).collect(),
+        sharp_edges: tess.sharp_edges.clone(),
+        edge_classes: classes,
         stats: TessStats {
             faces: plan.faces.len(),
             triangles: tess.triangles.len(),
@@ -840,5 +1058,87 @@ mod tests {
                 .expect("ordinal");
             assert_eq!(display_edge.id, format!("edge:{ordinal}"));
         }
+    }
+
+    #[test]
+    fn a_certified_crease_overrides_a_seam_fit() {
+        assert!(PlanEdgeClass::from_tess_flags(true, false, false).is_seam());
+        assert!(!PlanEdgeClass::from_tess_flags(true, false, true).is_seam());
+        assert!(PlanEdgeClass::from_tess_flags(false, true, false).is_smooth());
+    }
+
+    #[test]
+    fn primitive_seams_are_classified_from_the_kernel_flags() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let mut cone = api::create_cone(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 0.0, 40.0)
+            .expect("cone");
+        let mut cylinder = api::create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 40.0)
+            .expect("cylinder");
+        let mut sphere = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
+            .expect("sphere");
+        let mut boxed =
+            api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+                .expect("box");
+        for (name, brep) in [
+            ("cone", &mut cone),
+            ("cylinder", &mut cylinder),
+            ("sphere", &mut sphere),
+            ("box", &mut boxed),
+        ] {
+            let display = tessellate_kernel_preview(&mut kernel, brep, 3).expect(name);
+            assert_eq!(
+                display.edge_classes.len(),
+                display.plan.edges.len(),
+                "{name}: one class per plan edge",
+            );
+            let seams: Vec<usize> = display
+                .edge_classes
+                .iter()
+                .enumerate()
+                .filter(|(_, class)| class.is_seam())
+                .map(|(index, _)| index)
+                .collect();
+            if name == "box" {
+                assert!(seams.is_empty(), "a box has no seam of a smooth surface: {seams:?}");
+            } else {
+                assert_eq!(
+                    seams.len(),
+                    1,
+                    "{name}: exactly one wall seam, got {seams:?}",
+                );
+            }
+            for (index, class) in display.edge_classes.iter().enumerate() {
+                if class.is_seam() {
+                    assert!(!class.visible(false), "{name}: seam {index} is hidden by default");
+                    assert!(class.visible(true), "{name}: seam {index} shows when asked");
+                } else {
+                    assert!(class.visible(false), "{name}: ordinary edge {index} stays drawn");
+                }
+            }
+            let mesh_seams = display
+                .mesh
+                .brep_edges
+                .iter()
+                .filter(|edge| edge.class & PlanEdgeClass::SEAM.bits() != 0)
+                .count();
+            assert_eq!(
+                mesh_seams,
+                seams.len(),
+                "{name}: the CPU mesh carries the same seam classes",
+            );
+            assert_eq!(
+                display.edge_polylines.len(),
+                display.edge_classes.len(),
+                "{name}: every plan edge has its polyline and class",
+            );
+        }
+        // The GPU plan-only path derives the same classes without evaluating a
+        // CPU mesh.
+        let planned = plan_kernel(&mut kernel, &cone, 0.1, Some(3)).expect("plan-only cone");
+        assert_eq!(
+            planned.edge_classes.iter().filter(|class| class.is_seam()).count(),
+            1,
+            "the plan-only GPU path carries the cone's seam class",
+        );
     }
 }

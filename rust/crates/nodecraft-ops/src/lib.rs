@@ -8,7 +8,7 @@ use solidcore::kernel::Kernel;
 use solidcore::topology::brep::p3::brep_copy;
 use solidcore::topology::{Brep, EdgeId, FaceId};
 use solidcore_ops::blend::{Blend, BlendOptions, ChamferSecond, Corners, Turn};
-use solidcore_ops::{Body, Order};
+use solidcore_ops::{Body, Contract, Order};
 
 pub use solidcore_ops::blend::{BlendOptions as Options, ChamferCorner, ChamferSecond as Second, Turn as CornerTurn};
 pub use solidcore_ops::cancel;
@@ -183,15 +183,15 @@ impl<'k> OpsSession<'k> {
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (
                 Blend::Round,
-                BlendOptions { turn, chamfer_corner: ChamferCorner::Mitre },
+                BlendOptions { turn, chamfer_corner: ChamferCorner::Mitre, contract: Contract::Proved },
             ),
             OpsBlend::Curvature => (
                 Blend::Curvature,
-                BlendOptions { turn: Turn::Mitre, chamfer_corner: ChamferCorner::Mitre },
+                BlendOptions { turn: Turn::Mitre, chamfer_corner: ChamferCorner::Mitre, contract: Contract::Proved },
             ),
             OpsBlend::Chamfer(corner) => (
                 Blend::Chamfer,
-                BlendOptions { turn: Turn::Mitre, chamfer_corner: corner },
+                BlendOptions { turn: Turn::Mitre, chamfer_corner: corner, contract: Contract::Proved },
             ),
             OpsBlend::ChamferSides { second, up, flip } => {
                 let mut along = Vec::with_capacity(indices.len());
@@ -211,13 +211,14 @@ impl<'k> OpsSession<'k> {
                     along.push(if flip { other } else { leaning });
                 }
                 let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
-                    solidcore_ops::blend::chamfer_sides_ordered(
+                    solidcore_ops::blend::chamfer_sides_ordered_with(
                         &body,
                         &order,
                         &indices,
                         &along,
                         size,
                         second,
+                        Contract::Proved,
                     )
                 });
                 self.note_reset(reset);

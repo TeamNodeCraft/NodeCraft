@@ -11,6 +11,9 @@ default = ["gpu-viewport"]
 # The wgpu viewport is being ported from SolidCraft. It is kept optional until the
 # adapter lands so the first app shell can build without a GPU pipeline.
 gpu-viewport = ["dep:solidcraft-viewport-gpu"]
+# Opt-in external Tracy GPU profiling. Off by default so normal builds pay
+# nothing and do not link the Tracy client.
+tracy = ["wgpu-profiler/tracy"]
 
 [dependencies]
 nodecraft-crash = { path = "../../crates/nodecraft-crash" }
@@ -18,6 +21,10 @@ nodecraft-kernel-profile = { path = "../../crates/nodecraft-kernel-profile" }
 egui = "0.36"
 eframe = { version = "0.36", features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "__screenshot"] }
 egui-wgpu = "0.36"
+egui_plot = "=0.37.0"
+# GPU pass timings through timer queries. Its wgpu dependency is v30, matching
+# eframe/egui-wgpu 0.36, so the profiler shares our device.
+wgpu-profiler = "=0.28.0"
 rfd = "0.17"
 arboard = "3"
 image = { version = "0.25", features = ["png"] }
@@ -48,9 +55,9 @@ notify = "=8.2.1"
 nodecraft-worker = { path = "../../crates/nodecraft-worker" }
 # Upstream view math/geometry. Keep these as git dependencies so they can be
 # updated independently of the app; only our UI adapter lives in this repository.
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5" }
-solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "c2ffd48e27062a1651399b4e67efaa9e9c0176e5", optional = true }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c" }
+solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "c5ed6cd004fcb211dd0ce7fd5417b6e4f046221c", optional = true }
 solidcore-record = { workspace = true }
 glam = { version = "0.30", features = ["bytemuck"] }
 

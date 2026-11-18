@@ -238,6 +238,11 @@ pub fn round_settings_window() {
     round_window("NodeCraft Settings");
 }
 
+/// Round the Debug window with the same radius as the main window.
+pub fn round_debug_window() {
+    round_window("Debug");
+}
+
 fn position_standard_button(
     button: &objc2_app_kit::NSButton,
     x: f64,
@@ -286,8 +291,8 @@ pub fn show_main_traffic_lights() {
     }
 }
 
-/// Show only the native close button in the settings title bar.
-pub fn show_settings_close_light() {
+/// Show only the native close button in an auxiliary window title bar.
+fn show_auxiliary_close_light(title: &str) {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSWindowButton};
 
@@ -296,7 +301,7 @@ pub fn show_settings_close_light() {
     };
     let app = NSApplication::sharedApplication(mtm);
     for window in app.windows().iter() {
-        if window.title().to_string() != "NodeCraft Settings" {
+        if window.title().to_string() != title {
             continue;
         }
         for kind in [NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton] {
@@ -309,6 +314,16 @@ pub fn show_settings_close_light() {
             position_standard_button(&button, 15.0, 20.0);
         }
     }
+}
+
+/// Show only the native close button in the settings title bar.
+pub fn show_settings_close_light() {
+    show_auxiliary_close_light("NodeCraft Settings");
+}
+
+/// Show only the native close button in the Debug window title bar.
+pub fn show_debug_close_light() {
+    show_auxiliary_close_light("Debug");
 }
 
 /// Prevent the native titlebar from stealing a drag that began in an egui

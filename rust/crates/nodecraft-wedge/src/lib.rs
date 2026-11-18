@@ -299,6 +299,7 @@ fn push_face(
         id: format!("mesh-edge:{}", *edge_index),
         kind: "mesh".into(),
         segments: (0..count).map(|index| [base + index, base + (index + 1) % count]).collect(),
+        class: 0,
     });
 
     *face_index += 1;

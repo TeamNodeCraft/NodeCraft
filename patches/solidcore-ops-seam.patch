@@ -1,7 +1,7 @@
-From 34effd3de1af981d620ca3f57cf3567cff4ecf79 Mon Sep 17 00:00:00 2001
+From 03cb087e13b89e6df45b7c635edd2f7c925d5c1b Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:05:16 +1030
-Subject: [PATCH 1/8] ops: lend a kernel and build bodies from B-reps
+Subject: [PATCH 1/7] ops: lend a kernel and build bodies from B-reps
 
 Add session::with_kernel, borrowed-mode rules, Body::from_brep/into_brep, Order::of and a seam test.
 ---
@@ -32,10 +32,10 @@ index 390b6c522..d6c9219ad 100644
  /// vertices. In [`to_record`]'s order several record edges may name one kernel edge where solids
  /// touch along it; [`to_kernel`] builds one kernel edge per record edge.
 diff --git a/solidcore/crates/solidcore-ops/Cargo.toml b/solidcore/crates/solidcore-ops/Cargo.toml
-index b1c08cbe8..2317bc8f2 100644
+index 44168da8c..fadd504d8 100644
 --- a/solidcore/crates/solidcore-ops/Cargo.toml
 +++ b/solidcore/crates/solidcore-ops/Cargo.toml
-@@ -13,6 +13,7 @@ categories = ["science"]
+@@ -47,6 +47,7 @@ path = "tests/round_between_crossing_cylinders.rs"
  
  # Layers §3: ops sits on the kernel, the record and the conversion only.
  [dependencies]
@@ -179,10 +179,10 @@ index 294224823..bf116c3b3 100644
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 03eb7e422..f210e17b9 100644
+index bc4e0271c..75cbdbcde 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -1979,6 +1979,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -2342,6 +2342,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -210,15 +210,15 @@ index 03eb7e422..f210e17b9 100644
 +    assert!(!kernel_needs_reset());
  }
  
- /// The kernel rig's fix set (`fixes.json`), as the rig runs its entries.
+ /// The kernel rig's fix set (SolidCraft's preset, `solidcraft_fixes.rs`), as the rig runs its
 -- 
 2.54.0 (Apple Git-157)
 
 
-From 46124b32ee918eb75215a3539dc258fdeb524ea7 Mon Sep 17 00:00:00 2001
+From 164b2d67542c714915d732bb9a6527181c26bd63 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:25:30 +1030
-Subject: [PATCH 2/8] ops: fix borrowed-kernel reset, cancel, panic and hook
+Subject: [PATCH 2/7] ops: fix borrowed-kernel reset, cancel, panic and hook
  rules
 
 Per-thread needs-reset flag, restore the saved cancel token, catch/restore the kernel around with_kernel, refuse hook reentry, get-or-create trims and list-order Order::of.
@@ -231,10 +231,10 @@ Per-thread needs-reset flag, restore the saved cancel token, catch/restore the k
  5 files changed, 49 insertions(+), 19 deletions(-)
 
 diff --git a/solidcore/Cargo.lock b/solidcore/Cargo.lock
-index 824241764..1b5357d07 100644
+index 3d7cd8273..a8b30ae38 100644
 --- a/solidcore/Cargo.lock
 +++ b/solidcore/Cargo.lock
-@@ -342,6 +342,12 @@ dependencies = [
+@@ -349,6 +349,12 @@ dependencies = [
   "twox-hash",
  ]
  
@@ -247,7 +247,7 @@ index 824241764..1b5357d07 100644
  [[package]]
  name = "serde"
  version = "1.0.229"
-@@ -463,6 +469,7 @@ name = "solidcore-ops"
+@@ -470,6 +476,7 @@ name = "solidcore-ops"
  version = "0.1.0"
  dependencies = [
   "flate2",
@@ -392,10 +392,10 @@ index bf116c3b3..ac1398280 100644
      r
  }
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index f210e17b9..aceb2979b 100644
+index 75cbdbcde..227704ebf 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -1996,9 +1996,10 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -2359,9 +2359,10 @@ fn borrowed_kernel_matches_the_global_path() {
      kernel.fixes = UpstreamFixes::all();
      let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
      let edge = top_front(&borrowed);
@@ -412,10 +412,10 @@ index f210e17b9..aceb2979b 100644
 2.54.0 (Apple Git-157)
 
 
-From 6ff6862a4abb59f9eb9dd42bfa3492eee909e655 Mon Sep 17 00:00:00 2001
+From 3d533ed2ed8d30068bbca53ce1001ac3ab85bfb7 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 20:07:23 +1030
-Subject: [PATCH 3/8] ops: keep a lent kernel's own cancel token
+Subject: [PATCH 3/7] ops: keep a lent kernel's own cancel token
 
 Combine the kernel token with any cancel::within token and test a cancelled lent kernel without within.
 ---
@@ -444,10 +444,10 @@ index ac1398280..12885483f 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index aceb2979b..00856dfc8 100644
+index 227704ebf..0099afa82 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -3314,6 +3314,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
+@@ -3676,6 +3676,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
      assert!((removed - 127.1).abs() < 1.0, "removed {removed}");
  }
  
@@ -478,20 +478,20 @@ index aceb2979b..00856dfc8 100644
 2.54.0 (Apple Git-157)
 
 
-From aba6ef4139c2026bf6eaf4df1d2822e7928cec7a Mon Sep 17 00:00:00 2001
+From c1284c0585d2481c15de3d7a2773f9f184d4330e Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Fri, 13 Nov 2026 21:04:31 +1030
-Subject: [PATCH 4/8] test: close the carried-faces test after the seam rebase
+Subject: [PATCH 4/7] test: close the carried-faces test after the seam rebase
 
 ---
  solidcore/crates/solidcore-ops/tests/blend.rs | 1 +
  1 file changed, 1 insertion(+)
 
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 00856dfc8..a576b055b 100644
+index 0099afa82..27bba4fa9 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -1979,6 +1979,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -2342,6 +2342,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -503,10 +503,10 @@ index 00856dfc8..a576b055b 100644
 2.54.0 (Apple Git-157)
 
 
-From 3bc168f9e4de6f5880cc81433055bb7a843b05fc Mon Sep 17 00:00:00 2001
+From 41f59486d4700dd42e26b9c8e40589e995479ccc Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:47:39 +1030
-Subject: [PATCH 5/8] ops: keep a proof across a copy, and defer it to the node
+Subject: [PATCH 5/7] ops: keep a proof across a copy, and defer it to the node
 
 Body::to_brep_on / copy_held_on keep the proof on a deep copy (the same B-rep in the same
 order), Body::prove_on takes the node-end proof, and session::Validation::EachNode leaves the
@@ -653,10 +653,10 @@ index b24420a04..e399a9c22 100644
      }
      Ok(Ok((b, outward)))
 diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
-index fbb00c50e..485f83f70 100644
+index 8880292d7..b4b7b83ae 100644
 --- a/solidcore/crates/solidcore-ops/src/lib.rs
 +++ b/solidcore/crates/solidcore-ops/src/lib.rs
-@@ -89,6 +89,7 @@ pub use blend::{
+@@ -94,6 +94,7 @@ pub use blend::{
  pub use body::{
      make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, Contract, TurnedOver,
  };
@@ -819,10 +819,10 @@ index 45343de54..919f21bf1 100644
 2.54.0 (Apple Git-157)
 
 
-From 14dec952607dd15950dd8836335b74c12f5c71d5 Mon Sep 17 00:00:00 2001
+From 107191cfc5b9db5af888effc76fe4dc89e7bb5ae Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:58:33 +1030
-Subject: [PATCH 6/8] ops: EachNode keeps the closedness test and defers only
+Subject: [PATCH 6/7] ops: EachNode keeps the closedness test and defers only
  the proof
 
 An operand with no standing proof counts as a solid exactly when is_manifold_solid says it is
@@ -930,10 +930,10 @@ index 919f21bf1..8a1b9508d 100644
 2.54.0 (Apple Git-157)
 
 
-From 325ce6fc655cebc1617b524d68ca6928974375aa Mon Sep 17 00:00:00 2001
+From c245f3f57850af202549ede0204fe433370e6e99 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 15:40:36 +1030
-Subject: [PATCH 7/8] ops: fit the borrowed-kernel path to the per-call session
+Subject: [PATCH 7/7] ops: fit the borrowed-kernel path to the per-call session
 
 The rebased session keeps each call's kernel in the pool and the call's name
 in a thread local, so the borrowed path sets CURRENT directly and clears it
@@ -1126,10 +1126,10 @@ index ab32e06f0..774e08679 100644
          let _ = catch_unwind(AssertUnwindSafe(|| hook(&failure)));
          IN_HOOK.with(|flag| flag.set(false));
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index a576b055b..121e2fc7a 100644
+index 27bba4fa9..249c9bbf5 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -1988,17 +1988,34 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -2351,17 +2351,34 @@ fn borrowed_kernel_matches_the_global_path() {
      all_fixes();
      let mut global = block();
      let edge = top_front(&global);
@@ -1167,7 +1167,7 @@ index a576b055b..121e2fc7a 100644
      });
      result.expect("borrowed blend");
      assert!(rel(volume(&borrowed), global_volume) < 1.0e-9);
-@@ -3327,10 +3344,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
+@@ -3689,10 +3706,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
      let source = block();
      let brep = source.into_brep();
      let order = Order::of(&brep);
@@ -1297,230 +1297,6 @@ index 8a1b9508d..fd2477edc 100644
 +        .expect("a sheet");
      assert_eq!(step.counts().unwrap(), node.counts().unwrap());
  }
--- 
-2.54.0 (Apple Git-157)
-
-
-From 89ec774df49ef42aae858fc4d32d95f5400e7f94 Mon Sep 17 00:00:00 2001
-From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
-Date: Wed, 18 Nov 2026 10:49:57 +1030
-Subject: [PATCH 8/8] solidcore-cadir: read a STEP edge without a parameter
- range
-
-cadmpeg's neutral model bounds a STEP file's edges by their vertices alone, so an edge can
-carry a curve with no parameter range. Upstream's CADIR reader refuses it. Port PR 16906's
-fallback onto it: Assembly::add_edge_on finds the interval where the two vertices lie on the
-curve, with topology::record_edge covering lines, conics, splines and polylines (a closed
-spline restarted at its vertex), and the cadir reader calls it for such an edge.
----
- solidcore/crates/solidcore-cadir/src/lib.rs   | 79 ++++++++++++-------
- .../crates/solidcore-step/src/assembly.rs     | 14 ++++
- .../crates/solidcore-step/src/topology.rs     | 70 ++++++++++++++++
- 3 files changed, 134 insertions(+), 29 deletions(-)
-
-diff --git a/solidcore/crates/solidcore-cadir/src/lib.rs b/solidcore/crates/solidcore-cadir/src/lib.rs
-index 0b64159b0..c9c1818e8 100644
---- a/solidcore/crates/solidcore-cadir/src/lib.rs
-+++ b/solidcore/crates/solidcore-cadir/src/lib.rs
-@@ -347,42 +347,63 @@ impl<'a> Builder<'_, 'a, '_> {
-         };
-         let made = match curve {
-             Some(carrier) => {
--                let interval = edge.param_range().map(|r| r.get()).ok_or_else(|| {
--                    format!("edge {id}: not supported yet: an edge without a parameter range")
--                })?;
--                let (curve, interval) = match carrier {
--                    geometry::Carrier::Curve {
--                        curve,
--                        periodic: false,
--                    } => (curve, interval),
--                    geometry::Carrier::Curve {
--                        curve,
--                        periodic: true,
--                    } => periodic_edge(curve, interval).map_err(|m| format!("edge {id}: {m}"))?,
--                    geometry::Carrier::Parabola {
--                        vertex,
--                        axis,
--                        reference,
--                        focal,
--                    } => (
-+                let ends = [start, end];
-+                let made = match (carrier, edge.param_range().map(|r| r.get())) {
-+                    (
-+                        geometry::Carrier::Curve {
-+                            curve,
-+                            periodic: false,
-+                        },
-+                        Some(interval),
-+                    ) => self.asm.add_edge(origin, curve, interval, ends),
-+                    (
-+                        geometry::Carrier::Curve {
-+                            curve,
-+                            periodic: true,
-+                        },
-+                        Some(interval),
-+                    ) => periodic_edge(curve, interval).and_then(|(curve, interval)| {
-+                        self.asm.add_edge(origin, curve, interval, ends)
-+                    }),
-+                    (
-+                        geometry::Carrier::Parabola {
-+                            vertex,
-+                            axis,
-+                            reference,
-+                            focal,
-+                        },
-+                        Some(interval),
-+                    ) => self.asm.add_edge(
-+                        origin,
-                         parabola_curve(vertex, axis, reference, focal, interval),
-                         interval,
-+                        ends,
-                     ),
--                    geometry::Carrier::Hyperbola {
--                        center,
--                        axis,
--                        reference,
--                        radii,
--                    } => (
-+                    (
-+                        geometry::Carrier::Hyperbola {
-+                            center,
-+                            axis,
-+                            reference,
-+                            radii,
-+                        },
-+                        Some(interval),
-+                    ) => self.asm.add_edge(
-+                        origin,
-                         hyperbola_curve(center, axis, reference, radii, interval),
-                         interval,
-+                        ends,
-+                    ),
-+                    // An edge with no interval (a STEP file's, bounded by its vertices alone) is
-+                    // where its vertices lie on its curve.
-+                    (geometry::Carrier::Curve { curve, .. }, None) => {
-+                        self.asm.add_edge_on(origin, curve, ends)
-+                    }
-+                    (_, None) => Err(
-+                        "not supported yet: a parabola or hyperbola edge without a parameter range"
-+                            .into(),
-                     ),
-                 };
--                Ok(self
--                    .asm
--                    .add_edge(origin, curve, interval, [start, end])
--                    .map_err(|m| format!("edge {id}: {m}"))?
--                    .0)
-+                Ok(made.map_err(|m| format!("edge {id}: {m}"))?.0)
-             }
-             // Collapsed to a point: its vertices are one ([`Builder::join_collapsed`]).
-             None if start == end => Err(start),
-diff --git a/solidcore/crates/solidcore-step/src/assembly.rs b/solidcore/crates/solidcore-step/src/assembly.rs
-index 707809f3b..2754480c3 100644
---- a/solidcore/crates/solidcore-step/src/assembly.rs
-+++ b/solidcore/crates/solidcore-step/src/assembly.rs
-@@ -269,6 +269,20 @@ impl<'t> Assembly<'t> {
-         Ok((i, along))
-     }
- 
-+    /// An edge between vertices `ends` on `curve` where the producer gives no interval: the
-+    /// interval is where the vertices lie on the curve (the whole of a closed curve when both
-+    /// ends are one vertex or one point), the edge running from `ends[0]` along the curve, as a
-+    /// STEP edge is read. Then as [`Assembly::add_edge`].
-+    pub fn add_edge_on(&mut self, origin: u64, curve: BCurve, ends: [u32; 2]) -> R<(u32, bool)> {
-+        let (ps, pe) = (self.point(ends[0])?, self.point(ends[1])?);
-+        let closed = ends[0] == ends[1];
-+        let full = closed || ps == pe;
-+        let (curve, interval, with) =
-+            crate::topology::record_edge(curve, ps, pe, closed, full, self.tol).map_err(|m| format!("edge #{origin}: {m}"))?;
-+        let (e, along) = self.add_edge(origin, curve, interval, if with { ends } else { [ends[1], ends[0]] })?;
-+        Ok((e, along == with))
-+    }
-+
-     /// A sphere face bounded by vertex loops alone, each at one of its poles (a face of a closed
-     /// surface bounded by vertices is all of the surface): the whole sphere, its loop a meridian
-     /// from the south pole to the north and back, which [`Assembly::complete_slits`] keeps as its
-diff --git a/solidcore/crates/solidcore-step/src/topology.rs b/solidcore/crates/solidcore-step/src/topology.rs
-index 1ab5c97ec..d4bbbfa0d 100644
---- a/solidcore/crates/solidcore-step/src/topology.rs
-+++ b/solidcore/crates/solidcore-step/src/topology.rs
-@@ -1419,6 +1419,76 @@ pub(crate) fn hyperbola_curve(position: &Placement, a: f64, b: f64, [t0, t1]: [f
-     swept::hyperbola_spline(position, a, b, t0, t1)
- }
- 
-+/// An edge from `ps` to `pe` on a record curve whose producer gives no interval (cadmpeg's
-+/// neutral model read from a STEP file bounds an edge by its vertices alone): the curve as the
-+/// record takes it, the interval (min → max) between the vertices, and whether the edge runs
-+/// from `ps` to `pe` along it, found as [`map_edge`] finds a STEP edge's, its sense along the
-+/// curve. `closed`: the same vertex at both ends; `full`: the ends are one point.
-+pub(crate) fn record_edge(curve: BCurve, ps: P3, pe: P3, closed: bool, full: bool, tol: f64) -> R<(BCurve, [f64; 2], bool)> {
-+    let mapped = match curve {
-+        BCurve::Line { start, end } => {
-+            if closed {
-+                return Err("a closed edge on a line".into());
-+            }
-+            let d = sub(end, start);
-+            let m2 = dot(d, d);
-+            if !(m2 > 0.0) {
-+                return Err("a line of no length".into());
-+            }
-+            let param = |p: P3| dot(sub(p, start), d) / m2;
-+            let (ts, te) = (param(ps), param(pe));
-+            // Its length, whatever the line's own parameter scale, as `map_edge` measures it.
-+            let m = m2.sqrt();
-+            if !((te - ts).abs() * m > 1e-12 * (1.0 + ts.abs().max(te.abs()) * m)) {
-+                return Err("a degenerate edge on a line".into());
-+            }
-+            let with = ts < te;
-+            let interval = if with { [ts, te] } else { [te, ts] };
-+            Mapped { curve: BCurve::Line { start, end }, interval, with_step: with, sense_mismatch: false }
-+        }
-+        BCurve::Circle { ref frame, radius } => {
-+            let position = placement(frame);
-+            conic(curve.clone(), &position, [radius; 2], ps, pe, true, full)?
-+        }
-+        BCurve::Ellipse { ref frame, radii } => {
-+            let position = placement(frame);
-+            conic(curve.clone(), &position, radii, ps, pe, true, full)?
-+        }
-+        BCurve::Spline { .. } | BCurve::RationalSpline { .. } | BCurve::Polyline { .. } => {
-+            let mapped = open_or_closed(curve, ps, pe, true, closed, tol)?;
-+            if closed { closed_at_vertex(mapped, ps)? } else { mapped }
-+        }
-+        BCurve::SurfaceIntersection { .. } => return Err(unsupported("an intersection curve without an interval")),
-+    };
-+    Ok((mapped.curve, mapped.interval, mapped.with_step))
-+}
-+
-+/// A closed edge on a closed spline or polyline, all of it, starting and ending at its vertex
-+/// `at`: the curve restarted there (exactly) when the vertex is not where the curve starts.
-+fn closed_at_vertex(mapped: Mapped, at: P3) -> R<Mapped> {
-+    let [a, b] = mapped.interval;
-+    let eval = CurveEval::new(&mapped.curve).map_err(|e| e.to_string())?;
-+    let knots = match &mapped.curve {
-+        BCurve::Spline { knots, .. } | BCurve::RationalSpline { knots, .. } => knots.clone(),
-+        BCurve::Polyline { points } => (0..points.len()).map(|i| i as f64).collect(),
-+        _ => Vec::new(),
-+    };
-+    let t = project(&eval, a, b, &knots, v3(at)).ok_or("no parameter for the edge's vertex")?;
-+    let eps = 1e-9 * (b - a);
-+    if t - a <= eps || b - t <= eps {
-+        return Ok(mapped);
-+    }
-+    let curve = crate::kernel::restart_curve(&mapped.curve, t)?;
-+    Ok(Mapped { curve, interval: [t, t + (b - a)], ..mapped })
-+}
-+
-+/// The STEP placement of a record frame: its axis x × y.
-+fn placement(f: &Frame) -> Placement {
-+    let (x, y) = (f.x_axis, f.y_axis);
-+    let axis = [x[1] * y[2] - x[2] * y[1], x[2] * y[0] - x[0] * y[2], x[0] * y[1] - x[1] * y[0]];
-+    Placement { origin: f.origin, axis, ref_direction: x }
-+}
-+
- /// A hyperbola or parabola: the vertices' parameters in closed form, the edge running the way
- /// they go, as an exact spline over just that interval.
- fn open_conic(curve: &Curve, ps: P3, pe: P3, same_sense: bool, closed: bool, spline: impl Fn(f64, f64) -> BCurve) -> R<Mapped> {
 -- 
 2.54.0 (Apple Git-157)
 
