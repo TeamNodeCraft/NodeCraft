@@ -179,7 +179,6 @@ fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     point.distance(a + ab * t)
 }
 
-#[cfg(not(feature = "gpu-viewport"))]
 fn raycast_face(
     mesh: &solidcraft_geom::Mesh,
     face_ids: &[String],
@@ -377,6 +376,10 @@ pub struct Viewport {
     hovered_edge: Option<String>,
     hovered_face: Option<String>,
     selected_edges: std::collections::BTreeSet<String>,
+    /// Faces committed on the active feature node. They are the same reference
+    /// ids the node stores, so the highlight and the picked value cannot
+    /// disagree after a re-evaluation.
+    selected_faces: std::collections::BTreeSet<String>,
     dock_rect: Option<egui::Rect>,
     transform_gizmo: Option<Gizmo>,
     gizmo_state: GizmoState,
@@ -581,6 +584,7 @@ impl Default for Viewport {
             hovered_edge: None,
             hovered_face: None,
             selected_edges: std::collections::BTreeSet::new(),
+            selected_faces: std::collections::BTreeSet::new(),
             dock_rect: None,
             transform_gizmo: None,
             gizmo_state: GizmoState::default(),
@@ -1425,6 +1429,7 @@ impl Viewport {
     pub fn set_selection_mode(&mut self, mode: SelectionMode) {
         if mode != self.selection_mode {
             self.selected_edges.clear();
+            self.selected_faces.clear();
             self.hovered_edge = None;
             self.hovered_face = None;
             self.pending_gpu_pick = None;
@@ -1432,6 +1437,22 @@ impl Viewport {
             self.latest_hover_pick = None;
         }
         self.selection_mode = mode;
+    }
+
+    /// Highlight the feature node's committed face references. The ids come
+    /// from the node's `faces` value, not from a second pick model, so the
+    /// selected highlight survives re-evaluation unchanged.
+    pub fn set_selected_faces(&mut self, ids: impl IntoIterator<Item = String>) {
+        let ids: std::collections::BTreeSet<String> = ids.into_iter().collect();
+        if ids != self.selected_faces {
+            self.selected_faces = ids;
+            self.dirty = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn selected_faces(&self) -> &std::collections::BTreeSet<String> {
+        &self.selected_faces
     }
 
     pub fn clear_edge_selection(&mut self) {
@@ -1532,7 +1553,6 @@ impl Viewport {
     /// Face ids in display-triangle order, derived from the display target's
     /// `TessPlan` faces. This keeps face picking on the exact B-rep face ids
     /// instead of relying on the display mesh's group strings.
-    #[cfg(not(feature = "gpu-viewport"))]
     fn plan_face_ids(&self) -> Option<Vec<String>> {
         let display = self.display.as_ref()?;
         let multiple = self.plans.len() > 1;
@@ -2468,6 +2488,7 @@ impl Viewport {
                 // selection experiment. Keep `selection_dock` for a future opt-in.
                 self.pick_face(ui, rect, response.clicked(), pointer_button_blocked);
                 self.update_edge_selection(ui, rect, response.clicked(), pointer_button_blocked);
+                self.draw_face_selection(ui, rect);
                 self.draw_face_hover(ui, rect);
                 self.draw_comparison_overlay(ui, rect);
                 // The feature-input edge field is a quiet guide; selected edges
@@ -2502,6 +2523,7 @@ impl Viewport {
             // Top selection dock intentionally disabled; see inspector edit action.
             self.pick_face(ui, rect, response.clicked(), pointer_button_blocked);
             self.update_edge_selection(ui, rect, response.clicked(), pointer_button_blocked);
+            self.draw_face_selection(ui, rect);
             self.draw_face_hover(ui, rect);
             self.draw_comparison_overlay(ui, rect);
             self.draw_edge_highlights(ui, rect);
@@ -2817,20 +2839,26 @@ impl Viewport {
         ))
     }
 
-    fn draw_face_hover(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+    /// Paint every display triangle whose face id matches. Hover and committed
+    /// selection use this one projection/fill path, so a selected face cannot
+    /// highlight at a different place than the face under the pointer.
+    fn draw_face_ids(
+        &self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        colour: egui::Color32,
+        matches: impl Fn(&str) -> bool,
+    ) {
         let Some(display) = self.display.as_ref() else { return };
-        let Some(hovered) = self.hovered_face.as_deref() else { return };
-        let theme = crate::theme::get();
-        let colour = egui::Color32::from_rgba_unmultiplied(
-            theme.highlight[0], theme.highlight[1], theme.highlight[2], 90,
-        );
         let painter = ui.painter().with_clip_rect(viewport);
         for (index, triangle) in display.mesh.triangles.iter().enumerate() {
             let face = display.mesh.tri_face.get(index).copied().unwrap_or(u32::MAX) as usize;
-            if display.face_ids.get(face).map(String::as_str) != Some(hovered) {
+            let Some(id) = display.face_ids.get(face).map(String::as_str) else {
+                continue;
+            };
+            if !matches(id) {
                 continue;
             }
-            let body = display.face_ids.get(face).map(String::as_str).unwrap_or("");
             let points: Vec<egui::Pos2> = triangle
                 .iter()
                 .filter_map(|corner| {
@@ -2846,6 +2874,26 @@ impl Viewport {
             mesh.add_triangle(0, 1, 2);
             painter.add(egui::Shape::mesh(mesh));
         }
+    }
+
+    fn draw_face_selection(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        if self.selected_faces.is_empty() {
+            return;
+        }
+        let theme = crate::theme::get();
+        let colour = egui::Color32::from_rgba_unmultiplied(
+            theme.accent[0], theme.accent[1], theme.accent[2], 150,
+        );
+        self.draw_face_ids(ui, viewport, colour, |id| self.selected_faces.contains(id));
+    }
+
+    fn draw_face_hover(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
+        let Some(hovered) = self.hovered_face.as_deref() else { return };
+        let theme = crate::theme::get();
+        let colour = egui::Color32::from_rgba_unmultiplied(
+            theme.highlight[0], theme.highlight[1], theme.highlight[2], 90,
+        );
+        self.draw_face_ids(ui, viewport, colour, |id| id == hovered);
     }
 
     fn draw_comparison_overlay(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
@@ -3131,29 +3179,44 @@ impl Viewport {
             return;
         }
         #[cfg(not(feature = "gpu-viewport"))]
-        {
-            let Some(display) = self.display.as_ref() else { return };
-            let width = f64::from(viewport.width()).max(1.0);
-            let height = f64::from(viewport.height()).max(1.0);
-            let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
-            let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
-            let (origin, direction) = self.camera.ray(x, y, width, height);
-            let plan_ids = self.plan_face_ids();
-            let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
-            let hovered = raycast_face(&display.mesh, face_ids, origin, direction);
-            if hovered != self.hovered_face {
-                self.hovered_face = hovered.clone();
+        self.pick_face_cpu(ui, viewport, pointer, clicked);
+        #[cfg(feature = "gpu-viewport")]
+        if !self.gpu_active() && self.edge_picking_enabled {
+            // A build with the GPU viewport can still run without an adapter
+            // (headless tests, driver fallback). Picking then uses the same CPU
+            // raycast as a build compiled without the feature.
+            self.pick_face_cpu(ui, viewport, pointer, clicked);
+        }
+    }
+
+    fn pick_face_cpu(
+        &mut self,
+        ui: &mut egui::Ui,
+        viewport: egui::Rect,
+        pointer: egui::Pos2,
+        clicked: bool,
+    ) {
+        let Some(display) = self.display.as_ref() else { return };
+        let width = f64::from(viewport.width()).max(1.0);
+        let height = f64::from(viewport.height()).max(1.0);
+        let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
+        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+        let (origin, direction) = self.camera.ray(x, y, width, height);
+        let plan_ids = self.plan_face_ids();
+        let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
+        let hovered = raycast_face(&display.mesh, face_ids, origin, direction);
+        if hovered != self.hovered_face {
+            self.hovered_face = hovered.clone();
+            ui.ctx().request_repaint();
+        }
+        if clicked {
+            let Some(face) = hovered else {
+                self.selection_miss = true;
                 ui.ctx().request_repaint();
-            }
-            if clicked {
-                let Some(face) = hovered else {
-                    self.selection_miss = true;
-                    ui.ctx().request_repaint();
-                    return;
-                };
-                self.face_picks.push(face);
-                ui.ctx().request_repaint();
-            }
+                return;
+            };
+            self.face_picks.push(face);
+            ui.ctx().request_repaint();
         }
     }
 

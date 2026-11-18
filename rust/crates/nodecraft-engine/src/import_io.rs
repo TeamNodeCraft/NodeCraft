@@ -283,10 +283,35 @@ fn store_hash(
     }
 }
 
+/// Whether a stored import path is a full path on every operating system.
+///
+/// Documents move between platforms, so the host's path parser alone is not
+/// enough: on Windows `/models/x.step` is rooted but not absolute, on
+/// macOS/Linux `\models\x.step` and `C:\models\x.step` are ordinary relative
+/// names to `Path`. A full path is anchored to something outside the document
+/// folder in all of those cases, so it must never be joined to that folder.
+#[must_use]
+pub fn is_full_path(stored: &str) -> bool {
+    let path = Path::new(stored);
+    if path.is_absolute() || path.has_root() {
+        return true;
+    }
+    // `Path` only treats a leading `\` as a root on Windows. Check it
+    // explicitly so a Windows path stored in a document opened on macOS is
+    // still full.
+    if stored.starts_with(['/', '\\']) {
+        return true;
+    }
+    // Windows drive prefix (`C:\models\x.step`, `C:/models/x.step`). Off
+    // Windows `Path` sees a drive letter as part of a relative file name.
+    let bytes = stored.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
 /// `relative` or `absolute`.
 ///
 /// An explicit `pathMode` wins. A document saved before the field existed has no
-/// `pathMode`, so derive the mode from the stored `path`: an absolute path is
+/// `pathMode`, so derive the mode from the stored `path`: a full path is
 /// `absolute`, a relative path is `relative`, and an empty path keeps the
 /// contract default, `relative`.
 #[must_use]
@@ -295,7 +320,7 @@ pub fn path_mode(values: &Value) -> &'static str {
         return if mode == "absolute" { "absolute" } else { "relative" };
     }
     match values.get(PATH_KEY).and_then(Value::as_str) {
-        Some(path) if Path::new(path).is_absolute() => "absolute",
+        Some(path) if is_full_path(path) => "absolute",
         _ => "relative",
     }
 }
@@ -303,7 +328,7 @@ pub fn path_mode(values: &Value) -> &'static str {
 /// Whether the stored path is already in the mode requested by `pathMode`.
 #[must_use]
 pub fn path_is_absolute(stored: &str) -> bool {
-    Path::new(stored).is_absolute()
+    is_full_path(stored)
 }
 
 /// The primary absolute path candidate for a node, in the stored mode's form.
@@ -318,7 +343,7 @@ pub fn primary_path(values: &Value, document_directory: Option<&Path>) -> Option
 
 fn resolve_stored(stored: &str, document_directory: Option<&Path>) -> PathBuf {
     let path = Path::new(stored);
-    if path.is_absolute() {
+    if is_full_path(stored) {
         path.to_path_buf()
     } else if let Some(directory) = document_directory {
         directory.join(path)
@@ -911,6 +936,42 @@ mod tests {
             "relative",
             "an explicit mode wins over the stored path's form"
         );
+    }
+
+    #[test]
+    fn full_paths_are_full_on_every_os_and_relative_paths_stay_relative() {
+        let directory = Path::new("/documents/project");
+        for stored in [
+            "/models/x.step",
+            "\\models\\x.step",
+            "C:\\models\\x.step",
+            "C:/models/x.step",
+        ] {
+            assert!(is_full_path(stored), "{stored:?} must be a full path");
+            assert_eq!(
+                path_mode(&serde_json::json!({ "path": stored })),
+                "absolute",
+                "{stored:?} must derive absolute mode"
+            );
+            assert_eq!(
+                primary_path(&serde_json::json!({ "path": stored }), Some(directory)),
+                Some(PathBuf::from(stored)),
+                "{stored:?} must be used as-is, not joined to the document folder"
+            );
+        }
+        for stored in ["models/x.step", "./x.step", "..\\x.step"] {
+            assert!(!is_full_path(stored), "{stored:?} must stay relative");
+            assert_eq!(
+                path_mode(&serde_json::json!({ "path": stored })),
+                "relative",
+                "{stored:?} must derive relative mode"
+            );
+            assert_eq!(
+                primary_path(&serde_json::json!({ "path": stored }), Some(directory)),
+                Some(directory.join(stored)),
+                "{stored:?} must resolve against the document folder"
+            );
+        }
     }
 
     #[test]

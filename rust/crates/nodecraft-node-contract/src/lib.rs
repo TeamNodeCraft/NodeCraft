@@ -776,6 +776,7 @@ const SELECTION_SPECS: &[SelectionSpec] = &[
     SelectionSpec { node_type: "fillet", field: "edges", kind: SelectionKind::Edge },
     SelectionSpec { node_type: "shell", field: "faces", kind: SelectionKind::Face },
     SelectionSpec { node_type: "extrude", field: "faces", kind: SelectionKind::Face },
+    SelectionSpec { node_type: "offsetfaces", field: "faces", kind: SelectionKind::Face },
 ];
 
 /// The topology selection a node opts into, if any.
@@ -1010,6 +1011,8 @@ mod capability_tests {
         assert!(!overlay_only("spline"));
         assert_eq!(selection_spec("fillet").map(|spec| spec.field), Some("edges"));
         assert_eq!(selection_spec("shell").map(|spec| spec.field), Some("faces"));
+        assert_eq!(selection_spec("extrude").map(|spec| spec.field), Some("faces"));
+        assert_eq!(selection_spec("offsetfaces").map(|spec| spec.field), Some("faces"));
         assert!(selection_spec("primitive").is_none());
         for spec in SELECTION_SPECS {
             assert!(descriptor(spec.node_type).is_some(), "selection type has no descriptor");

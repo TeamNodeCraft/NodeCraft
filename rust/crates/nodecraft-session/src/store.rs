@@ -68,11 +68,12 @@ fn rewrite_import_node(node: &mut crate::GraphNode, directory: &Path) {
     if stored.is_empty() {
         return;
     }
-    let stored_path = Path::new(stored);
-    let absolute = if stored_path.is_absolute() {
-        stored_path.to_path_buf()
-    } else {
-        directory.join(stored_path)
+    // Resolve through the shared helper so a rooted Windows path stored in a
+    // document saved elsewhere is not joined to the document folder.
+    let Some(absolute) =
+        nodecraft_engine::import_io::primary_path(&node.values, Some(directory))
+    else {
+        return;
     };
     let relative = nodecraft_engine::import_io::document_relative(&absolute, directory);
     if mode == "absolute" {

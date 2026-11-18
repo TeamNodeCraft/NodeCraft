@@ -494,15 +494,21 @@ fn edit_preview_target_for(document: &GraphDocument, edit_target: &str) -> Optio
     edit_preview_input(document, edit_target)
 }
 
-fn edge_pick_gate_open(
+/// One gate for every topology pick: the displayed exact target must be the
+/// session's topology target. Edge editing additionally accepts the feature's
+/// input preview, which is the pickable ghost over the displayed breakpoint.
+fn topology_pick_gate_open(
     eval_target: Option<&str>,
     topology_target: &str,
     face_pick_target: Option<&str>,
     edit_preview_target: Option<&str>,
+    mode: crate::viewport::SelectionMode,
 ) -> bool {
     eval_target.is_some()
         && (eval_target == Some(topology_target)
-            || (face_pick_target.is_some() && face_pick_target == edit_preview_target))
+            || (mode == crate::viewport::SelectionMode::Edge
+                && face_pick_target.is_some()
+                && face_pick_target == edit_preview_target))
 }
 
 fn edit_preview_input(document: &GraphDocument, edit_target: &str) -> Option<String> {
@@ -4582,6 +4588,29 @@ impl NodeCraftApp {
             .or_else(|| self.face_pick_target.clone())
     }
 
+    /// The target whose exact result the viewport shows in the current selection
+    /// mode. Evaluation and validation both ask this one question, so a
+    /// topology session cannot validate against a different closure than the
+    /// one it displays (which otherwise re-evaluates every frame).
+    fn evaluation_selection_target(&self) -> Option<String> {
+        if self.viewport.selection_mode() == crate::viewport::SelectionMode::Edge {
+            // Edge editing keeps the displayed breakpoint as the base and
+            // picks from the transform-edit ghost.
+            self.selection_view_target
+                .clone()
+                .or_else(|| self.viewer_breakpoint.clone())
+                .or_else(|| self.eval_target.clone())
+                .or_else(|| self.face_pick_target.clone())
+        } else {
+            // Other selection modes use the downstream view target when one is
+            // set, then the feature's own input body.
+            self.selection_view_target
+                .clone()
+                .or_else(|| self.face_pick_target.clone())
+                .or_else(|| self.viewer_breakpoint.clone())
+        }
+    }
+
     /// True once the edit preview has delivered the feature's input body. Edge
     /// picks then come from the ghost branch while the breakpoint stays the
     /// displayed solid.
@@ -4596,11 +4625,24 @@ impl NodeCraftApp {
             && self.face_pick_target == self.edit_preview_target
     }
 
+    /// Whether the viewport's current display is the target the active
+    /// topology session may pick from. Face and edge picking share this one
+    /// session/target decision.
+    fn topology_pick_ready(&self) -> bool {
+        let topology = self.topology_target();
+        topology_pick_gate_open(
+            self.eval_target.as_deref(),
+            topology.as_deref().unwrap_or(""),
+            self.face_pick_target.as_deref(),
+            self.edit_preview_target.as_deref(),
+            self.viewport.selection_mode(),
+        )
+    }
+
     fn refresh_topology_picking(&mut self) {
         let mode = self.viewport.selection_mode();
         let matching_target = mode != crate::viewport::SelectionMode::Object
-            && self.eval_target.is_some()
-            && (self.eval_target == self.topology_target() || self.edge_selection_on_preview());
+            && self.topology_pick_ready();
         self.viewport.set_edge_picking_enabled(matching_target);
     }
 
@@ -4648,6 +4690,49 @@ impl NodeCraftApp {
             self.evaluate();
         }
         self.refresh_topology_picking();
+        self.sync_selected_faces();
+    }
+
+    /// The active feature node's committed face references, in document order.
+    /// The inspector list, the viewport highlight and the next pick toggle all
+    /// read this same `faces` value.
+    fn selected_face_references(&self) -> Vec<String> {
+        let Some(selected) = self.selected_nodes.iter().next() else {
+            return Vec::new();
+        };
+        let Some(node) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.document().nodes.iter().find(|node| &node.id == selected))
+        else {
+            return Vec::new();
+        };
+        let Some((field, mode)) = Self::selection_spec(&node.node_type) else {
+            return Vec::new();
+        };
+        if mode != crate::viewport::SelectionMode::Face {
+            return Vec::new();
+        }
+        node.values
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("id").and_then(serde_json::Value::as_str))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn sync_selected_faces(&mut self) {
+        let ids = if self.viewport.selection_mode() == crate::viewport::SelectionMode::Face {
+            self.selected_face_references()
+        } else {
+            Vec::new()
+        };
+        self.viewport.set_selected_faces(ids);
     }
 
     fn single_geometry_input(document: &GraphDocument, node: &GraphNode) -> Option<String> {
@@ -4693,14 +4778,12 @@ impl NodeCraftApp {
             self.preview_ghost = preview_ghost;
             changed = true;
         }
+        let evaluation_target = self.evaluation_selection_target();
         let validation_selection = self.session.as_ref().map(|session| {
             let document = session.document();
-            let closure = engine_bridge::target_for(
-                document,
-                self.viewer_breakpoint.as_deref(),
-            )
-            .map(|target| target_closure(document, &target))
-            .unwrap_or_default();
+            let closure = engine_bridge::target_for(document, evaluation_target.as_deref())
+                .map(|target| target_closure(document, &target))
+                .unwrap_or_default();
             let mut selected: Vec<String> = self
                 .selected_nodes
                 .iter()
@@ -6323,8 +6406,7 @@ impl NodeCraftApp {
         self.sync_face_pick_target();
         let face_picks = self.viewport.take_face_picks();
         if !face_picks.is_empty()
-            && self.eval_target.is_some()
-            && self.eval_target == self.topology_target()
+            && self.topology_pick_ready()
             && let Some(node) = selected_node.as_ref()
             && let Some((field, mode)) = Self::selection_spec(&node.node_type)
             && mode == crate::viewport::SelectionMode::Face
@@ -6338,14 +6420,7 @@ impl NodeCraftApp {
         }
         let edge_picks = self.viewport.take_edge_picks();
         if !edge_picks.is_empty() {
-            let topology = self.topology_target();
-            let gate = edge_pick_gate_open(
-                self.eval_target.as_deref(),
-                topology.as_deref().unwrap_or(""),
-                self.face_pick_target.as_deref(),
-                self.edit_preview_target.as_deref(),
-            );
-            if gate
+            if self.topology_pick_ready()
                 && let Some(node) = selected_node.as_ref()
                 && Self::selection_spec(&node.node_type)
                     .is_some_and(|(_, mode)| mode == crate::viewport::SelectionMode::Edge)
@@ -9090,7 +9165,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_pick_gate_opens_for_the_edit_input_overlay() {
+    fn topology_pick_gate_opens_for_the_edit_input_overlay() {
         let node = |id: &str, node_type: &str| GraphNode {
             expressions: Default::default(),
             id: id.into(),
@@ -9118,8 +9193,14 @@ mod tests {
         ];
         let preview = edit_preview_target_for(&document, "fillet");
         assert_eq!(preview.as_deref(), Some("box"));
-        assert!(edge_pick_gate_open(Some("out"), "fillet", Some("box"), preview.as_deref()));
-        assert!(!edge_pick_gate_open(Some("out"), "fillet", Some("box"), None));
+        let edge = crate::viewport::SelectionMode::Edge;
+        assert!(topology_pick_gate_open(Some("out"), "fillet", Some("box"), preview.as_deref(), edge));
+        assert!(!topology_pick_gate_open(Some("out"), "fillet", Some("box"), None, edge));
+        // Face picking uses the same gate, but has no input-ghost exemption.
+        let face = crate::viewport::SelectionMode::Face;
+        assert!(topology_pick_gate_open(Some("box"), "box", Some("box"), None, face));
+        assert!(!topology_pick_gate_open(Some("shell"), "box", Some("box"), Some("box"), face));
+        assert!(topology_pick_gate_open(Some("box"), "box", None, None, face));
 
         let mut references = Vec::new();
         merge_edge_reference(
@@ -9779,6 +9860,13 @@ mod tests {
             NodeCraftApp::selection_spec("shell"),
             Some(("faces", crate::viewport::SelectionMode::Face))
         );
+        for node_type in ["extrude", "offsetfaces"] {
+            assert_eq!(
+                NodeCraftApp::selection_spec(node_type),
+                Some(("faces", crate::viewport::SelectionMode::Face)),
+                "{node_type} opts into face selection",
+            );
+        }
         assert_eq!(NodeCraftApp::selection_spec("primitive"), None);
     }
 
@@ -9824,6 +9912,266 @@ mod tests {
         assert_eq!(start.len(), 1);
         assert_eq!(start.get("b"), Some(&(100.0, 0.0)));
         assert_eq!(end.get("b"), Some(&(240.0, 0.0)));
+    }
+
+    fn app_pick_mesh() -> Mesh {
+        Mesh {
+            vertices: vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0],
+            ],
+            faces: vec![[0, 1, 2], [0, 2, 3]],
+            face_groups: vec!["face:0".to_owned(), "face:0".to_owned()],
+            ..Default::default()
+        }
+    }
+
+    fn run_app_ui(
+        app: &mut NodeCraftApp,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        screen: egui::Rect,
+        events: Vec<egui::Event>,
+    ) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                focused: true,
+                ..Default::default()
+            },
+            |ui| app.ui_inner(ui, frame),
+        );
+        output.textures_delta.clear();
+    }
+
+    fn run_app_frame(
+        app: &mut NodeCraftApp,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        screen: egui::Rect,
+        events: Vec<egui::Event>,
+    ) {
+        app.logic_inner(ctx, frame);
+        run_app_ui(app, ctx, frame, screen, events);
+    }
+
+    fn settle_app(
+        app: &mut NodeCraftApp,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        screen: egui::Rect,
+    ) {
+        for _ in 0..300 {
+            run_app_frame(app, ctx, frame, screen, Vec::new());
+            if app.eval_pending.is_none() && app.pending_display.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    fn click_app(
+        app: &mut NodeCraftApp,
+        ctx: &egui::Context,
+        frame: &mut eframe::Frame,
+        screen: egui::Rect,
+        point: egui::Pos2,
+    ) {
+        let primary = egui::PointerButton::Primary;
+        run_app_frame(app, ctx, frame, screen, vec![egui::Event::PointerMoved(point)]);
+        run_app_frame(
+            app,
+            ctx,
+            frame,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: primary,
+                pressed: true,
+                modifiers: Default::default(),
+            }],
+        );
+        // The headless app has no GPU tessellation, so install the CPU mesh the
+        // CPU pick path needs after the frame's polling has run.
+        app.logic_inner(ctx, frame);
+        app.viewport.set_plans(Vec::new());
+        app.viewport.set_mesh(Some(&app_pick_mesh()));
+        run_app_ui(
+            app,
+            ctx,
+            frame,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }],
+        );
+        settle_app(app, ctx, frame, screen);
+    }
+
+    fn shell_volume(app: &NodeCraftApp) -> Option<f64> {
+        let (_, evaluation) = app.last_exact.as_ref()?;
+        let part = evaluation.exact_parts.get("shell")?;
+        let breps = part.realized_breps().ok()?;
+        let record = nodecraft_step::record_of_brep(breps.first()?).ok()?;
+        nodecraft_step::record_volume(&record).ok()
+    }
+
+    /// Shown the shell's input body during face selection, a viewport click must
+    /// reach the `faces` value, keep the session open, toggle on a second click,
+    /// highlight the committed faces and leave a valid shell behind when the
+    /// session ends.
+    #[test]
+    fn shell_face_selection_picks_toggles_and_persists_end_to_end() {
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = NodeCraftApp::new(&cc, None, None, false, false);
+        let node = |id: &str, node_type: &str, values: Value| GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut document = GraphDocument::new("shell-face-selection");
+        document.nodes.push(node(
+            "box",
+            "primitive",
+            json!({"primitiveType": "box", "length": 20.0, "width": 20.0, "height": 20.0}),
+        ));
+        document.nodes.push(node(
+            "shell",
+            "shell",
+            json!({"thickness": 1.0, "direction": "inward", "faces": []}),
+        ));
+        document.connections.push(GraphConnection {
+            from: "box".into(),
+            to: "shell".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
+        app.open_session(Session::new(document), None, "shell face selection".to_owned());
+        app.selected_nodes.clear();
+        app.selected_nodes.insert("shell".to_owned());
+        app.viewer_breakpoint = Some("shell".to_owned());
+
+        let mut frame = eframe::Frame::_new_kittest();
+        let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
+        for _ in 0..300 {
+            run_app_frame(&mut app, &ctx, &mut frame, screen, Vec::new());
+            if app.last_exact.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(app.eval_target.as_deref(), Some("shell"), "the closed shell evaluated");
+        let closed_volume = shell_volume(&app).expect("closed shell exact body");
+
+        assert!(app.begin_selection_session("shell", "faces"), "inspector starts face selection");
+        settle_app(&mut app, &ctx, &mut frame, screen);
+        assert_eq!(app.viewport.selection_mode(), crate::viewport::SelectionMode::Face);
+        assert_eq!(app.eval_target.as_deref(), Some("box"));
+        assert_eq!(app.viewport.displayed_target(), Some("box"));
+        assert!(app.face_pick_target.as_deref() == Some("box"));
+
+        // The regression: validation used the breakpoint closure while the
+        // display evaluated the feature's input, so every frame resubmitted a
+        // cached evaluation and a fresh display snapshot. That changed the GPU
+        // pick scene under the click and the face pick was dropped as stale.
+        let settled_evaluations = (app.eval_next, app.display_next);
+        for _ in 0..20 {
+            run_app_frame(&mut app, &ctx, &mut frame, screen, Vec::new());
+        }
+        assert_eq!(
+            (app.eval_next, app.display_next),
+            settled_evaluations,
+            "an idle face session must not resubmit its display every frame",
+        );
+
+        let shell_faces = |app: &NodeCraftApp| {
+            let node = app
+                .session
+                .as_ref()
+                .expect("session")
+                .document()
+                .nodes
+                .iter()
+                .find(|node| node.id == "shell")
+                .expect("shell");
+            crate::inspector::topology_reference_ids(node, "faces")
+        };
+        let panel = app.node_editor.panel_rect(screen);
+        let face_point = egui::pos2(
+            panel.right() + (screen.right() - panel.right()) * 0.5,
+            screen.center().y,
+        );
+        click_app(&mut app, &ctx, &mut frame, screen, face_point);
+        assert_eq!(shell_faces(&app), vec!["face:0".to_owned()]);
+        assert_eq!(app.viewport.selection_mode(), crate::viewport::SelectionMode::Face);
+        assert!(
+            app.viewport.selected_faces().contains("face:0"),
+            "the committed face must highlight in the viewport",
+        );
+
+        click_app(&mut app, &ctx, &mut frame, screen, face_point);
+        assert!(shell_faces(&app).is_empty(), "a second click toggles the same face off");
+        assert!(
+            app.viewport.selected_faces().is_empty(),
+            "the removed face must stop highlighting",
+        );
+
+        click_app(&mut app, &ctx, &mut frame, screen, face_point);
+        assert_eq!(shell_faces(&app), vec!["face:0".to_owned()]);
+        click_app(
+            &mut app,
+            &ctx,
+            &mut frame,
+            screen,
+            egui::pos2(panel.right() + 30.0, screen.top() + 80.0),
+        );
+        assert_eq!(
+            app.viewport.selection_mode(),
+            crate::viewport::SelectionMode::Object,
+            "an empty click ends the session",
+        );
+        assert!(app.face_pick_target.is_none());
+        assert_eq!(shell_faces(&app), vec!["face:0".to_owned()], "the opening persists");
+        assert_eq!(app.eval_target.as_deref(), Some("shell"));
+        let opened_volume = shell_volume(&app).expect("opened shell exact body");
+        assert!(
+            (opened_volume - closed_volume).abs() > 1.0,
+            "the shell re-evaluated with the picked face removed: {closed_volume} -> {opened_volume}",
+        );
+
+        // Escape clears the edit target; it does not end a topology session.
+        assert!(app.begin_selection_session("shell", "faces"));
+        settle_app(&mut app, &ctx, &mut frame, screen);
+        run_app_frame(
+            &mut app,
+            &ctx,
+            &mut frame,
+            screen,
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert_eq!(
+            app.viewport.selection_mode(),
+            crate::viewport::SelectionMode::Face,
+            "Escape keeps the topology session",
+        );
     }
 
 }

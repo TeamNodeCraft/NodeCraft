@@ -191,6 +191,22 @@ fn surface_loft_sections(ui: &mut Ui, sections: &[String], output: &mut Output) 
     }
 }
 
+/// The reference ids a topology field currently stores, in document order.
+/// The inspector list and the viewport highlight read the same ids.
+pub(crate) fn topology_reference_ids(node: &GraphNode, field: &str) -> Vec<String> {
+    node.values
+        .get(field)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn topology_references(
     ui: &mut Ui,
     node: &GraphNode,
@@ -204,6 +220,12 @@ fn topology_references(
     active: bool,
 ) {
     let theme = crate::theme::get();
+    let mut references = topology_reference_ids(node, field);
+    let title = if references.is_empty() {
+        title.to_owned()
+    } else {
+        format!("{title}  {}", references.len())
+    };
     egui::Frame::new()
         .fill(theme.with_alpha(theme.control, 90))
         .stroke(egui::Stroke::new(1.0, theme.with_alpha(theme.border, 170)))
@@ -238,18 +260,6 @@ fn topology_references(
             }
         });
     });
-    let mut references: Vec<String> = node
-        .values
-        .get(field)
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("id").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
     if references.is_empty() {
         ui.label(
             egui::RichText::new(empty)
@@ -2731,6 +2741,19 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(focused.is_some(), "a focus request focuses the number entry");
+    }
+
+    #[test]
+    fn topology_list_reads_the_nodes_committed_face_references() {
+        let node = node(
+            "shell",
+            serde_json::json!({"faces": [{"id": "face:2"}, {"id": "body:1:face:5"}]}),
+        );
+        assert_eq!(
+            topology_reference_ids(&node, "faces"),
+            vec!["face:2".to_owned(), "body:1:face:5".to_owned()],
+        );
+        assert!(topology_reference_ids(&node, "edges").is_empty());
     }
 
 }

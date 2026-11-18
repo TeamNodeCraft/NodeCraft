@@ -260,22 +260,9 @@ impl NodeCraftApp {
             .as_ref()
             .map(|binding| &binding.document)
             .unwrap_or_else(|| session.document());
-        // Edge editing keeps the displayed breakpoint as the base and picks
-        // from the transform-edit ghost. Other selection modes use the
-        // downstream view target when one is set.
-        let selection_mode = self.viewport.selection_mode();
-        let raw_evaluation_selection = if selection_mode == crate::viewport::SelectionMode::Edge {
-            self.selection_view_target
-                .clone()
-                .or_else(|| self.viewer_breakpoint.clone())
-                .or_else(|| self.eval_target.clone())
-                .or_else(|| self.face_pick_target.clone())
-        } else {
-            self.selection_view_target
-                .clone()
-                .or_else(|| self.face_pick_target.clone())
-                .or_else(|| self.viewer_breakpoint.clone())
-        };
+        // One selection-target rule for evaluation and validation, so the
+        // validated closure is always the closure this display evaluates.
+        let raw_evaluation_selection = self.evaluation_selection_target();
         let evaluation_selection = match (&binding, raw_evaluation_selection) {
             (Some(binding), Some(id)) => binding
                 .body
