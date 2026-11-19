@@ -830,7 +830,11 @@ mod tests {
         let text = std::fs::read_to_string(&saved).expect("read saved");
         assert!(!text.contains("pathMode"), "old document grew a pathMode field:\n{text}");
         assert!(!text.contains("ingestedSources"), "old document grew an ingest section:\n{text}");
-        assert!(text.contains(&old_path), "old absolute path must be preserved");
+        // Compare the saved value, not the raw text: JSON escapes the
+        // backslashes of a Windows path, so a substring search never matches.
+        let reread: serde_json::Value = serde_json::from_str(&text).expect("saved JSON");
+        let saved_path = reread["root"]["nodes"][0]["values"]["path"].as_str();
+        assert_eq!(saved_path, Some(old_path.as_str()), "old absolute path must be preserved");
         std::fs::remove_dir_all(dir).ok();
     }
 
