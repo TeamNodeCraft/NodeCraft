@@ -5,7 +5,7 @@
 //! for a Part that has a body and a selected face. Mixed and empty inputs are
 //! errors from the shared section validation, never a silent pass-through.
 
-use crate::face_ref::face_reference_index;
+use crate::face_ref::{parse_face_references, resolve_face_references};
 use crate::node_task::ExactNodeTask;
 use crate::{contract_number, contract_text, Part, RequestIndex};
 
@@ -36,20 +36,16 @@ impl BuiltinNode for Extrude {
                 Ok(Part::from_bodies(bodies))
             }
             ProfileInput::Body(source) => {
-                let faces = node.values.get("faces").and_then(serde_json::Value::as_array);
-                if faces.is_none_or(|items| items.is_empty()) {
+                // The same face-reference resolver Shell and Offset Faces use:
+                // a malformed or unknown reference is an error, not a skipped
+                // entry. Extrude uses the first resolved face.
+                let references = parse_face_references(node.values)?;
+                if references.is_empty() {
                     return Err(format!(
                         "Extrude {}: profile input is a body; select a face to extrude or connect a sketch profile.",
                         node.id
                     ));
                 }
-                let reference = faces
-                    .and_then(|values| values.first())
-                    .and_then(|value| value.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("");
-                let index: usize = face_reference_index(reference)
-                    .ok_or("Extrude needs a selected face reference (face:N).")?;
                 let mut solids = source.realized_bodies()?;
                 if solids.len() != 1 {
                     return Err(format!(
@@ -58,6 +54,11 @@ impl BuiltinNode for Extrude {
                     ));
                 }
                 let profile = solids.pop().ok_or("Extrude source Part is empty")?;
+                let face_count = profile.brep().faces().ids().count();
+                let openings = resolve_face_references(&references, &[face_count])?;
+                let index = *openings[0]
+                    .first()
+                    .ok_or("Extrude needs a selected face reference (face:N).")?;
                 let tool = ctx
                     .execute_warned(ExactNodeTask::Extrude {
                         body: profile.clone(),
@@ -257,6 +258,29 @@ mod tests {
         let output = crate::evaluate_exact(request, crate::EngineCache::new(), None);
         let error = output.response.node_errors.get("extrude").expect("mixed input error");
         assert!(error.contains("both bodies and sketches"), "{error}");
+    }
+
+    /// Extrude shares the Shell face-reference resolver: a malformed body
+    /// prefix is an error, not a downgrade to face 1 of the only body.
+    #[test]
+    fn malformed_face_reference_is_an_error() {
+        let output = crate::evaluate_exact(
+            body_extrude_request(serde_json::json!({
+                "amount": 5.0,
+                "operation": "new",
+                "faces": [{"id": "body:x:face:1"}]
+            })),
+            crate::EngineCache::new(),
+            None,
+        );
+        let error = output
+            .response
+            .node_errors
+            .get("extrude")
+            .cloned()
+            .unwrap_or_default();
+        assert!(!error.is_empty(), "malformed face reference was accepted");
+        assert!(error.contains("body:x:face:1"), "{error}");
     }
 
     fn exact_bounds(

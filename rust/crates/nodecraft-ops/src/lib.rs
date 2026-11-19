@@ -53,7 +53,7 @@ pub fn validation() -> Validation {
     VALIDATION.with(std::cell::Cell::get)
 }
 
-use error_map::map_error;
+use error_map::{map_error, OpKind};
 thread_local! {
     static NEEDS_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -178,7 +178,7 @@ impl<'k> OpsSession<'k> {
             .collect::<Result<Vec<_>, _>>()?;
         let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
+        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Blend, error))?;
         self.kernel.blend_face_log = Some(Default::default());
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (
@@ -204,7 +204,7 @@ impl<'k> OpsSession<'k> {
                         .collect::<Result<Vec<_>, _>>()
                 });
                 self.note_reset(reset);
-                let faces = faces.map_err(map_error)?;
+                let faces = faces.map_err(|error| map_error(OpKind::Blend, error))?;
                 for pair in faces {
                     let leaning = if pair[0].1 >= pair[1].1 { pair[0].0 } else { pair[1].0 };
                     let other = if leaning == pair[0].0 { pair[1].0 } else { pair[0].0 };
@@ -222,8 +222,8 @@ impl<'k> OpsSession<'k> {
                     )
                 });
                 self.note_reset(reset);
-                let _ = result.map_err(map_error)?;
-                let volume = body.volume(1.0e-8).map_err(map_error)?;
+                let _ = result.map_err(|error| map_error(OpKind::Blend, error))?;
+                let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
                 let mut brep = body.into_brep();
                 let made_faces = self.mark_made(&mut brep)?;
                 return Ok(OpsResult { brep, warnings: Vec::new(), made_faces, volume });
@@ -242,7 +242,7 @@ impl<'k> OpsSession<'k> {
             )
         });
         self.note_reset(reset);
-        let blended = blended.map_err(map_error)?;
+        let blended = blended.map_err(|error| map_error(OpKind::Blend, error))?;
         let warnings = blended
             .dropped
             .iter()
@@ -250,7 +250,7 @@ impl<'k> OpsSession<'k> {
             .filter(|(_, dropped)| **dropped)
             .map(|(index, _)| format!("edge {} was removed by a larger round", index + 1))
             .collect();
-        let volume = body.volume(1.0e-8).map_err(map_error)?;
+        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
         let mut brep = body.into_brep();
         let made_faces = self.mark_made(&mut brep)?;
         Ok(OpsResult { brep, warnings, made_faces, volume })
@@ -273,7 +273,7 @@ impl<'k> OpsSession<'k> {
         let bb = b.ops_copy(self.kernel)?;
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::boolean::boolean(ab, bb, op));
         self.note_reset(reset);
-        match result.map_err(map_error)? {
+        match result.map_err(|error| map_error(OpKind::Boolean, error))? {
             Some(body) => SolidBody::from_ops(body).map(Some),
             None => Ok(None),
         }
@@ -333,7 +333,7 @@ impl<'k> OpsSession<'k> {
         }
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::boolean::union_all(kernels));
         self.note_reset(reset);
-        let body = result.map_err(map_error)?;
+        let body = result.map_err(|error| map_error(OpKind::Boolean, error))?;
         SolidBody::from_ops(body)
     }
 
@@ -367,7 +367,7 @@ impl<'k> OpsSession<'k> {
             )
         });
         self.note_reset(reset);
-        let body = result.map_err(map_error)?;
+        let body = result.map_err(|error| map_error(OpKind::Extrude, error))?;
         SolidBody::from_ops(body)
     }
 
@@ -403,10 +403,10 @@ impl<'k> OpsSession<'k> {
     /// failures in the report; `Err` means the check could not run.
     pub fn check(&mut self, brep: &Brep, level: CheckLevel) -> Result<CheckReport, SessionError> {
         let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
-        let body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
+        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Check, error))?;
         let (report, reset) = solidcore_ops::session::with_kernel(self.kernel, || body.check(level));
         self.note_reset(reset);
-        report.map_err(map_error)
+        report.map_err(|error| map_error(OpKind::Check, error))
     }
 
     /// Shell a solid by `signed_thickness` (positive outward, negative inward), leaving
@@ -438,13 +438,13 @@ impl<'k> OpsSession<'k> {
             .collect::<Result<Vec<_>, _>>()?;
         let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
+        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Shell, error))?;
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
             solidcore_ops::shell(&body, &order, &open, thickness)
         });
         self.note_reset(reset);
-        result.map_err(map_error)?;
-        let volume = body.volume(1.0e-8).map_err(map_error)?;
+        result.map_err(|error| map_error(OpKind::Shell, error))?;
+        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Shell, error))?;
         Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new(), volume })
     }
 
@@ -474,11 +474,11 @@ impl<'k> OpsSession<'k> {
             .collect::<Result<Vec<_>, _>>()?;
         let copy = brep_copy(self.kernel, brep).map_err(|e| SessionError::Kernel(e.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(map_error)?;
+        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Offset, error))?;
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::offset_faces(&body, &order, &indices, distance));
         self.note_reset(reset);
-        result.map_err(map_error)?;
-        let volume = body.volume(1.0e-8).map_err(map_error)?;
+        result.map_err(|error| map_error(OpKind::Offset, error))?;
+        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Offset, error))?;
         Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new(), volume })
     }
 

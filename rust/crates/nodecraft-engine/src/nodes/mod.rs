@@ -496,23 +496,6 @@ pub(crate) fn has_edges(values: &serde_json::Value) -> bool {
         .is_some_and(|edges| !edges.is_empty())
 }
 
-/// The saved `face:N` / `body:B:face:N` opening references of a face feature.
-///
-/// The `faces` value is a selector list, not a contract field, so it has no
-/// default resolver; the engine and the node read the same ids here.
-pub(crate) fn face_references(values: &serde_json::Value) -> Vec<&str> {
-    values
-        .get("faces")
-        .and_then(serde_json::Value::as_array)
-        .map(|faces| {
-            faces
-                .iter()
-                .filter_map(|face| face.get("id").and_then(serde_json::Value::as_str))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// What a node may ask the exact Part evaluator for.
 ///
 /// This is intentionally narrower than `Eval`: a node cannot reach the caches,

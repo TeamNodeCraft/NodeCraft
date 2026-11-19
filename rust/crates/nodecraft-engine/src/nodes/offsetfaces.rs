@@ -7,7 +7,7 @@
 //! the display body layout.
 
 use super::{BuiltinNode, NodeView, PartEval};
-use crate::face_ref::face_reference_body_and_index;
+use crate::face_ref::{parse_face_references, resolve_face_references};
 use crate::node_task::ExactNodeTask;
 use crate::{Part, RequestIndex};
 
@@ -23,29 +23,20 @@ impl BuiltinNode for OffsetFaces {
         let Some(source) = ctx.input_part(&["shape"])? else {
             return Err("Offset Faces has no shape input".into());
         };
-        let references = super::face_references(node.values);
+        let references = parse_face_references(node.values)?;
         // No selected faces is a pass-through, not a zero-distance offset.
         if references.is_empty() {
             return Ok((*source).clone());
         }
         let distance = crate::contract_number("offsetfaces", node.values, "distance");
         let solids = source.realized_bodies()?;
+        let body_faces: Vec<usize> = solids
+            .iter()
+            .map(|solid| solid.brep().faces().ids().count())
+            .collect();
+        let openings = resolve_face_references(&references, &body_faces)?;
         let mut bodies = Vec::with_capacity(solids.len());
-        for (body_index, body) in solids.into_iter().enumerate() {
-            let mut faces = Vec::new();
-            for reference in &references {
-                // Per-body filtering: `body:B:face:N` only edits body B;
-                // `face:N` applies to every body that has it. A malformed or
-                // foreign reference is skipped, as before the port.
-                let Some((body_index_ref, face_index)) = face_reference_body_and_index(reference)
-                else {
-                    continue;
-                };
-                if body_index_ref.is_some_and(|body| body != body_index) {
-                    continue;
-                }
-                faces.push(face_index);
-            }
+        for (body, faces) in solids.into_iter().zip(openings) {
             if faces.is_empty() {
                 bodies.push(crate::BodyInstance {
                     body,
@@ -252,5 +243,38 @@ mod tests {
             builtin.body_layout(view, &[("shape", vec!["big".to_owned(), "small".to_owned()])]),
             Some(vec!["big".to_owned(), "small".to_owned()]),
         );
+    }
+
+    /// Offset Faces shares the Shell face-reference resolver: a malformed body
+    /// prefix or a non-list `faces` value is an error, not a skipped entry or a
+    /// silent pass-through.
+    #[test]
+    fn malformed_face_references_are_errors_not_silent_passes() {
+        for (case, faces, expected) in [
+            (
+                "malformed body",
+                serde_json::json!([{"id": "body:x:face:1"}]),
+                "body:x:face:1",
+            ),
+            (
+                "faces is not a list",
+                serde_json::json!({"id": "face:0"}),
+                "list",
+            ),
+        ] {
+            let output = crate::evaluate_exact(
+                single_box_request(faces, false),
+                crate::EngineCache::new(),
+                None,
+            );
+            let error = output
+                .response
+                .node_errors
+                .get("offset")
+                .cloned()
+                .unwrap_or_default();
+            assert!(!error.is_empty(), "{case}: no node error");
+            assert!(error.contains(expected), "{case}: {error}");
+        }
     }
 }

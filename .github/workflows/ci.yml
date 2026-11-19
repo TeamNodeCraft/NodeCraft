@@ -4,8 +4,15 @@ on:
   push:
   pull_request:
 
+# Read-only by default. The check job may write only to publish a failing
+# test log to the public `ci-logs` release (pushes only, see below).
+permissions:
+  contents: read
+
 jobs:
   check:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -24,8 +31,32 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Check
         run: cargo check --manifest-path rust/Cargo.toml -p nodecraft
+      # scripts/publish-public.sh runs this exact command before every publish.
+      # Keep it a single command; the failure-log step below repeats it.
       - name: Test application and editor
         run: >-
           cargo test --manifest-path rust/Cargo.toml
           -p nodecraft -p nodecraft-node-canvas -p nodecraft-session
           -p nodecraft-layers
+      # GitHub only shows job logs to signed-in users. When the tests fail on a
+      # push, run them again (already built, so this is quick) with the output
+      # captured, and attach it to the public `ci-logs` release so anyone can
+      # read the failure. Pull requests get a read-only token, so they skip it.
+      - name: Publish failing test log
+        if: failure() && github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          log="test-${{ github.run_id }}-${{ runner.os }}.log"
+          cargo test --manifest-path rust/Cargo.toml \
+            -p nodecraft -p nodecraft-node-canvas -p nodecraft-session \
+            -p nodecraft-layers --no-fail-fast > "$log" 2>&1 || true
+          gh release view ci-logs >/dev/null 2>&1 \
+            || gh release create ci-logs --title "CI logs" \
+                 --notes "Failing test logs from CI, one file per run and OS." \
+                 --prerelease
+          gh release upload ci-logs "$log" --clobber
+          url="https://github.com/${{ github.repository }}/releases/download/ci-logs/$log"
+          echo "::error title=Test log::$url"
+          { echo "### Failing test log"; echo; echo "$url"; } >> "$GITHUB_STEP_SUMMARY"

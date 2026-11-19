@@ -682,6 +682,65 @@ pub fn resolve_choice<'a>(
     resolve_text(node_type, values, key)
 }
 
+/// Resolve one enum/choice field to its canonical `&'static str`.
+///
+/// This is the one enum parser for node choices: callers must not string-match
+/// option labels or values themselves. Matching is ASCII case-insensitive
+/// against the declared `(canonical, label)` options, so UI text such as
+/// `"Inward"` and `"OUTWARD"` resolves to the canonical `"inward"` and
+/// `"outward"`.
+///
+/// A missing value resolves to the contract default. A stored value that is not
+/// a string, or that does not name a declared option, is an error and never
+/// falls back to the default silently. That turns a stale or misspelled value
+/// into a node error instead of silently changing the operation.
+///
+/// # Panics
+///
+/// Panics if `key` is not a declared `FieldKind::Choice` field of `node_type`.
+/// That is a contract-programming error, not a document error, matching the
+/// engine's contract readers.
+pub fn resolve_choice_value(
+    node_type: &str,
+    values: &serde_json::Value,
+    key: &str,
+) -> Result<&'static str, String> {
+    let spec = field_spec(node_type, values, key)
+        .unwrap_or_else(|| panic!("node contract has no choice field {node_type}.{key}"));
+    let FieldKind::Choice(choices) = spec.kind else {
+        panic!("node contract field {node_type}.{key} is not a choice field");
+    };
+    let FieldDefault::Choice(default) = spec.default else {
+        panic!("node contract choice field {node_type}.{key} has a non-choice default");
+    };
+    let accepted = || {
+        choices
+            .iter()
+            .map(|(canonical, _)| format!("{canonical:?}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let Some(raw) = values.get(key) else {
+        return Ok(default);
+    };
+    let Some(stored) = raw.as_str() else {
+        return Err(format!(
+            "{node_type}.{key} must be a string, got {raw}; expected one of {}. Reselect the value.",
+            accepted()
+        ));
+    };
+    choices
+        .iter()
+        .find(|(canonical, _)| canonical.eq_ignore_ascii_case(stored))
+        .map(|(canonical, _)| *canonical)
+        .ok_or_else(|| {
+            format!(
+                "{node_type}.{key} has unknown value {stored:?}; expected one of {}. Reselect the value.",
+                accepted()
+            )
+        })
+}
+
 /// Every contract default for a node as JSON, keyed by field. Used by reset
 /// actions and by tests that compare a missing value with its explicit default.
 #[must_use]
@@ -995,6 +1054,72 @@ mod tests {
             validate_connections(&nodes, &connections),
             Err(ContractError::WrongKind { .. })
         ));
+    }
+
+    #[test]
+    fn choice_value_resolves_canonical_shell_direction() {
+        for direction in ["inward", "outward"] {
+            let values = serde_json::json!({"direction": direction});
+            assert_eq!(
+                resolve_choice_value("shell", &values, "direction"),
+                Ok(direction),
+                "shell.direction {direction}"
+            );
+        }
+    }
+
+    #[test]
+    fn choice_value_matches_direction_ascii_case_insensitively() {
+        for (stored, canonical) in [
+            ("Inward", "inward"),
+            ("INWARD", "inward"),
+            ("Outward", "outward"),
+        ] {
+            let values = serde_json::json!({"direction": stored});
+            assert_eq!(
+                resolve_choice_value("shell", &values, "direction"),
+                Ok(canonical),
+                "shell.direction {stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn choice_value_rejects_unknown_direction_values() {
+        for stored in ["inwrad", "outside"] {
+            let values = serde_json::json!({"direction": stored});
+            let error = resolve_choice_value("shell", &values, "direction")
+                .expect_err("unknown direction must not fall back to the default");
+            assert!(error.contains("shell.direction"), "{error}");
+            assert!(error.contains(stored), "{error}");
+            assert!(error.contains("\"inward\"") && error.contains("\"outward\""), "{error}");
+            assert!(error.ends_with('.'), "{error}");
+        }
+    }
+
+    #[test]
+    fn choice_value_rejects_non_string_direction() {
+        let values = serde_json::json!({"direction": 5});
+        let error = resolve_choice_value("shell", &values, "direction")
+            .expect_err("non-string direction must not fall back to the default");
+        assert!(error.contains("shell.direction"), "{error}");
+        assert!(error.contains('5'), "{error}");
+        assert!(error.ends_with('.'), "{error}");
+    }
+
+    #[test]
+    fn choice_value_missing_direction_uses_contract_default() {
+        let values = serde_json::json!({});
+        assert_eq!(
+            resolve_choice_value("shell", &values, "direction"),
+            Ok("inward")
+        );
+    }
+
+    #[test]
+    fn choice_value_is_shared_by_mirror_plane() {
+        let values = serde_json::json!({"plane": "XY"});
+        assert_eq!(resolve_choice_value("mirror", &values, "plane"), Ok("xy"));
     }
 }
 

@@ -5446,7 +5446,7 @@ mod tests {
         })).expect("invalid shell request");
         let (response, _, _) = respond(request, EngineCache::new());
         let error = response.node_errors.get("s").expect("shell opening error");
-        assert!(error.contains("does not exist"), "{error}");
+        assert!(error.contains("exist on body 0"), "{error}");
 
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 3, "targets": ["s"], "meshTargets": ["s"],

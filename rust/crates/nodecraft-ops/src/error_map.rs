@@ -16,8 +16,27 @@ use solidcore_ops::{Error as OpsError, Unblendable};
 
 use crate::SessionError;
 
+/// The operation that met an error, so the message can name the feature the user ran.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpKind {
+    /// A conversion, a proof or a measurement, not a user feature operation.
+    Body,
+    /// A fillet, a chamfer or a blend.
+    Blend,
+    Boolean,
+    Check,
+    Extrude,
+    Offset,
+    Shell,
+}
+
 /// The message a node shows for every way an ops call can fail.
-pub(crate) fn map_error(error: OpsError) -> SessionError {
+pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
+    if op == OpKind::Shell {
+        if let Some(refusal) = shell_refusal(&error) {
+            return refusal;
+        }
+    }
     match error {
         // A cancellation is not a failure: it is the caller's own token, and the session
         // rebuilds the worker rather than showing anything.
@@ -83,10 +102,12 @@ pub(crate) fn map_error(error: OpsError) -> SessionError {
             SessionError::Invalid(message)
         }
 
-        OpsError::WallFolds { largest: Some(x) } => SessionError::Invalid(format!(
+        OpsError::WallFolds { largest: Some(x) } if x.is_finite() && x >= 0.005 => SessionError::Invalid(format!(
             "Shell too thick for this body: the largest that fits is {x:.2} mm. Curved faces such as a G2 fillet's limit the thickness; use a thinner shell, or a larger or G1 fillet."
         )),
-        OpsError::WallFolds { largest: None } => SessionError::Invalid(
+        // A bound of zero (or no bound at all) says no wall fits, so it is written without a
+        // number: suggesting `0.00 mm` would read as a thickness the user could choose.
+        OpsError::WallFolds { .. } => SessionError::Invalid(
             "Shell too thick for this body's curved faces; try a thinner shell.".to_owned(),
         ),
 
@@ -388,6 +409,69 @@ pub(crate) fn map_error(error: OpsError) -> SessionError {
     }
 }
 
+/// A shell's own wording for the refusals it can meet: the message names the shell's wall, never
+/// the blend's "no room" or the offset's "refused", and never prints a raw kernel status.
+/// `None` leaves the variant to the op-neutral wording above.
+fn shell_refusal(error: &OpsError) -> Option<SessionError> {
+    let message = match error {
+        OpsError::NoRoom => {
+            "The wall is thicker than the part allows here. Use a thinner shell, or open fewer faces."
+                .to_owned()
+        }
+        OpsError::WallsTouch => {
+            "The shell's walls meet instead of crossing: the wall is thicker than the part allows here. Use a thinner shell, or open fewer faces."
+                .to_owned()
+        }
+        // A bound that would round to `0.00 mm` is no useful written thickness: it says no wall
+        // fits, and the message says so without a number.
+        OpsError::WallFolds { largest: Some(x) } if x.is_finite() && *x >= 0.005 => format!(
+            "The wall is thicker than the part allows here (max about {x:.2} mm). Use a thinner shell, or open fewer faces."
+        ),
+        // A zero (or non-finite) bound says no wall fits: never print `0.00 mm` as if it were
+        // a thickness the user could ask for.
+        OpsError::WallFolds { .. } => {
+            "The wall is thicker than the part allows here: no wall fits this body. Use a thinner shell, or open fewer faces."
+                .to_owned()
+        }
+        OpsError::Status(code) if *code == 1001 => {
+            "The shell can't open this face: it is on a curved or filleted part of the body where the kernel can't make the opening. Open a planar face, or shell with no faces open."
+                .to_owned()
+        }
+        OpsError::Status(_) => {
+            "The shell could not be built on this body. Try a thinner wall, or open fewer faces."
+                .to_owned()
+        }
+        OpsError::OffsetRefused { face, why } => match face {
+            Some(face) => format!(
+                "The shell's wall is refused at face {face}: {why}. Try a thinner shell, or open fewer faces."
+            ),
+            None => format!(
+                "The shell's wall is refused: {why}. Try a thinner shell, or open fewer faces."
+            ),
+        },
+        OpsError::NotSolid => {
+            "The shell's wall would not be a closed solid on this body. Try a thinner shell, or open fewer faces."
+                .to_owned()
+        }
+        OpsError::NotSolidBecause { .. } => format!(
+            "The shell's wall would not be a closed solid on this body ({error}). Try a thinner shell, or open fewer faces."
+        ),
+        OpsError::Argument => {
+            "The shell's wall or openings are not valid for this body. Check the thickness and reselect the faces to remove."
+                .to_owned()
+        }
+        OpsError::Empty => {
+            "The shell left no wall on this body. Open fewer faces, or use a thinner shell."
+                .to_owned()
+        }
+        OpsError::Unsupported(what) => format!(
+            "The shell can't measure this body's wall: {what}. Try a thinner shell."
+        ),
+        _ => return None,
+    };
+    Some(SessionError::Invalid(message))
+}
+
 /// A point in millimetres, as a message writes it out.
 fn format_point(point: [f64; 3]) -> String {
     format!("({:.2}, {:.2}, {:.2}) mm", point[0], point[1], point[2])
@@ -484,7 +568,7 @@ fn profile_refusal(refusal: ProfileRefusal) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::map_error;
+    use super::{map_error, OpKind};
     use crate::SessionError;
     use solidcore::error::ErrorKind;
     use solidcore::error::offset::LoopCrossing;
@@ -496,8 +580,8 @@ mod tests {
 
     /// No message shows a value the way `Debug` would: none has `Some(`, a bare `None`, or the
     /// opening of a struct dump (`{ `). A user reads sentences, so each ends like one.
-    fn assert_readable(error: OpsError) {
-        let message = map_error(error).to_string();
+    fn assert_readable(op: OpKind, error: OpsError) {
+        let message = map_error(op, error).to_string();
         assert!(!message.is_empty(), "an empty message");
         for forbidden in ["Some(", "None", "{ "] {
             assert!(!message.contains(forbidden), "the message shows {forbidden}: {message}");
@@ -651,10 +735,47 @@ mod tests {
             OpsError::EdgeLeftBehind { edge: 4 },
         ];
         for error in errors {
-            assert_readable(error);
+            assert_readable(OpKind::Body, error);
         }
 
-        assert_eq!(map_error(OpsError::Cancelled), SessionError::Cancelled);
-        assert_readable(not_solid);
+        assert_eq!(map_error(OpKind::Body, OpsError::Cancelled), SessionError::Cancelled);
+        assert_readable(OpKind::Body, not_solid);
+    }
+
+    /// A shell's refusal reads as the shell's: it names the wall, never the blend's "no room",
+    /// the offset's "refused", or a raw kernel status, and it always ends like a sentence.
+    #[test]
+    fn shell_refusals_use_shell_wording_not_blend_wording() {
+        let errors = [
+            OpsError::NoRoom,
+            OpsError::WallsTouch,
+            OpsError::WallFolds { largest: Some(0.0) },
+            OpsError::WallFolds { largest: Some(0.001) },
+            OpsError::WallFolds { largest: Some(f64::NAN) },
+            OpsError::WallFolds { largest: Some(1.25) },
+            OpsError::WallFolds { largest: None },
+            OpsError::Status(1001),
+            OpsError::Status(1007),
+            OpsError::OffsetRefused { face: Some(23), why: OffsetRefusal::NotCertified { distance: 1.5 } },
+            OpsError::OffsetRefused { face: None, why: OffsetRefusal::SeamOpened },
+            OpsError::NotSolid,
+            OpsError::Argument,
+            OpsError::Empty,
+            OpsError::Unsupported("a wall measured on a body with no thickness"),
+        ];
+        for error in errors {
+            let message = map_error(OpKind::Shell, error).to_string();
+            assert!(
+                message.contains("shell") || message.contains("wall"),
+                "the shell message names neither the shell nor its wall: {message}"
+            );
+            for forbidden in ["blend", "edges", "0.00", "kernel status", "offset is refused"] {
+                assert!(!message.contains(forbidden), "the shell message shows {forbidden}: {message}");
+            }
+            assert!(message.ends_with('.'), "not a full sentence: {message}");
+        }
+
+        let measured = map_error(OpKind::Shell, OpsError::WallFolds { largest: Some(1.25) }).to_string();
+        assert!(measured.contains("1.25 mm"), "the wall bound is not written out: {measured}");
     }
 }

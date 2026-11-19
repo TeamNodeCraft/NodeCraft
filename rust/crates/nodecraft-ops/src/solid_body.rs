@@ -22,7 +22,7 @@ use solidcore::kernel::Kernel;
 use solidcore::topology::Brep;
 use solidcore_ops::Body;
 
-use crate::error_map::map_error;
+use crate::error_map::{map_error, OpKind};
 use crate::SessionError;
 
 /// An exact axis-aligned box: the least corner, then the greatest.
@@ -99,7 +99,7 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Body::to_brep`].
     pub fn from_ops(body: Body) -> Result<SolidBody, SessionError> {
-        let brep = body.to_brep().map_err(map_error)?;
+        let brep = body.to_brep().map_err(|error| map_error(OpKind::Body, error))?;
         let solid = SolidBody::from_arc(Arc::new(brep));
         let proved = crate::validation() == crate::Validation::EachStep
             && solidcore::topology::brep::p2::is_manifold_solid(solid.brep()).unwrap_or(false);
@@ -206,7 +206,7 @@ impl SolidBody {
             .brep
             .clone_standing_for_self()
             .map_err(|error| SessionError::Kernel(error.to_string()))?;
-        let body = Body::from_brep(kernel, brep).map_err(map_error)?;
+        let body = Body::from_brep(kernel, brep).map_err(|error| map_error(OpKind::Body, error))?;
         Ok(self.ops.get_or_init(|| body))
     }
 
@@ -217,7 +217,7 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Body::from_brep`] and [`Body::copy_held_on`].
     pub fn ops_copy(&self, kernel: &mut Kernel) -> Result<Body, SessionError> {
-        self.kernel_body(kernel)?.copy_held_on(kernel).map_err(map_error)
+        self.kernel_body(kernel)?.copy_held_on(kernel).map_err(|error| map_error(OpKind::Body, error))
     }
 
     /// Prove this body now, under `kernel`'s settings, and keep the proof: the check the
@@ -243,7 +243,7 @@ impl SolidBody {
                 Ok(())
             }
             Err(error) => {
-                let mapped = map_error(error);
+                let mapped = map_error(OpKind::Body, error);
                 if let SessionError::Invalid(reason) = &mapped {
                     self.write_proof(ProofState::Refused(reason.clone()));
                 }
@@ -261,7 +261,7 @@ impl SolidBody {
         if let Some(volume) = *self.volume.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             return Ok(volume);
         }
-        let volume = self.ops_copy(kernel)?.volume(1.0e-8).map_err(map_error)?;
+        let volume = self.ops_copy(kernel)?.volume(1.0e-8).map_err(|error| map_error(OpKind::Body, error))?;
         *self.volume.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(volume);
         Ok(volume)
     }
@@ -276,7 +276,7 @@ impl SolidBody {
         if let Some(bounds) = *self.bounds.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
             return Ok(bounds);
         }
-        let bounds = self.ops_copy(kernel)?.bounds().map_err(map_error)?;
+        let bounds = self.ops_copy(kernel)?.bounds().map_err(|error| map_error(OpKind::Body, error))?;
         *self.bounds.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bounds);
         Ok(bounds)
     }
