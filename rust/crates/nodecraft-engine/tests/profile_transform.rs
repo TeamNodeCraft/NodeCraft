@@ -9,15 +9,19 @@ use nodecraft_protocol::{CacheState, Connection, Node, Request};
 use std::path::PathBuf;
 
 fn graph_path() -> PathBuf {
-    std::env::var_os("NODECRAFT_PROFILE_GRAPH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../samples/gigatest-forest-5000.nodecraft")
-        })
+    std::env::var_os("NODECRAFT_PROFILE_GRAPH").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../samples/gigatest-forest-5000.nodecraft")
+    })
 }
 
-fn node(id: &str, node_type: &str, values: &serde_json::Value, suppressed: bool, key: &str) -> Node {
+fn node(
+    id: &str,
+    node_type: &str,
+    values: &serde_json::Value,
+    suppressed: bool,
+    key: &str,
+) -> Node {
     Node {
         id: id.into(),
         node_type: node_type.into(),
@@ -62,7 +66,9 @@ fn transform_redraw_breaks_down_into_brep_and_mesh() {
             let id = node["id"].as_str().unwrap_or("");
             !raw_connections.iter().any(|link| link["from"].as_str() == Some(id))
         })
-        .filter_map(|node| Some((node["id"].as_str()?.to_owned(), node["type"].as_str()?.to_owned())))
+        .filter_map(|node| {
+            Some((node["id"].as_str()?.to_owned(), node["type"].as_str()?.to_owned()))
+        })
         .filter(|(_, node_type)| {
             matches!(node_type.as_str(), "translate" | "combine" | "boolean" | "fuse")
         })
@@ -101,7 +107,11 @@ fn transform_redraw_breaks_down_into_brep_and_mesh() {
             .collect()
     };
 
-    let first = evaluate_exact(request(build(0), connections.clone(), &target, 1), EngineCache::new(), None);
+    let first = evaluate_exact(
+        request(build(0), connections.clone(), &target, 1),
+        EngineCache::new(),
+        None,
+    );
     let print = |label: &str, output: &nodecraft_engine::EngineOutput| {
         let response = &output.response;
         let target_ms = response.timings.get(&target).copied().unwrap_or(0.0);

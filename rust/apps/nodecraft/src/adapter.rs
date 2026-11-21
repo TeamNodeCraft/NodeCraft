@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use solidcraft_geom::Mesh as CraftMesh;
-use solidcore_record::Vec3;
 use nodecraft_protocol::Mesh as NodeMesh;
+use solidcore_record::Vec3;
+use solidcraft_geom::Mesh as CraftMesh;
 use solidcraft_geom::prelude::*;
 
 /// A display mesh plus its edge polylines, ready for the SolidCraft CPU rasterizer.
@@ -15,9 +15,7 @@ impl DisplayMesh {
     /// The mesh to draw for a display LOD index. Index 0 is the full mesh.
     #[must_use]
     pub fn render_mesh(&self, lod: usize) -> &CraftMesh {
-        self.lods
-            .get(lod.saturating_sub(1))
-            .map_or(&self.mesh, |lod| &lod.mesh)
+        self.lods.get(lod.saturating_sub(1)).map_or(&self.mesh, |lod| &lod.mesh)
     }
 }
 
@@ -45,7 +43,6 @@ pub struct DisplayMesh {
     pub radius: f64,
     pub center: Vec3,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct DisplayLod {
@@ -86,10 +83,8 @@ pub fn generate_lods(source: &NodeMesh) -> Vec<DisplayLod> {
     if full < MIN_TRIANGLES || !source.face_colors.is_empty() {
         return Vec::new();
     }
-    let targets: Vec<usize> = [full / 2, full / 4, full / 8]
-        .into_iter()
-        .filter(|target| *target >= 100)
-        .collect();
+    let targets: Vec<usize> =
+        [full / 2, full / 4, full / 8].into_iter().filter(|target| *target >= 100).collect();
     if targets.is_empty() {
         return Vec::new();
     }
@@ -183,9 +178,15 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
             let Some(pb) = positions.get(b).copied() else { continue };
             let Some(pc) = positions.get(c).copied() else { continue };
             let n = (pb - pa).cross(pc - pa);
-            if let Some(slot) = normals.get_mut(a) { *slot = *slot + n; }
-            if let Some(slot) = normals.get_mut(b) { *slot = *slot + n; }
-            if let Some(slot) = normals.get_mut(c) { *slot = *slot + n; }
+            if let Some(slot) = normals.get_mut(a) {
+                *slot = *slot + n;
+            }
+            if let Some(slot) = normals.get_mut(b) {
+                *slot = *slot + n;
+            }
+            if let Some(slot) = normals.get_mut(c) {
+                *slot = *slot + n;
+            }
         }
         for normal in &mut normals {
             *normal = normal.normalized().unwrap_or(Vec3::Z);
@@ -195,14 +196,17 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
     let mut face_index = std::collections::BTreeMap::new();
     let tri_face = (0..source.faces.len())
         .map(|index| {
-            let group = source.face_groups.get(index).cloned().unwrap_or_else(|| format!("face:{index}"));
+            let group =
+                source.face_groups.get(index).cloned().unwrap_or_else(|| format!("face:{index}"));
             let next = face_index.len() as u32;
             *face_index.entry(group).or_insert(next)
         })
         .collect();
     let mut face_ids = vec![String::new(); face_index.len()];
     for (name, index) in face_index {
-        if let Some(slot) = face_ids.get_mut(index as usize) { *slot = name; }
+        if let Some(slot) = face_ids.get_mut(index as usize) {
+            *slot = name;
+        }
     }
 
     let pick_edges: Vec<DisplayEdge> = raw
@@ -217,7 +221,8 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
             for segment in &edge.segments {
                 for index in segment {
                     let point = raw.vertices.get(*index as usize)?;
-                    let point = Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]));
+                    let point =
+                        Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]));
                     if points.last().copied() != Some(point) {
                         points.push(point);
                     }
@@ -242,10 +247,7 @@ pub fn display_mesh(source: &NodeMesh) -> DisplayMesh {
         .collect();
     // Display the exact B-rep boundaries, not triangle adjacency. Generated
     // tessellation strips and mesh fallbacks must not appear as selectable edges.
-    let edges: Vec<Vec<Vec3>> = pick_edges
-        .iter()
-        .map(|edge| edge.points.clone())
-        .collect();
+    let edges: Vec<Vec<Vec3>> = pick_edges.iter().map(|edge| edge.points.clone()).collect();
     // The CPU scene path reads the same per-edge classes as the GPU ribbon.
     let seams: Vec<bool> = pick_edges.iter().map(|edge| edge.class.is_seam()).collect();
     let smooth_edges: Vec<bool> = pick_edges.iter().map(|edge| edge.class.is_smooth()).collect();
@@ -312,11 +314,11 @@ pub fn display_mesh_with_difference(
         added: mesh_triangles(added),
         removed: mesh_triangles(removed),
         edges: {
-            let mut edges: Vec<DisplayEdge> = comparison_edges(added)
-                .into_iter()
-                .chain(comparison_edges(removed))
-                .collect();
-            if edges.is_empty() && (!added.face_groups.is_empty() || !removed.face_groups.is_empty()) {
+            let mut edges: Vec<DisplayEdge> =
+                comparison_edges(added).into_iter().chain(comparison_edges(removed)).collect();
+            if edges.is_empty()
+                && (!added.face_groups.is_empty() || !removed.face_groups.is_empty())
+            {
                 // Some exact difference bodies arrive with no BRep edge
                 // metadata. Face-classified overlays have no face groups, so
                 // their triangle edges must never become a jagged outline.
@@ -337,13 +339,16 @@ fn comparison_edges(mesh: &NodeMesh) -> Vec<DisplayEdge> {
             for segment in &edge.segments {
                 for index in segment {
                     let point = mesh.vertices[*index as usize];
-                    let point = Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]));
+                    let point =
+                        Vec3::new(f64::from(point[0]), f64::from(point[1]), f64::from(point[2]));
                     if points.last().is_none_or(|last| *last != point) {
                         points.push(point);
                     }
                 }
             }
-            if points.len() < 2 { return None; }
+            if points.len() < 2 {
+                return None;
+            }
             let midpoint = points.iter().fold([0.0; 3], |mut sum, point| {
                 sum[0] += point.x / points.len() as f64;
                 sum[1] += point.y / points.len() as f64;
@@ -363,11 +368,9 @@ fn comparison_edges(mesh: &NodeMesh) -> Vec<DisplayEdge> {
 fn boundary_edges(triangles: &[([Vec3; 3], [Vec3; 3])]) -> Vec<DisplayEdge> {
     use std::collections::HashMap;
     let mut counts: HashMap<([i64; 3], [i64; 3]), (Vec3, Vec3)> = HashMap::new();
-    let key = |p: Vec3| [
-        (p.x * 1.0e6).round() as i64,
-        (p.y * 1.0e6).round() as i64,
-        (p.z * 1.0e6).round() as i64,
-    ];
+    let key = |p: Vec3| {
+        [(p.x * 1.0e6).round() as i64, (p.y * 1.0e6).round() as i64, (p.z * 1.0e6).round() as i64]
+    };
     for (points, _) in triangles {
         for (a, b) in [(0, 1), (1, 2), (2, 0)] {
             let (pa, pb) = (points[a], points[b]);
@@ -394,11 +397,7 @@ fn boundary_edges(triangles: &[([Vec3; 3], [Vec3; 3])]) -> Vec<DisplayEdge> {
             DisplayEdge {
                 id: format!("comparison-boundary:{k:?}"),
                 points: vec![pa, pb],
-                midpoint: [
-                    (pa.x + pb.x) * 0.5,
-                    (pa.y + pb.y) * 0.5,
-                    (pa.z + pb.z) * 0.5,
-                ],
+                midpoint: [(pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5, (pa.z + pb.z) * 0.5],
                 class: nodecraft_layers::PlanEdgeClass::NORMAL,
             }
         })
@@ -423,9 +422,6 @@ fn mesh_triangles(mesh: &NodeMesh) -> Vec<([Vec3; 3], [Vec3; 3])> {
         })
         .collect()
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -487,10 +483,13 @@ mod tests {
         assert_eq!(display.face_ids, vec!["face:0".to_owned()]);
         assert_eq!(display.edges.len(), 1, "generated mesh edges must not be pickable");
         assert_eq!(display.edges[0].id, "edge:0");
-        assert_eq!(display.mesh.edges, vec![vec![
-            solidcore_record::Vec3::new(0.0, 0.0, 0.0),
-            solidcore_record::Vec3::new(10.0, 0.0, 0.0),
-        ]]);
+        assert_eq!(
+            display.mesh.edges,
+            vec![vec![
+                solidcore_record::Vec3::new(0.0, 0.0, 0.0),
+                solidcore_record::Vec3::new(10.0, 0.0, 0.0),
+            ]]
+        );
         assert!(display.radius > 0.0);
     }
 
@@ -537,11 +536,7 @@ mod tests {
                 faces.push([a, d, c]);
             }
         }
-        let source = NodeMesh {
-            vertices,
-            faces,
-            ..NodeMesh::default()
-        };
+        let source = NodeMesh { vertices, faces, ..NodeMesh::default() };
         let mut display = display_mesh(&source);
         display.lods = generate_lods(&source);
         assert!(!display.lods.is_empty(), "large display should have LOD levels");
@@ -552,7 +547,9 @@ mod tests {
         assert!(display.lods.iter().all(|lod| lod.error.is_finite()));
     }
 
-    fn exact_display(brep: nodecraft_solidcore::solidcore::topology::Brep) -> (DisplayMesh, NodeMesh) {
+    fn exact_display(
+        brep: nodecraft_solidcore::solidcore::topology::Brep,
+    ) -> (DisplayMesh, NodeMesh) {
         let part = nodecraft_display::ExactPart::singleton(
             nodecraft_display::BodyKey::new(1, 0),
             Arc::new(brep),
@@ -626,14 +623,9 @@ mod tests {
         const BASE: f64 = 10.0;
         const HEIGHT: f64 = 20.0;
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let brep = api::create_cone(
-            &mut kernel,
-            Point3::new(0.0, 0.0, -HEIGHT / 2.0),
-            BASE,
-            0.0,
-            HEIGHT,
-        )
-        .expect("cone");
+        let brep =
+            api::create_cone(&mut kernel, Point3::new(0.0, 0.0, -HEIGHT / 2.0), BASE, 0.0, HEIGHT)
+                .expect("cone");
         let (display, evaluated) = exact_display(brep);
         assert_corner_normals_match_evaluated(&display, &evaluated);
 
@@ -659,11 +651,7 @@ mod tests {
                 // The cone side runs from the apex to `BASE` at the opposite
                 // end, at the normal's own azimuth. The exact limit normal is
                 // perpendicular to it.
-                let side = [
-                    BASE * normal.x / radial,
-                    BASE * normal.y / radial,
-                    -HEIGHT,
-                ];
+                let side = [BASE * normal.x / radial, BASE * normal.y / radial, -HEIGHT];
                 let length = (side[0] * side[0] + side[1] * side[1] + side[2] * side[2]).sqrt();
                 let along_side =
                     (normal.x * side[0] + normal.y * side[1] + normal.z * side[2]) / length;
@@ -689,8 +677,8 @@ mod tests {
         use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
         const RADIUS: f64 = 10.0;
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let brep = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), RADIUS)
-            .expect("sphere");
+        let brep =
+            api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), RADIUS).expect("sphere");
         let (display, evaluated) = exact_display(brep);
         assert_corner_normals_match_evaluated(&display, &evaluated);
 
@@ -719,12 +707,7 @@ mod tests {
         // face normals; without the exact flag the display path must rebuild
         // them from triangle geometry as it always has.
         let source = NodeMesh {
-            vertices: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             faces: vec![[0, 1, 2], [0, 1, 3]],
             face_groups: vec!["face:0".into(), "face:1".into()],
@@ -732,9 +715,8 @@ mod tests {
         };
         assert!(!source.exact_normals);
         let display = display_mesh(&source);
-        let normal_of = |triangle: usize| {
-            display.mesh.normals[display.mesh.triangles[triangle][0] as usize]
-        };
+        let normal_of =
+            |triangle: usize| display.mesh.normals[display.mesh.triangles[triangle][0] as usize];
         assert!(normal_of(0).z > 0.999, "flat face keeps its +Z normal");
         assert!(
             normal_of(1).y < -0.999,

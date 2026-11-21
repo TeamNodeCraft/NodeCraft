@@ -76,8 +76,7 @@ pub fn wedge_body(
     height: f64,
     top_length: f64,
 ) -> Result<solidcore_ops::Body, String> {
-    if !(length.is_finite() && width.is_finite() && height.is_finite() && top_length.is_finite())
-    {
+    if !(length.is_finite() && width.is_finite() && height.is_finite() && top_length.is_finite()) {
         return Err("wedge dimensions must be finite".into());
     }
     if !(length > 0.0 && width > 0.0 && height > 0.0) {
@@ -99,27 +98,13 @@ pub fn wedge_body(
     }
     points.push(top_far);
     points.push(top_high);
-    let region = Region2 {
-        outer: Loop2::polygon(&points),
-        holes: Vec::new(),
-    };
-    solidcore_ops::prism::extrude_planar_regions(
-        &Plane::XZ,
-        &[region],
-        -width * 0.5,
-        width * 0.5,
-    )
-    .map_err(|error| format!("wedge extrusion: {error}"))
+    let region = Region2 { outer: Loop2::polygon(&points), holes: Vec::new() };
+    solidcore_ops::prism::extrude_planar_regions(&Plane::XZ, &[region], -width * 0.5, width * 0.5)
+        .map_err(|error| format!("wedge extrusion: {error}"))
 }
 
-pub fn wedge_mesh(
-    length: f64,
-    width: f64,
-    height: f64,
-    top_length: f64,
-) -> Result<Mesh, String> {
-    if !(length.is_finite() && width.is_finite() && height.is_finite() && top_length.is_finite())
-    {
+pub fn wedge_mesh(length: f64, width: f64, height: f64, top_length: f64) -> Result<Mesh, String> {
+    if !(length.is_finite() && width.is_finite() && height.is_finite() && top_length.is_finite()) {
         return Err("wedge dimensions must be finite".into());
     }
     if !(length > 0.0 && width > 0.0 && height > 0.0) {
@@ -232,22 +217,14 @@ pub fn wedge_mesh(
         // Side faces at y = -width / 2 and y = +width / 2 (triangles).
         push_face(
             &mut mesh,
-            &[
-                [x_high, y_min, z_min],
-                [x_low, y_min, z_min],
-                [x_high, y_min, z_max],
-            ],
+            &[[x_high, y_min, z_min], [x_low, y_min, z_min], [x_high, y_min, z_max]],
             [0.0, -1.0, 0.0],
             &mut face_index,
             &mut edge_index,
         );
         push_face(
             &mut mesh,
-            &[
-                [x_high, y_max, z_min],
-                [x_low, y_max, z_min],
-                [x_high, y_max, z_max],
-            ],
+            &[[x_high, y_max, z_min], [x_low, y_max, z_min], [x_high, y_max, z_max]],
             [0.0, 1.0, 0.0],
             &mut face_index,
             &mut edge_index,
@@ -282,15 +259,12 @@ fn push_face(
     let group = format!("face:{}", *face_index);
     let base = mesh.vertices.len() as u32;
     for point in &polygon {
-        mesh.vertices
-            .push([point[0] as f32, point[1] as f32, point[2] as f32]);
-        mesh.normals
-            .push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
+        mesh.vertices.push([point[0] as f32, point[1] as f32, point[2] as f32]);
+        mesh.normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
     }
 
     for index in 1..polygon.len() - 1 {
-        mesh.faces
-            .push([base, base + index as u32, base + index as u32 + 1]);
+        mesh.faces.push([base, base + index as u32, base + index as u32 + 1]);
         mesh.face_groups.push(group.clone());
     }
 
@@ -311,27 +285,16 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 fn triangle_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
-    cross(
-        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
-        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
-    )
+    cross([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]])
 }
 
 fn normalize(vector: [f64; 3]) -> [f64; 3] {
     let length = dot(vector, vector).sqrt();
-    if length > 0.0 {
-        [vector[0] / length, vector[1] / length, vector[2] / length]
-    } else {
-        vector
-    }
+    if length > 0.0 { [vector[0] / length, vector[1] / length, vector[2] / length] } else { vector }
 }
 
 #[cfg(test)]
@@ -378,11 +341,7 @@ mod tests {
         let a = point(mesh, triangle[0]);
         let b = point(mesh, triangle[1]);
         let c = point(mesh, triangle[2]);
-        [
-            (a[0] + b[0] + c[0]) / 3.0,
-            (a[1] + b[1] + c[1]) / 3.0,
-            (a[2] + b[2] + c[2]) / 3.0,
-        ]
+        [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0]
     }
 
     fn group_index(mesh: &Mesh, triangle_index: usize) -> usize {
@@ -421,10 +380,7 @@ mod tests {
                 point(mesh, triangle[1]),
                 point(mesh, triangle[2]),
             );
-            assert!(
-                dot(normal, normal) > 0.0,
-                "triangle {triangle_index} is degenerate"
-            );
+            assert!(dot(normal, normal) > 0.0, "triangle {triangle_index} is degenerate");
             for (start, end) in [(0usize, 1usize), (1, 2), (2, 0)] {
                 let (first, second) = if keys[start] <= keys[end] {
                     (keys[start], keys[end])
@@ -459,15 +415,9 @@ mod tests {
                 point(mesh, triangle[2]),
             ));
             let center = centroid(mesh, *triangle);
-            let offset = [
-                center[0] - interior[0],
-                center[1] - interior[1],
-                center[2] - interior[2],
-            ];
-            assert!(
-                dot(normal, offset) > 0.0,
-                "triangle {triangle_index} does not face outwards"
-            );
+            let offset =
+                [center[0] - interior[0], center[1] - interior[1], center[2] - interior[2]];
+            assert!(dot(normal, offset) > 0.0, "triangle {triangle_index} does not face outwards");
         }
     }
 
@@ -545,10 +495,7 @@ mod tests {
                 dot(normal, expected_normal) > 1.0 - 1e-5,
                 "triangle {triangle_index} in face:{group} has the wrong normal"
             );
-            assert!(
-                on_plane,
-                "triangle {triangle_index} in face:{group} is off its face plane"
-            );
+            assert!(on_plane, "triangle {triangle_index} in face:{group} is off its face plane");
         }
     }
 
@@ -565,10 +512,7 @@ mod tests {
 
         // Five planar faces: bottom, high, slope and the two triangular sides.
         let groups: BTreeSet<&str> = mesh.face_groups.iter().map(String::as_str).collect();
-        assert_eq!(
-            groups,
-            BTreeSet::from(["face:0", "face:1", "face:2", "face:3", "face:4"])
-        );
+        assert_eq!(groups, BTreeSet::from(["face:0", "face:1", "face:2", "face:3", "face:4"]));
         assert_perimeter_edges(&mesh, 5);
 
         assert_face_planes(&mesh, 20.0, 10.0, 8.0, 0.0);
@@ -687,11 +631,7 @@ mod tests {
             for triangle_index in 0..mesh.faces.len() {
                 counts[group_index(&mesh, triangle_index)] += 1;
             }
-            let expected = if top_length > 0.0 {
-                [2, 2, 2, 2, 2, 2]
-            } else {
-                [2, 2, 2, 1, 1, 0]
-            };
+            let expected = if top_length > 0.0 { [2, 2, 2, 2, 2, 2] } else { [2, 2, 2, 1, 1, 0] };
             assert_eq!(counts, expected, "top_length {top_length}");
         }
     }
@@ -702,10 +642,9 @@ mod tests {
         let flat = wedge_mesh(20.0, 10.0, 8.0, 5.0).unwrap();
         // face:0..face:4 always mean bottom, high, slope, -Y side, +Y side; the
         // optional top is always the last group (face:5).
-        for (mesh, slope_normal) in [
-            (&sharp, normalize([8.0, 0.0, 20.0])),
-            (&flat, normalize([8.0, 0.0, 15.0])),
-        ] {
+        for (mesh, slope_normal) in
+            [(&sharp, normalize([8.0, 0.0, 20.0])), (&flat, normalize([8.0, 0.0, 15.0]))]
+        {
             let expected_normals = [
                 [0.0, 0.0, -1.0],
                 [-1.0, 0.0, 0.0],

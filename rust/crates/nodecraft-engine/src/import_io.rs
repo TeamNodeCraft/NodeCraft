@@ -57,20 +57,12 @@ pub struct ImportContext {
 impl ImportContext {
     #[must_use]
     pub fn new(document_directory: Option<PathBuf>, ingested_sources: Vec<IngestRecord>) -> Self {
-        Self {
-            document_directory,
-            ingested_sources,
-            source_hashes: BTreeMap::new(),
-        }
+        Self { document_directory, ingested_sources, source_hashes: BTreeMap::new() }
     }
 
     #[must_use]
     pub fn with_directory(document_directory: Option<PathBuf>) -> Self {
-        Self {
-            document_directory,
-            ingested_sources: Vec::new(),
-            source_hashes: BTreeMap::new(),
-        }
+        Self { document_directory, ingested_sources: Vec::new(), source_hashes: BTreeMap::new() }
     }
 
     #[must_use]
@@ -139,8 +131,8 @@ struct FileFingerprint {
 
 impl FileFingerprint {
     fn read(path: &Path) -> Result<Self, String> {
-        let metadata = std::fs::metadata(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
         Ok(Self::from_metadata(&metadata))
     }
 
@@ -191,9 +183,7 @@ fn hash_cache() -> &'static Mutex<HashCache> {
 }
 
 fn lock_hash_cache() -> std::sync::MutexGuard<'static, HashCache> {
-    hash_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    hash_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Canonical identity of a source file. A file that cannot be canonicalised
@@ -444,9 +434,7 @@ pub fn ingest_record_for<'a>(
         .and_then(Value::as_str)
         .filter(|hash| !hash.is_empty())
         .or_else(|| values.get(CONTENT_HASH_KEY).and_then(Value::as_str))?;
-    ingested_sources
-        .iter()
-        .find(|record| record.content_hash == hash)
+    ingested_sources.iter().find(|record| record.content_hash == hash)
 }
 
 /// Resolve the inspector status without hashing. `None` means the importer has
@@ -473,19 +461,17 @@ pub fn import_status(
             return Some(ImportStatus::Available { kind, path: candidate });
         }
     }
-    Some(
-        match ingest_record_for(values, ingested_sources, ingest_enabled) {
-            Some(record) => ImportStatus::Ingested {
-                missing: primary,
-                copy: EmbeddedCopyStatus {
-                    file_name: record.file_name.clone(),
-                    byte_length: record.byte_length,
-                    embedded_at: record.embedded_at.clone(),
-                },
+    Some(match ingest_record_for(values, ingested_sources, ingest_enabled) {
+        Some(record) => ImportStatus::Ingested {
+            missing: primary,
+            copy: EmbeddedCopyStatus {
+                file_name: record.file_name.clone(),
+                byte_length: record.byte_length,
+                embedded_at: record.embedded_at.clone(),
             },
-            None => ImportStatus::Missing { path: primary },
         },
-    )
+        None => ImportStatus::Missing { path: primary },
+    })
 }
 
 /// Resolve the source for one importer.
@@ -537,9 +523,7 @@ pub fn resolve_import(
             }));
         }
     }
-    if let Some(record) =
-        ingest_record_for(values, ingested_sources, ingest_enabled)
-    {
+    if let Some(record) = ingest_record_for(values, ingested_sources, ingest_enabled) {
         let bytes = decode_ingest_record(record)?;
         let actual = content_hash(&bytes);
         if actual != record.content_hash {
@@ -591,10 +575,7 @@ pub fn ingest_record_from_file(path: &Path) -> Result<IngestRecord, String> {
     let before = FileFingerprint::read(path)?;
     let observed_generation = generation(&lock_hash_cache(), &key);
     let bytes = std::fs::read(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("source");
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("source");
     let record = ingest_record(name, &bytes)?;
     store_hash(&key, before, path, &record.content_hash, observed_generation);
     Ok(record)
@@ -668,7 +649,11 @@ pub fn document_relative(path: &Path, directory: &Path) -> Option<PathBuf> {
 /// file is under it. Otherwise the absolute path is stored (and, for absolute
 /// mode, its relative form is kept as the alternate).
 #[must_use]
-pub fn store_path(path: &Path, mode: &str, document_directory: Option<&Path>) -> (String, Option<String>, Option<String>) {
+pub fn store_path(
+    path: &Path,
+    mode: &str,
+    document_directory: Option<&Path>,
+) -> (String, Option<String>, Option<String>) {
     let absolute = path.to_path_buf();
     let relative = document_directory.and_then(|directory| document_relative(&absolute, directory));
     match mode {
@@ -712,13 +697,15 @@ mod tests {
         use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
         let path = directory.join(name);
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let brep = create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
+        let brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
         nodecraft_step::write_breps_exact(path.to_str().expect("utf-8"), &[brep]).expect("write");
         path
     }
 
     fn temp_dir(label: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!("sn-import-io-{label}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-import-io-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("temp directory");
         directory
@@ -731,23 +718,31 @@ mod tests {
         std::fs::write(&path, b"first source bytes").expect("write source");
         let values = serde_json::json!({"path": "part.step", "pathMode": "relative"});
 
-        let first = resolve_import(&values, Some(&directory), &[], false).expect("first resolve").expect("configured");
+        let first = resolve_import(&values, Some(&directory), &[], false)
+            .expect("first resolve")
+            .expect("configured");
         assert_eq!(file_hash_reads(&path), 1, "the first resolve hashes once");
 
         // Same bytes and fingerprint: the shared cache answers without a read.
-        let second = resolve_import(&values, Some(&directory), &[], false).expect("second resolve").expect("configured");
+        let second = resolve_import(&values, Some(&directory), &[], false)
+            .expect("second resolve")
+            .expect("configured");
         assert_eq!(second.content_hash, first.content_hash);
         assert_eq!(file_hash_reads(&path), 1, "an unchanged resolve must not hash again");
 
         // A different size/mtime is a different fingerprint and must re-hash.
         std::fs::write(&path, b"second source bytes, deliberately longer").expect("replace source");
-        let third = resolve_import(&values, Some(&directory), &[], false).expect("third resolve").expect("configured");
+        let third = resolve_import(&values, Some(&directory), &[], false)
+            .expect("third resolve")
+            .expect("configured");
         assert_ne!(third.content_hash, second.content_hash);
         assert_eq!(file_hash_reads(&path), 2, "a changed fingerprint hashes again");
 
         // An explicit Reload forces a read through the same cache.
         invalidate_file_hash(&path);
-        let fourth = resolve_import(&values, Some(&directory), &[], false).expect("fourth resolve").expect("configured");
+        let fourth = resolve_import(&values, Some(&directory), &[], false)
+            .expect("fourth resolve")
+            .expect("configured");
         assert_eq!(fourth.content_hash, third.content_hash);
         assert_eq!(file_hash_reads(&path), 3, "invalidate forces exactly one fresh read");
         std::fs::remove_dir_all(directory).ok();
@@ -758,7 +753,9 @@ mod tests {
         let directory = temp_dir("relative");
         write_step(&directory, "part.step");
         let values = serde_json::json!({"path": "part.step", "pathMode": "relative"});
-        let resolved = resolve_import(&values, Some(&directory), &[], false).expect("resolve").expect("configured");
+        let resolved = resolve_import(&values, Some(&directory), &[], false)
+            .expect("resolve")
+            .expect("configured");
         assert_eq!(resolved.kind, ImportSourceKind::Path);
         assert_eq!(resolved.path, Some(directory.join("part.step")));
         assert!(resolved.warning.is_none());
@@ -769,8 +766,11 @@ mod tests {
     fn absolute_path_is_used_as_is() {
         let directory = temp_dir("absolute");
         let path = write_step(&directory, "part.step");
-        let values = serde_json::json!({"path": path.display().to_string(), "pathMode": "absolute"});
-        let resolved = resolve_import(&values, Some(Path::new("/nonexistent")), &[], false).expect("resolve").expect("configured");
+        let values =
+            serde_json::json!({"path": path.display().to_string(), "pathMode": "absolute"});
+        let resolved = resolve_import(&values, Some(Path::new("/nonexistent")), &[], false)
+            .expect("resolve")
+            .expect("configured");
         assert_eq!(resolved.path, Some(path));
         std::fs::remove_dir_all(directory).ok();
     }
@@ -784,7 +784,9 @@ mod tests {
             "pathMode": "absolute",
             "relativePath": "part.step",
         });
-        let resolved = resolve_import(&values, Some(&directory), &[], false).expect("resolve").expect("configured");
+        let resolved = resolve_import(&values, Some(&directory), &[], false)
+            .expect("resolve")
+            .expect("configured");
         assert_eq!(resolved.kind, ImportSourceKind::Alternate);
         assert_eq!(resolved.path, Some(directory.join("part.step")));
         assert!(resolved.warning.expect("alternate warning").contains("alternate path"));
@@ -799,7 +801,8 @@ mod tests {
         assert_eq!(first.content_hash, content_hash(bytes));
         assert_eq!(first.content_hash, second.content_hash);
         assert_eq!(decode_ingest_record(&first).expect("decode"), bytes);
-        let record: IngestRecord = serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
+        let record: IngestRecord =
+            serde_json::from_value(serde_json::to_value(&first).unwrap()).unwrap();
         assert_eq!(record, first);
     }
 
@@ -845,17 +848,17 @@ mod tests {
             import_status(&values, Some(&directory), &[], true),
             Some(ImportStatus::Missing { path: directory.join("missing/bracket.step") })
         );
-        assert_eq!(import_status(&serde_json::json!({"path": ""}), Some(&directory), &[], true), None);
+        assert_eq!(
+            import_status(&serde_json::json!({"path": ""}), Some(&directory), &[], true),
+            None
+        );
 
         let present = directory.join("bracket.step");
         std::fs::write(&present, bytes).expect("write");
         let present_values = serde_json::json!({ "path": "bracket.step", "pathMode": "relative" });
         assert_eq!(
             import_status(&present_values, Some(&directory), &[], true),
-            Some(ImportStatus::Available {
-                kind: ImportSourceKind::Path,
-                path: present,
-            })
+            Some(ImportStatus::Available { kind: ImportSourceKind::Path, path: present })
         );
         std::fs::remove_dir_all(directory).ok();
     }
@@ -883,9 +886,14 @@ mod tests {
             "ingest": true,
             "ingestHash": record.content_hash,
         });
-        let resolved = resolve_import(&values, Some(Path::new("/nonexistent")), std::slice::from_ref(&record), true)
-            .expect("embedded fallback")
-            .expect("configured");
+        let resolved = resolve_import(
+            &values,
+            Some(Path::new("/nonexistent")),
+            std::slice::from_ref(&record),
+            true,
+        )
+        .expect("embedded fallback")
+        .expect("configured");
         assert_eq!(resolved.kind, ImportSourceKind::Ingested);
         assert_eq!(resolved.bytes.as_deref(), Some(bytes.as_slice()));
         assert_eq!(
@@ -920,10 +928,7 @@ mod tests {
             "absolute",
             "an old document's absolute path is full-path mode"
         );
-        assert_eq!(
-            path_mode(&serde_json::json!({"path": "parts/x.step"})),
-            "relative"
-        );
+        assert_eq!(path_mode(&serde_json::json!({"path": "parts/x.step"})), "relative");
         assert_eq!(path_mode(&serde_json::json!({"path": ""})), "relative");
         assert_eq!(path_mode(&serde_json::json!({})), "relative");
         assert_eq!(
@@ -941,12 +946,9 @@ mod tests {
     #[test]
     fn full_paths_are_full_on_every_os_and_relative_paths_stay_relative() {
         let directory = Path::new("/documents/project");
-        for stored in [
-            "/models/x.step",
-            "\\models\\x.step",
-            "C:\\models\\x.step",
-            "C:/models/x.step",
-        ] {
+        for stored in
+            ["/models/x.step", "\\models\\x.step", "C:\\models\\x.step", "C:/models/x.step"]
+        {
             assert!(is_full_path(stored), "{stored:?} must be a full path");
             assert_eq!(
                 path_mode(&serde_json::json!({ "path": stored })),
@@ -983,12 +985,14 @@ mod tests {
     #[test]
     fn store_path_rewrites_relative_and_keeps_absolute_with_alternate() {
         let directory = Path::new("/project");
-        let (relative, alternate, warning) = store_path(Path::new("/project/model.step"), "relative", Some(directory));
+        let (relative, alternate, warning) =
+            store_path(Path::new("/project/model.step"), "relative", Some(directory));
         assert_eq!(relative, "model.step");
         assert!(alternate.is_none());
         assert!(warning.is_none());
 
-        let (absolute, alternate, warning) = store_path(Path::new("/project/model.step"), "absolute", Some(directory));
+        let (absolute, alternate, warning) =
+            store_path(Path::new("/project/model.step"), "absolute", Some(directory));
         assert_eq!(absolute, "/project/model.step");
         assert_eq!(alternate.as_deref(), Some("model.step"));
         assert!(warning.is_none());

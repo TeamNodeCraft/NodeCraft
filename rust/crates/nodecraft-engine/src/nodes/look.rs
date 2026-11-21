@@ -22,11 +22,8 @@ impl BuiltinNode for Look {
             return Err("Look has no shape input".into());
         };
         let color = crate::look::parse_look_color(node.values)?;
-        let breps: Vec<std::sync::Arc<_>> = source
-            .bodies
-            .iter()
-            .map(|body| body.body.shared())
-            .collect();
+        let breps: Vec<std::sync::Arc<_>> =
+            source.bodies.iter().map(|body| body.body.shared()).collect();
         let looked = crate::node_task::execute_exact(
             ExactNodeTask::LookMany { breps, colour: color },
             node.id,
@@ -61,9 +58,7 @@ impl BuiltinNode for Look {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -121,11 +116,7 @@ mod tests {
 
         // The placement stays on the instance.
         let brep = &look_part.bodies[0].brep;
-        let realized = look_part
-            .realized_breps()
-            .expect("realized look")
-            .pop()
-            .expect("one body");
+        let realized = look_part.realized_breps().expect("realized look").pop().expect("one body");
         let record = nodecraft_step::record_of_brep(&realized).expect("look record");
         let (min, max) = nodecraft_step::record_bounds(&record).expect("look bounds");
         assert!((min[0] - 15.0).abs() < 1.0e-6, "{min:?}");

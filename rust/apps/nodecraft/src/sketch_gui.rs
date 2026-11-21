@@ -4,14 +4,14 @@
 
 use std::collections::HashSet;
 
+use crate::hover::HoverMap;
+use crate::ui_shape;
 use egui::{Pos2, Rect, Stroke, Vec2 as EVec2};
+use nodecraft_dock::{DockItem, DockMetrics, paint_background};
+use nodecraft_engine::sketch::{ConstraintKind, CurveKind, Sketch, SolveReport, solve};
 use solidcore_record::{Vec2, Vec3};
 use solidcraft_geom::prelude::*;
 use solidcraft_viewport::Camera;
-use nodecraft_engine::sketch::{solve, ConstraintKind, CurveKind, Sketch, SolveReport};
-use nodecraft_dock::{DockItem, DockMetrics, paint_background};
-use crate::hover::HoverMap;
-use crate::ui_shape;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -43,16 +43,38 @@ impl Tool {
 
     fn icon(self) -> (&'static str, &'static [u8]) {
         match self {
-            Self::Select => ("select", include_bytes!("../../../../vendor/iconify-design/sketch/select.svg")),
-            Self::Line => ("line", include_bytes!("../../../../vendor/iconify-design/sketch/line.svg")),
-            Self::Rectangle => ("rectangle", include_bytes!("../../../../vendor/iconify-design/sketch/rectangle.svg")),
-            Self::Circle => ("circle", include_bytes!("../../../../vendor/iconify-design/sketch/circle.svg")),
-            Self::Arc => ("arc", include_bytes!("../../../../vendor/iconify-design/sketch/arc.svg")),
-            Self::Polyline => ("polyline", include_bytes!("../../../../vendor/iconify-design/sketch/polyline.svg")),
-            Self::Ellipse => ("ellipse", include_bytes!("../../../../vendor/iconify-design/sketch/ellipse.svg")),
-            Self::Polygon => ("polygon", include_bytes!("../../../../vendor/iconify-design/sketch/polygon.svg")),
-            Self::Fillet => ("fillet", include_bytes!("../../../../vendor/iconify-design/sketch/fillet.svg")),
-            Self::Trim => ("trim", include_bytes!("../../../../vendor/iconify-design/sketch/trim.svg")),
+            Self::Select => {
+                ("select", include_bytes!("../../../../vendor/iconify-design/sketch/select.svg"))
+            }
+            Self::Line => {
+                ("line", include_bytes!("../../../../vendor/iconify-design/sketch/line.svg"))
+            }
+            Self::Rectangle => (
+                "rectangle",
+                include_bytes!("../../../../vendor/iconify-design/sketch/rectangle.svg"),
+            ),
+            Self::Circle => {
+                ("circle", include_bytes!("../../../../vendor/iconify-design/sketch/circle.svg"))
+            }
+            Self::Arc => {
+                ("arc", include_bytes!("../../../../vendor/iconify-design/sketch/arc.svg"))
+            }
+            Self::Polyline => (
+                "polyline",
+                include_bytes!("../../../../vendor/iconify-design/sketch/polyline.svg"),
+            ),
+            Self::Ellipse => {
+                ("ellipse", include_bytes!("../../../../vendor/iconify-design/sketch/ellipse.svg"))
+            }
+            Self::Polygon => {
+                ("polygon", include_bytes!("../../../../vendor/iconify-design/sketch/polygon.svg"))
+            }
+            Self::Fillet => {
+                ("fillet", include_bytes!("../../../../vendor/iconify-design/sketch/fillet.svg"))
+            }
+            Self::Trim => {
+                ("trim", include_bytes!("../../../../vendor/iconify-design/sketch/trim.svg"))
+            }
         }
     }
 
@@ -95,11 +117,10 @@ fn sketch_dock_layout(
 ) -> SketchDockLayout {
     let metrics = DockMetrics::DEFAULT;
     let edge = metrics.edge_offset;
-    let tool_top = (interaction.center().y - tool_height * 0.5)
-        .clamp(
-            interaction.top() + edge,
-            (interaction.bottom() - tool_height - edge).max(interaction.top() + edge),
-        );
+    let tool_top = (interaction.center().y - tool_height * 0.5).clamp(
+        interaction.top() + edge,
+        (interaction.bottom() - tool_height - edge).max(interaction.top() + edge),
+    );
     let tools = Rect::from_min_size(
         Pos2::new(interaction.left(), tool_top),
         EVec2::new(metrics.width, tool_height),
@@ -125,18 +146,66 @@ struct Constraint {
 }
 
 const CONSTRAINTS: [Constraint; 12] = [
-    Constraint { label: "Horizontal", icon_name: "horizontal", icon: include_bytes!("../../../../vendor/iconify-design/constraints/horizontal.svg") },
-    Constraint { label: "Vertical", icon_name: "vertical", icon: include_bytes!("../../../../vendor/iconify-design/constraints/vertical.svg") },
-    Constraint { label: "Coincident", icon_name: "coincident", icon: include_bytes!("../../../../vendor/iconify-design/constraints/coincident.svg") },
-    Constraint { label: "Equal", icon_name: "equal", icon: include_bytes!("../../../../vendor/iconify-design/constraints/equal.svg") },
-    Constraint { label: "Parallel", icon_name: "parallel", icon: include_bytes!("../../../../vendor/iconify-design/constraints/parallel.svg") },
-    Constraint { label: "Perpendicular", icon_name: "perpendicular", icon: include_bytes!("../../../../vendor/iconify-design/constraints/perpendicular.svg") },
-    Constraint { label: "Tangent", icon_name: "tangent", icon: include_bytes!("../../../../vendor/iconify-design/constraints/tangent.svg") },
-    Constraint { label: "Concentric", icon_name: "concentric", icon: include_bytes!("../../../../vendor/iconify-design/constraints/concentric.svg") },
-    Constraint { label: "Collinear", icon_name: "collinear", icon: include_bytes!("../../../../vendor/iconify-design/constraints/collinear.svg") },
-    Constraint { label: "Length", icon_name: "length", icon: include_bytes!("../../../../vendor/iconify-design/constraints/length.svg") },
-    Constraint { label: "Radius", icon_name: "radius", icon: include_bytes!("../../../../vendor/iconify-design/constraints/radius.svg") },
-    Constraint { label: "Fix", icon_name: "fix", icon: include_bytes!("../../../../vendor/iconify-design/constraints/fix.svg") },
+    Constraint {
+        label: "Horizontal",
+        icon_name: "horizontal",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/horizontal.svg"),
+    },
+    Constraint {
+        label: "Vertical",
+        icon_name: "vertical",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/vertical.svg"),
+    },
+    Constraint {
+        label: "Coincident",
+        icon_name: "coincident",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/coincident.svg"),
+    },
+    Constraint {
+        label: "Equal",
+        icon_name: "equal",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/equal.svg"),
+    },
+    Constraint {
+        label: "Parallel",
+        icon_name: "parallel",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/parallel.svg"),
+    },
+    Constraint {
+        label: "Perpendicular",
+        icon_name: "perpendicular",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/perpendicular.svg"),
+    },
+    Constraint {
+        label: "Tangent",
+        icon_name: "tangent",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/tangent.svg"),
+    },
+    Constraint {
+        label: "Concentric",
+        icon_name: "concentric",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/concentric.svg"),
+    },
+    Constraint {
+        label: "Collinear",
+        icon_name: "collinear",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/collinear.svg"),
+    },
+    Constraint {
+        label: "Length",
+        icon_name: "length",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/length.svg"),
+    },
+    Constraint {
+        label: "Radius",
+        icon_name: "radius",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/radius.svg"),
+    },
+    Constraint {
+        label: "Fix",
+        icon_name: "fix",
+        icon: include_bytes!("../../../../vendor/iconify-design/constraints/fix.svg"),
+    },
 ];
 
 struct Draft {
@@ -144,7 +213,6 @@ struct Draft {
     start: Vec2,
     current: Vec2,
 }
-
 
 struct SketchDrag {
     start: Vec2,
@@ -176,9 +244,10 @@ impl ThreePointArc {
 }
 
 fn arc_through_three_points(start: Vec2, end: Vec2, through: Vec2) -> Option<ThreePointArc> {
-    let d = 2.0 * (start.x * (end.y - through.y)
-        + end.x * (through.y - start.y)
-        + through.x * (start.y - end.y));
+    let d = 2.0
+        * (start.x * (end.y - through.y)
+            + end.x * (through.y - start.y)
+            + through.x * (start.y - end.y));
     if d.abs() <= 1.0e-9 {
         return None;
     }
@@ -186,8 +255,14 @@ fn arc_through_three_points(start: Vec2, end: Vec2, through: Vec2) -> Option<Thr
     let end_sq = end.x * end.x + end.y * end.y;
     let through_sq = through.x * through.x + through.y * through.y;
     let center = Vec2::new(
-        (start_sq * (end.y - through.y) + end_sq * (through.y - start.y) + through_sq * (start.y - end.y)) / d,
-        (start_sq * (through.x - end.x) + end_sq * (start.x - through.x) + through_sq * (end.x - start.x)) / d,
+        (start_sq * (end.y - through.y)
+            + end_sq * (through.y - start.y)
+            + through_sq * (start.y - end.y))
+            / d,
+        (start_sq * (through.x - end.x)
+            + end_sq * (start.x - through.x)
+            + through_sq * (end.x - start.x))
+            / d,
     );
     let radius = center.dist(start);
     if !(radius.is_finite() && radius > 1.0e-9) {
@@ -282,11 +357,7 @@ impl SketchGui {
     fn add_three_point_arc(&mut self, start: Vec2, end: Vec2, through: Vec2) {
         let Some(arc) = arc_through_three_points(start, end, through) else { return };
         let first_new = self.sketch.curves.len();
-        if self
-            .sketch
-            .add_arc(arc.center, arc.start, arc.end, [None; 3], None)
-            .is_err()
-        {
+        if self.sketch.add_arc(arc.center, arc.start, arc.end, [None; 3], None).is_err() {
             return;
         }
         self.style_curve(first_new);
@@ -330,11 +401,7 @@ impl SketchGui {
         } else {
             estimated_height
         };
-        let layout = sketch_dock_layout(
-            interaction,
-            height,
-            CONSTRAINTS.len(),
-        );
+        let layout = sketch_dock_layout(interaction, height, CONSTRAINTS.len());
         let mut dock = layout.tools;
         let dock_content = egui::Area::new(egui::Id::new("sketch-tool-dock"))
             .order(egui::Order::Tooltip)
@@ -388,9 +455,11 @@ impl SketchGui {
                             ui.set_width(156.0);
                             if self.tool == Tool::Arc {
                                 ui.label(
-                                    egui::RichText::new("Click start, end, then a point on the arc")
-                                        .size(10.0)
-                                        .color(theme.color(theme.muted)),
+                                    egui::RichText::new(
+                                        "Click start, end, then a point on the arc",
+                                    )
+                                    .size(10.0)
+                                    .color(theme.color(theme.muted)),
                                 );
                             } else {
                                 ui.label(
@@ -435,9 +504,8 @@ impl SketchGui {
             palette_rects.push(options_response.response.rect);
         }
 
-
-        let constraint_metrics = DockMetrics::DEFAULT
-            .with_orientation(nodecraft_dock::DockOrientation::Horizontal);
+        let constraint_metrics =
+            DockMetrics::DEFAULT.with_orientation(nodecraft_dock::DockOrientation::Horizontal);
         let mut constraint_dock = layout.constraints;
         let mut constraint_to_apply = None;
         let constraint_content = egui::Area::new(egui::Id::new("sketch-constraints"))
@@ -451,11 +519,7 @@ impl SketchGui {
                             ui,
                             constraint_metrics,
                             style,
-                            DockItem::new(
-                                constraint.label,
-                                constraint.icon_name,
-                                constraint.icon,
-                            ),
+                            DockItem::new(constraint.label, constraint.icon_name, constraint.icon),
                         );
                         if response.clicked() {
                             self.tool = Tool::Select;
@@ -469,10 +533,8 @@ impl SketchGui {
                     }
                 });
             });
-        constraint_dock = nodecraft_dock::background_rect(
-            constraint_content.response.rect,
-            constraint_metrics,
-        );
+        constraint_dock =
+            nodecraft_dock::background_rect(constraint_content.response.rect, constraint_metrics);
         let constraint_painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Foreground,
             egui::Id::new("sketch-constraints-background"),
@@ -485,10 +547,8 @@ impl SketchGui {
 
         self.handle_input(ctx, viewport, interaction, camera, lens_shift, &palette_rects);
 
-        let mut painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Middle,
-            egui::Id::new("sketch-canvas"),
-        ));
+        let mut painter = ctx
+            .layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("sketch-canvas")));
         painter.set_clip_rect(interaction);
         let line_colour = theme.color(theme.accent);
         let point_colour = theme.color(theme.text);
@@ -506,11 +566,7 @@ impl SketchGui {
                 &points,
                 Stroke::new(
                     if selected { 3.2 } else { 2.0 },
-                    if selected {
-                        theme.color(theme.highlight)
-                    } else {
-                        line_colour
-                    },
+                    if selected { theme.color(theme.highlight) } else { line_colour },
                 ),
             );
         }
@@ -523,11 +579,7 @@ impl SketchGui {
                 painter.circle_filled(
                     screen,
                     if selected { 5.0 } else { 3.0 },
-                    if selected {
-                        theme.color(theme.highlight)
-                    } else {
-                        point_colour
-                    },
+                    if selected { theme.color(theme.highlight) } else { point_colour },
                 );
             }
         }
@@ -589,21 +641,20 @@ impl SketchGui {
         }
         let Some(pointer) = pointer_position else { return };
         if self.tool == Tool::Arc {
-            let current = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point));
+            let current =
+                unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point));
             if let (Some(draft), Some(current)) = (&mut self.arc_draft, current) {
                 draft.current = current;
             }
-            if ctx.input(|input| input.pointer.primary_clicked())
-                && hover.over_viewport()
-            {
-                let Some(point) = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point)) else { return };
+            if ctx.input(|input| input.pointer.primary_clicked()) && hover.over_viewport() {
+                let Some(point) =
+                    unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point))
+                else {
+                    return;
+                };
                 match &mut self.arc_draft {
                     None => {
-                        self.arc_draft = Some(ArcDraft {
-                            start: point,
-                            end: None,
-                            current: point,
-                        });
+                        self.arc_draft = Some(ArcDraft { start: point, end: None, current: point });
                     }
                     Some(draft) if draft.end.is_none() => {
                         if draft.start.dist(point) > 1.0e-6 {
@@ -626,7 +677,8 @@ impl SketchGui {
                 let pressed = ctx.input(|input| input.pointer.primary_pressed());
                 let released = ctx.input(|input| input.pointer.primary_released());
                 if pressed && hover.over_viewport() {
-                    let additive = ctx.input(|input| input.modifiers.shift || input.modifiers.command);
+                    let additive =
+                        ctx.input(|input| input.modifiers.shift || input.modifiers.command);
                     self.select_at(viewport, interaction, camera, lens_shift, pointer, additive);
                     self.begin_drag(viewport, camera, lens_shift, pointer);
                 }
@@ -644,15 +696,11 @@ impl SketchGui {
             }
             return;
         }
-        if ctx.input(|input| input.pointer.primary_pressed())
-            && hover.over_viewport()
-        {
-            if let Some(start) = unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point)) {
-                self.draft = Some(Draft {
-                    tool: self.tool,
-                    start,
-                    current: start,
-                });
+        if ctx.input(|input| input.pointer.primary_pressed()) && hover.over_viewport() {
+            if let Some(start) =
+                unproject(viewport, camera, lens_shift, pointer).map(|point| self.snap(point))
+            {
+                self.draft = Some(Draft { tool: self.tool, start, current: start });
             }
         }
         if let Some(draft) = &mut self.draft {
@@ -713,17 +761,30 @@ impl SketchGui {
 
     fn line_type_icon(style: u8, active: bool) -> (egui::Image<'static>, &'static str) {
         let (bytes, name) = match style {
-            0 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-normal.svg").as_slice(), "normal"),
-            1 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-construction.svg").as_slice(), "construction"),
-            2 => (include_bytes!("../../../../vendor/iconify-design/sketch/line-centerline.svg").as_slice(), "centerline"),
-            _ => (include_bytes!("../../../../vendor/iconify-design/sketch/line-infinite.svg").as_slice(), "infinite"),
+            0 => (
+                include_bytes!("../../../../vendor/iconify-design/sketch/line-normal.svg")
+                    .as_slice(),
+                "normal",
+            ),
+            1 => (
+                include_bytes!("../../../../vendor/iconify-design/sketch/line-construction.svg")
+                    .as_slice(),
+                "construction",
+            ),
+            2 => (
+                include_bytes!("../../../../vendor/iconify-design/sketch/line-centerline.svg")
+                    .as_slice(),
+                "centerline",
+            ),
+            _ => (
+                include_bytes!("../../../../vendor/iconify-design/sketch/line-infinite.svg")
+                    .as_slice(),
+                "infinite",
+            ),
         };
         let theme = crate::theme::get();
-        let colour = crate::theme::Theme::hex(if active {
-            [255, 255, 255, 255]
-        } else {
-            theme.icon
-        });
+        let colour =
+            crate::theme::Theme::hex(if active { [255, 255, 255, 255] } else { theme.icon });
         let svg = crate::app::tint_svg(bytes, &colour);
         // Distinguish the tinted variants so egui's image cache cannot keep the
         // inactive colour on a segment that becomes active.
@@ -737,17 +798,19 @@ impl SketchGui {
             (2, true) => "bytes://sketch-line-centerline-active.svg",
             _ => "bytes://sketch-line-infinite-active.svg",
         };
-        (egui::Image::from_bytes(uri, svg.into_bytes()).fit_to_exact_size(egui::vec2(20.0, 20.0)), name)
+        (
+            egui::Image::from_bytes(uri, svg.into_bytes())
+                .fit_to_exact_size(egui::vec2(20.0, 20.0)),
+            name,
+        )
     }
 
     /// One connected squircle segmented control for the four line types.
     fn line_type_selector(&mut self, ui: &mut egui::Ui) -> Option<u8> {
         let theme = crate::theme::get();
         let width = ui.available_width().min(4.0 * 44.0);
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(width, 30.0),
-            egui::Sense::click(),
-        );
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, 30.0), egui::Sense::click());
         if !ui.is_rect_visible(rect) {
             return None;
         }
@@ -814,7 +877,8 @@ impl SketchGui {
         {
             return Some((((point.x - rect.left()) / segment_w).floor() as usize).min(3) as u8);
         }
-        let name = ["Normal", "Construction", "Centerline", "Infinite"][hovered.unwrap_or(selected)];
+        let name =
+            ["Normal", "Construction", "Centerline", "Infinite"][hovered.unwrap_or(selected)];
         response.on_hover_text(name);
         None
     }
@@ -837,11 +901,7 @@ impl SketchGui {
             } else {
                 format!("{} degrees of freedom", report.dof)
             };
-            ui.label(
-                egui::RichText::new(text)
-                    .size(11.0)
-                    .color(theme.color(theme.muted)),
-            );
+            ui.label(egui::RichText::new(text).size(11.0).color(theme.color(theme.muted)));
         }
         ui.add_space(8.0);
         ui.label(egui::RichText::new("Line Type").size(10.0).color(theme.color(theme.muted)));
@@ -867,28 +927,23 @@ impl SketchGui {
         if crate::widgets::switch_row(ui, "Construction mode", &mut construction_mode).changed() {
             self.set_line_type(if construction_mode { 1 } else { 0 });
         }
-        egui::CollapsingHeader::new("MORE")
-            .default_open(false)
-            .show(ui, |ui| {
-                for (label, hidden) in [
-                    ("Projected Geometries", &mut view.hide_projected),
-                    ("Construction Geometries", &mut view.hide_construction),
-                ] {
-                    let mut shown = !*hidden;
-                    if crate::widgets::switch_row(ui, label, &mut shown).changed() {
-                        *hidden = !shown;
-                        changed = true;
-                    }
+        egui::CollapsingHeader::new("MORE").default_open(false).show(ui, |ui| {
+            for (label, hidden) in [
+                ("Projected Geometries", &mut view.hide_projected),
+                ("Construction Geometries", &mut view.hide_construction),
+            ] {
+                let mut shown = !*hidden;
+                if crate::widgets::switch_row(ui, label, &mut shown).changed() {
+                    *hidden = !shown;
+                    changed = true;
                 }
-                for (label, on) in [
-                    ("Slice", &mut view.slice),
-                    ("3D Sketch", &mut view.three_d),
-                ] {
-                    if crate::widgets::switch_row(ui, label, on).changed() {
-                        changed = true;
-                    }
+            }
+            for (label, on) in [("Slice", &mut view.slice), ("3D Sketch", &mut view.three_d)] {
+                if crate::widgets::switch_row(ui, label, on).changed() {
+                    changed = true;
                 }
-            });
+            }
+        });
         if changed {
             self.sketch.view = view;
             self.dirty = true;
@@ -896,11 +951,7 @@ impl SketchGui {
         ui.add_space(12.0);
         let danger = egui::Color32::from_rgb(245, 132, 122);
         if self.clear_sketch_armed {
-            ui.label(
-                egui::RichText::new("Clear all sketch geometry?")
-                    .size(11.0)
-                    .color(danger),
-            );
+            ui.label(egui::RichText::new("Clear all sketch geometry?").size(11.0).color(danger));
             ui.horizontal(|ui| {
                 if ui_shape::button(
                     ui,
@@ -921,7 +972,10 @@ impl SketchGui {
                     ui.available_width(),
                     28.0,
                     egui::Color32::from_rgba_unmultiplied(80, 28, 26, 140),
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(245, 132, 122, 180)),
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(245, 132, 122, 180),
+                    ),
                     danger,
                 )
                 .clicked()
@@ -992,13 +1046,7 @@ impl SketchGui {
 
     /// Start a point/curve drag from the current selection. A curve moves its
     /// own points; the origin and other fixed points stay put.
-    fn begin_drag(
-        &mut self,
-        viewport: Rect,
-        camera: &Camera,
-        lens_shift: [f32; 2],
-        pointer: Pos2,
-    ) {
+    fn begin_drag(&mut self, viewport: Rect, camera: &Camera, lens_shift: [f32; 2], pointer: Pos2) {
         let Some(start) = unproject(viewport, camera, lens_shift, pointer) else { return };
         let mut indices = Vec::new();
         if let Some(point) = self.selected_point {
@@ -1054,11 +1102,7 @@ impl SketchGui {
 
     fn delete_selection(&mut self) {
         let changed = if let Some(point) = self.selected_point {
-            let removable = self
-                .sketch
-                .points
-                .get(point)
-                .is_some_and(|point| point.id != "origin");
+            let removable = self.sketch.points.get(point).is_some_and(|point| point.id != "origin");
             if removable {
                 self.sketch.remove_points(&[point]);
             }
@@ -1082,31 +1126,15 @@ impl SketchGui {
     /// The dock is presentation; `solidcraft_sketch` owns validation and solving.
     fn apply_constraint(&mut self, index: usize) {
         let kind = match index {
-            0 => self
-                .selected_line()
-                .map(|l| ConstraintKind::Horizontal { l }),
-            1 => self
-                .selected_line()
-                .map(|l| ConstraintKind::Vertical { l }),
+            0 => self.selected_line().map(|l| ConstraintKind::Horizontal { l }),
+            1 => self.selected_line().map(|l| ConstraintKind::Vertical { l }),
             2 => None, // Coincident needs two picked points; selection supports one for now.
-            3 => self
-                .selected_curve_pair()
-                .map(|(a, b)| ConstraintKind::Equal { a, b }),
-            4 => self
-                .selected_line_pair()
-                .map(|(a, b)| ConstraintKind::Parallel { a, b }),
-            5 => self
-                .selected_line_pair()
-                .map(|(a, b)| ConstraintKind::Perpendicular { a, b }),
-            6 => self
-                .selected_curve_pair()
-                .map(|(a, b)| ConstraintKind::Tangent { a, b }),
-            7 => self
-                .selected_round_pair()
-                .map(|(a, b)| ConstraintKind::Concentric { a, b }),
-            8 => self
-                .selected_line_pair()
-                .map(|(a, b)| ConstraintKind::Collinear { a, b }),
+            3 => self.selected_curve_pair().map(|(a, b)| ConstraintKind::Equal { a, b }),
+            4 => self.selected_line_pair().map(|(a, b)| ConstraintKind::Parallel { a, b }),
+            5 => self.selected_line_pair().map(|(a, b)| ConstraintKind::Perpendicular { a, b }),
+            6 => self.selected_curve_pair().map(|(a, b)| ConstraintKind::Tangent { a, b }),
+            7 => self.selected_round_pair().map(|(a, b)| ConstraintKind::Concentric { a, b }),
+            8 => self.selected_line_pair().map(|(a, b)| ConstraintKind::Collinear { a, b }),
             9 => self.selected_line().and_then(|l| {
                 let (a, b) = match self.sketch.curves.get(l)?.kind {
                     CurveKind::Line { a, b } => (a, b),
@@ -1192,7 +1220,8 @@ impl SketchGui {
         ) else {
             return;
         };
-        let (CurveKind::Line { a: a1, b: b1 }, CurveKind::Line { a: a2, b: b2 }) = (kind1, kind2) else {
+        let (CurveKind::Line { a: a1, b: b1 }, CurveKind::Line { a: a2, b: b2 }) = (kind1, kind2)
+        else {
             return;
         };
         let (Some(p1), Some(p2)) = (self.sketch.point(a1), self.sketch.point(b1)) else { return };
@@ -1211,16 +1240,10 @@ impl SketchGui {
             return;
         }
         let corner = p1 + d1 * t;
-        let (shared1, other1, end1) = if p1.dist(corner) <= p2.dist(corner) {
-            (a1, b1, p2)
-        } else {
-            (b1, a1, p1)
-        };
-        let (shared2, other2, end2) = if q1.dist(corner) <= q2.dist(corner) {
-            (a2, b2, q2)
-        } else {
-            (b2, a2, q1)
-        };
+        let (shared1, other1, end1) =
+            if p1.dist(corner) <= p2.dist(corner) { (a1, b1, p2) } else { (b1, a1, p1) };
+        let (shared2, other2, end2) =
+            if q1.dist(corner) <= q2.dist(corner) { (a2, b2, q2) } else { (b2, a2, q1) };
         let Some(u) = (end1 - corner).normalized() else { return };
         let Some(v) = (end2 - corner).normalized() else { return };
         let dot = u.dot(v).clamp(-1.0, 1.0);
@@ -1300,9 +1323,7 @@ impl SketchGui {
                 continue;
             }
             let distance = screen.distance(pointer);
-            if distance <= point_radius
-                && best_point.is_none_or(|(best, _)| distance < best)
-            {
+            if distance <= point_radius && best_point.is_none_or(|(best, _)| distance < best) {
                 best_point = Some((distance, index));
             }
         }
@@ -1327,9 +1348,7 @@ impl SketchGui {
                 if !interaction.contains(pointer) {
                     continue;
                 }
-                if distance <= 7.0
-                    && best_curve.is_none_or(|(best, _)| distance < best)
-                {
+                if distance <= 7.0 && best_curve.is_none_or(|(best, _)| distance < best) {
                     best_curve = Some((distance, index));
                 }
             }
@@ -1435,24 +1454,11 @@ fn project(viewport: Rect, camera: &Camera, lens_shift: [f32; 2], point: Vec2) -
     )
 }
 
-fn unproject(
-    viewport: Rect,
-    camera: &Camera,
-    lens_shift: [f32; 2],
-    pointer: Pos2,
-) -> Option<Vec2> {
-    let x = f64::from(
-        pointer.x - viewport.min.x - lens_shift[0] * viewport.width() * 0.5,
-    );
-    let y = f64::from(
-        pointer.y - viewport.min.y + lens_shift[1] * viewport.height() * 0.5,
-    );
-    let (origin, direction) = camera.ray(
-        x,
-        y,
-        f64::from(viewport.width()),
-        f64::from(viewport.height()),
-    );
+fn unproject(viewport: Rect, camera: &Camera, lens_shift: [f32; 2], pointer: Pos2) -> Option<Vec2> {
+    let x = f64::from(pointer.x - viewport.min.x - lens_shift[0] * viewport.width() * 0.5);
+    let y = f64::from(pointer.y - viewport.min.y + lens_shift[1] * viewport.height() * 0.5);
+    let (origin, direction) =
+        camera.ray(x, y, f64::from(viewport.width()), f64::from(viewport.height()));
     if direction.z.abs() <= 1.0e-9 {
         return None;
     }
@@ -1472,17 +1478,14 @@ fn draw_polyline(
     points: &[Vec2],
     stroke: Stroke,
 ) {
-    let projected: Vec<Option<Pos2>> = points
-        .iter()
-        .map(|point| project(viewport, camera, lens_shift, *point))
-        .collect();
+    let projected: Vec<Option<Pos2>> =
+        points.iter().map(|point| project(viewport, camera, lens_shift, *point)).collect();
     for pair in projected.windows(2) {
         if let (Some(a), Some(b)) = (pair[0], pair[1]) {
             painter.line_segment([a, b], stroke);
         }
     }
 }
-
 
 fn point_segment_distance(point: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
@@ -1500,10 +1503,7 @@ mod tests {
 
     #[test]
     fn line_tool_adds_a_solved_sketch_curve() {
-        let mut gui = SketchGui {
-            tool: Tool::Line,
-            ..SketchGui::default()
-        };
+        let mut gui = SketchGui { tool: Tool::Line, ..SketchGui::default() };
         gui.commit(Draft {
             tool: Tool::Line,
             start: Vec2::new(0.0, 0.0),
@@ -1531,7 +1531,10 @@ mod tests {
     #[test]
     fn delete_removes_the_selected_sketch_curve() {
         let mut gui = SketchGui::default();
-        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
+        let line = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None)
+            .unwrap();
         gui.selected_curves.insert(line);
         gui.delete_selection();
         assert!(gui.sketch.curves.is_empty());
@@ -1541,11 +1544,7 @@ mod tests {
 
     #[test]
     fn drawn_curves_take_the_selected_line_type() {
-        let mut gui = SketchGui {
-            tool: Tool::Line,
-            draw_type: 1,
-            ..SketchGui::default()
-        };
+        let mut gui = SketchGui { tool: Tool::Line, draw_type: 1, ..SketchGui::default() };
         gui.commit(Draft {
             tool: Tool::Line,
             start: Vec2::new(0.0, 0.0),
@@ -1558,7 +1557,10 @@ mod tests {
     #[test]
     fn select_tool_drag_moves_a_point() {
         let mut gui = SketchGui::default();
-        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
+        let line = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None)
+            .unwrap();
         let point = match gui.sketch.curves[line].kind {
             CurveKind::Line { b, .. } => b,
             _ => unreachable!(),
@@ -1575,7 +1577,10 @@ mod tests {
     #[test]
     fn constraint_dock_applies_line_and_dimension_constraints() {
         let mut gui = SketchGui::default();
-        let line = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 3.0), None, None, None).unwrap();
+        let line = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 3.0), None, None, None)
+            .unwrap();
         gui.selected_curves.insert(line);
         gui.apply_constraint(0); // Horizontal
         assert!(matches!(
@@ -1593,8 +1598,14 @@ mod tests {
     #[test]
     fn constraint_dock_uses_two_selected_lines() {
         let mut gui = SketchGui::default();
-        let a = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None).unwrap();
-        let b = gui.sketch.add_line(Vec2::new(0.0, 10.0), Vec2::new(10.0, 10.0), None, None, None).unwrap();
+        let a = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), None, None, None)
+            .unwrap();
+        let b = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 10.0), Vec2::new(10.0, 10.0), None, None, None)
+            .unwrap();
         gui.selected_curves.insert(a);
         gui.selected_curves.insert(b);
         gui.apply_constraint(4); // Parallel
@@ -1606,12 +1617,15 @@ mod tests {
 
     #[test]
     fn fillet_joins_two_lines_with_a_tangent_arc() {
-        let mut gui = SketchGui {
-            tool: Tool::Fillet,
-            ..SketchGui::default()
-        };
-        let a = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), None, None, None).unwrap();
-        let b = gui.sketch.add_line(Vec2::new(20.0, 0.0), Vec2::new(20.0, 20.0), None, None, None).unwrap();
+        let mut gui = SketchGui { tool: Tool::Fillet, ..SketchGui::default() };
+        let a = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), None, None, None)
+            .unwrap();
+        let b = gui
+            .sketch
+            .add_line(Vec2::new(20.0, 0.0), Vec2::new(20.0, 20.0), None, None, None)
+            .unwrap();
         gui.selected_curves.insert(a);
         gui.selected_curves.insert(b);
         gui.apply_fillet();
@@ -1625,12 +1639,15 @@ mod tests {
 
     #[test]
     fn fillet_handles_lines_that_cross_at_ninety_degrees() {
-        let mut gui = SketchGui {
-            tool: Tool::Fillet,
-            ..SketchGui::default()
-        };
-        let a = gui.sketch.add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), None, None, None).unwrap();
-        let b = gui.sketch.add_line(Vec2::new(10.0, -10.0), Vec2::new(10.0, 10.0), None, None, None).unwrap();
+        let mut gui = SketchGui { tool: Tool::Fillet, ..SketchGui::default() };
+        let a = gui
+            .sketch
+            .add_line(Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0), None, None, None)
+            .unwrap();
+        let b = gui
+            .sketch
+            .add_line(Vec2::new(10.0, -10.0), Vec2::new(10.0, 10.0), None, None, None)
+            .unwrap();
         gui.selected_curves.insert(a);
         gui.selected_curves.insert(b);
         gui.apply_fillet();
@@ -1640,15 +1657,8 @@ mod tests {
 
     #[test]
     fn three_point_arc_passes_through_its_third_point() {
-        let mut gui = SketchGui {
-            tool: Tool::Arc,
-            ..SketchGui::default()
-        };
-        gui.add_three_point_arc(
-            Vec2::new(0.0, 0.0),
-            Vec2::new(10.0, 0.0),
-            Vec2::new(5.0, 5.0),
-        );
+        let mut gui = SketchGui { tool: Tool::Arc, ..SketchGui::default() };
+        gui.add_three_point_arc(Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(5.0, 5.0));
         assert_eq!(gui.sketch.curves.len(), 1);
         assert!(matches!(gui.sketch.curves[0].kind, CurveKind::Arc { .. }));
         let polyline = gui.sketch.polyline(0);
@@ -1670,10 +1680,7 @@ mod tests {
 
     #[test]
     fn drawing_a_rectangle_clears_stale_curve_selection() {
-        let mut gui = SketchGui {
-            tool: Tool::Rectangle,
-            ..SketchGui::default()
-        };
+        let mut gui = SketchGui { tool: Tool::Rectangle, ..SketchGui::default() };
         gui.selected_curves.insert(0);
         gui.commit(Draft {
             tool: Tool::Rectangle,
@@ -1689,9 +1696,6 @@ mod tests {
     fn constraint_dock_uses_the_viewport_top_without_double_margin() {
         let viewport = Rect::from_min_max(Pos2::new(100.0, 50.0), Pos2::new(900.0, 700.0));
         let layout = sketch_dock_layout(viewport, 300.0, CONSTRAINTS.len());
-        assert_eq!(
-            layout.constraints.top(),
-            viewport.top() + CONSTRAINT_DOCK_TOP_GAP
-        );
+        assert_eq!(layout.constraints.top(), viewport.top() + CONSTRAINT_DOCK_TOP_GAP);
     }
 }

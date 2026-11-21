@@ -169,12 +169,9 @@ where
     let value = CableOutlineValue::deserialize(deserializer)?;
     Ok(match value {
         CableOutlineValue::Rgba(rgba) => rgba,
-        CableOutlineValue::Opacity(opacity) => [
-            0,
-            0,
-            0,
-            (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
-        ],
+        CableOutlineValue::Opacity(opacity) => {
+            [0, 0, 0, (opacity.clamp(0.0, 1.0) * 255.0).round() as u8]
+        }
     })
 }
 
@@ -196,35 +193,19 @@ pub struct ThemePreset {
 }
 
 fn default_preset() -> ThemePreset {
-    ThemePreset {
-        name: DEFAULT_THEME_NAME.to_owned(),
-        id: "default".to_owned(),
-        path: None,
-    }
+    ThemePreset { name: DEFAULT_THEME_NAME.to_owned(), id: "default".to_owned(), path: None }
 }
 
 fn light_preset() -> ThemePreset {
-    ThemePreset {
-        name: LIGHT_THEME_NAME.to_owned(),
-        id: "light".to_owned(),
-        path: None,
-    }
+    ThemePreset { name: LIGHT_THEME_NAME.to_owned(), id: "light".to_owned(), path: None }
 }
 
 fn forest_preset() -> ThemePreset {
-    ThemePreset {
-        name: FOREST_THEME_NAME.to_owned(),
-        id: "forest".to_owned(),
-        path: None,
-    }
+    ThemePreset { name: FOREST_THEME_NAME.to_owned(), id: "forest".to_owned(), path: None }
 }
 
 fn punk_preset() -> ThemePreset {
-    ThemePreset {
-        name: PUNK_THEME_NAME.to_owned(),
-        id: "punk".to_owned(),
-        path: None,
-    }
+    ThemePreset { name: PUNK_THEME_NAME.to_owned(), id: "punk".to_owned(), path: None }
 }
 
 fn preset_from_path(path: PathBuf, name: Option<String>) -> ThemePreset {
@@ -285,10 +266,7 @@ impl Theme {
 
     /// Hex colour including alpha, used by editable settings fields.
     pub fn hex_rgba(rgba: [u8; 4]) -> String {
-        format!(
-            "#{:02x}{:02x}{:02x}{:02x}",
-            rgba[0], rgba[1], rgba[2], rgba[3]
-        )
+        format!("#{:02x}{:02x}{:02x}{:02x}", rgba[0], rgba[1], rgba[2], rgba[3])
     }
 
     /// Parse `#RGB`, `#RGBA`, `#RRGGBB` or `#RRGGBBAA`.
@@ -347,7 +325,6 @@ impl Theme {
         }
         ((self.backdrop_blur / 18.0 * 5.0).ceil() as usize).clamp(1, 5)
     }
-
 
     /// Map the user-facing radius to the backdrop's dual-Kawase sample scale.
     /// 24 px is one full sample-scale unit; the default 18 px preserves the
@@ -494,10 +471,7 @@ impl Theme {
         #[allow(unreachable_code)]
         if let Some(path) = Self::env_override_path() {
             return match Self::load_file(&path) {
-                Ok(Some(theme)) => ThemeState {
-                    preset: preset_from_path(path, None),
-                    theme,
-                },
+                Ok(Some(theme)) => ThemeState { preset: preset_from_path(path, None), theme },
                 Ok(None) => ThemeState::default(),
                 Err(error) => {
                     eprintln!("theme: ignored invalid {}: {error}", path.display());
@@ -509,22 +483,13 @@ impl Theme {
         let selection = Self::read_selection();
         if let Some(selected) = selection.as_deref() {
             if selected == "light" {
-                return ThemeState {
-                    theme: Theme::light(),
-                    preset: light_preset(),
-                };
+                return ThemeState { theme: Theme::light(), preset: light_preset() };
             }
             if selected == "forest" {
-                return ThemeState {
-                    theme: Theme::forest(),
-                    preset: forest_preset(),
-                };
+                return ThemeState { theme: Theme::forest(), preset: forest_preset() };
             }
             if selected == "punk" {
-                return ThemeState {
-                    theme: Theme::punk(),
-                    preset: punk_preset(),
-                };
+                return ThemeState { theme: Theme::punk(), preset: punk_preset() };
             }
             if selected != "default"
                 && let Some(path) = user_theme_files()
@@ -533,10 +498,7 @@ impl Theme {
                     .and_then(|preset| preset.path)
                 && let Ok(Some(theme)) = Self::load_file(&path)
             {
-                return ThemeState {
-                    preset: preset_from_path(path, None),
-                    theme,
-                };
+                return ThemeState { preset: preset_from_path(path, None), theme };
             }
         } else if let Some(path) = Self::legacy_custom_path()
             && path.is_file()
@@ -569,9 +531,7 @@ impl Theme {
 
     fn load_file(path: &std::path::Path) -> Result<Option<Self>, String> {
         match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|error| error.to_string()),
+            Ok(text) => serde_json::from_str(&text).map(Some).map_err(|error| error.to_string()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.to_string()),
         }
@@ -617,10 +577,7 @@ impl Theme {
                 eprintln!("theme: invalid {}: {error}; restoring default", path.display());
                 let backup = path.with_extension("json.corrupt");
                 if let Err(rename_error) = std::fs::rename(path, &backup) {
-                    eprintln!(
-                        "theme: cannot preserve corrupt {}: {rename_error}",
-                        path.display()
-                    );
+                    eprintln!("theme: cannot preserve corrupt {}: {rename_error}", path.display());
                 }
                 if let Err(write_error) = Self::write_default(path) {
                     eprintln!("theme: cannot restore {}: {write_error}", path.display());
@@ -642,25 +599,17 @@ fn theme_cell() -> &'static RwLock<ThemeState> {
 /// Themes are small and the UI is the only writer, so cloning the palette per
 /// frame is cheaper than threading a guard through every widget call.
 pub fn get() -> Theme {
-    theme_cell()
-        .read()
-        .map(|state| state.theme.clone())
-        .unwrap_or_else(|_| Theme::default())
+    theme_cell().read().map(|state| state.theme.clone()).unwrap_or_else(|_| Theme::default())
 }
 
 /// Replace the runtime theme after a live edit.
 pub fn set(theme: Theme) {
-    let mut state = theme_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.theme = theme;
 }
 
 pub fn active_preset() -> ThemePreset {
-    theme_cell()
-        .read()
-        .map(|state| state.preset.clone())
-        .unwrap_or_else(|_| default_preset())
+    theme_cell().read().map(|state| state.preset.clone()).unwrap_or_else(|_| default_preset())
 }
 
 pub fn active_name() -> String {
@@ -741,9 +690,7 @@ pub fn load_preset(preset: &ThemePreset) -> Result<Theme, String> {
             .ok_or_else(|| format!("theme does not exist: {}", path.display()))?,
     };
     Theme::write_selection(preset);
-    let mut state = theme_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.theme = theme.clone();
     state.preset = preset.clone();
     Ok(theme)
@@ -756,23 +703,19 @@ pub fn save(theme: &Theme) -> Result<(), String> {
     let (path, custom_name) = match &preset.path {
         Some(path) => (path.clone(), CUSTOM_THEME_NAME),
         None if preset.id == "light" => (
-            Theme::light_custom_path()
-                .ok_or_else(|| "no user theme path available".to_owned())?,
+            Theme::light_custom_path().ok_or_else(|| "no user theme path available".to_owned())?,
             LIGHT_CUSTOM_THEME_NAME,
         ),
         None if preset.id == "forest" => (
-            Theme::forest_custom_path()
-                .ok_or_else(|| "no user theme path available".to_owned())?,
+            Theme::forest_custom_path().ok_or_else(|| "no user theme path available".to_owned())?,
             FOREST_CUSTOM_THEME_NAME,
         ),
         None if preset.id == "punk" => (
-            Theme::punk_custom_path()
-                .ok_or_else(|| "no user theme path available".to_owned())?,
+            Theme::punk_custom_path().ok_or_else(|| "no user theme path available".to_owned())?,
             PUNK_CUSTOM_THEME_NAME,
         ),
         None => (
-            Theme::legacy_custom_path()
-                .ok_or_else(|| "no user theme path available".to_owned())?,
+            Theme::legacy_custom_path().ok_or_else(|| "no user theme path available".to_owned())?,
             CUSTOM_THEME_NAME,
         ),
     };
@@ -781,9 +724,7 @@ pub fn save(theme: &Theme) -> Result<(), String> {
         preset = preset_from_path(path, Some(custom_name.to_owned()));
     }
     Theme::write_selection(&preset);
-    let mut state = theme_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.theme = theme.clone();
     state.preset = preset;
     Ok(())
@@ -799,13 +740,7 @@ pub fn create_theme(name: &str, theme: &Theme) -> Result<ThemePreset, String> {
     std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
     let slug: String = name
         .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
         .collect();
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "theme" } else { slug };
@@ -818,9 +753,7 @@ pub fn create_theme(name: &str, theme: &Theme) -> Result<ThemePreset, String> {
     Theme::write_theme(&path, theme)?;
     let preset = preset_from_path(path, Some(name.to_owned()));
     Theme::write_selection(&preset);
-    let mut state = theme_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.theme = theme.clone();
     state.preset = preset.clone();
     Ok(preset)
@@ -853,9 +786,7 @@ pub fn rename_theme(preset: &ThemePreset, name: &str) -> Result<ThemePreset, Str
     let new_preset = preset_from_path(new_path, Some(name.to_owned()));
     if active_preset().id == preset.id {
         Theme::write_selection(&new_preset);
-        let mut state = theme_cell()
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.preset = new_preset.clone();
     }
     Ok(new_preset)
@@ -875,9 +806,7 @@ pub fn reset_current_theme() -> Result<Theme, String> {
     if let Some(path) = &preset.path {
         Theme::write_theme(path, &theme)?;
     }
-    let mut state = theme_cell()
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = theme_cell().write().unwrap_or_else(|poisoned| poisoned.into_inner());
     state.theme = theme.clone();
     state.preset = preset;
     Ok(theme)
@@ -938,12 +867,11 @@ pub fn menu_style(style: &mut egui::Style) {
         visuals.fg_stroke = egui::Stroke::new(1.0, white);
     }
 
-    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme.color(theme.muted));
+    style.visuals.widgets.noninteractive.fg_stroke =
+        egui::Stroke::new(1.0, theme.color(theme.muted));
     style.visuals.selection.bg_fill = accent;
     style.visuals.selection.stroke = egui::Stroke::new(1.0, white);
 }
-
-
 
 /// Full-row menu item with a fixed indicator column.
 ///
@@ -952,23 +880,14 @@ pub fn menu_style(style: &mut egui::Style) {
 /// matches the layout used by the node cleanup menu.
 pub fn menu_row(ui: &mut egui::Ui, selected: bool, label: &str) -> egui::Response {
     let theme = get();
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 26.0),
-        egui::Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
     if response.hovered() || response.clicked() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let text = if response.hovered() {
-        egui::Color32::WHITE
-    } else {
-        theme.color(theme.text)
-    };
-    let fill = if response.hovered() {
-        theme.color(theme.accent)
-    } else {
-        egui::Color32::TRANSPARENT
-    };
+    let text = if response.hovered() { egui::Color32::WHITE } else { theme.color(theme.text) };
+    let fill =
+        if response.hovered() { theme.color(theme.accent) } else { egui::Color32::TRANSPARENT };
     ui.painter().rect_filled(rect, egui::CornerRadius::same(5), fill);
     if selected {
         ui.painter().text(
@@ -1004,14 +923,10 @@ mod tests {
     use super::*;
 
     fn temp_theme_path(name: &str) -> PathBuf {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "nodecraft-theme-{name}-{}-{stamp}",
-            std::process::id()
-        ));
+        let stamp =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir()
+            .join(format!("nodecraft-theme-{name}-{}-{stamp}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("theme.json")
     }
@@ -1084,12 +999,7 @@ mod tests {
 #[derive(Clone, Copy, Debug)]
 pub enum ThemeValue {
     Color([u8; 4]),
-    Number {
-        value: f32,
-        min: f32,
-        max: f32,
-        step: f32,
-    },
+    Number { value: f32, min: f32, max: f32, step: f32 },
 }
 
 /// One read-only entry in a theme palette category.
@@ -1117,7 +1027,12 @@ fn entry(
     ThemeEntry { key, label, description, value }
 }
 
-fn color(key: &'static str, label: &'static str, description: &'static str, value: [u8; 4]) -> ThemeEntry {
+fn color(
+    key: &'static str,
+    label: &'static str,
+    description: &'static str,
+    value: [u8; 4],
+) -> ThemeEntry {
     entry(key, label, description, ThemeValue::Color(value))
 }
 
@@ -1130,12 +1045,7 @@ fn number(
     max: f32,
     step: f32,
 ) -> ThemeEntry {
-    entry(
-        key,
-        label,
-        description,
-        ThemeValue::Number { value, min, max, step },
-    )
+    entry(key, label, description, ThemeValue::Number { value, min, max, step })
 }
 
 /// Theme data grouped by the part of the application it styles.
@@ -1154,10 +1064,25 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("control", "Control", "Buttons and inset controls", theme.control),
                 color("dock", "Dock background", "Floating tool dock fill", theme.dock),
                 color("border", "Border", "Default dividers and outlines", theme.border),
-                color("dock_border", "Dock border", "Floating tool dock outline", theme.dock_border),
-                color("border_strong", "Strong border", "Selected and emphasized outlines", theme.border_strong),
+                color(
+                    "dock_border",
+                    "Dock border",
+                    "Floating tool dock outline",
+                    theme.dock_border,
+                ),
+                color(
+                    "border_strong",
+                    "Strong border",
+                    "Selected and emphasized outlines",
+                    theme.border_strong,
+                ),
                 color("popup", "Popup", "Menus and floating popup background", theme.popup),
-                color("blur_tint", "Blur tint", "Tint applied to the blurred backdrop", theme.blur_tint),
+                color(
+                    "blur_tint",
+                    "Blur tint",
+                    "Tint applied to the blurred backdrop",
+                    theme.blur_tint,
+                ),
                 number(
                     "backdrop_blur",
                     "Backdrop blur",
@@ -1176,25 +1101,35 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
                 color("text", "Text", "Primary text", theme.text),
                 color("muted", "Muted text", "Secondary labels and hints", theme.muted),
                 color("accent", "Accent", "Primary selection and action colour", theme.accent),
-                color("highlight", "Highlight", "Secondary highlight and hover wash", theme.highlight),
+                color(
+                    "highlight",
+                    "Highlight",
+                    "Secondary highlight and hover wash",
+                    theme.highlight,
+                ),
             ],
         },
         ThemeGroup {
             title: "Node editor",
             description: "Cards, cables and node-canvas-specific surfaces.",
             entries: vec![
-                color("node_activity", "Node activity", "Glow on a node while it computes", theme.node_activity),
-                color("node_warning", "Node warning", "Glow on a node that finished with a warning", theme.node_warning),
+                color(
+                    "node_activity",
+                    "Node activity",
+                    "Glow on a node while it computes",
+                    theme.node_activity,
+                ),
+                color(
+                    "node_warning",
+                    "Node warning",
+                    "Glow on a node that finished with a warning",
+                    theme.node_warning,
+                ),
                 color("node_error", "Node error", "Glow on a node that failed", theme.node_error),
                 color("card", "Card", "Node body background", theme.card),
                 color("card_border", "Card border", "Node outline", theme.card_border),
                 color("cable", "Cable", "Cable core colour", theme.cable),
-                color(
-                    "cable_outline",
-                    "Cable outline",
-                    "Dark cable outline",
-                    theme.cable_outline,
-                ),
+                color("cable_outline", "Cable outline", "Dark cable outline", theme.cable_outline),
                 color(
                     "cable_selected",
                     "Selected cable",
@@ -1234,7 +1169,12 @@ pub fn palette_groups(theme: &Theme) -> Vec<ThemeGroup> {
             entries: vec![
                 color("minimap_bg", "Background", "Minimap card background", theme.minimap_bg),
                 color("minimap_border", "Border", "Minimap card outline", theme.minimap_border),
-                color("minimap_node", "Unselected node", "Node mark in the overview", theme.minimap_node),
+                color(
+                    "minimap_node",
+                    "Unselected node",
+                    "Node mark in the overview",
+                    theme.minimap_node,
+                ),
             ],
         },
         ThemeGroup {
@@ -1278,17 +1218,15 @@ mod palette_tests {
 
     #[test]
     fn palette_groups_cover_every_theme_field_once() {
-        for (file, theme) in [
-            ("theme.json", Theme::default()),
-            ("theme-light.json", Theme::light()),
-        ] {
-            let json: serde_json::Value =
-                serde_json::from_str(if file == "theme-light.json" {
-                    include_str!("../assets/theme-light.json")
-                } else {
-                    include_str!("../assets/theme.json")
-                })
-                .unwrap();
+        for (file, theme) in
+            [("theme.json", Theme::default()), ("theme-light.json", Theme::light())]
+        {
+            let json: serde_json::Value = serde_json::from_str(if file == "theme-light.json" {
+                include_str!("../assets/theme-light.json")
+            } else {
+                include_str!("../assets/theme.json")
+            })
+            .unwrap();
             let mut remaining: std::collections::BTreeSet<String> =
                 json.as_object().unwrap().keys().cloned().collect();
             let mut seen = std::collections::BTreeSet::new();

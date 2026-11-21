@@ -74,11 +74,7 @@ pub fn min_distance_to_line(mesh: &Mesh, point: [f64; 3], direction: [f64; 3]) -
     let norm =
         (direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2])
             .sqrt();
-    let unit = [
-        direction[0] / norm,
-        direction[1] / norm,
-        direction[2] / norm,
-    ];
+    let unit = [direction[0] / norm, direction[1] / norm, direction[2] / norm];
     let mut best = f64::INFINITY;
     for vertex in &mesh.vertices {
         let relative = [
@@ -124,11 +120,7 @@ pub fn blend_plane(mesh: &Mesh, prefix: &str) -> Option<([f64; 3], [f64; 3])> {
         let c = mesh.vertices[face[2] as usize].map(f64::from);
         let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
         let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let n = [
-            u[1] * v[2] - u[2] * v[1],
-            u[2] * v[0] - u[0] * v[2],
-            u[0] * v[1] - u[1] * v[0],
-        ];
+        let n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
         let length = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
         if length > 0.0 {
             return Some((a, [n[0] / length, n[1] / length, n[2] / length]));
@@ -148,8 +140,5 @@ pub fn plane_distance(point: [f64; 3], plane: ([f64; 3], [f64; 3])) -> f64 {
 
 /// Number of triangles whose face group starts with `prefix`.
 pub fn count_group(mesh: &Mesh, prefix: &str) -> usize {
-    mesh.face_groups
-        .iter()
-        .filter(|group| group.starts_with(prefix))
-        .count()
+    mesh.face_groups.iter().filter(|group| group.starts_with(prefix)).count()
 }

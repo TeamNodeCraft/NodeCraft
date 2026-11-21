@@ -15,7 +15,7 @@
 //! result and performs the action from a normal frame.
 
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 /// Which native dialog to show. File filters mirror the call sites.
 pub enum FileDialogKind {
@@ -70,9 +70,9 @@ impl PendingFileDialog {
 
 fn show(kind: FileDialogKind) -> FileDialogResult {
     let path = match kind {
-        FileDialogKind::OpenDocument => rfd::FileDialog::new()
-            .add_filter("NodeCraft graph", &["nodecraft"])
-            .pick_file(),
+        FileDialogKind::OpenDocument => {
+            rfd::FileDialog::new().add_filter("NodeCraft graph", &["nodecraft"]).pick_file()
+        }
         FileDialogKind::SaveDocument { suggested_name } => rfd::FileDialog::new()
             .add_filter("NodeCraft graph", &["nodecraft"])
             .set_file_name(suggested_name)

@@ -129,10 +129,7 @@ mod tests {
         assert_eq!(
             builtin.body_layout(
                 view,
-                &[
-                    ("shape", vec!["a".to_owned()]),
-                    ("shape", vec!["b".to_owned()]),
-                ],
+                &[("shape", vec!["a".to_owned()]), ("shape", vec!["b".to_owned()]),],
             ),
             Some(vec!["a".to_owned(), "b".to_owned()]),
         );

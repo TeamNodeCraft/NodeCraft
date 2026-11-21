@@ -33,11 +33,7 @@ impl BlendError {
     /// `Unsupported` with a reason and no missing-symbol list.
     #[must_use]
     pub fn unsupported(feature: &'static str, reason: impl Into<String>) -> Self {
-        Self::Unsupported {
-            feature,
-            reason: reason.into(),
-            missing: Vec::new(),
-        }
+        Self::Unsupported { feature, reason: reason.into(), missing: Vec::new() }
     }
 
     /// `Unsupported` naming the missing solidcore API calls.
@@ -47,11 +43,7 @@ impl BlendError {
         reason: impl Into<String>,
         missing: Vec<&'static str>,
     ) -> Self {
-        Self::Unsupported {
-            feature,
-            reason: reason.into(),
-            missing,
-        }
+        Self::Unsupported { feature, reason: reason.into(), missing }
     }
 
     /// True when the failure is a missing solidcore port rather than bad input.
@@ -76,11 +68,7 @@ impl fmt::Display for BlendError {
             Self::InvalidInput(message) => write!(f, "invalid input: {message}"),
             Self::Kernel(message) => write!(f, "solidcore: {message}"),
             Self::Cancelled => write!(f, "cancelled"),
-            Self::Unsupported {
-                feature,
-                reason,
-                missing,
-            } => {
+            Self::Unsupported { feature, reason, missing } => {
                 write!(f, "unsupported ({feature}): {reason}")?;
                 if !missing.is_empty() {
                     write!(f, " [missing: {}]", missing.join(", "))?;

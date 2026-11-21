@@ -90,7 +90,12 @@ fn transform_moves_emit_a_mesh() {
     cache = warm.cache;
     let mut display_cache = nodecraft_display::PlanCache::new(256);
     let warm_mesh = warm.exact_parts.get("result").and_then(|part| {
-        nodecraft_display::mesh_part(part, nodecraft_display::DisplayQuality::Full(0.35), &mut display_cache).ok()
+        nodecraft_display::mesh_part(
+            part,
+            nodecraft_display::DisplayQuality::Full(0.35),
+            &mut display_cache,
+        )
+        .ok()
     });
     assert!(
         warm_mesh.is_some_and(|display| !display.mesh.vertices.is_empty()),
@@ -105,9 +110,18 @@ fn transform_moves_emit_a_mesh() {
         let started = Instant::now();
         let output = evaluate_exact(request(xs), cache, None);
         cache = output.cache;
-        let mesh = output.exact_parts.get("result").and_then(|part| {
-            nodecraft_display::mesh_part(part, nodecraft_display::DisplayQuality::Full(0.35), &mut display_cache).ok()
-        }).expect("mesh result");
+        let mesh = output
+            .exact_parts
+            .get("result")
+            .and_then(|part| {
+                nodecraft_display::mesh_part(
+                    part,
+                    nodecraft_display::DisplayQuality::Full(0.35),
+                    &mut display_cache,
+                )
+                .ok()
+            })
+            .expect("mesh result");
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
         assert!(!mesh.mesh.vertices.is_empty(), "step {step} produced no mesh");
         wall_ms.push(elapsed);

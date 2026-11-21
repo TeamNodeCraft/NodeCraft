@@ -68,34 +68,13 @@ pub struct PassDef {
 /// Every pass that is scoped. Keeping this table next to [`pass`] is what makes
 /// the pass set testable without a GPU.
 pub const PASSES: [PassDef; 7] = [
-    PassDef {
-        label: pass::SCENE,
-        series: Series::GpuScene,
-    },
-    PassDef {
-        label: pass::PICK,
-        series: Series::GpuPick,
-    },
-    PassDef {
-        label: pass::BACKDROP_SCENE,
-        series: Series::GpuBackdrop,
-    },
-    PassDef {
-        label: pass::BACKDROP_SHARP,
-        series: Series::GpuBlur,
-    },
-    PassDef {
-        label: pass::BACKDROP_BLUR_H,
-        series: Series::GpuBlur,
-    },
-    PassDef {
-        label: pass::BACKDROP_BLUR_V,
-        series: Series::GpuBlur,
-    },
-    PassDef {
-        label: pass::BACKDROP_BLUR_FINAL,
-        series: Series::GpuBlur,
-    },
+    PassDef { label: pass::SCENE, series: Series::GpuScene },
+    PassDef { label: pass::PICK, series: Series::GpuPick },
+    PassDef { label: pass::BACKDROP_SCENE, series: Series::GpuBackdrop },
+    PassDef { label: pass::BACKDROP_SHARP, series: Series::GpuBlur },
+    PassDef { label: pass::BACKDROP_BLUR_H, series: Series::GpuBlur },
+    PassDef { label: pass::BACKDROP_BLUR_V, series: Series::GpuBlur },
+    PassDef { label: pass::BACKDROP_BLUR_FINAL, series: Series::GpuBlur },
 ];
 
 /// A graph/table series. The order is the table order.
@@ -168,10 +147,7 @@ impl Series {
 
     /// The series a pass label contributes to, or `None` for an unknown label.
     pub fn for_pass_label(label: &str) -> Option<Self> {
-        PASSES
-            .iter()
-            .find(|pass| pass.label == label)
-            .map(|pass| pass.series)
+        PASSES.iter().find(|pass| pass.label == label).map(|pass| pass.series)
     }
 
     pub fn color(self, theme: &crate::theme::Theme) -> egui::Color32 {
@@ -221,12 +197,7 @@ struct Sample {
 
 impl Default for Sample {
     fn default() -> Self {
-        Self {
-            seq: 0,
-            values: [0.0; SERIES_COUNT],
-            present: 0,
-            upload_bytes: 0,
-        }
+        Self { seq: 0, values: [0.0; SERIES_COUNT], present: 0, upload_bytes: 0 }
     }
 }
 
@@ -258,11 +229,7 @@ struct SampleRing {
 impl SampleRing {
     fn new() -> Self {
         // Deliberately empty: an off profiler must not allocate its ring.
-        Self {
-            samples: Vec::new(),
-            len: 0,
-            next_seq: 0,
-        }
+        Self { samples: Vec::new(), len: 0, next_seq: 0 }
     }
 
     fn ensure_capacity(&mut self) {
@@ -282,10 +249,7 @@ impl SampleRing {
         let seq = self.next_seq;
         self.next_seq += 1;
         let index = seq as usize % WINDOW_FRAMES;
-        self.samples[index] = Sample {
-            seq,
-            ..Sample::default()
-        };
+        self.samples[index] = Sample { seq, ..Sample::default() };
         self.len = (self.len + 1).min(WINDOW_FRAMES);
         seq
     }
@@ -308,11 +272,8 @@ impl SampleRing {
 
     /// Oldest to newest.
     fn iter(&self) -> impl Iterator<Item = &Sample> {
-        let start = if self.len == WINDOW_FRAMES {
-            self.next_seq as usize % WINDOW_FRAMES
-        } else {
-            0
-        };
+        let start =
+            if self.len == WINDOW_FRAMES { self.next_seq as usize % WINDOW_FRAMES } else { 0 };
         (0..self.len).map(move |offset| &self.samples[(start + offset) % WINDOW_FRAMES])
     }
 }
@@ -386,9 +347,8 @@ impl ProfilerCore {
         }
         self.upload_bytes = 0;
         if let Some(bytes) = upload_bytes {
-            let uploaded = self
-                .last_upload_bytes
-                .map_or(0, |previous| bytes.saturating_sub(previous));
+            let uploaded =
+                self.last_upload_bytes.map_or(0, |previous| bytes.saturating_sub(previous));
             self.last_upload_bytes = Some(bytes);
             self.upload_bytes = uploaded;
         }
@@ -490,10 +450,7 @@ impl ProfilerCore {
         out.clear();
         for (index, sample) in self.ring.iter().enumerate() {
             if let Some(value) = sample.get(series) {
-                out.push(egui_plot::PlotPoint {
-                    x: index as f64,
-                    y: f64::from(value),
-                });
+                out.push(egui_plot::PlotPoint { x: index as f64, y: f64::from(value) });
             }
         }
     }
@@ -778,11 +735,7 @@ impl ProfilerWindow {
         // Empty until the window first draws; an off profiler allocates none.
         let plot_points: [Vec<egui_plot::PlotPoint>; SERIES_COUNT] =
             std::array::from_fn(|_| Vec::new());
-        Self {
-            visible,
-            status: None,
-            plot_points,
-        }
+        Self { visible, status: None, plot_points }
     }
 }
 
@@ -835,9 +788,7 @@ fn write_merged_trace(
                 "name": series.key(),
             }));
         }
-        let frame_us = sample
-            .get(Series::CpuFrame)
-            .map_or(0.0, |ms| f64::from(ms) * 1000.0);
+        let frame_us = sample.get(Series::CpuFrame).map_or(0.0, |ms| f64::from(ms) * 1000.0);
         if sample.upload_bytes > 0 {
             events.push(serde_json::json!({
                 "pid": 0,
@@ -969,25 +920,17 @@ mod tests {
         let seq = core.current_seq.expect("current frame");
         core.attach_gpu(
             seq,
-            vec![
-                timed(pass::SCENE, 5.0),
-                timed(pass::PICK, 1.0),
-                timed(pass::BACKDROP_SCENE, 0.5),
-            ],
+            vec![timed(pass::SCENE, 5.0), timed(pass::PICK, 1.0), timed(pass::BACKDROP_SCENE, 0.5)],
         );
 
-        let path = std::env::temp_dir().join(format!(
-            "nodecraft-profiler-test-{}.json",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("nodecraft-profiler-test-{}.json", std::process::id()));
         write_merged_trace(&path, &core.ring, &core.trace).expect("write trace");
         let text = std::fs::read_to_string(&path).expect("read trace");
         let _ = std::fs::remove_file(&path);
         let value: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
-        let events = value
-            .get("traceEvents")
-            .and_then(serde_json::Value::as_array)
-            .expect("traceEvents");
+        let events =
+            value.get("traceEvents").and_then(serde_json::Value::as_array).expect("traceEvents");
         let names: Vec<&str> = events
             .iter()
             .filter_map(|event| event.get("name").and_then(serde_json::Value::as_str))
@@ -1015,10 +958,8 @@ mod tests {
         let mut core = ProfilerCore::new(true, false);
         core.begin_frame(16.0, None);
         core.record(Series::UiUpdate, 2.0);
-        let path = std::env::temp_dir().join(format!(
-            "nodecraft-profiler-cpu-trace-{}.json",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir()
+            .join(format!("nodecraft-profiler-cpu-trace-{}.json", std::process::id()));
         write_merged_trace(&path, &core.ring, &core.trace).expect("write trace");
         let text = std::fs::read_to_string(&path).expect("read trace");
         let _ = std::fs::remove_file(&path);

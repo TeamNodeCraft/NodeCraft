@@ -63,11 +63,7 @@ pub fn brep_center(kernel: &Kernel, brep: &Brep) -> Result<[f64; 3], BlendError>
     let extent = calculate_bounding_box(
         kernel,
         brep,
-        BoundingBoxOptions {
-            approx: false,
-            tight: true,
-            expand_by_zone_tol_3d: false,
-        },
+        BoundingBoxOptions { approx: false, tight: true, expand_by_zone_tol_3d: false },
     )
     .map_err(|error| BlendError::Kernel(format!("bounding box: {error}")))?;
     Ok([
@@ -96,24 +92,16 @@ pub fn select_edge_by_midpoint(
     point: [f64; 3],
 ) -> Result<EdgeSelection, BlendError> {
     if !point.iter().all(|coordinate| coordinate.is_finite()) {
-        return Err(BlendError::InvalidInput(
-            "edge selection point must be finite".into(),
-        ));
+        return Err(BlendError::InvalidInput("edge selection point must be finite".into()));
     }
     let selections = edge_selections(kernel, brep)?;
     if selections.is_empty() {
-        return Err(BlendError::InvalidInput(
-            "the B-rep has no edges to select".into(),
-        ));
+        return Err(BlendError::InvalidInput("the B-rep has no edges to select".into()));
     }
     let extent = calculate_bounding_box(
         kernel,
         brep,
-        BoundingBoxOptions {
-            approx: false,
-            tight: true,
-            expand_by_zone_tol_3d: false,
-        },
+        BoundingBoxOptions { approx: false, tight: true, expand_by_zone_tol_3d: false },
     )
     .map_err(|error| BlendError::Kernel(format!("bounding box: {error}")))?;
     let diagonal = length3([
@@ -164,9 +152,7 @@ pub fn select_edges_by_midpoints(
         }
     }
     if out.is_empty() {
-        return Err(BlendError::InvalidInput(
-            "no edge midpoints were given".into(),
-        ));
+        return Err(BlendError::InvalidInput("no edge midpoints were given".into()));
     }
     Ok(out)
 }
@@ -191,9 +177,7 @@ pub fn select_edges_by_ordinals(
         }
     }
     if out.is_empty() {
-        return Err(BlendError::InvalidInput(
-            "no edge ordinals were given".into(),
-        ));
+        return Err(BlendError::InvalidInput("no edge ordinals were given".into()));
     }
     Ok(out)
 }
@@ -218,7 +202,9 @@ pub fn tangent_chain(
         .map_err(|error| BlendError::Kernel(error.to_string()))?;
     let working_edges = working.edge_list().to_vec();
     if working_edges.len() != source_edges.len() {
-        return Err(BlendError::Kernel("tangent chain: the B-rep copy changed the edge count".into()));
+        return Err(BlendError::Kernel(
+            "tangent chain: the B-rep copy changed the edge count".into(),
+        ));
     }
     let seeds: Vec<EdgeId> = selections
         .iter()
@@ -227,7 +213,12 @@ pub fn tangent_chain(
                 .iter()
                 .position(|edge| *edge == selection.edge)
                 .map(|index| working_edges[index])
-                .ok_or_else(|| BlendError::InvalidInput(format!("tangent chain: edge {:?} is not on the body", selection.edge)))
+                .ok_or_else(|| {
+                    BlendError::InvalidInput(format!(
+                        "tangent chain: edge {:?} is not on the body",
+                        selection.edge
+                    ))
+                })
         })
         .collect::<Result<_, _>>()?;
     let chain = solidcore::blend::blend_refusal::tangent_chain(
@@ -313,32 +304,21 @@ fn resolve_edge_reference(
     reference: &Value,
     center_tolerance: f64,
 ) -> Result<EdgeSelection, BlendError> {
-    let center = reference
-        .get("center")
-        .or_else(|| reference.get("point"))
-        .map(json_point)
-        .transpose()?;
-    if reference
-        .get("id")
-        .and_then(Value::as_str)
-        .is_some_and(|id| id.starts_with("preview-edge:"))
+    let center =
+        reference.get("center").or_else(|| reference.get("point")).map(json_point).transpose()?;
+    if reference.get("id").and_then(Value::as_str).is_some_and(|id| id.starts_with("preview-edge:"))
     {
         return Err(BlendError::InvalidInput(
-            "a preview-only edge cannot be used for an exact treatment; select a B-rep edge"
-                .into(),
+            "a preview-only edge cannot be used for an exact treatment; select a B-rep edge".into(),
         ));
     }
-    let ordinal = reference
-        .get("ordinal")
-        .map(json_ordinal)
-        .transpose()?
-        .or_else(|| {
-            reference
-                .get("id")
-                .and_then(Value::as_str)
-                .and_then(|id| id.rsplit("edge:").next())
-                .and_then(|tail| tail.parse::<usize>().ok())
-        });
+    let ordinal = reference.get("ordinal").map(json_ordinal).transpose()?.or_else(|| {
+        reference
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| id.rsplit("edge:").next())
+            .and_then(|tail| tail.parse::<usize>().ok())
+    });
     if let Some(ordinal) = ordinal {
         let selection = selections.get(ordinal).ok_or_else(|| {
             BlendError::InvalidInput(format!(
@@ -374,38 +354,15 @@ fn edge_selection(
     edge: EdgeId,
     ordinal: usize,
 ) -> Result<EdgeSelection, BlendError> {
-    let record = brep
-        .edge(edge)
-        .map_err(|error| BlendError::Kernel(format!("edge {ordinal}: {error}")))?;
+    let record =
+        brep.edge(edge).map_err(|error| BlendError::Kernel(format!("edge {ordinal}: {error}")))?;
     let interval = record.interval;
-    let start = evaluate_point(
-        kernel,
-        record.curve.as_ref(),
-        interval.evaluate(0.0),
-        ordinal,
-    )?;
-    let end = evaluate_point(
-        kernel,
-        record.curve.as_ref(),
-        interval.evaluate(1.0),
-        ordinal,
-    )?;
-    let midpoint = evaluate_point(
-        kernel,
-        record.curve.as_ref(),
-        interval.evaluate(0.5),
-        ordinal,
-    )?;
+    let start = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(0.0), ordinal)?;
+    let end = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(1.0), ordinal)?;
+    let midpoint = evaluate_point(kernel, record.curve.as_ref(), interval.evaluate(0.5), ordinal)?;
     let length = solidcore::mass::integrator::properties::edge_length(kernel, brep, edge, 1.0e-9)
         .map_err(|error| BlendError::Kernel(format!("edge {ordinal} length: {error}")))?;
-    Ok(EdgeSelection {
-        ordinal,
-        edge,
-        start,
-        end,
-        midpoint,
-        length,
-    })
+    Ok(EdgeSelection { ordinal, edge, start, end, midpoint, length })
 }
 
 /// Evaluate a curve point, turning solidcore errors into blend errors.
@@ -431,14 +388,9 @@ fn point_to_edge_distance(
     edge: EdgeId,
     point: [f64; 3],
 ) -> Result<f64, BlendError> {
-    queries::edge_closest_point(
-        kernel,
-        brep,
-        edge,
-        Point3::new(point[0], point[1], point[2]),
-    )
-    .map(|closest| closest.closest.distance)
-    .map_err(|error| BlendError::Kernel(format!("edge closest point: {error}")))
+    queries::edge_closest_point(kernel, brep, edge, Point3::new(point[0], point[1], point[2]))
+        .map(|closest| closest.closest.distance)
+        .map_err(|error| BlendError::Kernel(format!("edge closest point: {error}")))
 }
 
 /// Parse `[x, y, z]` or `{ "x": .., "y": .., "z": .. }`.
@@ -472,9 +424,7 @@ fn json_point(value: &Value) -> Result<[f64; 3], BlendError> {
         }
         return Ok(out);
     }
-    Err(BlendError::InvalidInput(format!(
-        "point must be an array or an object, got {value}"
-    )))
+    Err(BlendError::InvalidInput(format!("point must be an array or an object, got {value}")))
 }
 
 /// Parse a non-negative integer ordinal from JSON.
@@ -520,10 +470,6 @@ mod tests {
         assert!((bottom.midpoint[2]).abs() < 1.0e-6, "{:?}", bottom.midpoint);
         let top = select_edge_by_midpoint(&kernel, &cylinder, [0.0, 10.0, 20.0])
             .expect("top circle by point");
-        assert!(
-            (top.midpoint[2] - 20.0).abs() < 1.0e-6,
-            "{:?}",
-            top.midpoint
-        );
+        assert!((top.midpoint[2] - 20.0).abs() < 1.0e-6, "{:?}", top.midpoint);
     }
 }

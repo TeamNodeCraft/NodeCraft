@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use nodecraft_engine::import_io;
@@ -173,10 +173,7 @@ impl ChangeTracker {
         let previous = self.hashes.insert(key, content_hash.to_owned());
         let differs = previous.as_deref().is_some_and(|previous| previous != content_hash);
         if differs {
-            self.changed
-                .entry(document_id.to_owned())
-                .or_default()
-                .insert(node_id.to_owned());
+            self.changed.entry(document_id.to_owned()).or_default().insert(node_id.to_owned());
         } else {
             self.clear(document_id, node_id);
         }
@@ -186,8 +183,7 @@ impl ChangeTracker {
     /// Record a successful reload/ingest, so the same content no longer shows
     /// the badge.
     pub fn reloaded(&mut self, document_id: &str, node_id: &str, content_hash: &str) {
-        self.hashes
-            .insert(Self::key(document_id, node_id), content_hash.to_owned());
+        self.hashes.insert(Self::key(document_id, node_id), content_hash.to_owned());
         self.clear(document_id, node_id);
     }
 
@@ -205,16 +201,12 @@ impl ChangeTracker {
 
     #[must_use]
     pub fn hash(&self, document_id: &str, node_id: &str) -> Option<&str> {
-        self.hashes
-            .get(&Self::key(document_id, node_id))
-            .map(String::as_str)
+        self.hashes.get(&Self::key(document_id, node_id)).map(String::as_str)
     }
 
     #[must_use]
     pub fn is_changed(&self, document_id: &str, node_id: &str) -> bool {
-        self.changed
-            .get(document_id)
-            .is_some_and(|changed| changed.contains(node_id))
+        self.changed.get(document_id).is_some_and(|changed| changed.contains(node_id))
     }
 
     #[must_use]
@@ -472,9 +464,8 @@ impl WatchManager {
             .map(|target| {
                 // Seed an initial baseline off the UI thread when the document
                 // has not recorded one yet.
-                let last_hash = target
-                    .content_hash
-                    .or_else(|| import_io::hash_file(&target.path).ok());
+                let last_hash =
+                    target.content_hash.or_else(|| import_io::hash_file(&target.path).ok());
                 WatchEntry {
                     document_id: target.document_id,
                     node_id: target.node_id,
@@ -505,8 +496,7 @@ impl WatchManager {
         }
         if self.poll.is_none() {
             let touched = self.touched.clone();
-            let config = NotifyConfig::default()
-                .with_poll_interval(Duration::from_secs(2));
+            let config = NotifyConfig::default().with_poll_interval(Duration::from_secs(2));
             if let Ok(watcher) = PollWatcher::new(
                 move |result: notify::Result<notify::Event>| {
                     if let Ok(event) = result {
@@ -754,11 +744,7 @@ mod tests {
         assert!(!prefer_polling(Path::new("/Users/me/project/model.step")));
     }
 
-    fn watched_manager(
-        path: &Path,
-        content_hash: &str,
-        events: Sender<Event>,
-    ) -> WatchManager {
+    fn watched_manager(path: &Path, content_hash: &str, events: Sender<Event>) -> WatchManager {
         let (touched, _touched_rx) = channel();
         WatchManager {
             entries: vec![WatchEntry {

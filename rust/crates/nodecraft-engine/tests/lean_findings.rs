@@ -21,10 +21,7 @@ fn node(id: &str, node_type: &str, values: serde_json::Value, suppressed: bool) 
         node_type: node_type.to_owned(),
         values,
         suppressed,
-        cache: Some(CacheState {
-            key: Some(id.to_owned()),
-            state: Some("cached".to_owned()),
-        }),
+        cache: Some(CacheState { key: Some(id.to_owned()), state: Some("cached".to_owned()) }),
     }
 }
 
@@ -109,8 +106,5 @@ fn suppression_walk_cap_misses_live_input_after_64_translates() {
          Translate nodes, but the Boolean was rejected: {:?}",
         output.response.node_errors
     );
-    assert!(
-        output.exact_parts.contains_key("out"),
-        "a live Boolean must produce an exact Part"
-    );
+    assert!(output.exact_parts.contains_key("out"), "a live Boolean must produce an exact Part");
 }

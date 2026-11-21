@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-fn default_run_exporters() -> bool { true }
+fn default_run_exporters() -> bool {
+    true
+}
 
 /// One self-contained CAD source stored inside a `.nodecraft` document.
 ///

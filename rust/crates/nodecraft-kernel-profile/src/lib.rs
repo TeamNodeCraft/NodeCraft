@@ -45,11 +45,7 @@ pub fn fixes() -> UpstreamFixes {
 /// Names that are on in [`fixes`], for the `solidcore-ops` session.
 #[must_use]
 pub fn fix_names() -> Vec<&'static str> {
-    UpstreamFixes::NAMES
-        .iter()
-        .copied()
-        .filter(|name| !HELD_BACK.contains(name))
-        .collect()
+    UpstreamFixes::NAMES.iter().copied().filter(|name| !HELD_BACK.contains(name)).collect()
 }
 
 /// Configure the opt-in SolidCore fixes applied to newly created kernels.
@@ -75,11 +71,7 @@ pub fn experimental_fixes_enabled() -> bool {
 pub fn apply_fixes(kernel: &mut Kernel) {
     let enabled = experimental_fixes_enabled()
         && std::env::var("NODECRAFT_KERNEL_FIXES").map_or(true, |value| value != "0");
-    kernel.fixes = if enabled {
-        fixes()
-    } else {
-        UpstreamFixes::default()
-    };
+    kernel.fixes = if enabled { fixes() } else { UpstreamFixes::default() };
 }
 
 /// A NodeCraft kernel with the standard fix profile.

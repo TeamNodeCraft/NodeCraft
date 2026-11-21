@@ -239,9 +239,7 @@ impl EdgeTreatment {
 
     pub fn from_node_values(values: &Value) -> Result<Self, BlendError> {
         if !values.is_object() {
-            return Err(BlendError::InvalidInput(
-                "edge node values must be a JSON object".into(),
-            ));
+            return Err(BlendError::InvalidInput("edge node values must be a JSON object".into()));
         }
         let mode = match string_field(values, "mode")? {
             Some(text) => EdgeMode::parse(&text)?,

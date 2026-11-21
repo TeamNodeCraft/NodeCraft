@@ -31,9 +31,7 @@ impl BuiltinNode for Translate {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -88,7 +86,10 @@ mod tests {
         assert_eq!(builtin.transform_role(), Some(crate::nodes::TransformRole::Translate));
         let values = serde_json::json!({});
         assert!(!builtin.repeats_input_bodies(crate::nodes::NodeView::new(
-            "move", "translate", &values, false,
+            "move",
+            "translate",
+            &values,
+            false,
         )));
     }
 

@@ -50,9 +50,7 @@ impl BuiltinNode for Fillet {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -97,12 +95,9 @@ mod tests {
         let builtin = crate::nodes::find("fillet").expect("fillet registered");
         assert_eq!(builtin.node_types(), &["fillet"]);
         assert_eq!(
-            crate::nodes::find("fillet").map(|node| node.exact_weight(crate::nodes::NodeView::new(
-                "f",
-                "fillet",
-                &serde_json::Value::Null,
-                false,
-            ))),
+            crate::nodes::find("fillet").map(|node| node.exact_weight(
+                crate::nodes::NodeView::new("f", "fillet", &serde_json::Value::Null, false,)
+            )),
             Some(12)
         );
     }
@@ -131,7 +126,8 @@ mod tests {
     /// No selected edges is a pass-through, not an error or a zero-radius blend.
     #[test]
     fn no_edges_passes_the_source_part_through() {
-        let output = crate::evaluate_exact(request(serde_json::json!([])), crate::EngineCache::new(), None);
+        let output =
+            crate::evaluate_exact(request(serde_json::json!([])), crate::EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let box_part = output.exact_parts.get("box").expect("box exact part");
         let fillet_part = output.exact_parts.get("fillet").expect("fillet exact part");
@@ -146,7 +142,8 @@ mod tests {
     fn warnings_are_recorded_on_the_node() {
         use super::super::PartEval as _;
         let request = request(serde_json::json!([{"ordinal": 0}]));
-        let node = request.nodes.iter().find(|node| node.id == "fillet").expect("fillet node").clone();
+        let node =
+            request.nodes.iter().find(|node| node.id == "fillet").expect("fillet node").clone();
         let mut eval = crate::Eval::new(&request, None);
         {
             let mut ctx = crate::nodes::EnginePartEval::new(&mut eval, &node);

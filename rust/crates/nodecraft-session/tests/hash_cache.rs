@@ -44,11 +44,7 @@ fn document() -> GraphDocument {
 }
 
 fn set_length(node: &str, length: f64) -> Command {
-    Command::SetValue {
-        node: node.to_owned(),
-        field: "length".into(),
-        value: json!(length),
-    }
+    Command::SetValue { node: node.to_owned(), field: "length".into(), value: json!(length) }
 }
 
 #[test]
@@ -68,9 +64,7 @@ fn new_edit_hashes_once_and_reads_are_free() {
     );
 
     reset_thread_node_hash_pass_count();
-    let change = session
-        .apply_commands(&[set_length("u", 20.0)])
-        .expect("edit applies");
+    let change = session.apply_commands(&[set_length("u", 20.0)]).expect("edit applies");
     assert_eq!(
         thread_node_hash_pass_count(),
         1,
@@ -98,16 +92,10 @@ fn no_op_edit_hashes_nothing_and_keeps_the_cache() {
     let hashes = session.node_hashes().expect("hashes after edit");
 
     reset_thread_node_hash_pass_count();
-    let change = session
-        .apply_commands(&[command])
-        .expect("no-op command applies");
+    let change = session.apply_commands(&[command]).expect("no-op command applies");
     assert!(!change.changed);
     assert_eq!(change.revision, revision);
-    assert_eq!(
-        thread_node_hash_pass_count(),
-        0,
-        "a no-op must not hash the document"
-    );
+    assert_eq!(thread_node_hash_pass_count(), 0, "a no-op must not hash the document");
     assert_eq!(session.revision(), revision);
     assert!(
         Arc::ptr_eq(&hashes, &session.node_hashes().expect("unchanged hashes")),
@@ -119,18 +107,12 @@ fn no_op_edit_hashes_nothing_and_keeps_the_cache() {
 fn undo_and_redo_each_hash_once_and_replace_the_cache() {
     let mut session = Session::new(document());
     let initial = session.node_hashes().expect("initial hashes");
-    session
-        .apply_commands(&[set_length("u", 20.0)])
-        .expect("edit applies");
+    session.apply_commands(&[set_length("u", 20.0)]).expect("edit applies");
     let edited = session.node_hashes().expect("edited hashes");
 
     reset_thread_node_hash_pass_count();
     let undone = session.undo().expect("undo runs").expect("undo entry");
-    assert_eq!(
-        thread_node_hash_pass_count(),
-        1,
-        "undo must recompute exactly once"
-    );
+    assert_eq!(thread_node_hash_pass_count(), 1, "undo must recompute exactly once");
     assert_eq!(undone.dirty_nodes, vec!["u"]);
     let restored = session.node_hashes().expect("undo hashes");
     assert_eq!(*restored, *initial, "undo must restore the initial keys");
@@ -141,11 +123,7 @@ fn undo_and_redo_each_hash_once_and_replace_the_cache() {
 
     reset_thread_node_hash_pass_count();
     let redone = session.redo().expect("redo runs").expect("redo entry");
-    assert_eq!(
-        thread_node_hash_pass_count(),
-        1,
-        "redo must recompute exactly once"
-    );
+    assert_eq!(thread_node_hash_pass_count(), 1, "redo must recompute exactly once");
     assert_eq!(redone.dirty_nodes, vec!["u"]);
     let redone_hashes = session.node_hashes().expect("redo hashes");
     assert_eq!(*redone_hashes, *edited);
@@ -160,14 +138,8 @@ fn source_change_recomputes_and_dirties_importer_descendants() {
     let sources = BTreeMap::from([("imp".to_owned(), "source-v1".to_owned())]);
     session.set_source_hashes(sources.clone());
     reset_thread_node_hash_pass_count();
-    let with_source = session
-        .hashes_with_sources(&sources)
-        .expect("source hashes");
-    assert_eq!(
-        thread_node_hash_pass_count(),
-        1,
-        "a source change falls back to one full pass"
-    );
+    let with_source = session.hashes_with_sources(&sources).expect("source hashes");
+    assert_eq!(thread_node_hash_pass_count(), 1, "a source change falls back to one full pass");
     assert_ne!(with_source["imp"], initial["imp"], "importer key changes");
     assert_ne!(with_source["t"], initial["t"], "descendant key changes");
     assert_eq!(with_source["u"], initial["u"], "unrelated node is unchanged");
@@ -175,18 +147,14 @@ fn source_change_recomputes_and_dirties_importer_descendants() {
     // The fallback is not the revision cache: before an edit that publishes the
     // new sources, asking again still performs the correctness pass.
     reset_thread_node_hash_pass_count();
-    session
-        .hashes_with_sources(&sources)
-        .expect("fallback hashes");
+    session.hashes_with_sources(&sources).expect("fallback hashes");
     assert_eq!(thread_node_hash_pass_count(), 1);
 
     // The edit publishes the new source map into the next revision, so the
     // dirty set includes the source-changed importer and its descendant even
     // though the edited node is unrelated.
     reset_thread_node_hash_pass_count();
-    let change = session
-        .apply_commands(&[set_length("u", 20.0)])
-        .expect("edit applies");
+    let change = session.apply_commands(&[set_length("u", 20.0)]).expect("edit applies");
     assert_eq!(
         thread_node_hash_pass_count(),
         1,
@@ -201,9 +169,7 @@ fn source_change_recomputes_and_dirties_importer_descendants() {
 
     // The source map now matches the revision cache: no further pass.
     reset_thread_node_hash_pass_count();
-    session
-        .hashes_with_sources(&sources)
-        .expect("cached source hashes");
+    session.hashes_with_sources(&sources).expect("cached source hashes");
     assert_eq!(thread_node_hash_pass_count(), 0);
 }
 
@@ -229,10 +195,7 @@ fn ingest_record_bumps_revision_without_another_pass() {
         0,
         "ingested assets are not node content and must not rehash"
     );
-    assert!(Arc::ptr_eq(
-        &hashes,
-        &session.node_hashes().expect("unchanged hashes")
-    ));
+    assert!(Arc::ptr_eq(&hashes, &session.node_hashes().expect("unchanged hashes")));
 }
 
 #[test]
@@ -250,11 +213,7 @@ fn failed_structural_edit_restores_the_previous_cache() {
         }])
         .expect_err("a cycle must roll the transaction back");
     assert_eq!(error, SessionError::Cycle);
-    assert_eq!(
-        thread_node_hash_pass_count(),
-        0,
-        "a failed pass is not a completed pass"
-    );
+    assert_eq!(thread_node_hash_pass_count(), 0, "a failed pass is not a completed pass");
     assert_eq!(session.revision(), revision, "rollback must not bump revision");
     assert!(
         Arc::ptr_eq(&before, &session.node_hashes().expect("restored hashes")),

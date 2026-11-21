@@ -8,7 +8,7 @@
 //!   nodecraft-bench GRAPH.nodecraft [--edits N] [--timeout-ms MS] [--mesh]
 //!                    [--target ID] [--json]
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
@@ -41,8 +41,21 @@ fn parse_args() -> Result<Args, String> {
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--edits" => out.edits = args.next().ok_or("--edits needs a number")?.parse().map_err(|error| format!("--edits: {error}"))?,
-            "--timeout-ms" => out.timeout = Duration::from_millis(args.next().ok_or("--timeout-ms needs milliseconds")?.parse().map_err(|error| format!("--timeout-ms: {error}"))?),
+            "--edits" => {
+                out.edits = args
+                    .next()
+                    .ok_or("--edits needs a number")?
+                    .parse()
+                    .map_err(|error| format!("--edits: {error}"))?
+            }
+            "--timeout-ms" => {
+                out.timeout = Duration::from_millis(
+                    args.next()
+                        .ok_or("--timeout-ms needs milliseconds")?
+                        .parse()
+                        .map_err(|error| format!("--timeout-ms: {error}"))?,
+                )
+            }
             "--mesh" => out.mesh = true,
             "--target" => out.target = Some(args.next().ok_or("--target needs a node id")?),
             "--json" => out.json = true,
@@ -136,11 +149,15 @@ fn main() {
 fn run() -> Result<(), String> {
     let args = parse_args()?;
     let load_start = Instant::now();
-    let text = std::fs::read_to_string(&args.graph).map_err(|error| format!("{}: {error}", args.graph.display()))?;
-    let document: Value = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", args.graph.display()))?;
+    let text = std::fs::read_to_string(&args.graph)
+        .map_err(|error| format!("{}: {error}", args.graph.display()))?;
+    let document: Value = serde_json::from_str(&text)
+        .map_err(|error| format!("{}: {error}", args.graph.display()))?;
     let root = document.get("root").unwrap_or(&document);
-    let mut nodes = root.get("nodes").and_then(Value::as_array).cloned().ok_or("graph needs nodes[]")?;
-    let connections = root.get("connections").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut nodes =
+        root.get("nodes").and_then(Value::as_array).cloned().ok_or("graph needs nodes[]")?;
+    let connections =
+        root.get("connections").and_then(Value::as_array).cloned().unwrap_or_default();
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
     let target = match args.target {
         Some(target) => target,
@@ -149,14 +166,15 @@ fn run() -> Result<(), String> {
     if args.fillet_edits {
         return run_fillet_edits(&nodes, &connections, &target, args.timeout);
     }
-    let edit_index = nodes
-        .iter()
-        .position(|node| numeric_field(node).is_some());
+    let edit_index = nodes.iter().position(|node| numeric_field(node).is_some());
     let mesh_targets = if args.mesh { vec![target.clone()] } else { Vec::new() };
     let mut worker = Worker::spawn()?;
     let mut results = Vec::new();
 
-    let mut run_phase = |name: &str, nodes: &[Value], worker: &mut Worker| -> Result<Value, String> {
+    let mut run_phase = |name: &str,
+                         nodes: &[Value],
+                         worker: &mut Worker|
+     -> Result<Value, String> {
         let keyed = keyed_nodes(nodes, &connections);
         let request = json!({
             "requestId": 1,
@@ -169,7 +187,8 @@ fn run() -> Result<(), String> {
         let started = Instant::now();
         let response = worker.request(&request, args.timeout)?;
         let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let errors = response.get("nodeErrors").and_then(Value::as_object).cloned().unwrap_or_default();
+        let errors =
+            response.get("nodeErrors").and_then(Value::as_object).cloned().unwrap_or_default();
         let entry = json!({
             "phase": name,
             "wallMs": wall_ms,
@@ -212,8 +231,15 @@ fn run() -> Result<(), String> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?);
     } else {
-        println!("graph: {}  target: {}  load: {load_ms:.1} ms", args.graph.display(), summary["target"].as_str().unwrap_or(""));
-        println!("{:<28} {:>10} {:>12} {:>10} {:>10}", "phase", "wall ms", "eval ms", "triangles", "cache");
+        println!(
+            "graph: {}  target: {}  load: {load_ms:.1} ms",
+            args.graph.display(),
+            summary["target"].as_str().unwrap_or("")
+        );
+        println!(
+            "{:<28} {:>10} {:>12} {:>10} {:>10}",
+            "phase", "wall ms", "eval ms", "triangles", "cache"
+        );
         for phase in summary["phases"].as_array().into_iter().flatten() {
             println!(
                 "{:<28} {:>10.1} {:>12.1} {:>10} {:>10}",
@@ -221,7 +247,11 @@ fn run() -> Result<(), String> {
                 phase["wallMs"].as_f64().unwrap_or(0.0),
                 phase["evaluationMs"].as_f64().unwrap_or(0.0),
                 phase["triangles"].as_u64().unwrap_or(0),
-                format!("{}/{}", phase["cacheHit"].as_u64().unwrap_or(0), phase["cacheMiss"].as_u64().unwrap_or(0)),
+                format!(
+                    "{}/{}",
+                    phase["cacheHit"].as_u64().unwrap_or(0),
+                    phase["cacheMiss"].as_u64().unwrap_or(0)
+                ),
             );
         }
         if !summary["ok"].as_bool().unwrap_or(false) {
@@ -240,20 +270,14 @@ fn run_fillet_edits(
     target: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    use nodecraft_engine::kernel_pool::set_current_revision_token;
     use nodecraft_engine::CancelToken;
+    use nodecraft_engine::kernel_pool::set_current_revision_token;
     let fillet = nodes
         .iter()
         .position(|node| node.get("type").and_then(Value::as_str) == Some("fillet"))
         .ok_or("graph has no fillet node")?;
     let mut nodes = nodes.to_vec();
-    let edits: [(f64, &str); 5] = [
-        (1.0, ""),
-        (1.2, ""),
-        (1.4, ""),
-        (1.6, ""),
-        (1.6, "G2"),
-    ];
+    let edits: [(f64, &str); 5] = [(1.0, ""), (1.2, ""), (1.4, ""), (1.6, ""), (1.6, "G2")];
     let (tx, rx) = std::sync::mpsc::channel();
     let mut previous: Option<CancelToken> = None;
     for (index, (length, continuity)) in edits.iter().copied().enumerate() {
@@ -279,13 +303,27 @@ fn run_fillet_edits(
         std::thread::spawn(move || {
             set_current_revision_token(token.clone());
             let started = Instant::now();
-            let output = nodecraft_engine::evaluate_exact(request, nodecraft_engine::EngineCache::new(), None);
-            let _ = tx.send((index + 1, length, continuity, token.is_cancelled(), started.elapsed(), output.response.node_errors.len()));
+            let output = nodecraft_engine::evaluate_exact(
+                request,
+                nodecraft_engine::EngineCache::new(),
+                None,
+            );
+            let _ = tx.send((
+                index + 1,
+                length,
+                continuity,
+                token.is_cancelled(),
+                started.elapsed(),
+                output.response.node_errors.len(),
+            ));
         });
         std::thread::sleep(Duration::from_millis(30));
     }
     drop(tx);
-    println!("{:<5} {:>6} {:>4} {:>10} {:>9} {:>8}", "edit", "size", "cont", "cancelled", "wall ms", "errors");
+    println!(
+        "{:<5} {:>6} {:>4} {:>10} {:>9} {:>8}",
+        "edit", "size", "cont", "cancelled", "wall ms", "errors"
+    );
     let mut seen = 0;
     let mut last_result = None;
     while seen < edits.len() {
@@ -306,7 +344,11 @@ fn run_fillet_edits(
                 );
             }
             Err(_) => {
-                println!("edit {}: TIMEOUT after {:.0} ms", seen + 1, timeout.as_secs_f64() * 1000.0);
+                println!(
+                    "edit {}: TIMEOUT after {:.0} ms",
+                    seen + 1,
+                    timeout.as_secs_f64() * 1000.0
+                );
                 break;
             }
         }
@@ -319,7 +361,8 @@ fn run_fillet_edits(
 }
 
 fn terminal_target(nodes: &[Value], connections: &[Value]) -> Option<String> {
-    let sources: std::collections::BTreeSet<&str> = connections.iter().filter_map(|link| link.get("from").and_then(Value::as_str)).collect();
+    let sources: std::collections::BTreeSet<&str> =
+        connections.iter().filter_map(|link| link.get("from").and_then(Value::as_str)).collect();
     nodes
         .iter()
         .filter_map(|node| node.get("id").and_then(Value::as_str))
@@ -328,9 +371,10 @@ fn terminal_target(nodes: &[Value], connections: &[Value]) -> Option<String> {
 }
 
 fn numeric_field(node: &Value) -> Option<(String, f64)> {
-    node.get("values")?.as_object()?.iter().find_map(|(field, value)| {
-        value.as_f64().map(|value| (field.clone(), value))
-    })
+    node.get("values")?
+        .as_object()?
+        .iter()
+        .find_map(|(field, value)| value.as_f64().map(|value| (field.clone(), value)))
 }
 
 fn mesh_stat(response: &Value, key: &str) -> usize {
@@ -339,7 +383,9 @@ fn mesh_stat(response: &Value, key: &str) -> usize {
         .and_then(Value::as_object)
         .into_iter()
         .flatten()
-        .filter_map(|(_, payload)| payload.get("mesh").and_then(|mesh| mesh.get(key)).and_then(Value::as_array))
+        .filter_map(|(_, payload)| {
+            payload.get("mesh").and_then(|mesh| mesh.get(key)).and_then(Value::as_array)
+        })
         .map(Vec::len)
         .sum()
 }
@@ -351,10 +397,15 @@ fn keyed_nodes(nodes: &[Value], connections: &[Value]) -> Vec<Value> {
             link.get("to").and_then(Value::as_str),
             link.get("from").and_then(Value::as_str),
             link.get("in").and_then(Value::as_str).unwrap_or(""),
-        ) else { continue };
+        ) else {
+            continue;
+        };
         incoming.entry(to).or_default().push((input, from));
     }
-    let by_id: HashMap<&str, &Value> = nodes.iter().filter_map(|node| node.get("id").and_then(Value::as_str).map(|id| (id, node))).collect();
+    let by_id: HashMap<&str, &Value> = nodes
+        .iter()
+        .filter_map(|node| node.get("id").and_then(Value::as_str).map(|id| (id, node)))
+        .collect();
     let mut memo: HashMap<String, u64> = HashMap::new();
     let mut visiting = std::collections::HashSet::new();
     fn content_key(
@@ -364,12 +415,18 @@ fn keyed_nodes(nodes: &[Value], connections: &[Value]) -> Vec<Value> {
         memo: &mut HashMap<String, u64>,
         visiting: &mut std::collections::HashSet<String>,
     ) -> u64 {
-        if let Some(key) = memo.get(id) { return *key; }
-        if !visiting.insert(id.to_string()) { return 0; }
+        if let Some(key) = memo.get(id) {
+            return *key;
+        }
+        if !visiting.insert(id.to_string()) {
+            return 0;
+        }
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         if let Some(node) = by_id.get(id) {
             node.get("type").and_then(Value::as_str).unwrap_or("").hash(&mut hasher);
-            node.get("values").map_or_else(|| "null".to_owned(), |values| values.to_string()).hash(&mut hasher);
+            node.get("values")
+                .map_or_else(|| "null".to_owned(), |values| values.to_string())
+                .hash(&mut hasher);
         }
         let mut upstream = incoming.get(id).cloned().unwrap_or_default();
         upstream.sort();

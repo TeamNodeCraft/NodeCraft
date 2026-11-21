@@ -50,11 +50,7 @@ pub fn color_picker(
         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
         egui::Color32::WHITE,
     );
-    ui.painter().circle_stroke(
-        center,
-        radius,
-        egui::Stroke::new(1.0, color(style.border)),
-    );
+    ui.painter().circle_stroke(center, radius, egui::Stroke::new(1.0, color(style.border)));
 
     if let Some(pointer) = wheel_response.interact_pointer_pos() {
         let (hue, saturation) = wheel_hue_saturation(pointer, center, radius);
@@ -68,22 +64,13 @@ pub fn color_picker(
             (hsva.h * std::f32::consts::TAU).cos(),
             (hsva.h * std::f32::consts::TAU).sin(),
         ) * (hsva.s * radius);
-    let marker_colour = if hsva.v > 0.55 {
-        egui::Color32::BLACK
-    } else {
-        egui::Color32::WHITE
-    };
+    let marker_colour = if hsva.v > 0.55 { egui::Color32::BLACK } else { egui::Color32::WHITE };
     // Soft, centered shadow keeps the selector visible on bright and dark
     // wheel regions alike.
     for (radius, alpha) in [(10.0, 22), (9.0, 38), (8.0, 62), (7.0, 90)] {
-        ui.painter()
-            .circle_filled(marker, radius, egui::Color32::from_black_alpha(alpha));
+        ui.painter().circle_filled(marker, radius, egui::Color32::from_black_alpha(alpha));
     }
-    ui.painter().circle_stroke(
-        marker,
-        5.0,
-        egui::Stroke::new(2.0, marker_colour),
-    );
+    ui.painter().circle_stroke(marker, 5.0, egui::Stroke::new(2.0, marker_colour));
     ui.painter().circle_stroke(
         marker,
         7.0,
@@ -115,11 +102,8 @@ pub fn color_picker(
         size,
         style.icon,
     );
-    let out_alpha = if alpha_changed {
-        (alpha.clamp(0.0, 1.0) * 255.0).round() as u8
-    } else {
-        rgba[3]
-    };
+    let out_alpha =
+        if alpha_changed { (alpha.clamp(0.0, 1.0) * 255.0).round() as u8 } else { rgba[3] };
     if changed || alpha_changed {
         let out = if changed {
             hsva_rgba(hsva, out_alpha)
@@ -161,10 +145,9 @@ fn wheel_texture(
     match cached {
         Some(cached) if (cached.value - value).abs() <= 1.0e-4 => cached.texture,
         Some(mut cached) => {
-            cached.texture.set(
-                make_color_wheel_image(radius, size, value),
-                egui::TextureOptions::LINEAR,
-            );
+            cached
+                .texture
+                .set(make_color_wheel_image(radius, size, value), egui::TextureOptions::LINEAR);
             cached.value = value;
             let texture = cached.texture.clone();
             ctx.data_mut(|data| data.insert_temp(texture_id, cached));
@@ -177,13 +160,7 @@ fn wheel_texture(
                 egui::TextureOptions::LINEAR,
             );
             ctx.data_mut(|data| {
-                data.insert_temp(
-                    texture_id,
-                    WheelTexture {
-                        texture: texture.clone(),
-                        value,
-                    },
-                );
+                data.insert_temp(texture_id, WheelTexture { texture: texture.clone(), value });
             });
             texture
         }
@@ -204,8 +181,7 @@ fn make_color_wheel_image(radius: f32, size: f32, value: f32) -> egui::ColorImag
             if distance > radius_px {
                 pixels.push(egui::Color32::TRANSPARENT);
             } else {
-                let hue = dy.atan2(dx).rem_euclid(std::f32::consts::TAU)
-                    / std::f32::consts::TAU;
+                let hue = dy.atan2(dx).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
                 let saturation = (distance / radius_px).clamp(0.0, 1.0);
                 // The wheel is a value map, never an alpha preview.
                 pixels.push(egui::Color32::from(Hsva::new(hue, saturation, value, 1.0)));
@@ -229,8 +205,8 @@ fn picker_slider(
     const ICON: f32 = 16.0;
     const VALUE: f32 = 44.0;
     let svg = tint_svg(icon, icon_tint);
-    ui.spacing_mut().slider_width = (width - ICON - VALUE - ui.spacing().item_spacing.x * 2.0)
-        .max(60.0);
+    ui.spacing_mut().slider_width =
+        (width - ICON - VALUE - ui.spacing().item_spacing.x * 2.0).max(60.0);
     ui.horizontal(|ui| {
         ui.add(
             egui::Image::from_bytes(image_id, svg.into_bytes())
@@ -268,8 +244,7 @@ fn tint_svg(source: &[u8], colour: [u8; 4]) -> String {
 fn wheel_hue_saturation(pointer: egui::Pos2, center: egui::Pos2, radius: f32) -> (f32, f32) {
     let delta = pointer - center;
     let distance = delta.length();
-    let hue = delta.y.atan2(delta.x).rem_euclid(std::f32::consts::TAU)
-        / std::f32::consts::TAU;
+    let hue = delta.y.atan2(delta.x).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU;
     (hue, (distance / radius.max(0.001)).clamp(0.0, 1.0))
 }
 
@@ -296,11 +271,9 @@ mod tests {
     #[test]
     fn selector_clamps_outside_the_rim() {
         let center = egui::Pos2::new(100.0, 100.0);
-        let (_, saturation) =
-            wheel_hue_saturation(egui::Pos2::new(400.0, 100.0), center, 80.0);
+        let (_, saturation) = wheel_hue_saturation(egui::Pos2::new(400.0, 100.0), center, 80.0);
         assert_eq!(saturation, 1.0);
-        let (_, inside) =
-            wheel_hue_saturation(egui::Pos2::new(140.0, 100.0), center, 80.0);
+        let (_, inside) = wheel_hue_saturation(egui::Pos2::new(140.0, 100.0), center, 80.0);
         assert!((inside - 0.5).abs() < 1.0e-6);
     }
 

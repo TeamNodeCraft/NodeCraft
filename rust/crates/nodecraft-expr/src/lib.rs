@@ -27,7 +27,6 @@ impl std::error::Error for ExprError {}
 
 use std::collections::BTreeMap;
 
-
 const MAX_LEN: usize = 4096;
 const MAX_DEPTH: usize = 64;
 const MAX_ARGS: usize = 64;
@@ -35,7 +34,18 @@ const MAX_ARGS: usize = 64;
 /// An expression a feature holds, as the user wrote it (`2 * width + 5 mm`): kept as text and
 /// evaluated with the design's parameters. It is saved as a plain string, and reads as one
 /// (`&expr` is a `&str`); it changes only as a whole (`*expr = new.into()`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct Expr(String);
 
@@ -277,10 +287,18 @@ impl Value {
                 } else {
                     ""
                 };
-                return Err(ExprError::Expr(format!("expected {}, got {}{hint}", kind_word(k), self.describe())));
+                return Err(ExprError::Expr(format!(
+                    "expected {}, got {}{hint}",
+                    kind_word(k),
+                    self.describe()
+                )));
             }
         };
-        if out.is_finite() { Ok(out) } else { Err(ExprError::Expr("result is not a finite number".into())) }
+        if out.is_finite() {
+            Ok(out)
+        } else {
+            Err(ExprError::Expr("result is not a finite number".into()))
+        }
     }
     /// "a length", "an angle", "length²"…
     pub fn describe(&self) -> String {
@@ -292,7 +310,10 @@ impl Value {
                     1 => name.to_string(),
                     _ => format!("{name}^{n}"),
                 };
-                let parts: Vec<String> = [pow("length", self.len), pow("angle", self.ang)].into_iter().filter(|s| !s.is_empty()).collect();
+                let parts: Vec<String> = [pow("length", self.len), pow("angle", self.ang)]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 format!("a value in {}", parts.join("·"))
             }
         }
@@ -310,7 +331,12 @@ fn kind_word(k: Kind) -> &'static str {
 /// A number in the given unit (e.g. 50.8 mm in `in` is 2); unknown units leave it as is.
 pub fn value_in_unit(v: Value, unit: &str) -> f64 {
     match (unit_info(unit), v.kind()) {
-        (Some((Kind::Length, s)), Some(Kind::Length)) | (Some((Kind::Angle, s)), Some(Kind::Angle)) if s != 0.0 => v.v / s,
+        (Some((Kind::Length, s)), Some(Kind::Length))
+        | (Some((Kind::Angle, s)), Some(Kind::Angle))
+            if s != 0.0 =>
+        {
+            v.v / s
+        }
         _ => v.v,
     }
 }
@@ -348,14 +374,20 @@ pub fn is_reserved(name: &str) -> bool {
 /// Why `name` cannot be a parameter name, if it cannot.
 pub fn param_name_problem(name: &str) -> Option<String> {
     let mut cs = name.chars();
-    if !matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_') || !cs.all(|c| c.is_alphanumeric() || c == '_') {
-        return Some(format!("`{name}` is not a valid parameter name (letters, digits and _, starting with a letter)"));
+    if !matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+        || !cs.all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Some(format!(
+            "`{name}` is not a valid parameter name (letters, digits and _, starting with a letter)"
+        ));
     }
     if name.len() > 64 {
         return Some("parameter names are at most 64 characters".into());
     }
     match reserved_kind(name) {
-        Some("constant") => Some(format!("`{name}` is a constant, so it cannot be a parameter name")),
+        Some("constant") => {
+            Some(format!("`{name}` is a constant, so it cannot be a parameter name"))
+        }
         Some(kind) => Some(format!("`{name}` is a {kind} name, so it cannot be a parameter name")),
         None => None,
     }
@@ -388,7 +420,8 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, ExprError> {
     while let Some(&(_, c)) = cs.get(i) {
         if c.is_whitespace() {
             i += 1;
-        } else if c.is_ascii_digit() || c == '.' || leading_decimal_comma(&cs, i, depth, out.last()) {
+        } else if c.is_ascii_digit() || c == '.' || leading_decimal_comma(&cs, i, depth, out.last())
+        {
             let st = i;
             // A leading decimal comma (`,5` for 0,5, #2966) starts the number as `.5` would.
             let leading_comma = c == ',';
@@ -403,7 +436,13 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, ExprError> {
             // them a comma separates a function's arguments: `max(1,2)`).
             let digit = |k: usize| cs.get(k).is_some_and(|(_, c)| c.is_ascii_digit());
             let has_point = cs.get(st..i).is_some_and(|ds| ds.iter().any(|(_, c)| *c == '.'));
-            if depth == 0 && !leading_comma && !has_point && digit(i.wrapping_sub(1)) && cs.get(i).is_some_and(|(_, c)| *c == ',') && digit(i + 1) {
+            if depth == 0
+                && !leading_comma
+                && !has_point
+                && digit(i.wrapping_sub(1))
+                && cs.get(i).is_some_and(|(_, c)| *c == ',')
+                && digit(i + 1)
+            {
                 i += 1;
                 while digit(i) {
                     i += 1;
@@ -421,7 +460,10 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, ExprError> {
                 }
             }
             let t = s.get(at(st)..at(i)).unwrap_or_default();
-            let v: f64 = t.replace(',', ".").parse().map_err(|_| ExprError::Expr(format!("bad number `{t}`")))?;
+            let v: f64 = t
+                .replace(',', ".")
+                .parse()
+                .map_err(|_| ExprError::Expr(format!("bad number `{t}`")))?;
             // A mixed number, as imperial sizes are written (`2 1/8"` is 2.125 in, #1802): a whole
             // number, then a proper fraction of whole numbers, is one value, not `2 × 1/8`.
             if t.chars().all(|c| c.is_ascii_digit())
@@ -437,7 +479,11 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, ExprError> {
             while cs.get(i).is_some_and(|(_, c)| c.is_alphanumeric() || *c == '_') {
                 i += 1;
             }
-            out.push((Tok::Id(s.get(at(st)..at(i)).unwrap_or_default().to_string()), at(st), at(i)));
+            out.push((
+                Tok::Id(s.get(at(st)..at(i)).unwrap_or_default().to_string()),
+                at(st),
+                at(i),
+            ));
         } else if c == '°' {
             out.push((Tok::Id("deg".into()), at(i), at(i + 1)));
             i += 1;
@@ -481,7 +527,12 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, ExprError> {
 /// comma), be followed by a digit, and stand where an operand is expected: at the start or right
 /// after `+ - * / ^`. A comma after a number, name, `)` or `%` keeps its meaning (`2 ,5` and
 /// `1,5,3` stay errors).
-fn leading_decimal_comma(cs: &[(usize, char)], i: usize, depth: usize, prev: Option<&(Tok, usize, usize)>) -> bool {
+fn leading_decimal_comma(
+    cs: &[(usize, char)],
+    i: usize,
+    depth: usize,
+    prev: Option<&(Tok, usize, usize)>,
+) -> bool {
     depth == 0
         && cs.get(i).is_some_and(|(_, c)| *c == ',')
         && cs.get(i + 1).is_some_and(|(_, c)| c.is_ascii_digit())
@@ -497,7 +548,9 @@ fn leading_decimal_comma(cs: &[(usize, char)], i: usize, depth: usize, prev: Opt
 /// decimal comma outside parentheses: `2 1/8,5`). Its value and where it ends. `depth`: the
 /// parentheses open there (inside them a comma separates arguments: `max(2 1/8,1)`).
 fn mixed_fraction(cs: &[(usize, char)], mut i: usize, depth: usize) -> Option<(f64, usize)> {
-    let digits = |from: usize| cs.get(from..).map_or(0, |rest| rest.iter().take_while(|(_, c)| c.is_ascii_digit()).count());
+    let digits = |from: usize| {
+        cs.get(from..).map_or(0, |rest| rest.iter().take_while(|(_, c)| c.is_ascii_digit()).count())
+    };
     let space = i;
     while cs.get(i).is_some_and(|(_, c)| *c == ' ' || *c == '\t') {
         i += 1;
@@ -510,8 +563,11 @@ fn mixed_fraction(cs: &[(usize, char)], mut i: usize, depth: usize) -> Option<(f
     let end = i + numerator + 1 + denominator;
     let next = |k: usize| cs.get(end + k).map(|(_, c)| *c);
     let continues = matches!(next(0), Some('.'))
-        || (depth == 0 && matches!(next(0), Some(',')) && next(1).is_some_and(|c| c.is_ascii_digit()))
-        || (matches!(next(0), Some('e' | 'E')) && next(1).is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+'));
+        || (depth == 0
+            && matches!(next(0), Some(','))
+            && next(1).is_some_and(|c| c.is_ascii_digit()))
+        || (matches!(next(0), Some('e' | 'E'))
+            && next(1).is_some_and(|c| c.is_ascii_digit() || c == '-' || c == '+'));
     if denominator == 0 || continues {
         return None;
     }
@@ -619,7 +675,8 @@ pub fn is_bare_number(s: &str) -> bool {
 /// only; whether the name is free or reserved is `param_name_problem`'s business.
 fn is_name_shaped(s: &str) -> bool {
     let mut cs = s.chars();
-    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_') && cs.all(|c| c.is_alphanumeric() || c == '_')
+    matches!(cs.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && cs.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// A value typed as a definition, `name = expression` (or `#name = expression`, #2371): the name
@@ -663,7 +720,11 @@ impl Parser<'_> {
     }
     fn enter(&mut self) -> Result<(), ExprError> {
         self.depth += 1;
-        if self.depth > MAX_DEPTH { Err(ExprError::Expr("expression nested too deeply".into())) } else { Ok(()) }
+        if self.depth > MAX_DEPTH {
+            Err(ExprError::Expr("expression nested too deeply".into()))
+        } else {
+            Ok(())
+        }
     }
     fn expr(&mut self) -> Result<Value, ExprError> {
         self.enter()?;
@@ -739,7 +800,8 @@ impl Parser<'_> {
             // `1/2"` and `1/2 in` are half an inch (as the mixed number `2 1/8"` is one value).
             // After a division only written closed up: `1 in / 1/2 in` is 2, but
             // `width / 10 / 2 mm` is (width / 10) / 2 mm.
-            if let (Some(Tok::Op('/')), Some(Tok::Num(d))) = (self.peek(), self.toks.get(self.pos + 1))
+            if let (Some(Tok::Op('/')), Some(Tok::Num(d))) =
+                (self.peek(), self.toks.get(self.pos + 1))
                 && self.unit_at(self.pos + 2)
                 && (!self.after_division(at) || self.closed_up(at, self.pos + 1))
             {
@@ -776,7 +838,8 @@ impl Parser<'_> {
     }
     /// Whether the token at `i` is a unit name, not called as a function.
     fn unit_at(&self, i: usize) -> bool {
-        matches!(self.toks.get(i), Some(Tok::Id(id)) if unit(id).is_some()) && !matches!(self.toks.get(i + 1), Some(Tok::Op('(')))
+        matches!(self.toks.get(i), Some(Tok::Id(id)) if unit(id).is_some())
+            && !matches!(self.toks.get(i + 1), Some(Tok::Op('(')))
     }
     fn atom(&mut self) -> Result<Value, ExprError> {
         match self.next() {
@@ -795,13 +858,19 @@ impl Parser<'_> {
                     if !matches!(self.peek(), Some(Tok::Op(')'))) {
                         loop {
                             if args.len() >= MAX_ARGS {
-                                return Err(ExprError::Expr(format!("too many arguments to `{id}`")));
+                                return Err(ExprError::Expr(format!(
+                                    "too many arguments to `{id}`"
+                                )));
                             }
                             args.push(self.expr()?);
                             match self.next() {
                                 Some(Tok::Op(',')) => continue,
                                 Some(Tok::Op(')')) => break,
-                                _ => return Err(ExprError::Expr(format!("missing `)` after the arguments of `{id}`"))),
+                                _ => {
+                                    return Err(ExprError::Expr(format!(
+                                        "missing `)` after the arguments of `{id}`"
+                                    )));
+                                }
                             }
                         }
                     } else {
@@ -843,7 +912,12 @@ fn add(a: Value, b: Value, sub: bool, d: Defaults) -> Result<Value, ExprError> {
     } else if b.unitless() || (a.len == b.len && a.ang == b.ang) {
         (a.len, a.ang)
     } else {
-        return Err(ExprError::Expr(format!("cannot {} {} and {}", if sub { "subtract" } else { "add" }, a.describe(), b.describe())));
+        return Err(ExprError::Expr(format!(
+            "cannot {} {} and {}",
+            if sub { "subtract" } else { "add" },
+            a.describe(),
+            b.describe()
+        )));
     };
     let (x, y) = (scale_bare(a, len, ang, d), scale_bare(b, len, ang, d));
     Ok(Value { v: if sub { x - y } else { x + y }, len, ang })
@@ -868,7 +942,11 @@ fn mul(a: Value, b: Value, div: bool) -> Result<Value, ExprError> {
 fn modulo(a: Value, b: Value, d: Defaults) -> Result<Value, ExprError> {
     let (len, ang) = if a.unitless() { (b.len, b.ang) } else { (a.len, a.ang) };
     if !(a.unitless() || b.unitless() || (a.len == b.len && a.ang == b.ang)) {
-        return Err(ExprError::Expr(format!("cannot take {} modulo {}", a.describe(), b.describe())));
+        return Err(ExprError::Expr(format!(
+            "cannot take {} modulo {}",
+            a.describe(),
+            b.describe()
+        )));
     }
     let (x, y) = (scale_bare(a, len, ang, d), scale_bare(b, len, ang, d));
     if y == 0.0 {
@@ -879,14 +957,23 @@ fn modulo(a: Value, b: Value, d: Defaults) -> Result<Value, ExprError> {
 
 fn pow(base: Value, e: Value) -> Result<Value, ExprError> {
     if !e.unitless() {
-        return Err(ExprError::Expr(format!("an exponent must be a unit-less number, not {}", e.describe())));
+        return Err(ExprError::Expr(format!(
+            "an exponent must be a unit-less number, not {}",
+            e.describe()
+        )));
     }
     let n = e.v;
     let k = if (n - n.round()).abs() < 1e-12 && n.abs() < 16.0 { n.round() as i8 } else { 0 };
     if !base.unitless() && k == 0 {
-        return Err(ExprError::Expr("a value with units needs a small whole-number exponent".into()));
+        return Err(ExprError::Expr(
+            "a value with units needs a small whole-number exponent".into(),
+        ));
     }
-    Ok(Value { v: base.v.powf(n), len: dims(0, base.len.saturating_mul(k), false)?, ang: dims(0, base.ang.saturating_mul(k), false)? })
+    Ok(Value {
+        v: base.v.powf(n),
+        len: dims(0, base.len.saturating_mul(k), false)?,
+        ang: dims(0, base.ang.saturating_mul(k), false)?,
+    })
 }
 
 fn call(f: &str, args: &[Value], d: Defaults) -> Result<Value, ExprError> {
@@ -907,7 +994,13 @@ fn call(f: &str, args: &[Value], d: Defaults) -> Result<Value, ExprError> {
             Err(ExprError::Expr(format!("`{f}` needs an angle, not {}", a.describe())))
         }
     };
-    let num = |a: Value| if a.unitless() { Ok(a.v) } else { Err(ExprError::Expr(format!("`{f}` needs a unit-less number, not {}", a.describe()))) };
+    let num = |a: Value| {
+        if a.unitless() {
+            Ok(a.v)
+        } else {
+            Err(ExprError::Expr(format!("`{f}` needs a unit-less number, not {}", a.describe())))
+        }
+    };
     let same = |a: Value, b: Value| -> Result<(Value, Value), ExprError> {
         // Bring a bare number to the other operand's unit (as in `a + b`).
         let z = add(a, Value { v: 0.0, ..b }, false, d)?;
@@ -988,7 +1081,9 @@ fn call(f: &str, args: &[Value], d: Defaults) -> Result<Value, ExprError> {
             modulo(a, b, d)?
         }
         "min" | "max" => {
-            let Some(first) = args.first().copied() else { return Err(ExprError::Expr(format!("`{f}` needs arguments"))) };
+            let Some(first) = args.first().copied() else {
+                return Err(ExprError::Expr(format!("`{f}` needs arguments")));
+            };
             let mut acc = first;
             for a in args.iter().skip(1) {
                 let (x, y) = same(*a, acc)?;
@@ -1004,13 +1099,21 @@ fn call(f: &str, args: &[Value], d: Defaults) -> Result<Value, ExprError> {
 }
 
 /// Evaluate an expression; `lookup` resolves parameter names. Bare numbers are mm / degrees.
-pub fn eval_with(s: &str, lookup: &dyn Fn(&str) -> Result<Value, ExprError>) -> Result<Value, ExprError> {
+pub fn eval_with(
+    s: &str,
+    lookup: &dyn Fn(&str) -> Result<Value, ExprError>,
+) -> Result<Value, ExprError> {
     eval_with_defaults(s, lookup, Defaults::default())
 }
 
 /// Evaluate an expression reading bare numbers next to lengths / angles in `defaults`.
-pub fn eval_with_defaults(s: &str, lookup: &dyn Fn(&str) -> Result<Value, ExprError>, defaults: Defaults) -> Result<Value, ExprError> {
-    let (toks, spans): (Vec<Tok>, Vec<(usize, usize)>) = lex_spans(s)?.into_iter().map(|(t, a, b)| (t, (a, b))).unzip();
+pub fn eval_with_defaults(
+    s: &str,
+    lookup: &dyn Fn(&str) -> Result<Value, ExprError>,
+    defaults: Defaults,
+) -> Result<Value, ExprError> {
+    let (toks, spans): (Vec<Tok>, Vec<(usize, usize)>) =
+        lex_spans(s)?.into_iter().map(|(t, a, b)| (t, (a, b))).unzip();
     if toks.is_empty() {
         return Err(ExprError::Expr("empty expression".into()));
     }
@@ -1036,7 +1139,10 @@ pub struct ParamDef {
 /// Evaluate all parameters in dependency order: values (mm / rad / unit-less) and errors by
 /// name. Circular references are reported with their path (`a → b → a`). `doc_len` is the
 /// document's length unit in mm (bare numbers of unit-less-unit parameters next to lengths).
-pub fn eval_params(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value>, BTreeMap<String, String>) {
+pub fn eval_params(
+    params: &[ParamDef],
+    doc_len: f64,
+) -> (BTreeMap<String, Value>, BTreeMap<String, String>) {
     // Each command evaluates the design's parameters (every named feature input is one) several
     // times over, mostly unchanged: the last few results are kept (per thread) for the same
     // definitions, compared in full.
@@ -1068,7 +1174,10 @@ pub fn eval_params(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value
 }
 
 /// [`eval_params`], worked out.
-fn eval_params_uncached(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, Value>, BTreeMap<String, String>) {
+fn eval_params_uncached(
+    params: &[ParamDef],
+    doc_len: f64,
+) -> (BTreeMap<String, Value>, BTreeMap<String, String>) {
     let mut done: BTreeMap<String, Value> = BTreeMap::new();
     let mut errors: BTreeMap<String, String> = BTreeMap::new();
     let index: BTreeMap<&str, &ParamDef> = params.iter().map(|p| (p.name.as_str(), p)).collect();
@@ -1117,7 +1226,15 @@ fn eval_params_uncached(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, 
             // Most parameters are named feature inputs with a literal value ("10 mm"): those are
             // worked out once (per thread) rather than parsed again on every evaluation.
             None if vals.is_empty() => eval_constant(p, cx.doc_len),
-            None => eval_def(p, &|n| vals.get(n).copied().ok_or_else(|| ExprError::Expr(format!("unknown parameter `{n}`"))), cx.doc_len),
+            None => eval_def(
+                p,
+                &|n| {
+                    vals.get(n)
+                        .copied()
+                        .ok_or_else(|| ExprError::Expr(format!("unknown parameter `{n}`")))
+                },
+                cx.doc_len,
+            ),
         };
         match &r {
             Ok(v) => {
@@ -1125,12 +1242,21 @@ fn eval_params_uncached(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, 
             }
             Err(e) => {
                 let msg = e.to_string();
-                cx.errors.insert(name.to_string(), msg.strip_prefix("expression: ").unwrap_or(&msg).to_string());
+                cx.errors.insert(
+                    name.to_string(),
+                    msg.strip_prefix("expression: ").unwrap_or(&msg).to_string(),
+                );
             }
         }
         r
     }
-    let mut cx = Ctx { index, done: std::mem::take(&mut done), errors: std::mem::take(&mut errors), stack: Vec::new(), doc_len };
+    let mut cx = Ctx {
+        index,
+        done: std::mem::take(&mut done),
+        errors: std::mem::take(&mut errors),
+        stack: Vec::new(),
+        doc_len,
+    };
     for p in params {
         cx.stack.clear();
         let _ = visit(&p.name, &mut cx);
@@ -1140,7 +1266,11 @@ fn eval_params_uncached(params: &[ParamDef], doc_len: f64) -> (BTreeMap<String, 
 
 /// One parameter's value: its expression in its unit, with the values of the parameters it
 /// refers to from `lookup`.
-pub fn eval_def(p: &ParamDef, lookup: &dyn Fn(&str) -> Result<Value, ExprError>, doc_len: f64) -> Result<Value, ExprError> {
+pub fn eval_def(
+    p: &ParamDef,
+    lookup: &dyn Fn(&str) -> Result<Value, ExprError>,
+    doc_len: f64,
+) -> Result<Value, ExprError> {
     let (kind, _) = unit_info(&p.unit).unwrap_or((Kind::Length, 1.0));
     let defaults = Defaults::for_unit(&p.unit, doc_len);
     let x = eval_with_defaults(&p.expr, lookup, defaults)?.to_kind_in(kind, defaults)?;
@@ -1214,7 +1344,11 @@ mod tests {
         // Inside parentheses a comma still separates a function's arguments.
         assert_eq!(ev("max(1,2)", Kind::Unitless).unwrap(), 2.0);
         assert_eq!(ev("max(1 mm, 3, 2)", Kind::Length).unwrap(), 3.0);
-        assert_eq!(ev("(2,5)", Kind::Unitless).ok(), None, "a comma inside parentheses is not a decimal comma");
+        assert_eq!(
+            ev("(2,5)", Kind::Unitless).ok(),
+            None,
+            "a comma inside parentheses is not a decimal comma"
+        );
         // Not between two digits, or a second comma: still an error.
         for bad in ["2,", "2 ,5", "2, 5", "1,5,3", "1.5,3", ",5,3", ",5.3", "width ,5", "(1) ,5"] {
             assert!(ev(bad, Kind::Unitless).is_err(), "{bad}");
@@ -1231,7 +1365,11 @@ mod tests {
         assert_eq!(ev("width - ,25", Kind::Length).unwrap(), 39.75);
         // Function arguments are still separated by commas.
         assert_eq!(ev("max(1,5)", Kind::Unitless).unwrap(), 5.0);
-        assert_eq!(ev("max(,5; 2)", Kind::Unitless).ok(), None, "inside parentheses a comma is a separator");
+        assert_eq!(
+            ev("max(,5; 2)", Kind::Unitless).ok(),
+            None,
+            "inside parentheses a comma is a separator"
+        );
     }
 
     #[test]
@@ -1262,11 +1400,21 @@ mod tests {
         assert_eq!(ev("max(2 1/8,1)", Kind::Unitless).unwrap(), 2.125);
         assert_eq!(ev("2 1/8,5", Kind::Unitless).unwrap(), 2.0 / 8.5);
         // Long numerators and denominators are compared as digits, not as rounded floats.
-        assert!((ev("2 9007199254740992/9007199254740993", Kind::Unitless).unwrap() - 3.0).abs() < 1e-12);
+        assert!(
+            (ev("2 9007199254740992/9007199254740993", Kind::Unitless).unwrap() - 3.0).abs()
+                < 1e-12
+        );
         assert_eq!(ev("2 007/8", Kind::Unitless).unwrap(), 2.875);
         assert_eq!(ev("-2 1/4", Kind::Unitless).unwrap(), -2.25);
         // Not a proper fraction of whole numbers after a whole number: as before.
-        for (s, v) in [("2 3/2", 3.0), ("2.5 1/2", 1.25), ("2 1/8.5", 2.0 / 8.5), ("2 1 / 8", 0.25), ("2 1/0", f64::INFINITY), ("1/8", 0.125)] {
+        for (s, v) in [
+            ("2 3/2", 3.0),
+            ("2.5 1/2", 1.25),
+            ("2 1/8.5", 2.0 / 8.5),
+            ("2 1 / 8", 0.25),
+            ("2 1/0", f64::INFINITY),
+            ("1/8", 0.125),
+        ] {
             assert_eq!(ev(s, Kind::Unitless).ok(), Some(v).filter(|v| v.is_finite()), "{s}");
         }
     }
@@ -1278,8 +1426,16 @@ mod tests {
         assert_eq!(ev("10mm/2mm", Kind::Unitless).unwrap(), 5.0);
         assert_eq!(ev("width / 4 mm", Kind::Unitless).unwrap(), 10.0);
         assert_eq!(ev("6 mm / 2 mm * 3", Kind::Unitless).unwrap(), 9.0);
-        assert!((ev("90 deg / 1 rad", Kind::Unitless).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
-        assert!((ev("(ang - 30 deg) / 1 rad * width", Kind::Length).unwrap() - 40.0 * 60f64.to_radians()).abs() < 1e-12);
+        assert!(
+            (ev("90 deg / 1 rad", Kind::Unitless).unwrap() - std::f64::consts::FRAC_PI_2).abs()
+                < 1e-12
+        );
+        assert!(
+            (ev("(ang - 30 deg) / 1 rad * width", Kind::Length).unwrap()
+                - 40.0 * 60f64.to_radians())
+            .abs()
+                < 1e-12
+        );
         assert_eq!(ev("1 in / 1 mm", Kind::Unitless).unwrap(), 25.4);
         assert_eq!(ev("2 1/2 in / 1 in", Kind::Unitless).unwrap(), 2.5);
         assert_eq!(ev("1\" / 1 mm", Kind::Unitless).unwrap(), 25.4);
@@ -1324,11 +1480,19 @@ mod tests {
         assert_eq!(ev("min(1 in, 30 mm)", Kind::Length).unwrap(), 25.4);
         assert_eq!(ev("1e-3 m", Kind::Length).unwrap(), 1.0);
         assert_eq!(ev("1 ft - 1 in", Kind::Length).unwrap(), 304.8 - 25.4);
-        assert!((ev("atan2(1 mm, 1 mm)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
-        assert!((ev("atan2(1; 1)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
+        assert!(
+            (ev("atan2(1 mm, 1 mm)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_4).abs()
+                < 1e-12
+        );
+        assert!(
+            (ev("atan2(1; 1)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_4).abs() < 1e-12
+        );
         assert!((ev("exp(ln(5))", Kind::Unitless).unwrap() - 5.0).abs() < 1e-12);
         assert!((ev("log(1000)", Kind::Unitless).unwrap() - 3.0).abs() < 1e-12);
-        assert_eq!(ev("floor(2.7) + ceil(0.2) + round(1.5) + abs(-1)", Kind::Unitless).unwrap(), 6.0);
+        assert_eq!(
+            ev("floor(2.7) + ceil(0.2) + round(1.5) + abs(-1)", Kind::Unitless).unwrap(),
+            6.0
+        );
         assert!((ev("1 rad", Kind::Angle).unwrap() - 1.0).abs() < 1e-12);
         assert!((ev("acos(0)", Kind::Angle).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
         assert_eq!(ev("2 × 3 ÷ 4 − 1", Kind::Unitless).unwrap(), 0.5);
@@ -1341,7 +1505,11 @@ mod tests {
     #[test]
     fn a_length_where_a_count_is_expected_says_to_divide_by_a_length() {
         let e = ev("width / 2", Kind::Unitless).unwrap_err().to_string();
-        assert!(e.contains("expected a unit-less number, got a length") && e.contains("divide by a length"), "{e}");
+        assert!(
+            e.contains("expected a unit-less number, got a length")
+                && e.contains("divide by a length"),
+            "{e}"
+        );
         assert_eq!(ev("floor(width / (6 mm))", Kind::Unitless).unwrap(), 6.0);
         let e = ev("45 deg", Kind::Unitless).unwrap_err().to_string();
         assert!(!e.contains("divide"), "{e}");
@@ -1352,7 +1520,12 @@ mod tests {
         assert!(ev("width + ang", Kind::Length).is_err());
         let e = ev("10 mm + 5 deg", Kind::Length).unwrap_err().to_string();
         assert!(e.contains("cannot add a length and an angle"), "{e}");
-        assert!(ev("width * width", Kind::Length).unwrap_err().to_string().contains("expected a length"));
+        assert!(
+            ev("width * width", Kind::Length)
+                .unwrap_err()
+                .to_string()
+                .contains("expected a length")
+        );
         assert!(ev("nope", Kind::Length).is_err());
         assert!(ev("(1", Kind::Length).is_err());
         assert!(ev("1 / 0", Kind::Length).is_err());
@@ -1378,8 +1551,12 @@ mod tests {
     /// Hostile input never panics: random strings over the expression alphabet.
     #[test]
     fn fuzz_never_panics() {
-        let alphabet: Vec<char> = "0123456789.eE+-*/^(),;% abcdmnpitrsgxw_°×÷−µ\u{0}\u{7f}é\"'".chars().collect();
-        let words = ["width", "sin(", "atan2(", "mm", "deg", "pi", "1e308", "1e-400", "(", ")", "^", "max(", "in", "count", ","];
+        let alphabet: Vec<char> =
+            "0123456789.eE+-*/^(),;% abcdmnpitrsgxw_°×÷−µ\u{0}\u{7f}é\"'".chars().collect();
+        let words = [
+            "width", "sin(", "atan2(", "mm", "deg", "pi", "1e308", "1e-400", "(", ")", "^", "max(",
+            "in", "count", ",",
+        ];
         let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut rnd = move || {
             seed ^= seed << 13;
@@ -1408,12 +1585,21 @@ mod tests {
 
     #[test]
     fn params_in_order_with_cycles() {
-        let p = vec![def("b", "a * 2", "mm"), def("a", "10 mm", "mm"), def("x", "y", "mm"), def("y", "z + 1", "mm"), def("z", "x", "mm")];
+        let p = vec![
+            def("b", "a * 2", "mm"),
+            def("a", "10 mm", "mm"),
+            def("x", "y", "mm"),
+            def("y", "z + 1", "mm"),
+            def("z", "x", "mm"),
+        ];
         let (v, e) = eval_params(&p, 1.0);
         assert_eq!(v.get("b").unwrap().v, 20.0);
         assert!(e.contains_key("x") && e.contains_key("y") && e.contains_key("z"));
         assert!(e["x"].contains("circular reference: x → y → z → x"), "{}", e["x"]);
-        assert_eq!(references("2*width + sin(ang) + 3 mm + pi"), vec!["width".to_string(), "ang".to_string()]);
+        assert_eq!(
+            references("2*width + sin(ang) + 3 mm + pi"),
+            vec!["width".to_string(), "ang".to_string()]
+        );
         let (_, e) = eval_params(&[def("s", "s", "mm")], 1.0);
         assert!(e["s"].contains("s → s"));
     }
@@ -1444,12 +1630,23 @@ mod tests {
 
     #[test]
     fn rename_and_literals() {
-        assert_eq!(rename_reference("width*2 + widths + width(1) + sin(width)", "width", "w"), "w*2 + widths + width(1) + sin(w)");
+        assert_eq!(
+            rename_reference("width*2 + widths + width(1) + sin(width)", "width", "w"),
+            "w*2 + widths + width(1) + sin(w)"
+        );
         assert_eq!(rename_reference("10 mm", "mm", "x"), "10 mm");
         assert!(is_literal("20") && is_literal("-1.5 in") && is_literal("3 deg"));
         assert!(!is_literal("d1") && !is_literal("2 * 3") && !is_literal("2 width"));
-        assert!(is_bare_number(" -1.5 ") && is_bare_number("+2") && !is_bare_number("20 mm") && !is_bare_number("(2)"));
-        assert_eq!((length_unit_or_mm(" in "), length_unit_or_mm("deg"), length_unit_or_mm("")), ("in", "mm", "mm"));
+        assert!(
+            is_bare_number(" -1.5 ")
+                && is_bare_number("+2")
+                && !is_bare_number("20 mm")
+                && !is_bare_number("(2)")
+        );
+        assert_eq!(
+            (length_unit_or_mm(" in "), length_unit_or_mm("deg"), length_unit_or_mm("")),
+            ("in", "mm", "mm")
+        );
     }
 
     /// `name = expression` splits at the first `=` when the left side is shaped like a name; the
@@ -1507,7 +1704,13 @@ mod tests {
     #[test]
     fn a_reserved_name_is_refused_by_its_kind() {
         assert_eq!(
-            (reserved_kind("mm"), reserved_kind("deg"), reserved_kind("pi"), reserved_kind("sin"), reserved_kind("width")),
+            (
+                reserved_kind("mm"),
+                reserved_kind("deg"),
+                reserved_kind("pi"),
+                reserved_kind("sin"),
+                reserved_kind("width")
+            ),
             (Some("unit"), Some("unit"), Some("constant"), Some("function"), None)
         );
         let problem = |n: &str| param_name_problem(n).unwrap_or_default();
@@ -1528,17 +1731,30 @@ mod tests {
         let mm = |v: &BTreeMap<String, Value>, n: &str| v.get(n).map(|x| x.v);
         let mut defs = vec![def("a", "10 mm", "mm"), def("b", "a * 2", "mm"), def("c", "5", "mm")];
         let (first, _) = eval_params(&defs, 1.0);
-        assert_eq!((mm(&first, "a"), mm(&first, "b"), mm(&first, "c")), (Some(10.0), Some(20.0), Some(5.0)));
+        assert_eq!(
+            (mm(&first, "a"), mm(&first, "b"), mm(&first, "c")),
+            (Some(10.0), Some(20.0), Some(5.0))
+        );
         defs[0].expr = "12 mm".into();
         let (edited, _) = eval_params(&defs, 1.0);
         assert_eq!((mm(&edited, "a"), mm(&edited, "b")), (Some(12.0), Some(24.0)));
         defs[0].expr = "10 mm".into();
         assert_eq!(eval_params(&defs, 1.0).0, first, "back as it was");
         // Whatever changes, the kept answer is the one worked out afresh.
-        for (unit, expr, len) in [("mm", "5", 25.4), ("", "5", 25.4), ("in", "5", 1.0), ("deg", "5", 1.0), ("", "5", 1.0)] {
+        for (unit, expr, len) in [
+            ("mm", "5", 25.4),
+            ("", "5", 25.4),
+            ("in", "5", 1.0),
+            ("deg", "5", 1.0),
+            ("", "5", 1.0),
+        ] {
             defs[2].unit = unit.into();
             defs[2].expr = expr.into();
-            assert_eq!(eval_params(&defs, len), eval_params_uncached(&defs, len), "{unit} {expr} {len}");
+            assert_eq!(
+                eval_params(&defs, len),
+                eval_params_uncached(&defs, len),
+                "{unit} {expr} {len}"
+            );
         }
         defs[2].expr = "bad +".into();
         assert!(eval_params(&defs, 1.0).1.contains_key("c"));
@@ -1551,7 +1767,8 @@ mod fuzz_tests {
 
     #[test]
     fn malformed_inputs_do_not_panic() {
-        let alphabet: Vec<char> = "0123456789.+-*/^(),% mmcminchftdeg radpi sqrtmaxabc_\\[]{}^$?|:;\"'".chars().collect();
+        let alphabet: Vec<char> =
+            "0123456789.+-*/^(),% mmcminchftdeg radpi sqrtmaxabc_\\[]{}^$?|:;\"'".chars().collect();
         let mut seed = 0x1234_5678_9abc_def0u64;
         for _ in 0..50_000 {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);

@@ -36,7 +36,18 @@ impl GraphRuntime {
     #[must_use]
     pub fn new(document: GraphDocument) -> Self {
         let hashes = document.node_hashes().unwrap_or_default();
-        Self { session: Session::new(document), cache: EngineCache::new(), hashes, source_hashes: BTreeMap::new(), revision: 1, request_id: 1, view_targets: Vec::new(), selected: None, export_targets: Vec::new(), plans: nodecraft_display::PlanCache::new(1024) }
+        Self {
+            session: Session::new(document),
+            cache: EngineCache::new(),
+            hashes,
+            source_hashes: BTreeMap::new(),
+            revision: 1,
+            request_id: 1,
+            view_targets: Vec::new(),
+            selected: None,
+            export_targets: Vec::new(),
+            plans: nodecraft_display::PlanCache::new(1024),
+        }
     }
 
     /// Update the runtime importer-source hashes the next evaluation folds into
@@ -53,19 +64,29 @@ impl GraphRuntime {
     }
 
     #[must_use]
-    pub fn view_targets(&self) -> &[String] { &self.view_targets }
+    pub fn view_targets(&self) -> &[String] {
+        &self.view_targets
+    }
 
     /// Selected node is session runtime state used by view/proxy intent; it is not
     /// graph content and does not affect hashes or history.
-    pub fn set_selected(&mut self, selected: Option<String>) { self.selected = selected; }
+    pub fn set_selected(&mut self, selected: Option<String>) {
+        self.selected = selected;
+    }
 
     #[must_use]
-    pub fn selected(&self) -> Option<&str> { self.selected.as_deref() }
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
 
-    pub fn set_export_targets(&mut self, targets: Vec<String>) { self.export_targets = targets; }
+    pub fn set_export_targets(&mut self, targets: Vec<String>) {
+        self.export_targets = targets;
+    }
 
     #[must_use]
-    pub fn export_targets(&self) -> &[String] { &self.export_targets }
+    pub fn export_targets(&self) -> &[String] {
+        &self.export_targets
+    }
 
     /// Evaluation targets derived from view intent plus export roots. Missing and
     /// suppressed nodes are dropped; the engine evaluates each target's upstream
@@ -74,20 +95,33 @@ impl GraphRuntime {
     pub fn evaluation_targets(&self) -> Vec<String> {
         let mut targets = Vec::new();
         for id in self.view_targets.iter().chain(self.export_targets.iter()) {
-            if targets.contains(id) { continue; }
-            let Some(node) = self.session.document().nodes.iter().find(|node| &node.id == id) else { continue; };
-            if node.suppressed { continue; }
+            if targets.contains(id) {
+                continue;
+            }
+            let Some(node) = self.session.document().nodes.iter().find(|node| &node.id == id)
+            else {
+                continue;
+            };
+            if node.suppressed {
+                continue;
+            }
             targets.push(id.clone());
         }
         targets
     }
 
     #[must_use]
-    pub fn document(&self) -> &GraphDocument { self.session.document() }
+    pub fn document(&self) -> &GraphDocument {
+        self.session.document()
+    }
     #[must_use]
-    pub fn revision(&self) -> u64 { self.revision }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     #[must_use]
-    pub fn session(&self) -> &Session { &self.session }
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
 
     pub fn undo(&mut self) -> Result<Option<crate::Change>, SessionError> {
         self.session.undo()
@@ -101,10 +135,18 @@ impl GraphRuntime {
     pub fn apply_commands(&mut self, commands: &[Command]) -> Result<crate::Change, SessionError> {
         self.session.apply_commands(commands)
     }
-    pub fn apply_commands_coalesced(&mut self, commands: &[Command], coalesce_key: Option<&str>, coalesce_window: std::time::Duration) -> Result<crate::Change, SessionError> {
+    pub fn apply_commands_coalesced(
+        &mut self,
+        commands: &[Command],
+        coalesce_key: Option<&str>,
+        coalesce_window: std::time::Duration,
+    ) -> Result<crate::Change, SessionError> {
         self.session.apply_commands_coalesced(commands, coalesce_key, coalesce_window)
     }
-    pub fn apply_derived_commands(&mut self, commands: &[Command]) -> Result<crate::Change, SessionError> {
+    pub fn apply_derived_commands(
+        &mut self,
+        commands: &[Command],
+    ) -> Result<crate::Change, SessionError> {
         self.session.apply_derived_commands(commands)
     }
 
@@ -137,23 +179,46 @@ impl GraphRuntime {
         let grouped = crate::expand_groups(&document)?;
         let expanded = expand_linked_parts(&grouped, &mut stack)?;
         let expanded_hashes = expanded.node_hashes_with_sources(&self.source_hashes)?;
-        let nodes: Vec<Node> = expanded.nodes.iter().map(|node| {
-            let original = document.nodes.iter().find(|original| original.id == node.id);
-            let hash = original.and_then(|original| current_hashes.get(&original.id)).or_else(|| expanded_hashes.get(&node.id)).copied().unwrap_or(ContentHash(0));
-            let linked = original.is_some_and(|original| original.node_type == "linkedpart");
-            let dirty_node = linked || (original.is_some() && (force || current_hashes.get(&node.id) != self.hashes.get(&node.id)));
-            let state = if original.is_none() { "cached" } else if dirty_node { "dirty" } else { "cached" };
-            Node {
-                id: node.id.clone(),
-                node_type: node.node_type.clone(),
-                values: node.values.clone(),
-                suppressed: node.suppressed,
-                cache: Some(CacheState { key: Some(hash.to_hex()), state: Some(state.into()) }),
-            }
-        }).collect();
-        let connections: Vec<Connection> = expanded.connections.iter().map(|link| Connection {
-            from: link.from.clone(), to: link.to.clone(), input: link.input.clone(), out: link.out.clone(),
-        }).collect();
+        let nodes: Vec<Node> = expanded
+            .nodes
+            .iter()
+            .map(|node| {
+                let original = document.nodes.iter().find(|original| original.id == node.id);
+                let hash = original
+                    .and_then(|original| current_hashes.get(&original.id))
+                    .or_else(|| expanded_hashes.get(&node.id))
+                    .copied()
+                    .unwrap_or(ContentHash(0));
+                let linked = original.is_some_and(|original| original.node_type == "linkedpart");
+                let dirty_node = linked
+                    || (original.is_some()
+                        && (force || current_hashes.get(&node.id) != self.hashes.get(&node.id)));
+                let state = if original.is_none() {
+                    "cached"
+                } else if dirty_node {
+                    "dirty"
+                } else {
+                    "cached"
+                };
+                Node {
+                    id: node.id.clone(),
+                    node_type: node.node_type.clone(),
+                    values: node.values.clone(),
+                    suppressed: node.suppressed,
+                    cache: Some(CacheState { key: Some(hash.to_hex()), state: Some(state.into()) }),
+                }
+            })
+            .collect();
+        let connections: Vec<Connection> = expanded
+            .connections
+            .iter()
+            .map(|link| Connection {
+                from: link.from.clone(),
+                to: link.to.clone(),
+                input: link.input.clone(),
+                out: link.out.clone(),
+            })
+            .collect();
         let request = Request {
             request_id: self.request_id,
             tab_id: Some(document.id.clone()),
@@ -172,7 +237,8 @@ impl GraphRuntime {
             bypass_cache: false,
         };
         self.request_id += 1;
-        let output = nodecraft_engine::evaluate_exact(request, std::mem::take(&mut self.cache), progress);
+        let output =
+            nodecraft_engine::evaluate_exact(request, std::mem::take(&mut self.cache), progress);
         let quality = nodecraft_display::DisplayQuality::Full(mesh_tolerance.unwrap_or(0.35));
         let meshes = nodecraft_display::protocol_meshes_for_targets(
             mesh_targets,
@@ -193,7 +259,10 @@ impl GraphRuntime {
 /// V1 references are read-only: each linked document is loaded, recursively
 /// expanded, prefixed with `<link>::`, and its terminal shape nodes are connected
 /// to a synthetic `combine` node at the link node id.
-pub(crate) fn expand_linked_parts(document: &GraphDocument, stack: &mut Vec<String>) -> Result<GraphDocument, SessionError> {
+pub(crate) fn expand_linked_parts(
+    document: &GraphDocument,
+    stack: &mut Vec<String>,
+) -> Result<GraphDocument, SessionError> {
     expand_linked_parts_with(document, stack, &std::collections::BTreeMap::new())
 }
 
@@ -203,13 +272,26 @@ pub(crate) fn expand_linked_parts_with(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
 ) -> Result<GraphDocument, SessionError> {
     let mut expanded = document.clone();
-    let link_nodes: Vec<GraphNode> = document.nodes.iter().filter(|node| node.node_type == "linkedpart").cloned().collect();
-    if link_nodes.is_empty() { return Ok(expanded); }
+    let link_nodes: Vec<GraphNode> =
+        document.nodes.iter().filter(|node| node.node_type == "linkedpart").cloned().collect();
+    if link_nodes.is_empty() {
+        return Ok(expanded);
+    }
     for link in link_nodes {
-        let path = link.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
-        if path.is_empty() { return Err(SessionError::InvalidInput(format!("Linked part {} has no .nodecraft path.", link.id))); }
-        let canonical = std::fs::canonicalize(&path).map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|_| path.clone());
-        if stack.contains(&canonical) { return Err(SessionError::InvalidInput(format!("Linked part cycle through {path}."))); }
+        let path =
+            link.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        if path.is_empty() {
+            return Err(SessionError::InvalidInput(format!(
+                "Linked part {} has no .nodecraft path.",
+                link.id
+            )));
+        }
+        let canonical = std::fs::canonicalize(&path)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| path.clone());
+        if stack.contains(&canonical) {
+            return Err(SessionError::InvalidInput(format!("Linked part cycle through {path}.")));
+        }
         stack.push(canonical.clone());
         let linked = linked_documents
             .get(std::path::Path::new(&canonical))
@@ -219,8 +301,14 @@ pub(crate) fn expand_linked_parts_with(
             .map_err(SessionError::InvalidInput)?;
         let linked = expand_linked_parts_with(&linked, stack, linked_documents)?;
         stack.pop();
-        let sources: std::collections::BTreeSet<&str> = linked.connections.iter().map(|link| link.from.as_str()).collect();
-        let terminals: Vec<String> = linked.nodes.iter().filter(|node| node.node_type != "exporter" && !sources.contains(node.id.as_str())).map(|node| node.id.clone()).collect();
+        let sources: std::collections::BTreeSet<&str> =
+            linked.connections.iter().map(|link| link.from.as_str()).collect();
+        let terminals: Vec<String> = linked
+            .nodes
+            .iter()
+            .filter(|node| node.node_type != "exporter" && !sources.contains(node.id.as_str()))
+            .map(|node| node.id.clone())
+            .collect();
         for node in &linked.nodes {
             let mut node = node.clone();
             node.id = format!("{}::{}", link.id, node.id);
@@ -240,7 +328,12 @@ pub(crate) fn expand_linked_parts_with(
         }
         expanded.connections.retain(|connection| connection.to != link.id);
         for terminal in terminals {
-            expanded.connections.push(crate::GraphConnection { from: format!("{}::{}", link.id, terminal), to: link.id.clone(), input: "shape".into(), out: "shape".into() });
+            expanded.connections.push(crate::GraphConnection {
+                from: format!("{}::{}", link.id, terminal),
+                to: link.id.clone(),
+                input: "shape".into(),
+                out: "shape".into(),
+            });
         }
     }
     Ok(expanded)
@@ -249,7 +342,9 @@ pub(crate) fn expand_linked_parts_with(
 fn graph_revision(hashes: &BTreeMap<String, ContentHash>) -> String {
     let mut h = crate::ContentHash(0);
     let mut combined: u128 = 0;
-    for hash in hashes.values() { combined = combined.wrapping_add(hash.0).wrapping_mul(0x9e3779b97f4a7c15); }
+    for hash in hashes.values() {
+        combined = combined.wrapping_add(hash.0).wrapping_mul(0x9e3779b97f4a7c15);
+    }
     h.0 = combined;
     h.to_hex()
 }
@@ -257,7 +352,7 @@ fn graph_revision(hashes: &BTreeMap<String, ContentHash>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GraphConnection, GraphNode, GraphInterface};
+    use crate::{GraphConnection, GraphInterface, GraphNode};
     use serde_json::json;
 
     fn doc() -> GraphDocument {
@@ -269,10 +364,31 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":5}), suppressed: false, x: 100.0, y: 0.0 },
-            ],
-                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "a".into(),
+                        node_type: "primitive".into(),
+                        values: json!({"primitiveType":"box","length":10,"width":10,"height":10}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "b".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x":5}),
+                        suppressed: false,
+                        x: 100.0,
+                        y: 0.0,
+                    },
+                ],
+                connections: vec![GraphConnection {
+                    from: "a".into(),
+                    to: "b".into(),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                }],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -295,7 +411,9 @@ mod tests {
     fn layout_edit_reuses_the_whole_cache() {
         let mut runtime = GraphRuntime::new(doc());
         runtime.evaluate(&["b".into()], None).expect("first");
-        runtime.apply_commands(&[Command::SetPosition { node: "a".into(), x: 500.0, y: 0.0 }]).expect("layout");
+        runtime
+            .apply_commands(&[Command::SetPosition { node: "a".into(), x: 500.0, y: 0.0 }])
+            .expect("layout");
         let result = runtime.evaluate(&["b".into()], None).expect("layout");
         assert!(result.dirty_nodes.is_empty());
         assert_eq!(result.output.response.cache_stats.as_ref().expect("stats").misses, 0);
@@ -369,7 +487,13 @@ mod tests {
     fn value_edit_only_recomputes_changed_node_and_downstream() {
         let mut runtime = GraphRuntime::new(doc());
         runtime.evaluate(&["b".into()], None).expect("first");
-        runtime.apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: json!(9) }]).expect("value");
+        runtime
+            .apply_commands(&[Command::SetValue {
+                node: "b".into(),
+                field: "x".into(),
+                value: json!(9),
+            }])
+            .expect("value");
         let result = runtime.evaluate(&["b".into()], None).expect("value");
         assert_eq!(result.dirty_nodes, vec!["b"]);
         let stats = result.output.response.cache_stats.as_ref().expect("stats");
@@ -473,22 +597,15 @@ mod tests {
             "connections": connections
         }))
         .expect("STEP fixture request");
-        let output = nodecraft_engine::evaluate_exact(
-            request,
-            nodecraft_engine::EngineCache::new(),
-            None,
-        );
+        let output =
+            nodecraft_engine::evaluate_exact(request, nodecraft_engine::EngineCache::new(), None);
         assert!(
             output.response.node_errors.is_empty(),
             "STEP fixture export failed: {:?}",
             output.response.node_errors
         );
         let path = directory.join(format!("{stem}.step"));
-        assert!(
-            path.is_file(),
-            "STEP fixture was not written: {}",
-            path.display()
-        );
+        assert!(path.is_file(), "STEP fixture was not written: {}", path.display());
         path
     }
 
@@ -497,10 +614,8 @@ mod tests {
     /// branch stays cached, and the replacement STEP's bodies are what display.
     #[test]
     fn source_content_change_invalidates_the_importer_branch_only() {
-        let directory = std::env::temp_dir().join(format!(
-            "sn-source-invalidation-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("sn-source-invalidation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("temp directory");
         let one_body = write_step_fixture(&directory, "one-body", 1);
@@ -580,9 +695,7 @@ mod tests {
         let source_hash = |path: &std::path::Path| {
             nodecraft_engine::import_io::hash_file(path).expect("hash source")
         };
-        runtime.set_source_hashes(
-            [("s".to_owned(), source_hash(&source))].into_iter().collect(),
-        );
+        runtime.set_source_hashes([("s".to_owned(), source_hash(&source))].into_iter().collect());
         let targets = vec!["t".to_owned(), "u".to_owned()];
         let first = runtime.evaluate(&targets, None).expect("first");
         assert_eq!(
@@ -592,9 +705,7 @@ mod tests {
         );
 
         std::fs::copy(&six_bodies, &source).expect("replace source");
-        runtime.set_source_hashes(
-            [("s".to_owned(), source_hash(&source))].into_iter().collect(),
-        );
+        runtime.set_source_hashes([("s".to_owned(), source_hash(&source))].into_iter().collect());
         let second = runtime.evaluate(&targets, None).expect("reload");
         assert_eq!(
             second.dirty_nodes,
@@ -616,7 +727,7 @@ mod tests {
 #[cfg(test)]
 mod command_tests {
     use super::*;
-    use crate::{Command, GraphConnection, GraphNode, GraphInterface};
+    use crate::{Command, GraphConnection, GraphInterface, GraphNode};
     use serde_json::json;
 
     fn document() -> GraphDocument {
@@ -628,11 +739,40 @@ mod command_tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x":0}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "c".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
-            ],
-                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "a".into(),
+                        node_type: "primitive".into(),
+                        values: json!({"primitiveType":"box"}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "b".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x":0}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "c".into(),
+                        node_type: "primitive".into(),
+                        values: json!({"primitiveType":"box"}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                ],
+                connections: vec![GraphConnection {
+                    from: "a".into(),
+                    to: "b".into(),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                }],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -643,25 +783,45 @@ mod command_tests {
     #[test]
     fn commands_edit_graph_and_report_dirty_sets() {
         let mut runtime = GraphRuntime::new(document());
-        let change = runtime.apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: json!(5) }]).expect("set");
+        let change = runtime
+            .apply_commands(&[Command::SetValue {
+                node: "b".into(),
+                field: "x".into(),
+                value: json!(5),
+            }])
+            .expect("set");
         assert_eq!(change.dirty_nodes, vec!["b"]);
-        let change = runtime.apply_commands(&[Command::SetPosition { node: "a".into(), x: 300.0, y: 20.0 }]).expect("move");
+        let change = runtime
+            .apply_commands(&[Command::SetPosition { node: "a".into(), x: 300.0, y: 20.0 }])
+            .expect("move");
         assert!(change.dirty_nodes.is_empty());
     }
 
     #[test]
     fn connect_command_replaces_the_input_edge() {
         let mut runtime = GraphRuntime::new(document());
-        let change = runtime.apply_commands(&[Command::Connect { from: "c".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }]).expect("connect");
+        let change = runtime
+            .apply_commands(&[Command::Connect {
+                from: "c".into(),
+                to: "b".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            }])
+            .expect("connect");
         assert!(change.dirty_nodes.contains(&"b".to_string()));
         assert_eq!(runtime.document().connections[0].from, "c");
     }
     #[test]
     fn view_targets_are_runtime_state_and_drive_evaluation_targets() {
         let mut runtime = GraphRuntime::new(document());
-        runtime.apply_commands(&[crate::Command::SetSuppressed { node: "b".into(), suppressed: true }]).expect("suppress");
+        runtime
+            .apply_commands(&[crate::Command::SetSuppressed { node: "b".into(), suppressed: true }])
+            .expect("suppress");
         runtime.set_view_targets(vec!["b".into(), "missing".into(), "a".into()]);
-        assert_eq!(runtime.view_targets(), &["b".to_string(), "missing".to_string(), "a".to_string()]);
+        assert_eq!(
+            runtime.view_targets(),
+            &["b".to_string(), "missing".to_string(), "a".to_string()]
+        );
         runtime.set_export_targets(vec!["a".into()]);
         assert_eq!(runtime.evaluation_targets(), vec!["a".to_string()]);
         runtime.set_selected(Some("a".into()));
@@ -688,14 +848,15 @@ mod command_tests {
                 id: "root".into(),
                 name: "Root".into(),
                 kind: "graph".into(),
-                nodes: vec![GraphNode { expressions: Default::default(),
-                id: "link".into(),
-                node_type: "linkedpart".into(),
-                values: json!({"path": path.to_string_lossy()}),
-                suppressed: false,
-                x: 0.0,
-                y: 0.0,
-            }],
+                nodes: vec![GraphNode {
+                    expressions: Default::default(),
+                    id: "link".into(),
+                    node_type: "linkedpart".into(),
+                    values: json!({"path": path.to_string_lossy()}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                }],
                 connections: Vec::new(),
                 interface: GraphInterface::default(),
             },
@@ -722,7 +883,15 @@ mod command_tests {
                 id: "root".into(),
                 name: "Root".into(),
                 kind: "graph".into(),
-                nodes: vec![GraphNode { expressions: Default::default(), id: "p".into(), node_type: "primitive".into(), values: json!({"primitiveType":"box","length":10,"width":10,"height":10}), suppressed: false, x: 0.0, y: 0.0 }],
+                nodes: vec![GraphNode {
+                    expressions: Default::default(),
+                    id: "p".into(),
+                    node_type: "primitive".into(),
+                    values: json!({"primitiveType":"box","length":10,"width":10,"height":10}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                }],
                 connections: Vec::new(),
                 interface: GraphInterface::default(),
             },
@@ -738,10 +907,31 @@ mod command_tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                GraphNode { expressions: Default::default(), id: "link".into(), node_type: "linkedpart".into(), values: json!({"path": path.to_string_lossy()}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "t".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
-            ],
-                connections: vec![GraphConnection { from: "link".into(), to: "t".into(), input: "shape".into(), out: "shape".into() }],
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "link".into(),
+                        node_type: "linkedpart".into(),
+                        values: json!({"path": path.to_string_lossy()}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "t".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x": 5.0}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                ],
+                connections: vec![GraphConnection {
+                    from: "link".into(),
+                    to: "t".into(),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                }],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -749,9 +939,15 @@ mod command_tests {
         };
         let mut runtime = GraphRuntime::new(document);
         let result = runtime.evaluate(&["t".into()], None).expect("linked evaluation");
-        assert!(result.output.response.node_errors.is_empty(), "{:?}", result.output.response.node_errors);
-        assert!(result.output.exact_parts.contains_key("t"), "linked evaluation did not expose its exact Part");
+        assert!(
+            result.output.response.node_errors.is_empty(),
+            "{:?}",
+            result.output.response.node_errors
+        );
+        assert!(
+            result.output.exact_parts.contains_key("t"),
+            "linked evaluation did not expose its exact Part"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
-
 }

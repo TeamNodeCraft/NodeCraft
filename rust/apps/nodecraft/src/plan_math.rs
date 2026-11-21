@@ -44,7 +44,6 @@ pub(crate) fn plan_identity_hash(plans: &[PlanInstance]) -> u64 {
     hasher.finish()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,9 +120,8 @@ mod tests {
             mirror.determinant(),
         );
 
-        let placed = glam::Mat4::from_cols_array_2d(&instance_matrix(&placement([place([
-            3.0, -2.0, 1.0,
-        ])])));
+        let placed =
+            glam::Mat4::from_cols_array_2d(&instance_matrix(&placement([place([3.0, -2.0, 1.0])])));
         assert!(placed.determinant() > 0.0, "{}", placed.determinant());
 
         let scaled = glam::Mat4::from_cols_array_2d(&instance_matrix(&placement([
@@ -138,14 +136,8 @@ mod tests {
             place([1.0, 0.0, 0.0]),
             DisplayTransform::Mirror { plane: "yz", offset: 0.0 },
         ]));
-        let x = matrix[0][0] * 0.0
-            + matrix[1][0] * 0.0
-            + matrix[2][0] * 0.0
-            + matrix[3][0];
-        let y = matrix[0][1] * 0.0
-            + matrix[1][1] * 0.0
-            + matrix[2][1] * 0.0
-            + matrix[3][1];
+        let x = matrix[0][0] * 0.0 + matrix[1][0] * 0.0 + matrix[2][0] * 0.0 + matrix[3][0];
+        let y = matrix[0][1] * 0.0 + matrix[1][1] * 0.0 + matrix[2][1] * 0.0 + matrix[3][1];
         assert!((x - -1.0).abs() < 1.0e-6, "{x}");
         assert!(y.abs() < 1.0e-6, "{y}");
     }

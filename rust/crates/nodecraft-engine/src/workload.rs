@@ -51,16 +51,20 @@ fn mesh_bodies(node: &Node) -> usize {
 /// Profile the closure of `request.targets`.
 #[must_use]
 pub fn profile_request(request: &Request) -> WorkloadProfile {
-    let by_id: HashMap<&str, &Node> = request.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
+    let by_id: HashMap<&str, &Node> =
+        request.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     let mut dependencies: HashMap<&str, Vec<&str>> = HashMap::new();
     for connection in &request.connections {
-        if by_id.contains_key(connection.from.as_str()) && by_id.contains_key(connection.to.as_str()) {
+        if by_id.contains_key(connection.from.as_str())
+            && by_id.contains_key(connection.to.as_str())
+        {
             dependencies.entry(connection.to.as_str()).or_default().push(connection.from.as_str());
         }
     }
 
     let mut closure = BTreeSet::new();
-    let mut stack: Vec<&str> = request.targets.iter().map(String::as_str).filter(|id| by_id.contains_key(id)).collect();
+    let mut stack: Vec<&str> =
+        request.targets.iter().map(String::as_str).filter(|id| by_id.contains_key(id)).collect();
     while let Some(id) = stack.pop() {
         if !closure.insert(id) {
             continue;
@@ -94,7 +98,8 @@ pub fn profile_request(request: &Request) -> WorkloadProfile {
             }
         }
     }
-    let mut ready: VecDeque<&str> = indegree.iter().filter_map(|(id, degree)| (*degree == 0).then_some(*id)).collect();
+    let mut ready: VecDeque<&str> =
+        indegree.iter().filter_map(|(id, degree)| (*degree == 0).then_some(*id)).collect();
     let mut depth = 0;
     let mut max_ready_width = 0;
     let mut processed = 0;
@@ -134,7 +139,11 @@ pub fn profile_request(request: &Request) -> WorkloadProfile {
 /// Profile an already-flat node/connection slice. Useful for tests and for
 /// callers that do not have a full protocol request.
 #[must_use]
-pub fn profile_flat(nodes: &[Node], connections: &[Connection], targets: &[String]) -> WorkloadProfile {
+pub fn profile_flat(
+    nodes: &[Node],
+    connections: &[Connection],
+    targets: &[String],
+) -> WorkloadProfile {
     profile_request(&Request {
         request_id: 0,
         tab_id: None,
@@ -182,7 +191,8 @@ mod tests {
             node("join", "combine"),
             node("move", "translate"),
         ];
-        let connections = vec![link("a", "join"), link("b", "join"), link("c", "join"), link("join", "move")];
+        let connections =
+            vec![link("a", "join"), link("b", "join"), link("c", "join"), link("join", "move")];
         let profile = profile_flat(&nodes, &connections, &["move".into()]);
         assert_eq!(profile.node_count, 5);
         assert_eq!(profile.max_ready_width, 3);

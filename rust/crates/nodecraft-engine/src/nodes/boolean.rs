@@ -18,11 +18,7 @@ use crate::{Part, RequestIndex};
 pub(crate) struct Boolean;
 
 /// One connected operand, in the order the node reports it.
-fn operand<'a>(
-    node: NodeView<'_>,
-    connections: &'a [Connection],
-    port: &str,
-) -> Option<&'a str> {
+fn operand<'a>(node: NodeView<'_>, connections: &'a [Connection], port: &str) -> Option<&'a str> {
     connections
         .iter()
         .find(|link| link.to == node.id && link.input == port)
@@ -74,14 +70,12 @@ impl BuiltinNode for Boolean {
             (Some(a), Some(b)) => (a, b),
             (Some(a), None) => return Ok((*a).clone()),
             (None, Some(b)) => return Ok((*b).clone()),
-            (None, None) if a_state == InputState::Unconnected
-                && b_state == InputState::Unconnected =>
+            (None, None)
+                if a_state == InputState::Unconnected && b_state == InputState::Unconnected =>
             {
                 return Err("Part Boolean has no connected operand".into());
             }
-            (None, None) if a_state == InputState::Inactive
-                && b_state == InputState::Inactive =>
-            {
+            (None, None) if a_state == InputState::Inactive && b_state == InputState::Inactive => {
                 return Err("Part Boolean has no active operand".into());
             }
             // One port is connected but inactive (it evaluated to an empty Part
@@ -229,11 +223,8 @@ mod tests {
     /// All three run through the registry entry.
     #[test]
     fn union_subtract_and_intersect_have_their_exact_volumes() {
-        for (mode, expected) in [
-            ("union", 12_000.0),
-            ("subtract", 4_000.0),
-            ("intersect", 4_000.0),
-        ] {
+        for (mode, expected) in [("union", 12_000.0), ("subtract", 4_000.0), ("intersect", 4_000.0)]
+        {
             let output = evaluate(request("boolean", mode));
             assert!(
                 output.response.node_errors.is_empty(),
@@ -242,10 +233,7 @@ mod tests {
             );
             let part = output.exact_parts.get("u").expect("boolean exact part");
             let volume = volume(part);
-            assert!(
-                (volume - expected).abs() < 1.0,
-                "{mode} volume {volume} vs {expected}"
-            );
+            assert!((volume - expected).abs() < 1.0, "{mode} volume {volume} vs {expected}");
         }
     }
 

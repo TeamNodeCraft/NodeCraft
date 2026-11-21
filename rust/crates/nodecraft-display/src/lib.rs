@@ -81,9 +81,8 @@ fn part_body_ids(part: &ExactPart) -> Vec<u64> {
 pub fn face_colors_by_index(mesh: &nodecraft_protocol::Mesh) -> Vec<[f32; 3]> {
     let mut colors = Vec::new();
     for (group, color) in mesh.face_groups.iter().zip(&mesh.face_colors) {
-        let Some(index) = group
-            .rsplit_once("face:")
-            .and_then(|(_, tail)| tail.parse::<usize>().ok())
+        let Some(index) =
+            group.rsplit_once("face:").and_then(|(_, tail)| tail.parse::<usize>().ok())
         else {
             continue;
         };
@@ -194,7 +193,11 @@ impl PlanCache {
     ) {
         let (tolerance, detail) = quality.key();
         let key = (body, tolerance, detail);
-        if self.entries.insert(key, CachedBodyPlan { plan, edge_ids, edge_classes, stats }).is_none() {
+        if self
+            .entries
+            .insert(key, CachedBodyPlan { plan, edge_ids, edge_classes, stats })
+            .is_none()
+        {
             self.order.push_back(key);
         }
         while self.entries.len() > self.limit {
@@ -221,9 +224,8 @@ pub fn tessellate_body(
     brep: &Arc<nodecraft_solidcore::solidcore::topology::Brep>,
     quality: DisplayQuality,
 ) -> Result<nodecraft_layers::TessDisplay, String> {
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("display copy: {error}"))?;
+    let mut copy =
+        brep.clone_standing_for_self().map_err(|error| format!("display copy: {error}"))?;
     match quality {
         DisplayQuality::Full(tolerance) => {
             nodecraft_layers::tessellate_kernel(kernel, &mut copy, tolerance)
@@ -242,7 +244,11 @@ pub fn brep_display(
     cache: &mut PlanCache,
 ) -> Result<PartDisplay, String> {
     let part = ExactPart {
-        bodies: vec![ExactBody { key: BodyKey::new(std::sync::Arc::as_ptr(brep) as u64, 0), brep: std::sync::Arc::clone(brep), placement: Placement::identity() }],
+        bodies: vec![ExactBody {
+            key: BodyKey::new(std::sync::Arc::as_ptr(brep) as u64, 0),
+            brep: std::sync::Arc::clone(brep),
+            placement: Placement::identity(),
+        }],
     };
     mesh_part(&part, quality, cache)
 }
@@ -288,7 +294,9 @@ pub fn export_mesh(
         };
         let mut edges = std::collections::HashMap::<[[i64; 3]; 2], usize>::new();
         for face in &display.mesh.faces {
-            let Some(points) = face.map(point).into_iter().collect::<Option<Vec<_>>>() else { continue };
+            let Some(points) = face.map(point).into_iter().collect::<Option<Vec<_>>>() else {
+                continue;
+            };
             for [a, b] in [[points[0], points[1]], [points[1], points[2]], [points[2], points[0]]] {
                 let key = if a <= b { [a, b] } else { [b, a] };
                 *edges.entry(key).or_default() += 1;
@@ -318,10 +326,7 @@ pub fn export_step(
         let mut cache = PlanCache::new(8);
         let mesh = export_mesh(
             part,
-            ExportOptions {
-                tolerance: 0.05,
-                require_closed: false,
-            },
+            ExportOptions { tolerance: 0.05, require_closed: false },
             &mut cache,
         )?;
         nodecraft_step::write_step_faceted(
@@ -346,15 +351,10 @@ pub fn export_step(
 }
 
 fn export_options(values: &serde_json::Value) -> Result<nodecraft_step::StepExportOptions, String> {
-    let unit = values
-        .get("unit")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("mm")
-        .to_ascii_lowercase();
+    let unit =
+        values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase();
     if !matches!(unit.as_str(), "" | "mm" | "millimetre" | "millimeter") {
-        return Err(format!(
-            "STEP export writes millimetres; {unit:?} output is not supported"
-        ));
+        return Err(format!("STEP export writes millimetres; {unit:?} output is not supported"));
     }
     let color = values
         .get("color")
@@ -384,21 +384,14 @@ fn export_options(values: &serde_json::Value) -> Result<nodecraft_step::StepExpo
             .and_then(serde_json::Value::as_str)
             .unwrap_or("ap242")
             .to_string(),
-        author: values
-            .get("author")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        author: values.get("author").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
         organization: values
             .get("organization")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("NodeCraft")
             .to_string(),
         color,
-        layer: values
-            .get("layer")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        layer: values.get("layer").and_then(serde_json::Value::as_str).map(str::to_string),
     })
 }
 
@@ -409,7 +402,11 @@ pub fn mesh_brep(
     cache: &mut PlanCache,
 ) -> Result<nodecraft_protocol::Mesh, String> {
     let part = ExactPart {
-        bodies: vec![ExactBody { key: BodyKey::new(std::sync::Arc::as_ptr(brep) as u64, 0), brep: std::sync::Arc::clone(brep), placement: Placement::identity() }],
+        bodies: vec![ExactBody {
+            key: BodyKey::new(std::sync::Arc::as_ptr(brep) as u64, 0),
+            brep: std::sync::Arc::clone(brep),
+            placement: Placement::identity(),
+        }],
     };
     mesh_part(&part, quality, cache).map(|display| display.mesh)
 }
@@ -544,20 +541,15 @@ pub fn apply_placement(mesh: &mut nodecraft_protocol::Mesh, placement: &Placemen
     }
     let matrix = *placement.matrix();
     for vertex in &mut mesh.vertices {
-        let point = matrix.apply_point([
-            f64::from(vertex[0]),
-            f64::from(vertex[1]),
-            f64::from(vertex[2]),
-        ]);
+        let point =
+            matrix.apply_point([f64::from(vertex[0]), f64::from(vertex[1]), f64::from(vertex[2])]);
         *vertex = [point[0] as f32, point[1] as f32, point[2] as f32];
     }
     for normal in &mut mesh.normals {
-        let rotated = matrix.apply_vector([
-            f64::from(normal[0]),
-            f64::from(normal[1]),
-            f64::from(normal[2]),
-        ]);
-        let length = (rotated[0] * rotated[0] + rotated[1] * rotated[1] + rotated[2] * rotated[2]).sqrt();
+        let rotated =
+            matrix.apply_vector([f64::from(normal[0]), f64::from(normal[1]), f64::from(normal[2])]);
+        let length =
+            (rotated[0] * rotated[0] + rotated[1] * rotated[1] + rotated[2] * rotated[2]).sqrt();
         if length > 1.0e-12 {
             *normal = [
                 (rotated[0] / length) as f32,
@@ -573,14 +565,23 @@ pub fn apply_placement(mesh: &mut nodecraft_protocol::Mesh, placement: &Placemen
     }
 }
 
-fn brep_face_colours(brep: &nodecraft_solidcore::solidcore::topology::Brep, count: usize) -> Vec<[f32; 3]> {
+fn brep_face_colours(
+    brep: &nodecraft_solidcore::solidcore::topology::Brep,
+    count: usize,
+) -> Vec<[f32; 3]> {
     use nodecraft_solidcore::solidcore::error::EntityRef;
     use nodecraft_solidcore::solidcore::geom::attribute::AttributeValue;
     const LOOK_COLOR_ATTRIBUTE: u64 = 100;
     let mut colours = vec![[0.17, 0.18, 0.195]; count];
     for (position, &face) in brep.face_list().iter().enumerate() {
-        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE) else { continue };
-        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value() else { continue };
+        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE)
+        else {
+            continue;
+        };
+        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value()
+        else {
+            continue;
+        };
         if let Some(slot) = colours.get_mut(position) {
             *slot = [color.x as f32, color.y as f32, color.z as f32];
         }
@@ -590,7 +591,11 @@ fn brep_face_colours(brep: &nodecraft_solidcore::solidcore::topology::Brep, coun
 
 /// Plan each body without evaluating the plan into triangles. Edges stay in
 /// each plan's local space, ready for one GPU upload and per-body instancing.
-pub fn plan_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCache) -> Result<PartPlans, String> {
+pub fn plan_part(
+    part: &ExactPart,
+    quality: DisplayQuality,
+    cache: &mut PlanCache,
+) -> Result<PartPlans, String> {
     plan_part_with_qualities(part, quality, &BTreeMap::new(), &[], cache)
 }
 
@@ -628,11 +633,8 @@ pub fn plan_part_with_qualities(
                 .push(index);
         }
     }
-    let rank: HashMap<BodyKey, usize> = priority
-        .iter()
-        .enumerate()
-        .map(|(index, key)| (*key, index))
-        .collect();
+    let rank: HashMap<BodyKey, usize> =
+        priority.iter().enumerate().map(|(index, key)| (*key, index)).collect();
     let mut misses: Vec<(DisplayQuality, Vec<usize>)> = pending.values().cloned().collect();
     misses.sort_by_key(|(_, indices)| {
         indices
@@ -656,36 +658,43 @@ pub fn plan_part_with_qualities(
         std::thread::scope(|scope| -> Result<(), String> {
             let mut handles = Vec::new();
             for chunk in misses.chunks(chunk) {
-                handles.push(scope.spawn(move || -> Result<Vec<(BodyKey, DisplayQuality, CachedBodyPlan)>, String> {
-                    let mut kernel = nodecraft_solidcore::kernel::kernel();
-                    let mut out = Vec::with_capacity(chunk.len());
-                    for (quality, indices) in chunk {
-                        let Some(index) = indices.first() else { continue };
-                        let body = &part.bodies[*index];
-                        let (tolerance, detail) = match *quality {
-                            DisplayQuality::Full(tolerance) => (tolerance, None),
-                            DisplayQuality::Preview(detail) => (DEFAULT_TOLERANCE, Some(detail)),
-                        };
-                        let data = nodecraft_layers::plan_kernel(
-                            &mut kernel,
-                            body.brep.as_ref(),
-                            tolerance,
-                            detail,
-                        )?;
-                        out.push((body.key, *quality, CachedBodyPlan {
-                            plan: data.plan,
-                            edge_ids: data.plan_edge_ids,
-                            edge_classes: data.edge_classes,
-                            stats: data.stats,
-                        }));
-                    }
-                    Ok(out)
-                }));
+                handles.push(scope.spawn(
+                    move || -> Result<Vec<(BodyKey, DisplayQuality, CachedBodyPlan)>, String> {
+                        let mut kernel = nodecraft_solidcore::kernel::kernel();
+                        let mut out = Vec::with_capacity(chunk.len());
+                        for (quality, indices) in chunk {
+                            let Some(index) = indices.first() else { continue };
+                            let body = &part.bodies[*index];
+                            let (tolerance, detail) = match *quality {
+                                DisplayQuality::Full(tolerance) => (tolerance, None),
+                                DisplayQuality::Preview(detail) => {
+                                    (DEFAULT_TOLERANCE, Some(detail))
+                                }
+                            };
+                            let data = nodecraft_layers::plan_kernel(
+                                &mut kernel,
+                                body.brep.as_ref(),
+                                tolerance,
+                                detail,
+                            )?;
+                            out.push((
+                                body.key,
+                                *quality,
+                                CachedBodyPlan {
+                                    plan: data.plan,
+                                    edge_ids: data.plan_edge_ids,
+                                    edge_classes: data.edge_classes,
+                                    stats: data.stats,
+                                },
+                            ));
+                        }
+                        Ok(out)
+                    },
+                ));
             }
             for handle in handles {
-                let values = handle
-                    .join()
-                    .map_err(|_| "display planning thread panicked".to_owned())??;
+                let values =
+                    handle.join().map_err(|_| "display planning thread panicked".to_owned())??;
                 results.extend(values);
             }
             Ok(())
@@ -715,9 +724,7 @@ pub fn plan_part_with_qualities(
     let mut edge_min = [f64::INFINITY; 3];
     let mut edge_max = [f64::NEG_INFINITY; 3];
     for (body_index, body) in part.bodies.iter().enumerate() {
-        let cached = planned[body_index]
-            .take()
-            .ok_or("display plan missing after planning")?;
+        let cached = planned[body_index].take().ok_or("display plan missing after planning")?;
         stats.push(cached.stats.clone());
         let matrix = *body.placement.matrix();
         for polyline in &cached.plan.edges {
@@ -763,7 +770,11 @@ pub fn plan_part_with_qualities(
 }
 
 /// Build the display mesh and GPU plans for an exact Part, reusing cached plans.
-pub fn mesh_part(part: &ExactPart, quality: DisplayQuality, cache: &mut PlanCache) -> Result<PartDisplay, String> {
+pub fn mesh_part(
+    part: &ExactPart,
+    quality: DisplayQuality,
+    cache: &mut PlanCache,
+) -> Result<PartDisplay, String> {
     mesh_part_impl(part, quality, &BTreeMap::new(), cache, false)
 }
 
@@ -903,25 +914,40 @@ fn blend_feature_plan(
     })
 }
 
-fn apply_brep_face_colors(brep: &nodecraft_solidcore::solidcore::topology::Brep, mesh: &mut nodecraft_protocol::Mesh) {
+fn apply_brep_face_colors(
+    brep: &nodecraft_solidcore::solidcore::topology::Brep,
+    mesh: &mut nodecraft_protocol::Mesh,
+) {
     use nodecraft_solidcore::solidcore::error::EntityRef;
     use nodecraft_solidcore::solidcore::geom::attribute::AttributeValue;
     const LOOK_COLOR_ATTRIBUTE: u64 = 100;
     let mut by_face = std::collections::BTreeMap::new();
     for (position, &face) in brep.face_list().iter().enumerate() {
-        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE) else { continue };
-        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value() else { continue };
+        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE)
+        else {
+            continue;
+        };
+        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value()
+        else {
+            continue;
+        };
         by_face.insert(position, [color.x as f32, color.y as f32, color.z as f32]);
     }
     if by_face.is_empty() {
         mesh.face_colors.clear();
         return;
     }
-    mesh.face_colors = mesh.face_groups.iter().map(|group| {
-        group.rsplit_once("face:").and_then(|(_, tail)| tail.parse::<usize>().ok())
-            .and_then(|index| by_face.get(&index).copied())
-            .unwrap_or([0.32, 0.34, 0.37])
-    }).collect();
+    mesh.face_colors = mesh
+        .face_groups
+        .iter()
+        .map(|group| {
+            group
+                .rsplit_once("face:")
+                .and_then(|(_, tail)| tail.parse::<usize>().ok())
+                .and_then(|index| by_face.get(&index).copied())
+                .unwrap_or([0.32, 0.34, 0.37])
+        })
+        .collect();
 }
 
 #[cfg(test)]
@@ -944,7 +970,11 @@ mod tests {
         )
         .expect("box");
         let part = ExactPart {
-            bodies: vec![ExactBody { key: BodyKey::new(0, 0), brep: Arc::new(brep), placement: Placement::identity() }],
+            bodies: vec![ExactBody {
+                key: BodyKey::new(0, 0),
+                brep: Arc::new(brep),
+                placement: Placement::identity(),
+            }],
         };
         let path = std::env::temp_dir().join("nodecraft-display-export-test.step");
         export_step(&part, &path, &serde_json::json!({"fileName": "test"})).expect("export");
@@ -954,7 +984,9 @@ mod tests {
 
     #[test]
     fn marked_blend_faces_produce_a_feature_only_plan() {
-        use nodecraft_solidcore::solidcore::blend::definition_check::{mark_blend_faces, MadeBlendFace, BlendFaceKind};
+        use nodecraft_solidcore::solidcore::blend::definition_check::{
+            BlendFaceKind, MadeBlendFace, mark_blend_faces,
+        };
         let mut kernel = nodecraft_solidcore::kernel::kernel();
         let mut brep = nodecraft_solidcore::solidcore::primitive::api_primitives::create_box(
             &mut kernel,
@@ -968,10 +1000,15 @@ mod tests {
         mark_blend_faces(&mut brep, &[MadeBlendFace { face, kind: BlendFaceKind::Round }])
             .expect("mark");
         let part = ExactPart {
-            bodies: vec![ExactBody { key: BodyKey::new(0, 0), brep: Arc::new(brep), placement: Placement::identity() }],
+            bodies: vec![ExactBody {
+                key: BodyKey::new(0, 0),
+                brep: Arc::new(brep),
+                placement: Placement::identity(),
+            }],
         };
         let mut cache = PlanCache::new(8);
-        let display = mesh_part_with_features(&part, DisplayQuality::Full(0.35), &mut cache).expect("display");
+        let display = mesh_part_with_features(&part, DisplayQuality::Full(0.35), &mut cache)
+            .expect("display");
         assert_eq!(display.feature_plans.len(), 1);
         assert_eq!(display.feature_plans[0].plan.faces.len(), 1);
     }
@@ -988,13 +1025,18 @@ mod tests {
         )
         .expect("box");
         let part = ExactPart {
-            bodies: vec![ExactBody { key: BodyKey::new(0, 0), brep: Arc::new(brep), placement: Placement::identity() }],
+            bodies: vec![ExactBody {
+                key: BodyKey::new(0, 0),
+                brep: Arc::new(brep),
+                placement: Placement::identity(),
+            }],
         };
         let mut cache = PlanCache::new(4);
         let display = mesh_part(&part, DisplayQuality::Full(0.35), &mut cache).expect("display");
         assert_eq!(cache.len(), 1);
-        let export = export_mesh(&part, ExportOptions { tolerance: 0.2, require_closed: true }, &mut cache)
-            .expect("export");
+        let export =
+            export_mesh(&part, ExportOptions { tolerance: 0.2, require_closed: true }, &mut cache)
+                .expect("export");
         assert!(!export.mesh.faces.is_empty());
         assert!(cache.len() >= 2, "export tolerance must not reuse the display plan");
         assert_eq!(display.plans.len(), 1);
@@ -1012,7 +1054,11 @@ mod tests {
         )
         .expect("box");
         let part = ExactPart {
-            bodies: vec![ExactBody { key: BodyKey::new(0, 0), brep: Arc::new(brep), placement: Placement::identity() }],
+            bodies: vec![ExactBody {
+                key: BodyKey::new(0, 0),
+                brep: Arc::new(brep),
+                placement: Placement::identity(),
+            }],
         };
         let mut cache = PlanCache::new(4);
         let display = mesh_part(&part, DisplayQuality::Full(0.35), &mut cache).expect("mesh");
@@ -1036,7 +1082,11 @@ mod tests {
         let brep = std::sync::Arc::new(brep);
         let part = ExactPart {
             bodies: (0..3)
-                .map(|_| ExactBody { key, brep: std::sync::Arc::clone(&brep), placement: Placement::identity() })
+                .map(|_| ExactBody {
+                    key,
+                    brep: std::sync::Arc::clone(&brep),
+                    placement: Placement::identity(),
+                })
                 .collect(),
         };
         let mut cache = PlanCache::new(16);
@@ -1080,7 +1130,11 @@ mod tests {
         let part = ExactPart {
             bodies: vec![
                 ExactBody { key: fine, brep: Arc::clone(&brep), placement: Placement::identity() },
-                ExactBody { key: coarse, brep: Arc::clone(&brep), placement: Placement::identity() },
+                ExactBody {
+                    key: coarse,
+                    brep: Arc::clone(&brep),
+                    placement: Placement::identity(),
+                },
             ],
         };
         let by_body = BTreeMap::from([
@@ -1100,7 +1154,13 @@ mod tests {
         assert_eq!(cache.len(), 2, "one plan per body and level");
 
         let triangles = |plans: &PartPlans| -> usize {
-            plans.plans.iter().map(|instance| instance.plan.faces.iter().map(|face| face.triangles.len()).sum::<usize>()).sum()
+            plans
+                .plans
+                .iter()
+                .map(|instance| {
+                    instance.plan.faces.iter().map(|face| face.triangles.len()).sum::<usize>()
+                })
+                .sum()
         };
         let fine_only = plan_part(
             &ExactPart { bodies: vec![part.bodies[0].clone()] },
@@ -1125,14 +1185,8 @@ mod tests {
         assert_eq!(planned.bounds_mesh.vertices.len(), 8, "eight bounds corners");
         assert!(planned.bounds_mesh.brep_edges.is_empty());
         assert!(planned.plans.iter().all(|instance| !instance.plan.edges.is_empty()));
-        assert_eq!(
-            planned.plans[0].plan.edges.len(),
-            fine_only.plans[0].plan.edges.len(),
-        );
-        assert_eq!(
-            planned.plans[1].plan.edges.len(),
-            coarse_only.plans[0].plan.edges.len(),
-        );
+        assert_eq!(planned.plans[0].plan.edges.len(), fine_only.plans[0].plan.edges.len(),);
+        assert_eq!(planned.plans[1].plan.edges.len(), coarse_only.plans[0].plan.edges.len(),);
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use crate::face_ref::{parse_face_references, resolve_face_references};
 use crate::node_task::ExactNodeTask;
-use crate::{contract_number, contract_text, Part, RequestIndex};
+use crate::{Part, RequestIndex, contract_number, contract_text};
 
 use super::{BuiltinNode, NodeView, PartEval, ProfileInput};
 
@@ -95,16 +95,10 @@ impl BuiltinNode for Extrude {
         6
     }
 
-    fn suppression_source(
-        &self,
-        node: NodeView<'_>,
-        index: &RequestIndex<'_>,
-    ) -> Option<String> {
+    fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
         // Extrude passes the first connected shape/profile input through when
         // suppressed, in connection order, exactly as the dispatch arm did.
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -123,18 +117,10 @@ mod tests {
 
     fn square_sketch() -> crate::sketch::Sketch {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, -10.0), None)
-            .expect("a");
-        let b = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, -10.0), None)
-            .expect("b");
-        let c = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, 10.0), None)
-            .expect("c");
-        let d = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, 10.0), None)
-            .expect("d");
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).expect("a");
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).expect("b");
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).expect("c");
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).expect("d");
         sketch.add_line_pts(a, b, None).expect("ab");
         sketch.add_line_pts(b, c, None).expect("bc");
         sketch.add_line_pts(c, d, None).expect("cd");
@@ -179,10 +165,7 @@ mod tests {
         assert_eq!(builtin.node_types(), &["extrude"]);
         let values = serde_json::json!({});
         let view = NodeView::new("x", "extrude", &values, false);
-        assert_eq!(
-            builtin.body_layout(view, &[]),
-            Some(vec!["x".to_owned()]),
-        );
+        assert_eq!(builtin.body_layout(view, &[]), Some(vec!["x".to_owned()]),);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
             "nodes": [{"id": "x", "type": "extrude", "values": {}}],
@@ -203,7 +186,8 @@ mod tests {
     /// A sketch profile extrudes every sketch through the Part path.
     #[test]
     fn extrude_from_sketch_profiles() {
-        let output = crate::evaluate_exact(sketch_extrude_request(), crate::EngineCache::new(), None);
+        let output =
+            crate::evaluate_exact(sketch_extrude_request(), crate::EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let part = output.exact_parts.get("extrude").expect("extrude exact part");
         assert_eq!(part.bodies.len(), 1);
@@ -273,12 +257,7 @@ mod tests {
             crate::EngineCache::new(),
             None,
         );
-        let error = output
-            .response
-            .node_errors
-            .get("extrude")
-            .cloned()
-            .unwrap_or_default();
+        let error = output.response.node_errors.get("extrude").cloned().unwrap_or_default();
         assert!(!error.is_empty(), "malformed face reference was accepted");
         assert!(error.contains("body:x:face:1"), "{error}");
     }
@@ -299,16 +278,8 @@ mod tests {
             }
         }
         for axis in 0..3 {
-            assert!(
-                (min[axis] - expected_min[axis]).abs() < 1.0e-6,
-                "min[{axis}] = {}",
-                min[axis]
-            );
-            assert!(
-                (max[axis] - expected_max[axis]).abs() < 1.0e-6,
-                "max[{axis}] = {}",
-                max[axis]
-            );
+            assert!((min[axis] - expected_min[axis]).abs() < 1.0e-6, "min[{axis}] = {}", min[axis]);
+            assert!((max[axis] - expected_max[axis]).abs() < 1.0e-6, "max[{axis}] = {}", max[axis]);
         }
     }
 }

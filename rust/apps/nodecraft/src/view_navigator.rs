@@ -67,11 +67,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// The camera's view axes, as the compass takes them.
 pub(crate) fn view_axes(cam: &Camera) -> ViewAxes {
     let (right, up, back) = cam.basis();
-    ViewAxes {
-        right: right.into(),
-        up: up.into(),
-        back: back.into(),
-    }
+    ViewAxes { right: right.into(), up: up.into(), back: back.into() }
 }
 
 /// One signed axis as drawn: its name (`"x"`, `"-x"`, ...), world direction,
@@ -82,10 +78,7 @@ pub(crate) type Tip = (&'static str, [f64; 3], Pos2, f64);
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ViewAction {
     /// Look along an axis: a tip was clicked.
-    Snap {
-        axis: &'static str,
-        direction: [f64; 3],
-    },
+    Snap { axis: &'static str, direction: [f64; 3] },
 }
 
 /// One frame's step of a drag on a view navigator.
@@ -139,10 +132,7 @@ pub(crate) struct Layout {
 /// viewport margin and right-hand chrome inset.
 pub(crate) fn layout(viewport: Rect, right_inset: f32) -> Layout {
     let outer = Rect::from_min_size(
-        pos2(
-            viewport.right() - AXIS_VIEW_SIZE - MARGIN - right_inset,
-            viewport.top() + MARGIN,
-        ),
+        pos2(viewport.right() - AXIS_VIEW_SIZE - MARGIN - right_inset, viewport.top() + MARGIN),
         vec2(AXIS_VIEW_SIZE, AXIS_VIEW_SIZE),
     );
     let centre = outer.center() - vec2(0.0, AXIS_CENTER_LIFT);
@@ -159,10 +149,7 @@ pub(crate) fn contains(layout: &Layout, p: Pos2) -> bool {
 /// Where a tip is drawn from the centre, for a direction posed on screen as
 /// `[right, down]`.
 pub(crate) fn tip_offset([x, y]: [f64; 2]) -> egui::Vec2 {
-    vec2(
-        (x * AXIS_LENGTH * ART_SCALE) as f32,
-        (y * AXIS_LENGTH * ART_SCALE) as f32,
-    )
+    vec2((x * AXIS_LENGTH * ART_SCALE) as f32, (y * AXIS_LENGTH * ART_SCALE) as f32)
 }
 
 /// The six signed axes as `axes` poses them around `c`, back to front so
@@ -207,20 +194,12 @@ pub(crate) fn show(ui: &mut egui::Ui, compass: &Compass) -> Option<ViewAction> {
     let c = compass.centre;
     let tips = tips(&compass.axes, c);
     let hover = compass.hover;
-    let hovered = if compass.orbiting {
-        None
-    } else {
-        hover.and_then(|p| hit(&tips, p))
-    };
+    let hovered = if compass.orbiting { None } else { hover.and_then(|p| hit(&tips, p)) };
     let painter = ui.painter_at(compass.clip);
     let mut action = None;
     // The circle turns fully opaque under the pointer.
     let in_circle = hover.is_some_and(|p| p.distance(c) <= RADIUS);
-    let fill = if in_circle || compass.orbiting {
-        220
-    } else {
-        90
-    };
+    let fill = if in_circle || compass.orbiting { 220 } else { 90 };
     painter.circle(
         c,
         RADIUS,
@@ -239,26 +218,13 @@ pub(crate) fn show(ui: &mut egui::Ui, compass: &Compass) -> Option<ViewAction> {
                 Stroke::new(1.4, theme.color(theme.panel)),
             );
         }
-        axis_tip(
-            &painter,
-            c,
-            name,
-            *d,
-            *at,
-            *depth,
-            hovered == Some(i),
-            &theme,
-            light,
-        );
+        axis_tip(&painter, c, name, *d, *at, *depth, hovered == Some(i), &theme, light);
     }
     if let Some(i) = hovered {
         if let Some((name, d, _, _)) = tips.get(i) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             if ui.input(|i| i.pointer.primary_clicked()) {
-                action = Some(ViewAction::Snap {
-                    axis: name,
-                    direction: *d,
-                });
+                action = Some(ViewAction::Snap { axis: name, direction: *d });
             }
         }
     }
@@ -293,21 +259,13 @@ fn axis_tip(
     let positive = !name.starts_with('-');
     // Positive shafts are the full axis colour; negative ones are a dimmed
     // tint (and any end pointing away from the viewer dims further).
-    let ink = if !positive || depth < -0.01 {
-        col.gamma_multiply(0.55)
-    } else {
-        col
-    };
+    let ink = if !positive || depth < -0.01 { col.gamma_multiply(0.55) } else { col };
     let radius = if positive { 11.0 } else { 4.8 };
     let direction = (at - c).normalized();
     let width = 3.6;
     // A negative shaft stops at the outer edge of its ring; a positive one
     // runs under its disc.
-    let end = if positive {
-        at - direction * radius
-    } else {
-        at - direction * (radius + 1.2)
-    };
+    let end = if positive { at - direction * radius } else { at - direction * (radius + 1.2) };
     painter.line_segment([c, end], Stroke::new(width, ink));
     // The round cap sits at the origin; the other end is covered by the disc
     // or ring.
@@ -319,11 +277,7 @@ fn axis_tip(
     // centres, so the translucent compass background shows through. A hovered
     // tip of either kind turns fully white.
     if hovered {
-        painter.circle_filled(
-            at,
-            if positive { radius } else { radius + 1.2 },
-            Color32::WHITE,
-        );
+        painter.circle_filled(at, if positive { radius } else { radius + 1.2 }, Color32::WHITE);
         // On the light theme a white disc vanishes into the compass, so it
         // carries an outline in the axis colour, drawn inside the disc so it
         // does not grow.
@@ -337,10 +291,7 @@ fn axis_tip(
         let galley = painter.layout_no_wrap(label, FontId::proportional(COMPASS_FONT), letter);
         let origin = at - galley.size() / 2.0;
         let ppp = painter.ctx().pixels_per_point().max(0.5);
-        let origin = pos2(
-            (origin.x * ppp).round() / ppp,
-            (origin.y * ppp).round() / ppp,
-        );
+        let origin = pos2((origin.x * ppp).round() / ppp, (origin.y * ppp).round() / ppp);
         painter.galley(origin, galley, letter);
     }
     if !positive {
@@ -405,8 +356,7 @@ pub(crate) fn orbit(
         // warps the pointer. A real orbit drag is restored to the compass
         // point where it began.
         if was_moving && let Some(start) = start {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CursorPosition(start));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorPosition(start));
         }
     } else if lost && drag.at.take().is_some() {
         let was_moving = std::mem::take(&mut drag.moving);
@@ -456,8 +406,7 @@ pub(crate) fn orbit(
         {
             let home = screen.center();
             drag.warp = Some(home);
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CursorPosition(home));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorPosition(home));
         }
         ui.ctx().request_repaint();
     }
@@ -496,11 +445,7 @@ pub(crate) fn nearest_quarter_turn(yaw: f64) -> f64 {
             ((a + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI)
                 .abs()
         };
-        if off_front(lo) <= off_front(hi) {
-            lo
-        } else {
-            hi
-        }
+        if off_front(lo) <= off_front(hi) { lo } else { hi }
     } else if dlo < dhi {
         lo
     } else {
@@ -551,16 +496,10 @@ mod tests {
     use egui::{Event, RawInput, pos2, vec2};
     use solidcraft_geom::Vec3Geom;
 
-    const SCREEN: Rect = Rect {
-        min: Pos2::ZERO,
-        max: Pos2::new(400.0, 400.0),
-    };
+    const SCREEN: Rect = Rect { min: Pos2::ZERO, max: Pos2::new(400.0, 400.0) };
 
-    const FRONT: ViewAxes = ViewAxes {
-        right: [1.0, 0.0, 0.0],
-        up: [0.0, 0.0, 1.0],
-        back: [0.0, -1.0, 0.0],
-    };
+    const FRONT: ViewAxes =
+        ViewAxes { right: [1.0, 0.0, 0.0], up: [0.0, 0.0, 1.0], back: [0.0, -1.0, 0.0] };
 
     fn context() -> egui::Context {
         let ctx = egui::Context::default();
@@ -590,12 +529,7 @@ mod tests {
     ) -> (Option<ViewAction>, Orbit) {
         let mut out = (None, Orbit::default());
         let mut output = ctx.run_ui(
-            RawInput {
-                screen_rect: Some(SCREEN),
-                events,
-                focused: true,
-                ..Default::default()
-            },
+            RawInput { screen_rect: Some(SCREEN), events, focused: true, ..Default::default() },
             |ui| {
                 let orbit =
                     super::orbit(ui, drag, true, |p| p.distance(pos2(200.0, 200.0)) <= RADIUS);
@@ -642,20 +576,11 @@ mod tests {
     }
 
     fn front_camera() -> Camera {
-        Camera {
-            yaw: 0.0,
-            pitch: 0.0,
-            roll: 0.0,
-            ..Camera::default()
-        }
+        Camera { yaw: 0.0, pitch: 0.0, roll: 0.0, ..Camera::default() }
     }
 
     fn assert_back(cam: &Camera, expected: Vec3) {
-        assert!(
-            cam.back().dist(expected) < 2e-5,
-            "{:?} != {expected:?}",
-            cam.back()
-        );
+        assert!(cam.back().dist(expected) < 2e-5, "{:?} != {expected:?}", cam.back());
     }
 
     #[test]
@@ -670,10 +595,7 @@ mod tests {
             let action = click_axes(&ctx, axes, at);
             assert_eq!(
                 action,
-                Some(ViewAction::Snap {
-                    axis: name,
-                    direction
-                }),
+                Some(ViewAction::Snap { axis: name, direction }),
                 "{name} at {at:?}"
             );
             let to = snap(&from, direction);
@@ -685,34 +607,21 @@ mod tests {
     fn the_compass_has_no_home_hit_area() {
         let ctx = context();
         let old_chip = pos2(200.0, 200.0) + vec2(-37.0, -37.0);
-        assert_eq!(
-            click(&ctx, old_chip),
-            None,
-            "the compass only returns axis tips now"
-        );
+        assert_eq!(click(&ctx, old_chip), None, "the compass only returns axis tips now");
     }
 
     #[test]
     fn vertical_tips_keep_the_nearest_square_heading() {
-        let from = Camera {
-            yaw: 0.2,
-            ..front_camera()
-        };
+        let from = Camera { yaw: 0.2, ..front_camera() };
         let top = snap(&from, [0.0, 0.0, 1.0]);
         assert!((top.yaw - 0.0).abs() < 1e-12, "top yaw {}", top.yaw);
         assert!((top.pitch - std::f64::consts::FRAC_PI_2).abs() < 2e-6);
 
-        let from = Camera {
-            yaw: 0.3,
-            ..front_camera()
-        };
+        let from = Camera { yaw: 0.3, ..front_camera() };
         let top = snap(&from, [0.0, 0.0, 1.0]);
         assert!((top.yaw - nearest_quarter_turn(0.3)).abs() < 1e-12);
 
-        let from = Camera {
-            yaw: 3.0,
-            ..front_camera()
-        };
+        let from = Camera { yaw: 3.0, ..front_camera() };
         let top = snap(&from, [0.0, 0.0, 1.0]);
         assert!((top.yaw - std::f64::consts::PI).abs() < 1e-12);
     }
@@ -740,11 +649,7 @@ mod tests {
         assert_eq!(clockwise.pitch, cam.pitch);
 
         let ccw = navigate(&clockwise, NavigationAction::Counterclockwise);
-        assert!(
-            ccw.roll.abs() < 1e-12,
-            "one step back to the start: {}",
-            ccw.roll
-        );
+        assert!(ccw.roll.abs() < 1e-12, "one step back to the start: {}", ccw.roll);
     }
 
     #[test]
@@ -770,17 +675,9 @@ mod tests {
     fn tips_are_drawn_where_the_hit_test_finds_them() {
         let front = tips(&FRONT, pos2(200.0, 200.0));
         let x = front.iter().find(|tip| tip.0 == "x").unwrap().2;
-        assert_eq!(
-            x,
-            pos2(200.0 + (AXIS_LENGTH * ART_SCALE) as f32, 200.0),
-            "X points right"
-        );
+        assert_eq!(x, pos2(200.0 + (AXIS_LENGTH * ART_SCALE) as f32, 200.0), "X points right");
         let z = front.iter().find(|tip| tip.0 == "z").unwrap().2;
-        assert_eq!(
-            z,
-            pos2(200.0, 200.0 - (AXIS_LENGTH * ART_SCALE) as f32),
-            "Z points up"
-        );
+        assert_eq!(z, pos2(200.0, 200.0 - (AXIS_LENGTH * ART_SCALE) as f32), "Z points up");
 
         // A three-quarter view keeps the six ends apart, so each one's drawn
         // position is also the one the hit test reports.
@@ -789,15 +686,8 @@ mod tests {
         for (name, _, at, _) in &tips {
             let expected = tips.iter().position(|tip| tip.0 == *name).unwrap();
             assert_eq!(hit(&tips, *at), Some(expected), "{name}");
-            assert!(
-                hit(&tips, *at + vec2(AXIS_RADIUS - 0.1, 0.0)).is_some(),
-                "{name}"
-            );
-            assert_eq!(
-                hit(&tips, *at + vec2(AXIS_RADIUS + 0.1, 0.0)),
-                None,
-                "{name}"
-            );
+            assert!(hit(&tips, *at + vec2(AXIS_RADIUS - 0.1, 0.0)).is_some(), "{name}");
+            assert_eq!(hit(&tips, *at + vec2(AXIS_RADIUS + 0.1, 0.0)), None, "{name}");
         }
     }
 
@@ -820,10 +710,7 @@ mod tests {
         let (_, pressed) = run(&ctx, vec![button_at(start, true)], Some(start), &mut drag);
         assert!(pressed.grabbed && pressed.step.is_none());
         assert_eq!(drag.start, Some(start));
-        assert!(
-            !drag.moving,
-            "a press alone has not passed the drag threshold"
-        );
+        assert!(!drag.moving, "a press alone has not passed the drag threshold");
         let mut steps = Vec::new();
         for x in [190.0, 200.0, 230.0] {
             let at = pos2(x, 205.0);
@@ -831,15 +718,11 @@ mod tests {
             assert_eq!(action, None, "dragging over a tip does not snap");
             steps.extend(orbit.step);
         }
-        let travel = steps.iter().fold((0.0, 0.0, false), |(x, y, held), s| {
-            (x + s.dx, y + s.dy, held || s.snap)
-        });
+        let travel = steps
+            .iter()
+            .fold((0.0, 0.0, false), |(x, y, held), s| (x + s.dx, y + s.dy, held || s.snap));
         assert!(!steps.is_empty());
-        assert_eq!(
-            travel,
-            (50.0, -10.0, false),
-            "the steps add up to the pointer's travel"
-        );
+        assert_eq!(travel, (50.0, -10.0, false), "the steps add up to the pointer's travel");
         let end = pos2(230.0, 205.0);
         let (_, released) = run(&ctx, vec![button_at(end, false)], Some(end), &mut drag);
         assert!(released.released && drag.at.is_none() && drag.warp.is_none());
@@ -853,20 +736,12 @@ mod tests {
         run(&ctx, vec![pointer_at(start)], Some(start), &mut drag);
         run(&ctx, vec![button_at(start, true)], Some(start), &mut drag);
         let edge = SCREEN.max.x - 2.0;
-        let (_, at_edge) = run(
-            &ctx,
-            vec![pointer_at(pos2(edge, start.y))],
-            Some(pos2(edge, start.y)),
-            &mut drag,
-        );
+        let (_, at_edge) =
+            run(&ctx, vec![pointer_at(pos2(edge, start.y))], Some(pos2(edge, start.y)), &mut drag);
         assert!(at_edge.orbiting);
         assert_eq!(at_edge.step.map(|s| s.dx), Some(f64::from(edge - start.x)));
         let home = SCREEN.center();
-        assert_eq!(
-            drag.warp,
-            Some(home),
-            "the cursor was warped to the window centre"
-        );
+        assert_eq!(drag.warp, Some(home), "the cursor was warped to the window centre");
 
         // The OS echoes the warp: the pointer reappears at the centre without
         // moving the view.

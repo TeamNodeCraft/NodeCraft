@@ -83,10 +83,7 @@ fn cadmpeg_pins_match_the_solidcraft_pin() {
             .lines()
             .find(|line| line.trim_start().starts_with(&format!("{name} =")))
             .unwrap_or_else(|| panic!("{name} is missing from the workspace dependencies"));
-        assert!(
-            line.contains("\"=0.6.12\""),
-            "{name} must be pinned exactly to 0.6.12: {line}"
-        );
+        assert!(line.contains("\"=0.6.12\""), "{name} must be pinned exactly to 0.6.12: {line}");
     }
     let registry = workspace
         .lines()

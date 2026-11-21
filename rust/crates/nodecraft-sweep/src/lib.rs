@@ -5,8 +5,8 @@
 //! sketch adapters stay outside this crate.
 
 use solidcore_ops::sweep::Curve;
-use solidcore_record::profile::Seg2;
 use solidcore_record::Plane;
+use solidcore_record::profile::Seg2;
 
 /// One planar profile segment as a sweep curve, through the upstream converter.
 ///
@@ -20,10 +20,7 @@ pub fn curve_from_seg2(segment: &Seg2, plane: &Plane) -> Option<Curve> {
 /// A closed profile on `plane`, in order.
 #[must_use]
 pub fn section_from_seg2(segments: &[Seg2], plane: &Plane) -> Option<Vec<Curve>> {
-    segments
-        .iter()
-        .map(|segment| curve_from_seg2(segment, plane))
-        .collect()
+    segments.iter().map(|segment| curve_from_seg2(segment, plane)).collect()
 }
 
 /// Loft closed profile sections placed on their own record planes.
@@ -37,10 +34,8 @@ pub fn loft_on_planes(
     degree: u32,
     cap: bool,
 ) -> Result<solidcore_ops::Body, solidcore_ops::Error> {
-    let sections: Option<Vec<Vec<Curve>>> = sections
-        .iter()
-        .map(|(segments, plane)| section_from_seg2(segments, plane))
-        .collect();
+    let sections: Option<Vec<Vec<Curve>>> =
+        sections.iter().map(|(segments, plane)| section_from_seg2(segments, plane)).collect();
     let sections = sections.ok_or(solidcore_ops::Error::Argument)?;
     solidcore_ops::sweep::loft(&sections, degree, cap)
 }
@@ -66,7 +61,12 @@ mod tests {
         assert!(matches!(line, Curve::Line { start: [0.0, 0.0, 0.0], end: [2.0, 0.0, 0.0] }));
 
         let arc = curve_from_seg2(
-            &Seg2::Arc { center: Vec2::new(0.0, 0.0), radius: 1.0, start: 0.0, sweep: std::f64::consts::FRAC_PI_2 },
+            &Seg2::Arc {
+                center: Vec2::new(0.0, 0.0),
+                radius: 1.0,
+                start: 0.0,
+                sweep: std::f64::consts::FRAC_PI_2,
+            },
             &Plane::XY,
         )
         .expect("arc");
@@ -118,12 +118,9 @@ mod tests {
     fn loft_between_two_square_sections_has_the_expected_volume() {
         let square = square(10.0);
         let bottom = Plane::XY;
-        let top = Plane {
-            origin: Vec3::new(0.0, 0.0, 10.0),
-            ..Plane::XY
-        };
-        let body = loft_on_planes(&[(square.clone(), bottom), (square, top)], 1, true)
-            .expect("ops loft");
+        let top = Plane { origin: Vec3::new(0.0, 0.0, 10.0), ..Plane::XY };
+        let body =
+            loft_on_planes(&[(square.clone(), bottom), (square, top)], 1, true).expect("ops loft");
         let volume = body.volume(1.0e-7).expect("volume");
         assert!((volume - 1000.0).abs() < 1.0e-6, "{volume}");
     }

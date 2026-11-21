@@ -2,9 +2,9 @@ use super::*;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 
 use nodecraft_engine::EngineCache;
 use nodecraft_session::GraphDocument;
@@ -30,32 +30,21 @@ mod test_support {
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
-        SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub(super) fn reset() {
         PAUSE_AFTER_PICK_MS.store(0, Ordering::SeqCst);
         PICKED.store(0, Ordering::SeqCst);
-        RECEIVED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        RECEIVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     pub(super) fn record_received(kind: u8) {
-        RECEIVED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(kind);
+        RECEIVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(kind);
     }
 
     pub(super) fn received() -> Vec<u8> {
-        RECEIVED
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        RECEIVED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     pub(super) fn set_pause_after_pick_ms(ms: u64) {
@@ -104,7 +93,6 @@ fn map_eval_errors(
         None => errors.clone(),
     }
 }
-
 
 /// One exact result's display submission. The app has deliberately no display
 /// identity of its own: a body-key-only key cannot see placement, so it would
@@ -179,9 +167,7 @@ pub(super) fn source_hashes(
         .iter()
         .filter(|node| nodecraft_node_contract::import_source_node(&node.node_type))
         .filter_map(|node| {
-            changes
-                .hash(&document.id, &node.id)
-                .map(|hash| (node.id.clone(), hash.to_owned()))
+            changes.hash(&document.id, &node.id).map(|hash| (node.id.clone(), hash.to_owned()))
         })
         .collect()
 }
@@ -227,13 +213,13 @@ impl NodeCraftApp {
         .with_source_hashes(source_hashes)
     }
 
-    fn linked_documents(&self) -> std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>> {
+    fn linked_documents(
+        &self,
+    ) -> std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>> {
         let mut documents = std::collections::BTreeMap::new();
-        if self
-            .session
-            .as_ref()
-            .is_some_and(|session| session.document().nodes.iter().any(|node| node.node_type == "linkedpart"))
-        {
+        if self.session.as_ref().is_some_and(|session| {
+            session.document().nodes.iter().any(|node| node.node_type == "linkedpart")
+        }) {
             for (document_id, document) in self.documents.documents() {
                 if let Some(path) = self.documents.path(document_id) {
                     documents.insert(path.to_path_buf(), document.clone());
@@ -256,10 +242,8 @@ impl NodeCraftApp {
             return;
         }
         let binding = self.active_eval_binding();
-        let eval_document = binding
-            .as_ref()
-            .map(|binding| &binding.document)
-            .unwrap_or_else(|| session.document());
+        let eval_document =
+            binding.as_ref().map(|binding| &binding.document).unwrap_or_else(|| session.document());
         // One selection-target rule for evaluation and validation, so the
         // validated closure is always the closure this display evaluates.
         let raw_evaluation_selection = self.evaluation_selection_target();
@@ -274,18 +258,12 @@ impl NodeCraftApp {
             (Some(binding), None) => Some(binding.prefix.clone()),
             (None, raw) => raw,
         };
-        let selected_eval = self.selected_nodes.iter().next().and_then(|selected| {
-            match &binding {
-                Some(binding) => map_body_id_to_eval(binding, selected),
-                None => Some(selected.clone()),
-            }
+        let selected_eval = self.selected_nodes.iter().next().and_then(|selected| match &binding {
+            Some(binding) => map_body_id_to_eval(binding, selected),
+            None => Some(selected.clone()),
         });
         let comparison = if self.selected_nodes.len() == 1 {
-            comparison_for_selection(
-                eval_document,
-                selected_eval.as_deref(),
-                self.feature_overlay,
-            )
+            comparison_for_selection(eval_document, selected_eval.as_deref(), self.feature_overlay)
         } else {
             None
         };
@@ -329,12 +307,10 @@ impl NodeCraftApp {
         // A selected node outside the viewed target closure is evaluated as an
         // extra validation target. It contributes node_errors (and therefore the
         // canvas error glow) without changing the displayed mesh or breakpoint.
-        let viewed_closure = engine_bridge::target_for(
-            eval_document,
-            evaluation_selection.as_deref(),
-        )
-        .map(|target| target_closure(eval_document, &target))
-        .unwrap_or_default();
+        let viewed_closure =
+            engine_bridge::target_for(eval_document, evaluation_selection.as_deref())
+                .map(|target| target_closure(eval_document, &target))
+                .unwrap_or_default();
         let selected_eval_ids: Vec<String> = self
             .selected_nodes
             .iter()
@@ -406,11 +382,8 @@ impl NodeCraftApp {
         // Exporter runs must execute their write, so they always miss.
         if !clear_cache
             && !run_exporters
-            && let Some(cached) = self
-                .exact_results
-                .get(&tab_id)
-                .and_then(|cache| cache.get(&key))
-                .cloned()
+            && let Some(cached) =
+                self.exact_results.get(&tab_id).and_then(|cache| cache.get(&key)).cloned()
         {
             self.eval_worker.cancel_active();
             self.eval_pending = None;
@@ -455,9 +428,10 @@ impl NodeCraftApp {
         // The worker re-checks the flat node/connection counts before using it.
         let session_hashes = if binding.is_none()
             && linked_documents.is_empty()
-            && !job_document.nodes.iter().any(|node| {
-                matches!(node.node_type.as_str(), "group" | "graph" | "linkedpart")
-            })
+            && !job_document
+                .nodes
+                .iter()
+                .any(|node| matches!(node.node_type.as_str(), "group" | "graph" | "linkedpart"))
         {
             session.hashes_for_sources(&source_hashes)
         } else {
@@ -481,10 +455,7 @@ impl NodeCraftApp {
         let total = engine_bridge::target_for(&job_document, evaluation_selection.as_deref())
             .map(|target| target_closure(&job_document, &target).len())
             .unwrap_or(0);
-        self.eval_progress = (total > 0).then_some(EvalProgress {
-            total,
-            exact_done: 0,
-        });
+        self.eval_progress = (total > 0).then_some(EvalProgress { total, exact_done: 0 });
         self.exact_brep_hits = 0;
         self.exact_part_hits = 0;
         self.brep_hits = 0;
@@ -555,7 +526,8 @@ pub(super) struct EvalJob {
     /// Content hashes of the session revision this job evaluates. Present only
     /// when the job document is the session document and no flattening can
     /// change the worker's graph; the bridge otherwise hashes the flat graph.
-    session_hashes: Option<std::sync::Arc<std::collections::BTreeMap<String, nodecraft_session::ContentHash>>>,
+    session_hashes:
+        Option<std::sync::Arc<std::collections::BTreeMap<String, nodecraft_session::ContentHash>>>,
     selected: Option<String>,
     comparison: Option<(String, String)>,
     ghost_input: Option<String>,
@@ -628,12 +600,12 @@ pub(super) struct ValidationDiagnostics {
 
 /// Selected nodes whose exact body is outside the viewed closure. They are
 /// validation work, never display targets.
-pub(super) fn validation_targets_outside(selected: &[String], closure: &std::collections::HashSet<String>) -> Vec<String> {
-    let mut targets: Vec<String> = selected
-        .iter()
-        .filter(|id| !closure.contains(*id))
-        .cloned()
-        .collect();
+pub(super) fn validation_targets_outside(
+    selected: &[String],
+    closure: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut targets: Vec<String> =
+        selected.iter().filter(|id| !closure.contains(*id)).cloned().collect();
     targets.sort();
     targets.dedup();
     targets
@@ -647,10 +619,7 @@ pub(super) fn merge_diagnostics(
     base_warnings: &std::collections::BTreeMap<String, Vec<String>>,
     selection: &[String],
     results: &std::collections::HashMap<String, ValidationDiagnostics>,
-) -> (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, Vec<String>>,
-) {
+) -> (std::collections::BTreeMap<String, String>, std::collections::BTreeMap<String, Vec<String>>) {
     let mut errors = base_errors.clone();
     let mut warnings = base_warnings.clone();
     for target in selection {
@@ -661,10 +630,7 @@ pub(super) fn merge_diagnostics(
             errors.insert(id.clone(), message.clone());
         }
         for (id, messages) in &diagnostics.warnings {
-            warnings
-                .entry(id.clone())
-                .or_default()
-                .extend(messages.iter().cloned());
+            warnings.entry(id.clone()).or_default().extend(messages.iter().cloned());
         }
     }
     (errors, warnings)
@@ -789,17 +755,11 @@ const EXACT_CACHE_ENTRIES: usize = 8;
 
 impl ExactCache {
     pub(super) fn get(&self, key: &ExactKey) -> Option<&engine_bridge::Evaluation> {
-        self.entries
-            .iter()
-            .find(|(existing, _)| existing == key)
-            .map(|(_, evaluation)| evaluation)
+        self.entries.iter().find(|(existing, _)| existing == key).map(|(_, evaluation)| evaluation)
     }
 
     pub(super) fn insert(&mut self, key: ExactKey, evaluation: engine_bridge::Evaluation) {
-        if let Some((_, existing)) = self
-            .entries
-            .iter_mut()
-            .find(|(existing, _)| existing == &key)
+        if let Some((_, existing)) = self.entries.iter_mut().find(|(existing, _)| existing == &key)
         {
             *existing = evaluation;
             return;
@@ -925,11 +885,7 @@ impl LodState {
             for body in &part.bodies {
                 seen.insert(body.key);
                 let key = lod_bounds_key(body);
-                let local = match bounds
-                    .get(&key)
-                    .or_else(|| self.bounds.get(&key))
-                    .copied()
-                {
+                let local = match bounds.get(&key).or_else(|| self.bounds.get(&key)).copied() {
                     Some(cached) => cached,
                     None => {
                         let Some(local) = nodecraft_display::body_bounds(&body.brep) else {
@@ -1024,10 +980,8 @@ impl LodState {
             fov_y: view.fov_y,
             ortho_height: view.ortho_height,
         };
-        let viewport = nodecraft_display::ViewportSize {
-            width: view.viewport[0],
-            height: view.viewport[1],
-        };
+        let viewport =
+            nodecraft_display::ViewportSize { width: view.viewport[0], height: view.viewport[1] };
         let mut body_quality = BTreeMap::new();
         for (key, body_bounds) in &self.placed {
             let current_tolerance = match self.levels.get(key).copied() {
@@ -1119,10 +1073,7 @@ pub(super) fn build_display(
     };
     let mut overlays = Vec::new();
     let mut push = |kind: OverlayKind, part: &nodecraft_exact::ExactPart| {
-        overlays.push(OverlayRequest {
-            kind,
-            part: std::sync::Arc::new(part.clone()),
-        });
+        overlays.push(OverlayRequest { kind, part: std::sync::Arc::new(part.clone()) });
     };
     if let Some(edit) = edit_preview
         && let Some(part) = exact.exact_parts.get(edit)
@@ -1135,10 +1086,9 @@ pub(super) fn build_display(
         push(OverlayKind::FeatureGhost, part);
     }
     if let Some((before, after)) = comparison {
-        for (id, kind) in [
-            (before, OverlayKind::ComparisonBefore),
-            (after, OverlayKind::ComparisonAfter),
-        ] {
+        for (id, kind) in
+            [(before, OverlayKind::ComparisonBefore), (after, OverlayKind::ComparisonAfter)]
+        {
             if let Some(part) = exact.exact_parts.get(id) {
                 push(kind, part);
             }
@@ -1159,10 +1109,7 @@ pub(super) fn build_display(
         }
     }
     let breakpoint = vec![(exact.target.clone(), part.clone())].into_iter().collect();
-    std::sync::Arc::new(ExactSnapshot {
-        breakpoint,
-        overlays,
-    })
+    std::sync::Arc::new(ExactSnapshot { breakpoint, overlays })
 }
 
 enum WorkerMessage {
@@ -1185,11 +1132,7 @@ impl PendingJobs {
     /// an older one. A newer validation request supersedes an older one only
     /// when it names the same tab, document and target; different targets stay
     /// queued. Everything superseded is explicitly retired to the app.
-    fn fold(
-        &mut self,
-        message: WorkerMessage,
-        retired_tx: &Sender<(u64, u64)>,
-    ) {
+    fn fold(&mut self, message: WorkerMessage, retired_tx: &Sender<(u64, u64)>) {
         match message {
             WorkerMessage::Foreground(mut job) => {
                 #[cfg(test)]
@@ -1206,10 +1149,8 @@ impl PendingJobs {
             WorkerMessage::Validation(job) => {
                 #[cfg(test)]
                 test_support::record_received(test_support::VALIDATION);
-                if let Some(index) = self
-                    .validations
-                    .iter()
-                    .position(|pending| pending.same_request(&job))
+                if let Some(index) =
+                    self.validations.iter().position(|pending| pending.same_request(&job))
                 {
                     let superseded = self
                         .validations
@@ -1269,10 +1210,7 @@ impl PendingJobs {
 /// A result with no diagnostics, used when a validation request cannot produce
 /// an exact evaluation. Every request must retire its app bookkeeping, so the
 /// worker sends one of these instead of silently sending nothing.
-fn empty_validation_evaluation(
-    target: String,
-    error: Option<String>,
-) -> engine_bridge::Evaluation {
+fn empty_validation_evaluation(target: String, error: Option<String>) -> engine_bridge::Evaluation {
     engine_bridge::Evaluation {
         target,
         difference_error: None,
@@ -1298,7 +1236,8 @@ pub(super) struct EvalWorker {
     validation_rx: Receiver<(u64, u64, engine_bridge::Evaluation)>,
     validation_retired_rx: Receiver<(u64, u64)>,
     progress_rx: Receiver<(u64, u64, nodecraft_engine::ProgressEvent)>,
-    active_token: std::sync::Arc<std::sync::Mutex<Option<nodecraft_engine::kernel_pool::RevisionToken>>>,
+    active_token:
+        std::sync::Arc<std::sync::Mutex<Option<nodecraft_engine::kernel_pool::RevisionToken>>>,
 }
 
 impl EvalWorker {
@@ -1312,267 +1251,285 @@ impl EvalWorker {
             .name("nodecraft-eval".into())
             .stack_size(nodecraft_kernel_profile::KERNEL_THREAD_STACK)
             .spawn(move || {
-            // Cache ownership follows the tab/document, not the worker. This keeps
-            // per-document dirty/cache lifetimes aligned and prevents one tab from
-            // evicting or reusing another tab's entries. Exact results are cached
-            // on the app side by tab, so this thread only owns the engine caches.
-            /// Evaluate one selected node outside the viewed closure. This runs
-            /// only when no foreground job is queued, on the same worker and
-            /// cache as evaluation, so it never delays the display exact pass.
-            fn run_validation(
-                job: ValidationJob,
-                states: &mut std::collections::HashMap<String, TabEvalState>,
-                result_tx: &Sender<(u64, u64, engine_bridge::Evaluation)>,
-            ) {
-                let mut state = states.remove(&job.document_id).unwrap_or_default();
-                nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
-                let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
-                    Ok(flat) => flat.clone(),
-                    Err(error) => {
-                        let evaluation = empty_validation_evaluation(
-                            job.target.clone(),
-                            Some(error.to_string()),
-                        );
-                        states.insert(job.document_id.clone(), state);
-                        let _ = result_tx.send((job.id, job.tab_id, evaluation));
-                        return;
-                    }
-                };
-                let mut cache = state.cache;
-                let outcome = catch_unwind(AssertUnwindSafe(|| {
-                    nodecraft_engine::kernel_pool::with_current_token(|| {
-                        engine_bridge::evaluate_flat_exact_with_imports(
-                            flat.document(),
-                            job.target.clone(),
-                            cache,
-                            None,
-                            None,
-                            false,
-                            &Default::default(),
-                            None,
-                            &[],
-                            None,
-                            false,
-                            &job.imports,
-                        )
-                    })
-                }));
-                match outcome {
-                    Ok((evaluation, next_cache)) => {
-                        state.cache = next_cache;
-                        states.insert(job.document_id.clone(), state);
-                        let evaluation = evaluation.unwrap_or_else(|| {
-                            empty_validation_evaluation(
+                // Cache ownership follows the tab/document, not the worker. This keeps
+                // per-document dirty/cache lifetimes aligned and prevents one tab from
+                // evicting or reusing another tab's entries. Exact results are cached
+                // on the app side by tab, so this thread only owns the engine caches.
+                /// Evaluate one selected node outside the viewed closure. This runs
+                /// only when no foreground job is queued, on the same worker and
+                /// cache as evaluation, so it never delays the display exact pass.
+                fn run_validation(
+                    job: ValidationJob,
+                    states: &mut std::collections::HashMap<String, TabEvalState>,
+                    result_tx: &Sender<(u64, u64, engine_bridge::Evaluation)>,
+                ) {
+                    let mut state = states.remove(&job.document_id).unwrap_or_default();
+                    nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
+                    let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
+                        Ok(flat) => flat.clone(),
+                        Err(error) => {
+                            let evaluation = empty_validation_evaluation(
                                 job.target.clone(),
-                                Some("Validation produced no exact result".into()),
+                                Some(error.to_string()),
+                            );
+                            states.insert(job.document_id.clone(), state);
+                            let _ = result_tx.send((job.id, job.tab_id, evaluation));
+                            return;
+                        }
+                    };
+                    let mut cache = state.cache;
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        nodecraft_engine::kernel_pool::with_current_token(|| {
+                            engine_bridge::evaluate_flat_exact_with_imports(
+                                flat.document(),
+                                job.target.clone(),
+                                cache,
+                                None,
+                                None,
+                                false,
+                                &Default::default(),
+                                None,
+                                &[],
+                                None,
+                                false,
+                                &job.imports,
                             )
-                        });
-                        let _ = result_tx.send((job.id, job.tab_id, evaluation));
-                    }
-                    Err(_) => {
-                        state.cache = EngineCache::new();
-                        states.insert(job.document_id.clone(), state);
-                        let evaluation = empty_validation_evaluation(
-                            job.target.clone(),
-                            Some("Engine panicked during validation".into()),
-                        );
-                        let _ = result_tx.send((job.id, job.tab_id, evaluation));
-                    }
-                }
-            }
-            let mut states: std::collections::HashMap<String, TabEvalState> =
-                std::collections::HashMap::new();
-            let mut pending = PendingJobs::default();
-            'jobs: loop {
-                // Every message taken off the channel is folded into pending
-                // state first. Nothing is discarded here: superseded work is
-                // retired to the app inside `fold`.
-                pending.drain(&job_rx, &validation_retired_tx);
-                if pending.foreground.is_none() && pending.validations.is_empty() {
-                    match job_rx.recv() {
-                        Ok(message) => pending.fold(message, &validation_retired_tx),
+                        })
+                    }));
+                    match outcome {
+                        Ok((evaluation, next_cache)) => {
+                            state.cache = next_cache;
+                            states.insert(job.document_id.clone(), state);
+                            let evaluation = evaluation.unwrap_or_else(|| {
+                                empty_validation_evaluation(
+                                    job.target.clone(),
+                                    Some("Validation produced no exact result".into()),
+                                )
+                            });
+                            let _ = result_tx.send((job.id, job.tab_id, evaluation));
+                        }
                         Err(_) => {
-                            pending.retire_all_validations(&validation_retired_tx);
-                            break;
+                            state.cache = EngineCache::new();
+                            states.insert(job.document_id.clone(), state);
+                            let evaluation = empty_validation_evaluation(
+                                job.target.clone(),
+                                Some("Engine panicked during validation".into()),
+                            );
+                            let _ = result_tx.send((job.id, job.tab_id, evaluation));
                         }
                     }
                 }
-                // Foreground evaluation always wins. A queued validation request
-                // runs only when the foreground channel has no work, mirroring
-                // the kernel pool's low-priority channel.
-                let Some(job) = pending.foreground.take() else {
-                    // Take one more look before starting low-priority work so a
-                    // foreground request that arrived after the drain runs first.
+                let mut states: std::collections::HashMap<String, TabEvalState> =
+                    std::collections::HashMap::new();
+                let mut pending = PendingJobs::default();
+                'jobs: loop {
+                    // Every message taken off the channel is folded into pending
+                    // state first. Nothing is discarded here: superseded work is
+                    // retired to the app inside `fold`.
                     pending.drain(&job_rx, &validation_retired_tx);
-                    if pending.foreground.is_some() {
+                    if pending.foreground.is_none() && pending.validations.is_empty() {
+                        match job_rx.recv() {
+                            Ok(message) => pending.fold(message, &validation_retired_tx),
+                            Err(_) => {
+                                pending.retire_all_validations(&validation_retired_tx);
+                                break;
+                            }
+                        }
+                    }
+                    // Foreground evaluation always wins. A queued validation request
+                    // runs only when the foreground channel has no work, mirroring
+                    // the kernel pool's low-priority channel.
+                    let Some(job) = pending.foreground.take() else {
+                        // Take one more look before starting low-priority work so a
+                        // foreground request that arrived after the drain runs first.
+                        pending.drain(&job_rx, &validation_retired_tx);
+                        if pending.foreground.is_some() {
+                            continue 'jobs;
+                        }
+                        if let Some(validation) = pending.validations.pop_front() {
+                            run_validation(validation, &mut states, &validation_tx);
+                        }
+                        continue 'jobs;
+                    };
+                    let mut state = states.remove(&job.document_id).unwrap_or_default();
+                    let timeline = std::time::Instant::now();
+                    if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                        eprintln!("[t {}] worker picked", job.id);
+                    }
+                    #[cfg(test)]
+                    test_support::after_pick();
+                    nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
+                    // `clear_cache` means "bypass cache lookups for this run", not
+                    // "free every cache". The evaluator already keys entries by
+                    // content hash, so changed graphs cannot hit stale results; the
+                    // bypass is only for the explicit fresh re-evaluate action.
+                    let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
+                        Ok(flat) => flat.clone(),
+                        Err(error) => {
+                            let target =
+                                engine_bridge::target_for(&job.document, job.selected.as_deref());
+                            let evaluation = target.map(|target| engine_bridge::Evaluation {
+                                target,
+                                difference_error: None,
+                                difference_approximate: false,
+                                node_errors: Default::default(),
+                                node_warnings: Default::default(),
+                                error: Some(error.to_string()),
+                                elapsed_ms: 0.0,
+                                kernel_ms: 0.0,
+                                cache_hits: 0,
+                                cache_misses: 0,
+                                brep_hits: 0,
+                                part_hits: 0,
+                                exact_parts: Default::default(),
+                                exact_comparison: None,
+                                proof_generation: 0,
+                            });
+                            states.insert(job.document_id.clone(), state);
+                            if let Some(evaluation) = evaluation
+                                && result_tx.send((job.id, job.tab_id, evaluation)).is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    let target =
+                        engine_bridge::target_for(flat.document(), job.selected.as_deref());
+                    let progress_tx = progress_tx.clone();
+                    let mut on_progress = |event: nodecraft_engine::ProgressEvent| {
+                        let _ = progress_tx.send((job.id, job.tab_id, event));
+                    };
+                    let mut cache = state.cache;
+                    // The session map is only valid for the exact document it was
+                    // computed from. Flattening is a clone for a graph with no
+                    // linked/inline expansion, so require the same node and
+                    // connection counts; otherwise the bridge hashes its own flat
+                    // document (one pass, correctness first).
+                    let session_hashes = job.session_hashes.as_deref().filter(|_| {
+                        flat.document().nodes.len() == job.document.nodes.len()
+                            && flat.document().connections.len() == job.document.connections.len()
+                    });
+                    let exact_outcome = catch_unwind(AssertUnwindSafe(|| {
+                        nodecraft_engine::kernel_pool::with_current_token(|| {
+                            engine_bridge::evaluate_flat_exact_with_imports_and_hashes(
+                                flat.document(),
+                                target.clone().unwrap_or_default(),
+                                cache,
+                                Some(&mut on_progress),
+                                job.comparison
+                                    .as_ref()
+                                    .map(|(before, after)| (before.as_str(), after.as_str())),
+                                job.run_exporters,
+                                &job.dirty_nodes,
+                                job.ghost_input.as_deref(),
+                                &[],
+                                job.edit_preview.as_deref(),
+                                job.clear_cache,
+                                &job.imports,
+                                session_hashes,
+                            )
+                        })
+                    }));
+                    let exact = match exact_outcome {
+                        Ok((evaluation, next_cache)) => {
+                            cache = next_cache;
+                            evaluation
+                        }
+                        Err(_) => {
+                            cache = EngineCache::new();
+                            let evaluation = target.map(|target| engine_bridge::Evaluation {
+                                target,
+                                difference_error: None,
+                                difference_approximate: false,
+                                node_errors: Default::default(),
+                                node_warnings: Default::default(),
+                                error: Some("Engine panicked during exact evaluation".into()),
+                                elapsed_ms: 0.0,
+                                kernel_ms: 0.0,
+                                cache_hits: 0,
+                                cache_misses: 0,
+                                brep_hits: 0,
+                                part_hits: 0,
+                                exact_parts: Default::default(),
+                                exact_comparison: None,
+                                proof_generation: 0,
+                            });
+                            state.cache = cache;
+                            states.insert(job.document_id.clone(), state);
+                            if let Some(evaluation) = evaluation
+                                && result_tx.send((job.id, job.tab_id, evaluation)).is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    };
+                    if std::env::var_os("NODECRAFT_TIMELINE").is_some()
+                        && let Some(exact) = exact.as_ref()
+                    {
+                        eprintln!(
+                            "[t {}] exact {:?} hits {} misses {} parts {}",
+                            job.id,
+                            timeline.elapsed(),
+                            exact.cache_hits,
+                            exact.cache_misses,
+                            exact.exact_parts.len(),
+                        );
+                    }
+                    let mut evaluation = match exact {
+                        Some(evaluation) => evaluation,
+                        None => {
+                            state.cache = cache;
+                            states.insert(job.document_id.clone(), state);
+                            continue;
+                        }
+                    };
+                    if job.run_exporters {
+                        // The engine runs the exporter's effect once and records
+                        // any write/proof error on the exporter node. The app must
+                        // not write a second copy.
+                        evaluation.exact_parts.clear();
+                        state.cache = cache;
+                        states.insert(job.document_id.clone(), state);
+                        if result_tx.send((job.id, job.tab_id, evaluation)).is_err() {
+                            break;
+                        }
                         continue 'jobs;
                     }
-                    if let Some(validation) = pending.validations.pop_front() {
-                        run_validation(validation, &mut states, &validation_tx);
-                    }
-                    continue 'jobs;
-                };
-                let mut state = states.remove(&job.document_id).unwrap_or_default();
-                let timeline = std::time::Instant::now();
-                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-                    eprintln!("[t {}] worker picked", job.id);
-                }
-                #[cfg(test)]
-                test_support::after_pick();
-                nodecraft_engine::kernel_pool::set_current_revision_token(job.token.clone());
-                // `clear_cache` means "bypass cache lookups for this run", not
-                // "free every cache". The evaluator already keys entries by
-                // content hash, so changed graphs cannot hit stale results; the
-                // bypass is only for the explicit fresh re-evaluate action.
-                let flat = match state.flat.resolve(&job.document, &job.linked_documents) {
-                    Ok(flat) => flat.clone(),
-                    Err(error) => {
-                        let target = engine_bridge::target_for(&job.document, job.selected.as_deref());
-                        let evaluation = target.map(|target| engine_bridge::Evaluation {
-                            target,
-                            difference_error: None,
-                            difference_approximate: false,
-                            node_errors: Default::default(),
-                            node_warnings: Default::default(),
-                            error: Some(error.to_string()),
-                            elapsed_ms: 0.0,
-                            kernel_ms: 0.0,
-                            cache_hits: 0,
-                            cache_misses: 0,
-                            brep_hits: 0,
-                            part_hits: 0,
-                            exact_parts: Default::default(),
-                            exact_comparison: None,
-                            proof_generation: 0,
-                        });
-                        states.insert(job.document_id.clone(), state);
-                        if let Some(evaluation) = evaluation
-                            && result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
-                        continue;
-                    }
-                };
-                let target = engine_bridge::target_for(flat.document(), job.selected.as_deref());
-                let progress_tx = progress_tx.clone();
-                let mut on_progress = |event: nodecraft_engine::ProgressEvent| {
-                    let _ = progress_tx.send((job.id, job.tab_id, event));
-                };
-                let mut cache = state.cache;
-                // The session map is only valid for the exact document it was
-                // computed from. Flattening is a clone for a graph with no
-                // linked/inline expansion, so require the same node and
-                // connection counts; otherwise the bridge hashes its own flat
-                // document (one pass, correctness first).
-                let session_hashes = job.session_hashes.as_deref().filter(|_| {
-                    flat.document().nodes.len() == job.document.nodes.len()
-                        && flat.document().connections.len() == job.document.connections.len()
-                });
-                let exact_outcome = catch_unwind(AssertUnwindSafe(|| {
-                    nodecraft_engine::kernel_pool::with_current_token(|| engine_bridge::evaluate_flat_exact_with_imports_and_hashes(
-                        flat.document(),
-                        target.clone().unwrap_or_default(),
-                        cache,
-                        Some(&mut on_progress),
-                        job.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
-                        job.run_exporters,
-                        &job.dirty_nodes,
-                        job.ghost_input.as_deref(),
-                        &[],
-                        job.edit_preview.as_deref(),
-                        job.clear_cache,
-                        &job.imports,
-                        session_hashes,
-                    ))
-                }));
-                let exact = match exact_outcome {
-                    Ok((evaluation, next_cache)) => {
-                        cache = next_cache;
-                        evaluation
-                    }
-                    Err(_) => {
-                        cache = EngineCache::new();
-                        let evaluation = target.map(|target| engine_bridge::Evaluation {
-                            target,
-                            difference_error: None,
-                            difference_approximate: false,
-                            node_errors: Default::default(),
-                            node_warnings: Default::default(),
-                            error: Some("Engine panicked during exact evaluation".into()),
-                            elapsed_ms: 0.0,
-                            kernel_ms: 0.0,
-                            cache_hits: 0,
-                            cache_misses: 0,
-                            brep_hits: 0,
-                            part_hits: 0,
-                            exact_parts: Default::default(),
-                            exact_comparison: None,
-                            proof_generation: 0,
-                        });
+                    // A newer edit may have arrived while the exact pass ran. Fold
+                    // everything queued into the same pending state, publish this
+                    // exact result, abandon the now-stale display pass, and let the
+                    // newest foreground job use the warmed cache. Validation work
+                    // taken here stays pending instead of being dropped.
+                    pending.drain(&job_rx, &validation_retired_tx);
+                    if pending.foreground.is_some() {
                         state.cache = cache;
                         states.insert(job.document_id.clone(), state);
-                        if let Some(evaluation) = evaluation
-                            && result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
-                        continue;
+                        if result_tx.send((job.id, job.tab_id, evaluation)).is_err() {
+                            break;
+                        }
+                        if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
+                            eprintln!("[t {}] snapshot sent +{:?}", job.id, timeline.elapsed());
+                        }
+                        continue 'jobs;
                     }
-                };
-                if std::env::var_os("NODECRAFT_TIMELINE").is_some()
-                    && let Some(exact) = exact.as_ref()
-                {
-                    eprintln!(
-                        "[t {}] exact {:?} hits {} misses {} parts {}",
-                        job.id,
-                        timeline.elapsed(),
-                        exact.cache_hits,
-                        exact.cache_misses,
-                        exact.exact_parts.len(),
-                    );
-                }
-                let mut evaluation = match exact {
-                    Some(evaluation) => evaluation,
-                    None => {
-                        state.cache = cache;
-                        states.insert(job.document_id.clone(), state);
-                        continue;
-                    }
-                };
-                if job.run_exporters {
-                    // The engine runs the exporter's effect once and records
-                    // any write/proof error on the exporter node. The app must
-                    // not write a second copy.
-                    evaluation.exact_parts.clear();
                     state.cache = cache;
                     states.insert(job.document_id.clone(), state);
-                    if result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
-                    continue 'jobs;
-                }
-                // A newer edit may have arrived while the exact pass ran. Fold
-                // everything queued into the same pending state, publish this
-                // exact result, abandon the now-stale display pass, and let the
-                // newest foreground job use the warmed cache. Validation work
-                // taken here stays pending instead of being dropped.
-                pending.drain(&job_rx, &validation_retired_tx);
-                if pending.foreground.is_some() {
-                    state.cache = cache;
-                    states.insert(job.document_id.clone(), state);
-                    if result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
+                    if result_tx.send((job.id, job.tab_id, evaluation)).is_err() {
+                        break;
+                    }
                     if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
                         eprintln!("[t {}] snapshot sent +{:?}", job.id, timeline.elapsed());
                     }
-                    continue 'jobs;
+                    if states.len() > 16
+                        && let Some(oldest) = states.keys().next().cloned()
+                    {
+                        states.remove(&oldest);
+                    }
                 }
-                state.cache = cache;
-                states.insert(job.document_id.clone(), state);
-                if result_tx.send((job.id, job.tab_id, evaluation)).is_err() { break; }
-                if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-                    eprintln!("[t {}] snapshot sent +{:?}", job.id, timeline.elapsed());
-                }
-                if states.len() > 16
-                    && let Some(oldest) = states.keys().next().cloned()
-                {
-                    states.remove(&oldest);
-                }
-            }
-        })
-        .expect("spawn the evaluation thread");
+            })
+            .expect("spawn the evaluation thread");
         Self {
             tx: job_tx,
             rx: result_rx,
@@ -1617,11 +1574,7 @@ impl EvalWorker {
     /// one producer. The channel is FIFO, so enqueueing the foreground job
     /// first is the priority guarantee: an idle worker cannot start a
     /// low-priority validation before the user's evaluation.
-    pub(super) fn send_evaluation(
-        &self,
-        job: EvalJob,
-        validations: Vec<ValidationJob>,
-    ) {
+    pub(super) fn send_evaluation(&self, job: EvalJob, validations: Vec<ValidationJob>) {
         self.send(job);
         for validation in validations {
             self.send_validation(validation);
@@ -1703,9 +1656,8 @@ impl NodeCraftApp {
         } else {
             self.eval_target = Some(evaluation.target.clone());
         }
-        self.warmup_until = self
-            .warmup_until
-            .max(Instant::now() + std::time::Duration::from_millis(500));
+        self.warmup_until =
+            self.warmup_until.max(Instant::now() + std::time::Duration::from_millis(500));
         self.status = if self.error.is_none() {
             format!(
                 "Evaluated {} in {:.1} ms — kernel {:.1} ms",
@@ -1770,9 +1722,7 @@ impl NodeCraftApp {
         &mut self,
         tab_id: u64,
         document_id: &str,
-        linked_documents: &std::sync::Arc<
-            std::collections::BTreeMap<PathBuf, GraphDocument>,
-        >,
+        linked_documents: &std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>>,
         document: Option<std::sync::Arc<GraphDocument>>,
         targets: &[String],
         binding: &Option<EvalBinding>,
@@ -1799,9 +1749,7 @@ impl NodeCraftApp {
         &mut self,
         tab_id: u64,
         document_id: &str,
-        linked_documents: &std::sync::Arc<
-            std::collections::BTreeMap<PathBuf, GraphDocument>,
-        >,
+        linked_documents: &std::sync::Arc<std::collections::BTreeMap<PathBuf, GraphDocument>>,
         document: Option<std::sync::Arc<GraphDocument>>,
         targets: &[String],
         binding: &Option<EvalBinding>,
@@ -1829,11 +1777,8 @@ impl NodeCraftApp {
                 .as_ref()
                 .and_then(|binding| map_eval_id_to_body(binding, target))
                 .unwrap_or_else(|| target.clone());
-            if let Some(cached) = self
-                .exact_results
-                .get(&tab_id)
-                .and_then(|cache| cache.get(&key))
-                .cloned()
+            if let Some(cached) =
+                self.exact_results.get(&tab_id).and_then(|cache| cache.get(&key)).cloned()
             {
                 // Cached nodes cost nothing: reuse their diagnostics even when
                 // the foreground result on screen did not include this target.
@@ -1851,14 +1796,8 @@ impl NodeCraftApp {
             }
             self.validation_next = self.validation_next.wrapping_add(1);
             let id = self.validation_next;
-            self.validation_pending.insert(
-                id,
-                ValidationPending {
-                    tab_id,
-                    body_target,
-                    key: key.clone(),
-                },
-            );
+            self.validation_pending
+                .insert(id, ValidationPending { tab_id, body_target, key: key.clone() });
             jobs.push(ValidationJob {
                 id,
                 tab_id,
@@ -1930,12 +1869,8 @@ impl NodeCraftApp {
         // already displayed, which matters after an upstream edit moved the
         // body (for example a suppression changing the placement chain).
         let active_tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id).unwrap_or(0);
-        let explicit_view = view_request_matches(
-            self.view_request.as_ref(),
-            active_tab_id,
-            target,
-            frame.revision,
-        );
+        let explicit_view =
+            view_request_matches(self.view_request.as_ref(), active_tab_id, target, frame.revision);
         if explicit_view {
             self.view_request = None;
         }
@@ -1968,11 +1903,8 @@ impl NodeCraftApp {
         let had_mesh = self.mesh.is_some();
         let same_target = self.viewport.displayed_target() == Some(display_target.as_str());
         self.mesh = Some(planned.bounds_mesh.clone());
-        let diagnostics = planned
-            .stats
-            .iter()
-            .flat_map(|stats| stats.diagnostics.iter().cloned())
-            .collect();
+        let diagnostics =
+            planned.stats.iter().flat_map(|stats| stats.diagnostics.iter().cloned()).collect();
         // One hand-off: plans, edge/picking display, diagnostics and target
         // switch together. A staged plan set stages this payload with it.
         self.viewport.set_display(
@@ -2028,15 +1960,18 @@ impl NodeCraftApp {
                 None => {}
             }
         }
-        self.difference_stats = added.as_ref().zip(removed.as_ref())
+        self.difference_stats = added
+            .as_ref()
+            .zip(removed.as_ref())
             .map(|(added, removed)| (added.faces.len(), removed.faces.len()));
         if let Some((before, after)) = before.as_ref().zip(after.as_ref()) {
             let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
             let before = self.reframe_comparison(&selected, before);
             let after = self.reframe_comparison(&selected, after);
-            let exact = added.as_ref().zip(removed.as_ref()).filter(|(added, removed)| {
-                !added.faces.is_empty() || !removed.faces.is_empty()
-            });
+            let exact = added
+                .as_ref()
+                .zip(removed.as_ref())
+                .filter(|(added, removed)| !added.faces.is_empty() || !removed.faces.is_empty());
             if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
                 if let Some((added, removed)) = exact {
                     let added = self.reframe_comparison(&selected, added);
@@ -2085,7 +2020,9 @@ impl NodeCraftApp {
             .selected_nodes
             .iter()
             .next()
-            .and_then(|id| self.session.as_ref()?.document().nodes.iter().find(|node| &node.id == id))
+            .and_then(|id| {
+                self.session.as_ref()?.document().nodes.iter().find(|node| &node.id == id)
+            })
             .is_some_and(|node| matches!(node.node_type.as_str(), "fillet" | "chamfer"));
         let overlay_plans = if selected_blend && !frame.feature_plans.is_empty() {
             frame.feature_plans.clone()
@@ -2112,20 +2049,25 @@ impl NodeCraftApp {
             self.attach_pending_edit_ghost();
             self.refresh_edit_overlay();
             if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-                eprintln!("[t {}] apply edit overlay {}ms", frame.revision, edit_started.elapsed().as_millis());
+                eprintln!(
+                    "[t {}] apply edit overlay {}ms",
+                    frame.revision,
+                    edit_started.elapsed().as_millis()
+                );
             }
         }
         // The gate compares against the preview target, so it must run after the
         // edit-input overlay has installed it.
         self.refresh_topology_picking();
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-            eprintln!("[t {}] apply frame {}ms", frame.revision, apply_started.elapsed().as_millis());
+            eprintln!(
+                "[t {}] apply frame {}ms",
+                frame.revision,
+                apply_started.elapsed().as_millis()
+            );
         }
-        self.last_applied_display = Some((
-            std::sync::Arc::new(frame.clone()),
-            target.to_owned(),
-            _feature_ghost,
-        ));
+        self.last_applied_display =
+            Some((std::sync::Arc::new(frame.clone()), target.to_owned(), _feature_ghost));
         self.egui_ctx.request_repaint();
         true
     }
@@ -2179,7 +2121,9 @@ impl NodeCraftApp {
 
     /// Poll the display service for the exact pre-pass's frame.
     fn poll_display_frame(&mut self) {
-        let Some((id, target, feature_ghost, started)) = self.pending_display.clone() else { return };
+        let Some((id, target, feature_ghost, started)) = self.pending_display.clone() else {
+            return;
+        };
         let frame = self
             .display_worker
             .latest_frame()
@@ -2204,14 +2148,8 @@ impl NodeCraftApp {
         self.apply_display_frame(&frame, &target, feature_ghost, false);
         let apply_us = started.elapsed().as_micros() as u64;
         self.last_display_us = Some((frame.plan_us, apply_us));
-        self.profiler_record(
-            crate::gpu_profiler::Series::DisplayApply,
-            apply_us as f64 / 1000.0,
-        );
-        self.profiler_record(
-            crate::gpu_profiler::Series::PlanBuild,
-            frame.plan_us as f64 / 1000.0,
-        );
+        self.profiler_record(crate::gpu_profiler::Series::DisplayApply, apply_us as f64 / 1000.0);
+        self.profiler_record(crate::gpu_profiler::Series::PlanBuild, frame.plan_us as f64 / 1000.0);
     }
 
     pub(super) fn poll_evaluation(&mut self) {
@@ -2270,10 +2208,7 @@ impl NodeCraftApp {
             let Some((key, fields)) = self.pending_exact.take() else {
                 continue;
             };
-            self.exact_results
-                .entry(tab_id)
-                .or_default()
-                .insert(key, evaluation.clone());
+            self.exact_results.entry(tab_id).or_default().insert(key, evaluation.clone());
             self.last_exact = Some((revision, evaluation.clone()));
             self.apply_exact_result(binding.as_ref(), &evaluation);
             self.submit_exact_display(
@@ -2281,10 +2216,7 @@ impl NodeCraftApp {
                 fields.feature_ghost,
                 fields.edit_preview.as_deref(),
                 fields.ghost_input.as_deref(),
-                fields
-                    .comparison
-                    .as_ref()
-                    .map(|(before, after)| (before.as_str(), after.as_str())),
+                fields.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
                 fields.run_exporters,
             );
             self.egui_ctx.request_repaint();
@@ -2323,10 +2255,7 @@ impl NodeCraftApp {
                 },
             );
             // Warm the exact cache so viewing the validated node later is a hit.
-            self.exact_results
-                .entry(tab_id)
-                .or_default()
-                .insert(pending.key, evaluation);
+            self.exact_results.entry(tab_id).or_default().insert(pending.key, evaluation);
             self.refresh_diagnostics();
             self.egui_ctx.request_repaint();
         }
@@ -2516,19 +2445,12 @@ mod tests {
         let document = box_document();
         let viewed = target_closure(&document, "p");
         let targets = validation_targets_outside(&["q".to_owned()], &viewed);
-        assert_eq!(
-            targets,
-            vec!["q".to_owned()],
-            "q must be outside the viewed closure"
-        );
+        assert_eq!(targets, vec!["q".to_owned()], "q must be outside the viewed closure");
 
         let worker = EvalWorker::new();
         // The worker is idle: this is the same first-message race evaluate()
         // hits on a cache miss.
-        worker.send_evaluation(
-            job(1),
-            vec![validation(10, &targets[0])],
-        );
+        worker.send_evaluation(job(1), vec![validation(10, &targets[0])]);
 
         wait_until(|| test_support::received().len() >= 2);
         let received = test_support::received();
@@ -2781,11 +2703,7 @@ mod tests {
             let key = key_at(target, 1);
             pending.insert(
                 id,
-                ValidationPending {
-                    tab_id: 1,
-                    body_target: target.to_owned(),
-                    key: key.clone(),
-                },
+                ValidationPending { tab_id: 1, body_target: target.to_owned(), key: key.clone() },
             );
             requested.insert(key);
             worker.send_validation(validation(id, target));

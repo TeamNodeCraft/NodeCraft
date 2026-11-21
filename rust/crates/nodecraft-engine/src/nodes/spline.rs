@@ -30,11 +30,7 @@ impl BuiltinNode for Spline {
         OutputKind::Sketch
     }
 
-    fn suppression_source(
-        &self,
-        _node: NodeView<'_>,
-        _index: &RequestIndex<'_>,
-    ) -> Option<String> {
+    fn suppression_source(&self, _node: NodeView<'_>, _index: &RequestIndex<'_>) -> Option<String> {
         // A spline is a generator: suppressing it turns it off.
         None
     }

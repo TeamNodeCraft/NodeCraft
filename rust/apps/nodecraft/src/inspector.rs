@@ -3,10 +3,10 @@
 //! Known node fields get deliberate widgets (text, switch, drag-value, slider,
 //! choice). Raw/unknown JSON fields are not shown.
 
-use egui::{Response, Sense, Ui, Vec2};
 use crate::ui_shape;
-use serde_json::Value;
+use egui::{Response, Sense, Ui, Vec2};
 use nodecraft_session::GraphNode;
+use serde_json::Value;
 
 #[derive(Clone, Debug)]
 pub struct Change {
@@ -55,11 +55,7 @@ pub struct Output {
 /// only the title row.
 pub fn reset_icon_button_at(ui: &mut Ui, rect: egui::Rect) -> Response {
     let theme = crate::theme::get();
-    let response = ui.interact(
-        rect,
-        egui::Id::new("inspector-reset"),
-        Sense::click(),
-    );
+    let response = ui.interact(rect, egui::Id::new("inspector-reset"), Sense::click());
     if response.hovered() || response.is_pointer_button_down_on() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         let alpha = if response.is_pointer_button_down_on() { 44 } else { 26 };
@@ -69,21 +65,12 @@ pub fn reset_icon_button_at(ui: &mut Ui, rect: egui::Rect) -> Response {
             theme.with_alpha(theme.highlight, alpha),
         );
     }
-    let colour = if response.hovered() {
-        theme.color(theme.text)
-    } else {
-        theme.color(theme.icon)
-    };
-    let svg = std::str::from_utf8(include_bytes!(
-        "../../../../vendor/iconify-design/restore.svg"
-    ))
-    .unwrap_or_default()
-    .replace("currentColor", &crate::theme::Theme::hex(colour.to_array()));
-    let image = egui::Image::from_bytes(
-        "bytes://nodecraft-inspector-reset.svg",
-        svg.into_bytes(),
-    )
-    .fit_to_exact_size(Vec2::splat(17.0));
+    let colour = if response.hovered() { theme.color(theme.text) } else { theme.color(theme.icon) };
+    let svg = std::str::from_utf8(include_bytes!("../../../../vendor/iconify-design/restore.svg"))
+        .unwrap_or_default()
+        .replace("currentColor", &crate::theme::Theme::hex(colour.to_array()));
+    let image = egui::Image::from_bytes("bytes://nodecraft-inspector-reset.svg", svg.into_bytes())
+        .fit_to_exact_size(Vec2::splat(17.0));
     image.paint_at(ui, rect.shrink(4.5));
     response.on_hover_text("Reset this node's settings to defaults")
 }
@@ -121,10 +108,6 @@ fn switch(key: &'static str, label: &'static str, default: bool) -> FieldSpec {
     field(key, label, Value::Bool(default), Widget::Switch)
 }
 
-
-
-
-
 fn choice(
     key: &'static str,
     label: &'static str,
@@ -135,33 +118,23 @@ fn choice(
 }
 
 fn primitive_specs(node: &GraphNode) -> Vec<FieldSpec> {
-    let kind = node
-        .values
-        .get("primitiveType")
-        .and_then(Value::as_str)
-        .unwrap_or("box");
-    let mut specs = vec![choice(
-        "primitiveType",
-        "Primitive",
-        "box",
-        nodecraft_node_contract::PRIMITIVE_TYPES,
-    )];
+    let kind = node.values.get("primitiveType").and_then(Value::as_str).unwrap_or("box");
+    let mut specs =
+        vec![choice("primitiveType", "Primitive", "box", nodecraft_node_contract::PRIMITIVE_TYPES)];
     specs.extend(contract_field_specs(nodecraft_node_contract::primitive_fields(kind)));
     specs
 }
 
 fn surface_loft_sections(ui: &mut Ui, sections: &[String], output: &mut Output) {
     let theme = crate::theme::get();
-    ui.label(
-        egui::RichText::new("SECTIONS")
-            .size(9.0)
-            .color(theme.with_alpha(theme.muted, 190)),
-    );
+    ui.label(egui::RichText::new("SECTIONS").size(9.0).color(theme.with_alpha(theme.muted, 190)));
     if sections.is_empty() {
         ui.label(
-            egui::RichText::new("Connect sketch or spline profiles to the Sections port, in order.")
-                .size(10.0)
-                .color(theme.with_alpha(theme.muted, 220)),
+            egui::RichText::new(
+                "Connect sketch or spline profiles to the Sections port, in order.",
+            )
+            .size(10.0)
+            .color(theme.with_alpha(theme.muted, 220)),
         );
         return;
     }
@@ -232,82 +205,79 @@ fn topology_references(
         .corner_radius(6.0)
         .inner_margin(8.0)
         .show(ui, |ui| {
-    ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(title)
-                .size(9.0)
-                .color(theme.with_alpha(theme.muted, 190)),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let svg = include_str!("../../../../vendor/fluent/edit.svg");
-            let colour = if active {
-                crate::theme::Theme::hex(theme.highlight)
-            } else {
-                "#ffffff".to_owned()
-            };
-            let svg = crate::app::tint_svg(svg.as_bytes(), &colour);
-            let icon = egui::Image::from_bytes(
-                if active { "bytes://inspector-edit-active.svg" } else { "bytes://inspector-edit-idle.svg" },
-                svg.into_bytes(),
-            )
-            .fit_to_exact_size(egui::vec2(14.0, 14.0));
-            if ui
-                .add(egui::Button::image(icon).frame(false))
-                .on_hover_text("Edit selection")
-                .clicked()
-            {
-                output.begin_selection = Some(field.to_owned());
-            }
-        });
-    });
-    if references.is_empty() {
-        ui.label(
-            egui::RichText::new(empty)
-                .size(10.0)
-                .color(theme.with_alpha(theme.muted, 220)),
-        );
-    } else {
-        let mut remove = None;
-        for (index, reference) in references.iter().enumerate() {
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(reference)
-                        .size(10.0)
-                        .color(theme.color(theme.text)),
+                    egui::RichText::new(title).size(9.0).color(theme.with_alpha(theme.muted, 190)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text(remove_hint).clicked() {
-                        remove = Some(index);
+                    let svg = include_str!("../../../../vendor/fluent/edit.svg");
+                    let colour = if active {
+                        crate::theme::Theme::hex(theme.highlight)
+                    } else {
+                        "#ffffff".to_owned()
+                    };
+                    let svg = crate::app::tint_svg(svg.as_bytes(), &colour);
+                    let icon = egui::Image::from_bytes(
+                        if active {
+                            "bytes://inspector-edit-active.svg"
+                        } else {
+                            "bytes://inspector-edit-idle.svg"
+                        },
+                        svg.into_bytes(),
+                    )
+                    .fit_to_exact_size(egui::vec2(14.0, 14.0));
+                    if ui
+                        .add(egui::Button::image(icon).frame(false))
+                        .on_hover_text("Edit selection")
+                        .clicked()
+                    {
+                        output.begin_selection = Some(field.to_owned());
                     }
                 });
             });
-        }
-        let mut changed = remove.is_some();
-        if let Some(index) = remove {
-            references.remove(index);
-        }
-        if !references.is_empty()
-            && ui
-                .small_button(clear_label)
-                .on_hover_text(clear_hint)
-                .clicked()
-        {
-            references.clear();
-            changed = true;
-        }
-        if changed {
-            output.changes.push(Change {
-                field: field.to_owned(),
-                value: Value::Array(
-                    references
-                        .into_iter()
-                        .map(|id| serde_json::json!({ "id": id }))
-                        .collect(),
-                ),
-            });
-        }
-    }
-    });
+            if references.is_empty() {
+                ui.label(
+                    egui::RichText::new(empty).size(10.0).color(theme.with_alpha(theme.muted, 220)),
+                );
+            } else {
+                let mut remove = None;
+                for (index, reference) in references.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(reference)
+                                .size(10.0)
+                                .color(theme.color(theme.text)),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").on_hover_text(remove_hint).clicked() {
+                                remove = Some(index);
+                            }
+                        });
+                    });
+                }
+                let mut changed = remove.is_some();
+                if let Some(index) = remove {
+                    references.remove(index);
+                }
+                if !references.is_empty()
+                    && ui.small_button(clear_label).on_hover_text(clear_hint).clicked()
+                {
+                    references.clear();
+                    changed = true;
+                }
+                if changed {
+                    output.changes.push(Change {
+                        field: field.to_owned(),
+                        value: Value::Array(
+                            references
+                                .into_iter()
+                                .map(|id| serde_json::json!({ "id": id }))
+                                .collect(),
+                        ),
+                    });
+                }
+            }
+        });
 }
 
 /// Whether a spline shows its control points. The contract owns the default;
@@ -346,33 +316,34 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) -> Vec<Inde
     let mut laid_out = Vec::with_capacity(row_count);
     for (index, (x, y)) in points.iter_mut().enumerate() {
         let mut row_changed = false;
-        let row = indexed_vector_row(ui, index, row_count, 2, "Remove point", |ui, field, width| {
-            let (value, axis, prefix, id) = match field {
-                0 => (&mut *x, "x", "X ", egui::Id::new(("spline-x", &node.id, index))),
-                1 => (&mut *y, "y", "Y ", egui::Id::new(("spline-y", &node.id, index))),
-                _ => unreachable!("a spline point has exactly two values"),
-            };
-            let expression_key = format!("points.{index}.{axis}");
-            let response = ui.add_sized(
-                [width, FIELD_ROW_HEIGHT],
-                crate::expression_input::number_drag(
-                    ui,
-                    value,
-                    nodecraft_node_contract::NumberKind::Length,
-                    0.5,
-                    2,
-                    id,
-                    node.expressions.get(&expression_key).map(String::as_str),
-                )
-                .range(-10000.0..=10000.0)
-                .prefix(prefix),
-            );
-            crate::expression_input::remember_rect(id, response.rect);
-            if let Some(expression) = crate::expression_input::take_expression_change(id) {
-                output.expressions.push((expression_key, expression));
-            }
-            row_changed |= response.changed();
-        });
+        let row =
+            indexed_vector_row(ui, index, row_count, 2, "Remove point", |ui, field, width| {
+                let (value, axis, prefix, id) = match field {
+                    0 => (&mut *x, "x", "X ", egui::Id::new(("spline-x", &node.id, index))),
+                    1 => (&mut *y, "y", "Y ", egui::Id::new(("spline-y", &node.id, index))),
+                    _ => unreachable!("a spline point has exactly two values"),
+                };
+                let expression_key = format!("points.{index}.{axis}");
+                let response = ui.add_sized(
+                    [width, FIELD_ROW_HEIGHT],
+                    crate::expression_input::number_drag(
+                        ui,
+                        value,
+                        nodecraft_node_contract::NumberKind::Length,
+                        0.5,
+                        2,
+                        id,
+                        node.expressions.get(&expression_key).map(String::as_str),
+                    )
+                    .range(-10000.0..=10000.0)
+                    .prefix(prefix),
+                );
+                crate::expression_input::remember_rect(id, response.rect);
+                if let Some(expression) = crate::expression_input::take_expression_change(id) {
+                    output.expressions.push((expression_key, expression));
+                }
+                row_changed |= response.changed();
+            });
         changed |= row_changed;
         if row.remove.clicked() {
             remove = Some(index);
@@ -392,10 +363,7 @@ fn spline_points(ui: &mut Ui, node: &GraphNode, output: &mut Output) -> Vec<Inde
     }
     if changed {
         let value = Value::Array(
-            points
-                .into_iter()
-                .map(|(x, y)| serde_json::json!({"x": x, "y": y}))
-                .collect(),
+            points.into_iter().map(|(x, y)| serde_json::json!({"x": x, "y": y})).collect(),
         );
         output.changes.push(Change { field: "points".to_owned(), value });
     }
@@ -408,11 +376,7 @@ fn parse_look_color(text: &str) -> Option<egui::Color32> {
         return None;
     }
     let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
-    Some(egui::Color32::from_rgb(
-        channel(0..2)?,
-        channel(2..4)?,
-        channel(4..6)?,
-    ))
+    Some(egui::Color32::from_rgb(channel(0..2)?, channel(2..4)?, channel(4..6)?))
 }
 
 fn look_color(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
@@ -445,10 +409,14 @@ fn contract_field_specs(fields: &[nodecraft_node_contract::NodeFieldSpec]) -> Ve
         .iter()
         .map(|spec| {
             let default = match spec.default {
-                nodecraft_node_contract::FieldDefault::Text(value) => Value::String(value.to_owned()),
+                nodecraft_node_contract::FieldDefault::Text(value) => {
+                    Value::String(value.to_owned())
+                }
                 nodecraft_node_contract::FieldDefault::Bool(value) => Value::Bool(value),
                 nodecraft_node_contract::FieldDefault::Number(value) => Value::from(value),
-                nodecraft_node_contract::FieldDefault::Choice(value) => Value::String(value.to_owned()),
+                nodecraft_node_contract::FieldDefault::Choice(value) => {
+                    Value::String(value.to_owned())
+                }
             };
             let widget = match spec.kind {
                 nodecraft_node_contract::FieldKind::Text => Widget::Text,
@@ -458,12 +426,7 @@ fn contract_field_specs(fields: &[nodecraft_node_contract::NodeFieldSpec]) -> Ve
                 }
                 nodecraft_node_contract::FieldKind::Choice(choices) => Widget::Choice(choices),
             };
-            FieldSpec {
-                key: spec.key.to_owned(),
-                label: spec.label.to_owned(),
-                default,
-                widget,
-            }
+            FieldSpec { key: spec.key.to_owned(), label: spec.label.to_owned(), default, widget }
         })
         .collect()
 }
@@ -480,10 +443,7 @@ fn known_specs(node: &GraphNode) -> Vec<FieldSpec> {
     }
     match node.node_type.as_str() {
         "solid" | "primitive" => primitive_specs(node),
-        "stepimporter" => vec![
-            text("path", "CAD path", ""),
-            switch("heal", "Heal", true),
-        ],
+        "stepimporter" => vec![text("path", "CAD path", ""), switch("heal", "Heal", true)],
         "exporter" => vec![
             text("fileName", "File name", "model"),
             text("directory", "Directory", ""),
@@ -518,10 +478,8 @@ pub fn reset_values(node: &GraphNode) -> Vec<Change> {
             values.insert(key.to_owned(), value.clone());
         }
     }
-    let changes: Vec<Change> = values
-        .into_iter()
-        .map(|(field, value)| Change { field, value })
-        .collect();
+    let changes: Vec<Change> =
+        values.into_iter().map(|(field, value)| Change { field, value }).collect();
     changes
 }
 
@@ -558,8 +516,7 @@ fn field_row(ui: &mut Ui, label: &str, add_control: impl FnOnce(&mut Ui, f32)) {
             egui::Layout::left_to_right(egui::Align::Center),
             |ui| {
                 ui.set_width(label_width);
-                ui.add(egui::Label::new(label).truncate())
-                    .on_hover_text(label);
+                ui.add(egui::Label::new(label).truncate()).on_hover_text(label);
             },
         );
         ui.allocate_ui_with_layout(
@@ -594,11 +551,7 @@ struct IndexedVectorRow {
 fn indexed_vector_index_width(ui: &Ui, rows: usize) -> f32 {
     let widest = format!("{}.", rows.max(99));
     ui.painter()
-        .layout_no_wrap(
-            widest,
-            egui::FontId::proportional(10.0),
-            ui.visuals().text_color(),
-        )
+        .layout_no_wrap(widest, egui::FontId::proportional(10.0), ui.visuals().text_color())
         .size()
         .x
 }
@@ -620,12 +573,10 @@ fn indexed_vector_row(
     // A remove button is square at the row height, leaving the rest of the
     // content width to the equal value cells.
     let remove_width = FIELD_ROW_HEIGHT;
-    let field_width = ((content_width
-        - index_width
-        - remove_width
-        - FIELD_COLUMN_GAP * (fields + 1) as f32)
-        / fields.max(1) as f32)
-        .max(1.0);
+    let field_width =
+        ((content_width - index_width - remove_width - FIELD_COLUMN_GAP * (fields + 1) as f32)
+            / fields.max(1) as f32)
+            .max(1.0);
     let theme = crate::theme::get();
     let mut index_rect = egui::Rect::ZERO;
     let mut field_rects = Vec::with_capacity(fields);
@@ -727,16 +678,17 @@ fn field_switch_row_layout(
 }
 
 /// One boolean inspector row. See `field_switch_row_layout` for the geometry.
-fn field_switch_row(
-    ui: &mut Ui,
-    label: &str,
-    value: &mut bool,
-    tooltip: Option<&str>,
-) -> Response {
+fn field_switch_row(ui: &mut Ui, label: &str, value: &mut bool, tooltip: Option<&str>) -> Response {
     field_switch_row_layout(ui, label, value, tooltip).1
 }
 
-fn draw_choice(ui: &mut Ui, key: &str, value: &mut String, choices: &[(&str, &str)], width: f32) -> bool {
+fn draw_choice(
+    ui: &mut Ui,
+    key: &str,
+    value: &mut String,
+    choices: &[(&str, &str)],
+    width: f32,
+) -> bool {
     let selected = choices
         .iter()
         .find(|(candidate, _)| *candidate == value.as_str())
@@ -859,14 +811,10 @@ fn draw_number(
 
 pub fn node_title(node: &GraphNode) -> String {
     let metadata = nodecraft_node_contract::metadata(&node.node_type);
-    if metadata.is_some_and(|metadata| {
-        metadata.icon_kind == nodecraft_node_contract::IconKind::Primitive
-    }) {
-        let kind = node
-            .values
-            .get("primitiveType")
-            .and_then(Value::as_str)
-            .unwrap_or("box");
+    if metadata
+        .is_some_and(|metadata| metadata.icon_kind == nodecraft_node_contract::IconKind::Primitive)
+    {
+        let kind = node.values.get("primitiveType").and_then(Value::as_str).unwrap_or("box");
         return nodecraft_node_contract::primitive_label(kind)
             .map_or_else(|| title_case(kind), str::to_owned);
     }
@@ -896,8 +844,7 @@ pub fn node_badge(node: &GraphNode) -> String {
 }
 
 fn section_title(node: &GraphNode) -> &'static str {
-    nodecraft_node_contract::metadata(&node.node_type)
-        .map_or("VALUES", |metadata| metadata.section)
+    nodecraft_node_contract::metadata(&node.node_type).map_or("VALUES", |metadata| metadata.section)
 }
 
 fn node_description(node: &GraphNode) -> Option<String> {
@@ -905,19 +852,11 @@ fn node_description(node: &GraphNode) -> Option<String> {
 }
 
 fn graph_port_count(node: &GraphNode, field: &str) -> usize {
-    node.values
-        .get(field)
-        .and_then(|value| value.as_array())
-        .map_or(0, Vec::len)
+    node.values.get(field).and_then(|value| value.as_array()).map_or(0, Vec::len)
 }
 
 fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
-    let mut name = node
-        .values
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("Graph")
-        .to_owned();
+    let mut name = node.values.get("name").and_then(Value::as_str).unwrap_or("Graph").to_owned();
     let definition = match node.values.get("definition").and_then(Value::as_str) {
         Some(id) => format!("Local · {id}"),
         None => node
@@ -978,10 +917,8 @@ fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             changed |= edited;
         });
         if changed {
-            output.definition_ports = Some((
-                input_count.round() as usize,
-                output_count.round() as usize,
-            ));
+            output.definition_ports =
+                Some((input_count.round() as usize, output_count.round() as usize));
         }
     } else {
         field_row(ui, "Inputs", |ui, _| {
@@ -1036,12 +973,7 @@ fn graph_instance_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
 }
 
 fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_ports: bool) {
-    let mut name = node
-        .values
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+    let mut name = node.values.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
     field_row(ui, "Name", |ui, control_width| {
         if ui
             .add_sized(
@@ -1050,10 +982,9 @@ fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_por
             )
             .changed()
         {
-            output.changes.push(Change {
-                field: "name".to_owned(),
-                value: Value::String(name.clone()),
-            });
+            output
+                .changes
+                .push(Change { field: "name".to_owned(), value: Value::String(name.clone()) });
         }
     });
     let inputs = graph_port_count(node, "inputs");
@@ -1099,10 +1030,7 @@ fn graph_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable_por
         changed |= edited;
     });
     if changed {
-        output.graph_ports = Some((
-            input_value.round() as usize,
-            output_value.round() as usize,
-        ));
+        output.graph_ports = Some((input_value.round() as usize, output_value.round() as usize));
     }
 }
 
@@ -1110,20 +1038,10 @@ fn marker_ports(node: &GraphNode) -> Vec<String> {
     if let Some(ports) = node.values.get("ports").and_then(Value::as_array) {
         return ports.iter().filter_map(|port| port.as_str().map(str::to_owned)).collect();
     }
-    node.values
-        .get("port")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .into_iter()
-        .collect()
+    node.values.get("port").and_then(Value::as_str).map(str::to_owned).into_iter().collect()
 }
 
-fn marker_interface_fields(
-    ui: &mut Ui,
-    node: &GraphNode,
-    output: &mut Output,
-    editable: bool,
-) {
+fn marker_interface_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output, editable: bool) {
     let ports = marker_ports(node);
     if !editable {
         field_row(ui, "Ports", |ui, _| {
@@ -1160,10 +1078,7 @@ fn section_label(ui: &mut Ui, text: &str) {
     let theme = crate::theme::get();
     ui.add_space(4.0);
     ui.label(
-        egui::RichText::new(text)
-            .size(10.0)
-            .strong()
-            .color(theme.with_alpha(theme.muted, 220)),
+        egui::RichText::new(text).size(10.0).strong().color(theme.with_alpha(theme.muted, 220)),
     );
 }
 
@@ -1185,7 +1100,9 @@ fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             )
             .changed()
         {
-            output.changes.push(Change { field: "path".to_owned(), value: Value::String(path.clone()) });
+            output
+                .changes
+                .push(Change { field: "path".to_owned(), value: Value::String(path.clone()) });
         }
         if ui.button("Choose…").clicked() {
             output.choose_linked_part = true;
@@ -1196,7 +1113,10 @@ fn linked_part_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     if ui.add_enabled(enabled, egui::Button::new("Open in new tab")).clicked() {
         output.open_linked_part = true;
     }
-    description(ui, "Opens this .nodecraft document as an editable tab. Linked parts may themselves link further documents.");
+    description(
+        ui,
+        "Opens this .nodecraft document as an editable tab. Linked parts may themselves link further documents.",
+    );
 }
 
 fn step_schema(ui: &Ui, path: &str) -> Option<String> {
@@ -1220,9 +1140,8 @@ fn import_controls_enabled(path: &str) -> bool {
     !path.is_empty()
 }
 
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+const MONTHS: [&str; 12] =
+    ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -1303,12 +1222,8 @@ fn import_status_fields(
             );
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if import_action_button(
-                    ui,
-                    nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL,
-                    74.0,
-                )
-                .clicked()
+                if import_action_button(ui, nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL, 74.0)
+                    .clicked()
                 {
                     output.locate_import = true;
                 }
@@ -1329,12 +1244,8 @@ fn import_status_fields(
                     .size(10.5)
                     .color(theme.color(theme.node_error)),
             );
-            if import_action_button(
-                ui,
-                nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL,
-                74.0,
-            )
-            .clicked()
+            if import_action_button(ui, nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL, 74.0)
+                .clicked()
             {
                 output.locate_import = true;
             }
@@ -1358,11 +1269,14 @@ fn step_import_fields(
         let changed = ui
             .add_sized(
                 [path_width, 26.0],
-                egui::TextEdit::singleline(&mut path).hint_text("Path to .step, .stp, .FCStd or .3dm"),
+                egui::TextEdit::singleline(&mut path)
+                    .hint_text("Path to .step, .stp, .FCStd or .3dm"),
             )
             .changed();
         if changed {
-            output.changes.push(Change { field: "path".to_owned(), value: Value::String(path.clone()) });
+            output
+                .changes
+                .push(Change { field: "path".to_owned(), value: Value::String(path.clone()) });
         }
         let button_colour = theme.color(theme.control);
         if ui_shape::button(
@@ -1383,9 +1297,7 @@ fn step_import_fields(
     // action in the same muted style as the other secondary source notes.
     if path.is_empty() {
         ui.label(
-            egui::RichText::new("Choose a CAD file")
-                .size(10.5)
-                .color(theme.color(theme.muted)),
+            egui::RichText::new("Choose a CAD file").size(10.5).color(theme.color(theme.muted)),
         );
     }
     // The path-dependent controls share one enabled rule: no path, no source to
@@ -1439,26 +1351,18 @@ fn step_import_fields(
     let mut selected_mode = None;
     ui.add_enabled_ui(controls_enabled, |ui| {
         field_row(ui, path_mode.label, |ui, control_width| {
-            if draw_choice(
-                ui,
-                path_mode.key,
-                &mut mode,
-                path_mode_choices,
-                control_width,
-            ) {
+            if draw_choice(ui, path_mode.key, &mut mode, path_mode_choices, control_width) {
                 selected_mode = Some(mode.clone());
             }
         });
     });
     if let Some(mode) = selected_mode
         && let Some((path, relative, warning)) =
-            nodecraft_engine::import_io::switch_path_mode(
-                &node.values,
-                &mode,
-                document_directory,
-            )
+            nodecraft_engine::import_io::switch_path_mode(&node.values, &mode, document_directory)
     {
-        output.changes.push(Change { field: "pathMode".to_owned(), value: Value::String(mode.clone()) });
+        output
+            .changes
+            .push(Change { field: "pathMode".to_owned(), value: Value::String(mode.clone()) });
         output.changes.push(Change { field: "path".to_owned(), value: Value::String(path) });
         output.changes.push(Change {
             field: "relativePath".to_owned(),
@@ -1494,12 +1398,7 @@ fn step_import_fields(
     };
     let watch_changed = ui
         .add_enabled_ui(controls_enabled, |ui| {
-            field_switch_row(
-                ui,
-                step_import_field("watch").label,
-                &mut watch,
-                Some(watch_tooltip),
-            )
+            field_switch_row(ui, step_import_field("watch").label, &mut watch, Some(watch_tooltip))
         })
         .inner
         .changed();
@@ -1514,23 +1413,11 @@ fn step_import_fields(
 
 fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     let theme = crate::theme::get();
-    let mut name = node
-        .values
-        .get("fileName")
-        .and_then(Value::as_str)
-        .unwrap_or("model")
-        .to_owned();
-    let mut directory = node
-        .values
-        .get("directory")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let mut overwrite = node
-        .values
-        .get("overwrite")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let mut name =
+        node.values.get("fileName").and_then(Value::as_str).unwrap_or("model").to_owned();
+    let mut directory =
+        node.values.get("directory").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let mut overwrite = node.values.get("overwrite").and_then(Value::as_bool).unwrap_or(false);
     field_row(ui, "File name", |ui, control_width| {
         if ui
             .add_sized(
@@ -1539,10 +1426,9 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             )
             .changed()
         {
-            output.changes.push(Change {
-                field: "fileName".to_owned(),
-                value: Value::String(name.clone()),
-            });
+            output
+                .changes
+                .push(Change { field: "fileName".to_owned(), value: Value::String(name.clone()) });
         }
     });
 
@@ -1554,8 +1440,7 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
             if ui
                 .add_sized(
                     [path_width, FIELD_ROW_HEIGHT],
-                    egui::TextEdit::singleline(&mut directory)
-                        .hint_text("STEP output folder"),
+                    egui::TextEdit::singleline(&mut directory).hint_text("STEP output folder"),
                 )
                 .changed()
             {
@@ -1581,10 +1466,9 @@ fn export_fields(ui: &mut Ui, node: &GraphNode, output: &mut Output) {
     });
 
     if field_switch_row(ui, "Overwrite", &mut overwrite, None).changed() {
-        output.changes.push(Change {
-            field: "overwrite".to_owned(),
-            value: Value::Bool(overwrite),
-        });
+        output
+            .changes
+            .push(Change { field: "overwrite".to_owned(), value: Value::Bool(overwrite) });
     }
     let _ = theme;
 }
@@ -1667,7 +1551,14 @@ pub fn show(
             );
         }
         section_label(ui, section_title(node));
-        step_import_fields(ui, node, &mut output, document_directory, source_changed, import_status);
+        step_import_fields(
+            ui,
+            node,
+            &mut output,
+            document_directory,
+            source_changed,
+            import_status,
+        );
     } else if node.node_type == "linkedpart" {
         section_label(ui, section_title(node));
         linked_part_fields(ui, node, &mut output);
@@ -1701,11 +1592,7 @@ pub fn show(
                     theme.with_alpha(theme.control, 220)
                 },
                 egui::Stroke::new(1.0, theme.with_alpha(theme.border, 210)),
-                if sketch_editing {
-                    theme.color(theme.control)
-                } else {
-                    theme.color(theme.text)
-                },
+                if sketch_editing { theme.color(theme.control) } else { theme.color(theme.text) },
             )
             .clicked()
             {
@@ -1851,7 +1738,8 @@ mod tests {
     use super::*;
 
     fn node(node_type: &str, values: Value) -> GraphNode {
-        GraphNode { expressions: Default::default(),
+        GraphNode {
+            expressions: Default::default(),
             id: "n".into(),
             node_type: node_type.into(),
             values,
@@ -1958,31 +1846,11 @@ mod tests {
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row.index.width(), first.index.width(), "row {index} index width");
             assert_eq!(row.index.right(), first.index.right(), "row {index} index right");
-            assert_eq!(
-                row.fields[0].left(),
-                first.fields[0].left(),
-                "row {index} X left"
-            );
-            assert_eq!(
-                row.fields[0].right(),
-                first.fields[0].right(),
-                "row {index} X right"
-            );
-            assert_eq!(
-                row.fields[1].left(),
-                first.fields[1].left(),
-                "row {index} Y left"
-            );
-            assert_eq!(
-                row.fields[1].right(),
-                first.fields[1].right(),
-                "row {index} Y right"
-            );
-            assert_eq!(
-                row.fields[0].width(),
-                row.fields[1].width(),
-                "row {index} X/Y widths"
-            );
+            assert_eq!(row.fields[0].left(), first.fields[0].left(), "row {index} X left");
+            assert_eq!(row.fields[0].right(), first.fields[0].right(), "row {index} X right");
+            assert_eq!(row.fields[1].left(), first.fields[1].left(), "row {index} Y left");
+            assert_eq!(row.fields[1].right(), first.fields[1].right(), "row {index} Y right");
+            assert_eq!(row.fields[0].width(), row.fields[1].width(), "row {index} X/Y widths");
             assert_eq!(
                 row.remove.rect.right(),
                 popup_right,
@@ -2072,9 +1940,9 @@ mod tests {
             changes.extend(click_import_control(&ctx, &node, step as f32 * 4.0));
         }
         assert!(
-            !changes.iter().any(|change| {
-                matches!(change.field.as_str(), "pathMode" | "ingest" | "watch")
-            }),
+            !changes
+                .iter()
+                .any(|change| { matches!(change.field.as_str(), "pathMode" | "ingest" | "watch") }),
             "disabled source controls must not emit changes: {changes:?}"
         );
     }
@@ -2140,9 +2008,7 @@ mod tests {
             changes.extend(click_import_control(&ctx, &node, 55.0 + step as f32 * 2.0));
         }
         assert!(
-            changes
-                .iter()
-                .any(|change| matches!(change.field.as_str(), "ingest" | "watch")),
+            changes.iter().any(|change| matches!(change.field.as_str(), "ingest" | "watch")),
             "enabled switches should emit their change: {changes:?}"
         );
     }
@@ -2192,15 +2058,11 @@ mod tests {
             "warning status line missing, got {texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
+            texts.iter().any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
             "Locate… button missing, got {texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
+            texts.iter().any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
             "Save copy as… button missing, got {texts:?}"
         );
         assert_eq!(
@@ -2217,9 +2079,8 @@ mod tests {
     #[test]
     fn missing_copy_status_uses_the_error_line_and_only_offers_locate() {
         use nodecraft_engine::import_io::ImportStatus;
-        let status = ImportStatus::Missing {
-            path: std::path::PathBuf::from("/models/bracket.step"),
-        };
+        let status =
+            ImportStatus::Missing { path: std::path::PathBuf::from("/models/bracket.step") };
         let node = node(
             "stepimporter",
             serde_json::json!({ "path": "/models/bracket.step", "pathMode": "absolute" }),
@@ -2242,21 +2103,15 @@ mod tests {
         let texts = import_frame_texts(&frame);
         frame.textures_delta.clear();
         assert!(
-            texts
-                .iter()
-                .any(|text| text.contains("Original not found: /models/bracket.step")),
+            texts.iter().any(|text| text.contains("Original not found: /models/bracket.step")),
             "error status line missing, got {texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
+            texts.iter().any(|text| text == nodecraft_node_contract::STEP_IMPORT_LOCATE_LABEL),
             "Locate… button missing, got {texts:?}"
         );
         assert!(
-            !texts
-                .iter()
-                .any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
+            !texts.iter().any(|text| text == nodecraft_node_contract::STEP_IMPORT_SAVE_COPY_LABEL),
             "Save copy as… needs an embedded copy: {texts:?}"
         );
     }
@@ -2264,10 +2119,7 @@ mod tests {
     #[test]
     fn old_document_with_an_absolute_path_shows_full_path_without_a_change() {
         let ctx = egui::Context::default();
-        let node = node(
-            "stepimporter",
-            serde_json::json!({ "path": "/models/old/part.step" }),
-        );
+        let node = node("stepimporter", serde_json::json!({ "path": "/models/old/part.step" }));
         let mut inspector = Output::default();
         let mut frame = ctx.run_ui(
             egui::RawInput {
@@ -2282,10 +2134,7 @@ mod tests {
                 step_import_fields(ui, &node, &mut inspector, None, false, None);
             },
         );
-        assert!(
-            inspector.changes.is_empty(),
-            "showing a derived path mode must not emit a change"
-        );
+        assert!(inspector.changes.is_empty(), "showing a derived path mode must not emit a change");
 
         fn collect(shape: &egui::Shape, texts: &mut Vec<String>) {
             match shape {
@@ -2345,7 +2194,8 @@ mod tests {
         let continuity = fillet.iter().find(|spec| spec.key == "continuity").expect("continuity");
         assert_eq!(continuity.default, serde_json::json!(""));
 
-        let box_specs = known_specs(&node("primitive", serde_json::json!({"primitiveType": "box"})));
+        let box_specs =
+            known_specs(&node("primitive", serde_json::json!({"primitiveType": "box"})));
         assert_eq!(box_specs.len(), 4);
         let length = box_specs.iter().find(|spec| spec.key == "length").expect("length");
         assert_eq!(length.default, serde_json::json!(40.0));
@@ -2362,10 +2212,7 @@ mod tests {
             serde_json::json!({ "primitiveType": "box", "length": 5000.0 }),
         ));
         let length = specs.iter().find(|spec| spec.key == "length").expect("length");
-        assert!(matches!(
-            length.widget,
-            Widget::Number { max: None, .. }
-        ));
+        assert!(matches!(length.widget, Widget::Number { max: None, .. }));
         let translate = known_specs(&node("translate", Value::Null));
         let x = translate.iter().find(|spec| spec.key == "x").expect("x");
         assert!(matches!(x.widget, Widget::Number { min: None, max: None, .. }));
@@ -2373,7 +2220,8 @@ mod tests {
 
     #[test]
     fn step_file_name_drops_the_extension() {
-        let step = node("stepimporter", serde_json::json!({ "path": "/tmp/models/MoonBaguette.stp" }));
+        let step =
+            node("stepimporter", serde_json::json!({ "path": "/tmp/models/MoonBaguette.stp" }));
         assert_eq!(step_file_name(&step).as_deref(), Some("MoonBaguette"));
         let no_path = node("stepimporter", serde_json::json!({}));
         assert_eq!(step_file_name(&no_path), None);
@@ -2397,7 +2245,8 @@ mod tests {
 
     #[test]
     fn unknown_and_raw_fields_are_not_inspected() {
-        let custom = node("custom", serde_json::json!({ "label": "x", "enabled": true, "size": 3 }));
+        let custom =
+            node("custom", serde_json::json!({ "label": "x", "enabled": true, "size": 3 }));
         assert!(known_specs(&custom).is_empty());
         let extrude = node(
             "extrude",
@@ -2428,14 +2277,8 @@ mod tests {
             nodecraft_node_contract::resolve_bool("spline", &missing.values, "control")
                 .expect("spline.control is a contract switch")
         );
-        assert!(spline_control_points(&node(
-            "spline",
-            serde_json::json!({"control": true})
-        )));
-        assert!(!spline_control_points(&node(
-            "spline",
-            serde_json::json!({"control": false})
-        )));
+        assert!(spline_control_points(&node("spline", serde_json::json!({"control": true}))));
+        assert!(!spline_control_points(&node("spline", serde_json::json!({"control": false}))));
     }
 
     #[test]
@@ -2459,7 +2302,8 @@ mod tests {
 
     #[test]
     fn reset_values_restores_settings_but_preserves_asset_data() {
-        let look = GraphNode { expressions: Default::default(),
+        let look = GraphNode {
+            expressions: Default::default(),
             id: "look".into(),
             node_type: "look".into(),
             values: serde_json::json!({"color": "#ff0000"}),
@@ -2468,10 +2312,15 @@ mod tests {
             y: 0.0,
         };
         let reset = reset_values(&look);
-        assert!(reset.iter().any(|change| change.field == "color"
-            && change.value == serde_json::json!("#7fa0cf")));
+        assert!(
+            reset
+                .iter()
+                .any(|change| change.field == "color"
+                    && change.value == serde_json::json!("#7fa0cf"))
+        );
 
-        let spline = GraphNode { expressions: Default::default(),
+        let spline = GraphNode {
+            expressions: Default::default(),
             id: "s".into(),
             node_type: "spline".into(),
             values: serde_json::json!({"degree": 5.0, "points": [[0.0, 0.0], [1.0, 1.0]]}),
@@ -2480,11 +2329,16 @@ mod tests {
             y: 0.0,
         };
         let reset = reset_values(&spline);
-        assert!(reset.iter().any(|change| change.field == "degree" && change.value == serde_json::json!(3.0)));
+        assert!(
+            reset
+                .iter()
+                .any(|change| change.field == "degree" && change.value == serde_json::json!(3.0))
+        );
         assert!(reset.iter().any(|change| change.field == "points"
             && change.value == serde_json::json!([[0.0, 0.0], [1.0, 1.0]])));
 
-        let fillet = GraphNode { expressions: Default::default(),
+        let fillet = GraphNode {
+            expressions: Default::default(),
             id: "f".into(),
             node_type: "fillet".into(),
             values: serde_json::json!({"length": 9.0, "edges": [{"id": "edge:1"}]}),
@@ -2493,8 +2347,11 @@ mod tests {
             y: 0.0,
         };
         let reset = reset_values(&fillet);
-        assert!(reset.iter().any(|change| change.field == "edges"
-            && change.value == serde_json::json!([])));
+        assert!(
+            reset
+                .iter()
+                .any(|change| change.field == "edges" && change.value == serde_json::json!([]))
+        );
     }
 
     /// Pin the inspector metadata map before it moves into the contract table.
@@ -2532,7 +2389,9 @@ mod tests {
                 "Import CAD",
                 "Import",
                 "CAD FILE",
-                Some("Imports CAD solids with cadmpeg: STEP (AP203/AP214/AP242), FreeCAD .FCStd and Rhino .3dm are detected from the file contents."),
+                Some(
+                    "Imports CAD solids with cadmpeg: STEP (AP203/AP214/AP242), FreeCAD .FCStd and Rhino .3dm are detected from the file contents.",
+                ),
             ),
             (
                 "exporter",
@@ -2548,7 +2407,9 @@ mod tests {
                 "Transform",
                 "Transform",
                 "TRANSFORM",
-                Some("Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo."),
+                Some(
+                    "Moves and rotates the incoming shape. Select it in the graph or use the viewport gizmo.",
+                ),
             ),
             ("surfaceloft", serde_json::json!({}), "Surface Loft", "Node", "VALUES", None),
             (
@@ -2569,7 +2430,9 @@ mod tests {
                 "Graph",
                 "Graph",
                 "GRAPH",
-                Some("Graph with 1 child node(s), 1 input port(s) and 0 output port(s). It is flattened into the parent graph during evaluation."),
+                Some(
+                    "Graph with 1 child node(s), 1 input port(s) and 0 output port(s). It is flattened into the parent graph during evaluation.",
+                ),
             ),
             ("graph", serde_json::json!({}), "Graph", "Graph", "GRAPH", None),
             (
@@ -2580,8 +2443,22 @@ mod tests {
                 "OFFSET",
                 Some("Moves the selected faces along their normals."),
             ),
-            ("groupinput", serde_json::json!({}), "Graph Input", "Interface", "GRAPH INTERFACE", None),
-            ("groupoutput", serde_json::json!({}), "Graph Output", "Interface", "GRAPH INTERFACE", None),
+            (
+                "groupinput",
+                serde_json::json!({}),
+                "Graph Input",
+                "Interface",
+                "GRAPH INTERFACE",
+                None,
+            ),
+            (
+                "groupoutput",
+                serde_json::json!({}),
+                "Graph Output",
+                "Interface",
+                "GRAPH INTERFACE",
+                None,
+            ),
             (
                 "boolean",
                 serde_json::json!({}),
@@ -2652,7 +2529,9 @@ mod tests {
                 "Look",
                 "Feature",
                 "LOOK",
-                Some("Applies a colour to every body in the incoming Part. The geometry is unchanged."),
+                Some(
+                    "Applies a colour to every body in the incoming Part. The geometry is unchanged.",
+                ),
             ),
             (
                 "shell",
@@ -2699,11 +2578,7 @@ mod tests {
             assert_eq!(node_title(&node), *title, "{node_type} title");
             assert_eq!(node_badge(&node), *badge, "{node_type} badge");
             assert_eq!(section_title(&node), *section, "{node_type} section");
-            assert_eq!(
-                node_description(&node).as_deref(),
-                *description,
-                "{node_type} description",
-            );
+            assert_eq!(node_description(&node).as_deref(), *description, "{node_type} description",);
         }
     }
 
@@ -2755,5 +2630,4 @@ mod tests {
         );
         assert!(topology_reference_ids(&node, "edges").is_empty());
     }
-
 }

@@ -1,7 +1,7 @@
 //! The application settings window.
 
-use super::*;
 use super::theme_editor::*;
+use super::*;
 
 impl NodeCraftApp {
     pub(super) fn show_app_settings(&mut self, ctx: &egui::Context) {
@@ -475,8 +475,7 @@ impl NodeCraftApp {
             self.viewport.set_theme(&theme);
             if !theme_selection_changed {
                 self.theme_dirty = true;
-                self.theme_save_due =
-                    Some(Instant::now() + std::time::Duration::from_millis(350));
+                self.theme_save_due = Some(Instant::now() + std::time::Duration::from_millis(350));
             }
             ctx.request_repaint();
         }
@@ -538,9 +537,7 @@ impl NodeCraftApp {
         }
         self.settings_tab = tab;
     }
-
 }
-
 
 const SETTINGS_SIZE: egui::Vec2 = egui::vec2(760.0, 620.0);
 const SETTINGS_MIN_SIZE: egui::Vec2 = egui::vec2(520.0, 400.0);
@@ -583,22 +580,14 @@ pub(super) fn paint_tab(
     theme: &crate::theme::Theme,
 ) {
     if active {
-        ui.painter().rect_filled(
-            rect,
-            egui::CornerRadius::same(7),
-            theme.color(theme.accent),
-        );
+        ui.painter().rect_filled(rect, egui::CornerRadius::same(7), theme.color(theme.accent));
     }
     ui.painter().text(
         egui::pos2(rect.min.x + 10.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         egui::FontId::proportional(13.0),
-        if active {
-            theme.color(theme.window)
-        } else {
-            theme.color(theme.muted)
-        },
+        if active { theme.color(theme.window) } else { theme.color(theme.muted) },
     );
 }
 

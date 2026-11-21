@@ -132,10 +132,7 @@ pub fn summary(report: &str) -> String {
     let location = sections.next().unwrap_or("").trim();
     let message = truncate(message, 700);
     let location = truncate(location, 200);
-    format!(
-        "{message}\n\n{location}\n\nFull details: {}",
-        crash_log_path().display()
-    )
+    format!("{message}\n\n{location}\n\nFull details: {}", crash_log_path().display())
 }
 
 fn truncate(text: &str, limit: usize) -> String {
@@ -207,9 +204,7 @@ pub fn guard_render<T>(unit: &str, body: impl FnOnce() -> T) -> Option<T> {
             // Fall back to the payload so tests and hook-less callers still get
             // a message and a backtrace.
             let captured = take();
-            let report = captured
-                .clone()
-                .unwrap_or_else(|| report_from_payload(&*payload));
+            let report = captured.clone().unwrap_or_else(|| report_from_payload(&*payload));
             if captured.is_none() {
                 record(&report);
             }
@@ -280,7 +275,8 @@ mod tests {
     #[test]
     fn first_panic_report_survives_the_cannot_unwind_follow_up() {
         let original = "NodeCraft crashed\n\nwgpu error: Validation Error\n\nat gpu.rs:925";
-        let follow_up = "NodeCraft crashed\n\npanic in a function that cannot unwind\n\nat panicking.rs:225";
+        let follow_up =
+            "NodeCraft crashed\n\npanic in a function that cannot unwind\n\nat panicking.rs:225";
         let mut slot = None;
         assert!(keep_first(&mut slot, original));
         assert!(!keep_first(&mut slot, follow_up));
@@ -293,10 +289,7 @@ mod tests {
         assert!(record("NodeCraft crashed\n\nworker panic A"));
         begin_event();
         assert!(record("NodeCraft crashed\n\nrender panic B"));
-        assert_eq!(
-            take().as_deref(),
-            Some("NodeCraft crashed\n\nrender panic B")
-        );
+        assert_eq!(take().as_deref(), Some("NodeCraft crashed\n\nrender panic B"));
     }
 
     #[test]
@@ -306,17 +299,11 @@ mod tests {
         std::thread::spawn(|| {
             begin_event();
             assert!(record("NodeCraft crashed\n\nrender panic"));
-            assert_eq!(
-                take().as_deref(),
-                Some("NodeCraft crashed\n\nrender panic")
-            );
+            assert_eq!(take().as_deref(), Some("NodeCraft crashed\n\nrender panic"));
         })
         .join()
         .expect("render thread");
-        assert_eq!(
-            take().as_deref(),
-            Some("NodeCraft crashed\n\nUI fatal panic")
-        );
+        assert_eq!(take().as_deref(), Some("NodeCraft crashed\n\nUI fatal panic"));
     }
 
     #[test]

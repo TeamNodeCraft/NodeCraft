@@ -12,9 +12,8 @@ use crate::RequestIndex;
 pub(crate) fn suppression_source(node: &Node, index: &RequestIndex<'_>) -> Option<String> {
     // A registered node declares its pass-through. An unported node has no
     // declared source and is treated as a generator (off when suppressed).
-    crate::nodes::find(&node.node_type).and_then(|builtin| {
-        builtin.suppression_source(crate::nodes::NodeView::from(node), index)
-    })
+    crate::nodes::find(&node.node_type)
+        .and_then(|builtin| builtin.suppression_source(crate::nodes::NodeView::from(node), index))
 }
 
 /// The input an errored node passes through.
@@ -24,9 +23,7 @@ pub(crate) fn suppression_source(node: &Node, index: &RequestIndex<'_>) -> Optio
 /// without an input stay terminal and report only their own error.
 pub(crate) fn bypass_source(node: &Node, index: &RequestIndex<'_>) -> Option<String> {
     suppression_source(node, index).or_else(|| {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     })
 }
 

@@ -54,14 +54,12 @@ pub(super) fn auxiliary_window_shell(
 ) -> AuxiliaryWindowShell {
     // A native viewport has no egui::Window background of its own. Paint the
     // same fill Settings uses instead of leaving the platform default.
-    ui.painter()
-        .rect_filled(full_rect, 0.0, theme.color(theme.window));
+    ui.painter().rect_filled(full_rect, 0.0, theme.color(theme.window));
 
     if let Some(direction) = titlebar::resize_direction(ui.ctx()) {
         ui.ctx().set_cursor_icon(titlebar::resize_cursor(direction));
         if ui.ctx().input(|input| input.pointer.primary_pressed()) {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
         }
     }
 
@@ -69,8 +67,7 @@ pub(super) fn auxiliary_window_shell(
         full_rect.min,
         egui::pos2(full_rect.max.x, full_rect.min.y + AUXILIARY_TITLEBAR_HEIGHT),
     );
-    ui.painter()
-        .rect_filled(titlebar, 0.0, theme.color(theme.window));
+    ui.painter().rect_filled(titlebar, 0.0, theme.color(theme.window));
     crate::window_chrome::prepare_auxiliary_window(window);
     let close_center = egui::pos2(titlebar.min.x + 22.0, titlebar.center().y);
     let close = if crate::window_chrome::auxiliary_window_uses_native_close() {

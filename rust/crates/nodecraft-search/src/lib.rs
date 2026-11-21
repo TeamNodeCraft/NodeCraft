@@ -13,14 +13,10 @@
 #[must_use]
 pub fn wildcard_matches(pattern: &str, text: &str) -> bool {
     let text: Vec<char> = text.chars().collect();
-    pattern
-        .split(';')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .any(|part| {
-            let pattern: Vec<char> = part.chars().collect();
-            wildcard_matches_all(&text, &pattern)
-        })
+    pattern.split(';').map(str::trim).filter(|part| !part.is_empty()).any(|part| {
+        let pattern: Vec<char> = part.chars().collect();
+        wildcard_matches_all(&text, &pattern)
+    })
 }
 
 fn wildcard_matches_anywhere(source: &[char], pattern: &[char]) -> bool {

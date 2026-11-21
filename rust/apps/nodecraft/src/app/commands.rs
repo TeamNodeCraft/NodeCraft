@@ -56,10 +56,7 @@ impl AppCommand {
     }
 
     pub(super) fn needs_document(self) -> bool {
-        matches!(
-            self,
-            Self::SaveDocument | Self::SaveDocumentAs | Self::CloseTab
-        )
+        matches!(self, Self::SaveDocument | Self::SaveDocumentAs | Self::CloseTab)
     }
 }
 

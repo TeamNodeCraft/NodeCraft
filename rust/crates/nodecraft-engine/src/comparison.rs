@@ -87,13 +87,17 @@ fn changed_faces(source: &Mesh, target: &Mesh, tolerance: f64) -> Mesh {
         // off the other surface. Testing a corner includes a large cylinder-side
         // triangle whose centre still lies on the kept surface, which is what
         // drew a rectangle around the real fillet.
-        let changed = whole_face.get(face).copied().unwrap_or(false)
-            || !index.contains(mid3(a, b, c));
+        let changed =
+            whole_face.get(face).copied().unwrap_or(false) || !index.contains(mid3(a, b, c));
         if !changed {
             continue;
         }
         let base = vertices.len() as u32;
-        vertices.extend_from_slice(&[a.map(|v| v as f32), b.map(|v| v as f32), c.map(|v| v as f32)]);
+        vertices.extend_from_slice(&[
+            a.map(|v| v as f32),
+            b.map(|v| v as f32),
+            c.map(|v| v as f32),
+        ]);
         faces.push([base, base + 1, base + 2]);
     }
     Mesh { vertices, faces, ..Mesh::default() }
@@ -119,9 +123,9 @@ fn mid3(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
 
 fn triangle_points(mesh: &Mesh, triangle: &[u32; 3]) -> Option<[[f64; 3]; 3]> {
     let point = |index: u32| {
-        mesh.vertices.get(index as usize).map(|p| {
-            [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]
-        })
+        mesh.vertices
+            .get(index as usize)
+            .map(|p| [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])])
     };
     Some([point(triangle[0])?, point(triangle[1])?, point(triangle[2])?])
 }
@@ -141,11 +145,8 @@ impl SurfaceIndex {
     const BUDGET: usize = 4_000_000;
 
     fn new(mesh: &Mesh, tolerance: f64) -> Option<Self> {
-        let tris: Vec<[[f64; 3]; 3]> = mesh
-            .faces
-            .iter()
-            .filter_map(|triangle| triangle_points(mesh, triangle))
-            .collect();
+        let tris: Vec<[[f64; 3]; 3]> =
+            mesh.faces.iter().filter_map(|triangle| triangle_points(mesh, triangle)).collect();
         if tris.is_empty() {
             return None;
         }
@@ -161,11 +162,8 @@ impl SurfaceIndex {
         }
         let tol = tolerance.max(1.0e-9);
         let lo = min.map(|value| value - tol);
-        let ext = [
-            max[0] - min[0] + 2.0 * tol,
-            max[1] - min[1] + 2.0 * tol,
-            max[2] - min[2] + 2.0 * tol,
-        ];
+        let ext =
+            [max[0] - min[0] + 2.0 * tol, max[1] - min[1] + 2.0 * tol, max[2] - min[2] + 2.0 * tol];
         let mut res = ((tris.len() as f64).cbrt().round() as usize).clamp(1, 48);
         loop {
             let cell = [ext[0] / res as f64, ext[1] / res as f64, ext[2] / res as f64];
@@ -208,11 +206,7 @@ impl SurfaceIndex {
         let lo = self.lo.get(axis).copied().unwrap_or(0.0);
         let cell = self.cell.get(axis).copied().unwrap_or(1.0);
         let index = ((value - lo) / cell).floor();
-        if index.is_finite() {
-            (index.max(0.0) as usize).min(self.res - 1)
-        } else {
-            0
-        }
+        if index.is_finite() { (index.max(0.0) as usize).min(self.res - 1) } else { 0 }
     }
 
     fn range(&self, triangle: &[[f64; 3]; 3]) -> ([usize; 3], [usize; 3]) {
@@ -236,7 +230,12 @@ impl SurfaceIndex {
             return false;
         };
         cell.iter().filter_map(|index| self.tris.get(*index as usize)).any(|triangle| {
-            point_triangle_distance(point, &triangle[0].map(|v| v as f32), &triangle[1].map(|v| v as f32), &triangle[2].map(|v| v as f32)) < self.tol
+            point_triangle_distance(
+                point,
+                &triangle[0].map(|v| v as f32),
+                &triangle[1].map(|v| v as f32),
+                &triangle[2].map(|v| v as f32),
+            ) < self.tol
         })
     }
 }
@@ -261,12 +260,7 @@ fn mesh_diagonal(a: &Mesh, b: &Mesh) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt().max(1.0e-9)
 }
 
-fn point_triangle_distance(
-    p: [f64; 3],
-    a: &[f32; 3],
-    b: &[f32; 3],
-    c: &[f32; 3],
-) -> f64 {
+fn point_triangle_distance(p: [f64; 3], a: &[f32; 3], b: &[f32; 3], c: &[f32; 3]) -> f64 {
     let a = [f64::from(a[0]), f64::from(a[1]), f64::from(a[2])];
     let b = [f64::from(b[0]), f64::from(b[1]), f64::from(b[2])];
     let c = [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])];
@@ -312,11 +306,21 @@ fn point_triangle_distance(
     len(sub(p, add(a, add(scale(ab, v), scale(ac, w)))))
 }
 
-fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[0] + b[0], a[1] + b[1], a[2] + b[2]] }
-fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] { [a[0] - b[0], a[1] - b[1], a[2] - b[2]] }
-fn scale(a: [f64; 3], s: f64) -> [f64; 3] { [a[0] * s, a[1] * s, a[2] * s] }
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 { a[0] * b[0] + a[1] * b[1] + a[2] * b[2] }
-fn len(a: [f64; 3]) -> f64 { dot(a, a).sqrt() }
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn scale(a: [f64; 3], s: f64) -> [f64; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn len(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
 
 /// Compute exact difference meshes for one feature.
 ///
@@ -372,19 +376,22 @@ pub(crate) fn compare_parts(before: &Part, after: &Part) -> Result<DifferenceMes
 }
 
 pub(crate) fn mesh_volume(mesh: &Mesh) -> f64 {
-    mesh.faces.iter().map(|triangle| {
-        let a = mesh.vertices[triangle[0] as usize];
-        let b = mesh.vertices[triangle[1] as usize];
-        let c = mesh.vertices[triangle[2] as usize];
-        let cross = [
-            f64::from(b[1]) * f64::from(c[2]) - f64::from(b[2]) * f64::from(c[1]),
-            f64::from(b[2]) * f64::from(c[0]) - f64::from(b[0]) * f64::from(c[2]),
-            f64::from(b[0]) * f64::from(c[1]) - f64::from(b[1]) * f64::from(c[0]),
-        ];
-        (f64::from(a[0]) * cross[0] + f64::from(a[1]) * cross[1] + f64::from(a[2]) * cross[2]) / 6.0
-    }).sum()
+    mesh.faces
+        .iter()
+        .map(|triangle| {
+            let a = mesh.vertices[triangle[0] as usize];
+            let b = mesh.vertices[triangle[1] as usize];
+            let c = mesh.vertices[triangle[2] as usize];
+            let cross = [
+                f64::from(b[1]) * f64::from(c[2]) - f64::from(b[2]) * f64::from(c[1]),
+                f64::from(b[2]) * f64::from(c[0]) - f64::from(b[0]) * f64::from(c[2]),
+                f64::from(b[0]) * f64::from(c[1]) - f64::from(b[1]) * f64::from(c[0]),
+            ];
+            (f64::from(a[0]) * cross[0] + f64::from(a[1]) * cross[1] + f64::from(a[2]) * cross[2])
+                / 6.0
+        })
+        .sum()
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -392,11 +399,7 @@ mod tests {
 
     fn triangle(offset: f32) -> Mesh {
         Mesh {
-            vertices: vec![
-                [offset, 0.0, 0.0],
-                [offset + 1.0, 0.0, 0.0],
-                [offset, 1.0, 0.0],
-            ],
+            vertices: vec![[offset, 0.0, 0.0], [offset + 1.0, 0.0, 0.0], [offset, 1.0, 0.0]],
             faces: vec![[0, 1, 2]],
             ..Mesh::default()
         }
@@ -427,7 +430,10 @@ mod tests {
         let after = kept.clone();
         let difference = surface_difference(&before, &after);
         assert_eq!(difference.removed.faces.len(), 2, "only the moved face is removed");
-        assert!(difference.removed.face_groups.is_empty(), "approximate difference has no synthetic face groups");
+        assert!(
+            difference.removed.face_groups.is_empty(),
+            "approximate difference has no synthetic face groups"
+        );
         assert!(difference.added.faces.is_empty(), "the kept surface is unchanged");
     }
 
@@ -436,13 +442,25 @@ mod tests {
         // A 2×2 grid face: one corner triangle moves, the rest stays.
         let mut before = Mesh {
             vertices: vec![
-                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0],
-                [0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [1.0, 2.0, 0.0],
+                [2.0, 2.0, 0.0],
             ],
             faces: vec![
-                [0, 1, 4], [0, 4, 3], [1, 2, 5], [1, 5, 4],
-                [3, 4, 7], [3, 7, 6], [4, 5, 8], [4, 8, 7],
+                [0, 1, 4],
+                [0, 4, 3],
+                [1, 2, 5],
+                [1, 5, 4],
+                [3, 4, 7],
+                [3, 7, 6],
+                [4, 5, 8],
+                [4, 8, 7],
             ],
             face_groups: vec!["side".to_owned(); 8],
             ..Mesh::default()
@@ -453,9 +471,15 @@ mod tests {
         before.vertices[8] = [2.0, 2.0, 5.0];
         let after = Mesh {
             vertices: vec![
-                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0],
-                [0.0, 2.0, 0.0], [1.0, 2.0, 0.0], [2.0, 2.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [2.0, 1.0, 0.0],
+                [0.0, 2.0, 0.0],
+                [1.0, 2.0, 0.0],
+                [2.0, 2.0, 0.0],
             ],
             faces: before.faces.clone(),
             face_groups: before.face_groups.clone(),

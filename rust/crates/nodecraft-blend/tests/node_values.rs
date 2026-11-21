@@ -135,9 +135,7 @@ fn g2_and_g3_node_fillets_report_the_missing_law_api() {
         });
         let error = edge_treatment_preview(&kernel, &brep, &values).expect_err("continuity");
         match error {
-            BlendError::Unsupported {
-                feature, missing, ..
-            } => {
+            BlendError::Unsupported { feature, missing, .. } => {
                 assert_eq!(feature, "fillet G2/G3");
                 assert!(
                     missing.iter().any(|call| call.contains("SmFilletLaw")),

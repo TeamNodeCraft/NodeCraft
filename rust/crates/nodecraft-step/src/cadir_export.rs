@@ -64,13 +64,7 @@ pub struct ExportBody {
 impl ExportBody {
     /// A body with no colour and no placement.
     pub fn new(name: impl Into<String>, brep: record::Brep) -> Self {
-        Self {
-            name: name.into(),
-            color: None,
-            placement: None,
-            sheet: false,
-            brep,
-        }
+        Self { name: name.into(), color: None, placement: None, sheet: false, brep }
     }
 }
 
@@ -87,11 +81,7 @@ fn vector(v: [f64; 3]) -> Vector3 {
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 fn normalized(v: [f64; 3]) -> Result<[f64; 3], String> {
@@ -128,9 +118,7 @@ fn curve_geometry(curve: &record::Curve) -> Result<SolvedCurveGeometry, String> 
         }
         record::Curve::Ellipse { frame, radii } => {
             if radii[0] < radii[1] {
-                return Err(unsupported(
-                    "an ellipse whose record x axis is its minor axis",
-                ));
+                return Err(unsupported("an ellipse whose record x axis is its minor axis"));
             }
             let axis = axis_of(frame)?;
             let ellipse = EllipseCurve::try_new(
@@ -154,9 +142,7 @@ fn curve_geometry(curve: &record::Curve) -> Result<SolvedCurveGeometry, String> 
             let curve = NurbsCurve::new(
                 1,
                 knots,
-                NurbsPoles3::Polynomial {
-                    points: points.iter().map(|p| point(*p)).collect(),
-                },
+                NurbsPoles3::Polynomial { points: points.iter().map(|p| point(*p)).collect() },
                 false,
             )
             .map_err(|error| format!("polyline: {error}"))?;
@@ -171,9 +157,7 @@ fn curve_geometry(curve: &record::Curve) -> Result<SolvedCurveGeometry, String> 
             let curve = NurbsCurve::new(
                 degree,
                 knots.clone(),
-                NurbsPoles3::Polynomial {
-                    points: points.iter().map(|p| point(*p)).collect(),
-                },
+                NurbsPoles3::Polynomial { points: points.iter().map(|p| point(*p)).collect() },
                 false,
             )
             .map_err(|error| format!("spline curve: {error}"))?;
@@ -204,39 +188,23 @@ fn curve_geometry(curve: &record::Curve) -> Result<SolvedCurveGeometry, String> 
             .map_err(|error| format!("rational spline curve: {error}"))?;
             Ok(SolvedCurveGeometry::Nurbs(curve))
         }
-        record::Curve::SurfaceIntersection { .. } => Err(unsupported(
-            "a surface-intersection curve with no NURBS form",
-        )),
+        record::Curve::SurfaceIntersection { .. } => {
+            Err(unsupported("a surface-intersection curve with no NURBS form"))
+        }
     }
 }
 
 fn surface_geometry(surface: &record::Surface) -> Result<SolvedSurfaceGeometry, String> {
     match surface {
-        record::Surface::Plane {
-            origin,
-            u_axis,
-            v_axis,
-        } => {
+        record::Surface::Plane { origin, u_axis, v_axis } => {
             let normal = normalized(cross(*u_axis, *v_axis))?;
             let plane = PlaneSurface::try_new(point(*origin), vector(normal), vector(*u_axis))
                 .map_err(|error| format!("plane: {error}"))?;
             Ok(SolvedSurfaceGeometry::Plane(plane))
         }
-        record::Surface::PlaneThrough {
-            origin,
-            u_point,
-            v_point,
-        } => {
-            let u = [
-                u_point[0] - origin[0],
-                u_point[1] - origin[1],
-                u_point[2] - origin[2],
-            ];
-            let v = [
-                v_point[0] - origin[0],
-                v_point[1] - origin[1],
-                v_point[2] - origin[2],
-            ];
+        record::Surface::PlaneThrough { origin, u_point, v_point } => {
+            let u = [u_point[0] - origin[0], u_point[1] - origin[1], u_point[2] - origin[2]];
+            let v = [v_point[0] - origin[0], v_point[1] - origin[1], v_point[2] - origin[2]];
             let normal = normalized(cross(u, v))?;
             let plane = PlaneSurface::try_new(point(*origin), vector(normal), vector(u))
                 .map_err(|error| format!("plane: {error}"))?;
@@ -253,11 +221,7 @@ fn surface_geometry(surface: &record::Surface) -> Result<SolvedSurfaceGeometry, 
             .map_err(|error| format!("cylinder: {error}"))?;
             Ok(SolvedSurfaceGeometry::Cylinder(cylinder))
         }
-        record::Surface::Cone {
-            frame,
-            radius_at_origin,
-            half_angle,
-        } => {
+        record::Surface::Cone { frame, radius_at_origin, half_angle } => {
             if *radius_at_origin < 0.0 {
                 return Err(unsupported("a cone whose radius at the origin is negative"));
             }
@@ -289,16 +253,9 @@ fn surface_geometry(surface: &record::Surface) -> Result<SolvedSurfaceGeometry, 
             .map_err(|error| format!("sphere: {error}"))?;
             Ok(SolvedSurfaceGeometry::Sphere(sphere))
         }
-        record::Surface::Torus {
-            frame,
-            major_radius,
-            minor_radius,
-            tube_start,
-        } => {
+        record::Surface::Torus { frame, major_radius, minor_radius, tube_start } => {
             if *tube_start != 0.0 {
-                return Err(unsupported(
-                    "a torus whose tube starts away from its frame axis",
-                ));
+                return Err(unsupported("a torus whose tube starts away from its frame axis"));
             }
             let axis = axis_of(frame)?;
             let torus = TorusSurface::try_new(
@@ -311,11 +268,7 @@ fn surface_geometry(surface: &record::Surface) -> Result<SolvedSurfaceGeometry, 
             .map_err(|error| format!("torus: {error}"))?;
             Ok(SolvedSurfaceGeometry::Torus(torus))
         }
-        record::Surface::Spline {
-            u_knots,
-            v_knots,
-            points,
-        } => {
+        record::Surface::Spline { u_knots, v_knots, points } => {
             let u_degree = u_knots
                 .len()
                 .checked_sub(points.len().saturating_add(1))
@@ -341,11 +294,7 @@ fn surface_geometry(surface: &record::Surface) -> Result<SolvedSurfaceGeometry, 
             .map_err(|error| format!("spline surface: {error}"))?;
             Ok(SolvedSurfaceGeometry::Nurbs(surface))
         }
-        record::Surface::RationalSpline {
-            u_knots,
-            v_knots,
-            homogeneous,
-        } => {
+        record::Surface::RationalSpline { u_knots, v_knots, homogeneous } => {
             let u_degree = u_knots
                 .len()
                 .checked_sub(homogeneous.len().saturating_add(1))
@@ -407,24 +356,9 @@ fn transform_of(
     placement: [[f64; 4]; 4],
 ) -> Result<Option<cadmpeg_ir::transform::Transform>, String> {
     let rows = [
-        [
-            placement[0][0],
-            placement[1][0],
-            placement[2][0],
-            placement[3][0],
-        ],
-        [
-            placement[0][1],
-            placement[1][1],
-            placement[2][1],
-            placement[3][1],
-        ],
-        [
-            placement[0][2],
-            placement[1][2],
-            placement[2][2],
-            placement[3][2],
-        ],
+        [placement[0][0], placement[1][0], placement[2][0], placement[3][0]],
+        [placement[0][1], placement[1][1], placement[2][1], placement[3][1]],
+        [placement[0][2], placement[1][2], placement[2][2], placement[3][2]],
     ];
     if rows.iter().flatten().any(|value| !value.is_finite()) {
         return Err("a placement that is not finite".into());
@@ -468,9 +402,7 @@ impl BodyWriter<'_> {
                 PointId::mint(self.id("point", index)).map_err(|error| error.to_string())?;
             let position = FinitePoint3::new(point(vertex.point))
                 .ok_or_else(|| "a vertex with a non-finite coordinate".to_string())?;
-            self.model
-                .points
-                .push(Point::new(point_id.clone(), position, None));
+            self.model.points.push(Point::new(point_id.clone(), position, None));
             let vertex_id =
                 VertexId::mint(self.id("vertex", index)).map_err(|error| error.to_string())?;
             self.model.vertices.push(Vertex {
@@ -601,14 +533,9 @@ impl BodyWriter<'_> {
                             .collect()
                     })
                     .unwrap_or_default();
-                let wires = shell_wires
-                    .get(&(*shell_index as usize))
-                    .cloned()
-                    .unwrap_or_default();
-                let vertices = shell_vertices
-                    .get(&(*shell_index as usize))
-                    .cloned()
-                    .unwrap_or_default();
+                let wires = shell_wires.get(&(*shell_index as usize)).cloned().unwrap_or_default();
+                let vertices =
+                    shell_vertices.get(&(*shell_index as usize)).cloned().unwrap_or_default();
                 let shell = Shell::new(shell_id.clone(), region_id.clone(), faces, wires, vertices)
                     .map_err(|error| format!("shell: {error:?}"))?;
                 self.model.shells.push(shell);
@@ -638,10 +565,7 @@ impl BodyWriter<'_> {
                     })
                     .unwrap_or_default();
                 let wires = shell_wires.get(&shell_index).cloned().unwrap_or_default();
-                let vertices = shell_vertices
-                    .get(&shell_index)
-                    .cloned()
-                    .unwrap_or_default();
+                let vertices = shell_vertices.get(&shell_index).cloned().unwrap_or_default();
                 if faces.is_empty() && wires.is_empty() && vertices.is_empty() {
                     continue;
                 }
@@ -723,7 +647,8 @@ impl BodyWriter<'_> {
                                     .ok()
                                 })
                                 .unwrap_or_else(|| coedge_id.clone());
-                            let forward = if reversed { !oriented.forward } else { oriented.forward };
+                            let forward =
+                                if reversed { !oriented.forward } else { oriented.forward };
                             self.model.coedges.push(Coedge {
                                 id: coedge_id.clone(),
                                 owner_loop: loop_id.clone(),
@@ -732,11 +657,7 @@ impl BodyWriter<'_> {
                                     .ok_or_else(|| "a loop naming a missing edge".to_string())?
                                     .clone(),
                                 radial_next,
-                                sense: if forward {
-                                    Sense::Forward
-                                } else {
-                                    Sense::Reversed
-                                },
+                                sense: if forward { Sense::Forward } else { Sense::Reversed },
                                 pcurves: Vec::new(),
                                 use_curve: None,
                             });
@@ -786,11 +707,7 @@ impl BodyWriter<'_> {
 
         self.model.bodies.push(Body {
             id: self.body.clone(),
-            kind: if self.sheet {
-                BodyKind::Sheet
-            } else {
-                BodyKind::Solid
-            },
+            kind: if self.sheet { BodyKind::Sheet } else { BodyKind::Solid },
             regions: region_ids,
             transform: None,
             name: None,
@@ -806,10 +723,8 @@ pub fn cadir(bodies: &[ExportBody], product: &str) -> Result<CadIr, String> {
     if bodies.is_empty() {
         return Err("STEP export has no bodies".into());
     }
-    let tolerance = bodies
-        .iter()
-        .map(|body| uncertainty(&body.brep))
-        .fold(MIN_UNCERTAINTY, f64::max);
+    let tolerance =
+        bodies.iter().map(|body| uncertainty(&body.brep)).fold(MIN_UNCERTAINTY, f64::max);
     let mut ir = CadIr::empty();
     ir.tolerances =
         Tolerances::new(tolerance, 1.0e-6).map_err(|error| format!("export tolerance: {error}"))?;
@@ -926,11 +841,8 @@ pub fn write_step_with_options(
     bodies: &[ExportBody],
     options: &StepExportOptions,
 ) -> Result<(), String> {
-    let product = if options.product_name.trim().is_empty() {
-        "model"
-    } else {
-        options.product_name.trim()
-    };
+    let product =
+        if options.product_name.trim().is_empty() { "model" } else { options.product_name.trim() };
     let mut ir = cadir(bodies, product)?;
     if let Some(color) = options.color {
         let color = color_of(color);
@@ -941,22 +853,20 @@ pub fn write_step_with_options(
     if let Some(layer) = options.layer.as_deref().filter(|name| !name.trim().is_empty()) {
         let id = cadmpeg_ir::ids::LayerId::mint("nodecraft:export:layer#0")
             .map_err(|error| error.to_string())?;
-        ir.model
-            .presentation_layers
-            .push(cadmpeg_ir::presentation::PresentationLayer {
-                id,
-                name: layer.trim().to_string(),
-                description: None,
-                visible: None,
-                items: ir
-                    .model
-                    .bodies
-                    .iter()
-                    .map(|body| cadmpeg_ir::presentation::PresentationItem::Body {
-                        body: body.id.clone(),
-                    })
-                    .collect(),
-            });
+        ir.model.presentation_layers.push(cadmpeg_ir::presentation::PresentationLayer {
+            id,
+            name: layer.trim().to_string(),
+            description: None,
+            visible: None,
+            items: ir
+                .model
+                .bodies
+                .iter()
+                .map(|body| cadmpeg_ir::presentation::PresentationItem::Body {
+                    body: body.id.clone(),
+                })
+                .collect(),
+        });
     }
     let (_, target) = schema_and_target(&options.schema)?;
     let writer_options = StepWriteOptions {
@@ -970,14 +880,11 @@ pub fn write_step_with_options(
         timestamp: None,
         originating_system: "NodeCraft".to_string(),
     };
-    let plan = StepCodec {
-        options: writer_options,
-    }
-    .plan(EncodeInput::new(&ir, None), TargetRequest::Explicit(target))
-    .map_err(|error| format!("STEP export of '{product}': {error}"))?;
-    let mut bytes = Vec::new();
-    plan.write_to(&mut bytes)
+    let plan = StepCodec { options: writer_options }
+        .plan(EncodeInput::new(&ir, None), TargetRequest::Explicit(target))
         .map_err(|error| format!("STEP export of '{product}': {error}"))?;
+    let mut bytes = Vec::new();
+    plan.write_to(&mut bytes).map_err(|error| format!("STEP export of '{product}': {error}"))?;
     if bytes.is_empty() {
         return Err("STEP export produced no bytes".into());
     }
@@ -1007,9 +914,8 @@ pub fn write_step(
 /// The record form of one kernel B-rep.
 pub fn record_of_brep(brep: &solidcore::topology::Brep) -> Result<record::Brep, String> {
     let mut kernel = nodecraft_kernel_profile::kernel();
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("STEP export copy: {error}"))?;
+    let mut copy =
+        brep.clone_standing_for_self().map_err(|error| format!("STEP export copy: {error}"))?;
     let (record, _order) = solidcore_convert::brep::to_record(&mut kernel, &mut copy)
         .map_err(|error| format!("STEP export record: {error}"))?;
     Ok(record)
@@ -1023,11 +929,7 @@ fn body_stem(path: &str) -> String {
         .or_else(|| base.strip_suffix(".STEP"))
         .or_else(|| base.strip_suffix(".STP"))
         .unwrap_or(base);
-    if stem.trim().is_empty() {
-        "part".to_string()
-    } else {
-        stem.trim().to_string()
-    }
+    if stem.trim().is_empty() { "part".to_string() } else { stem.trim().to_string() }
 }
 
 /// The `ExportBody` list for one or more kernel B-reps.
@@ -1044,11 +946,8 @@ pub fn bodies_from_breps(
         if record.regions.len() <= 1 && record.shells.is_empty() {
             return Err(format!("body {} has no STEP geometry", index + 1));
         }
-        let name = if breps.len() == 1 {
-            stem.to_string()
-        } else {
-            format!("{stem}_{}", index + 1)
-        };
+        let name =
+            if breps.len() == 1 { stem.to_string() } else { format!("{stem}_{}", index + 1) };
         bodies.push(ExportBody::new(name, record));
     }
     Ok(bodies)
@@ -1060,10 +959,7 @@ pub fn write_brep_exact(path: &str, brep: &solidcore::topology::Brep) -> Result<
 }
 
 /// Write several exact SolidCore solids as one STEP part.
-pub fn write_breps_exact(
-    path: &str,
-    breps: &[solidcore::topology::Brep],
-) -> Result<(), String> {
+pub fn write_breps_exact(path: &str, breps: &[solidcore::topology::Brep]) -> Result<(), String> {
     let stem = body_stem(path);
     let bodies = bodies_from_breps(&stem, breps)?;
     write_step(path, &bodies, &stem, "ap242")
@@ -1086,10 +982,7 @@ pub fn write_breps_exact_with_options(
 
 /// A closed faceted body from an indexed triangle mesh: one planar triangular face per
 /// triangle, with line carriers on shared edges.
-fn record_from_mesh(
-    vertices: &[[f32; 3]],
-    triangles: &[[u32; 3]],
-) -> Result<record::Brep, String> {
+fn record_from_mesh(vertices: &[[f32; 3]], triangles: &[[u32; 3]]) -> Result<record::Brep, String> {
     use std::collections::BTreeMap;
 
     fn key(point: [f64; 3]) -> [i64; 3] {
@@ -1103,27 +996,18 @@ fn record_from_mesh(
         [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
     }
     fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
     }
     fn normalize(v: [f64; 3]) -> Option<[f64; 3]> {
         let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        (length.is_finite() && length > 0.0)
-            .then(|| [v[0] / length, v[1] / length, v[2] / length])
+        (length.is_finite() && length > 0.0).then(|| [v[0] / length, v[1] / length, v[2] / length])
     }
 
     let mut points: Vec<[f64; 3]> = Vec::new();
     let mut point_index: BTreeMap<[i64; 3], u32> = BTreeMap::new();
     let mut remap = Vec::with_capacity(vertices.len());
     for vertex in vertices {
-        let point = [
-            f64::from(vertex[0]),
-            f64::from(vertex[1]),
-            f64::from(vertex[2]),
-        ];
+        let point = [f64::from(vertex[0]), f64::from(vertex[1]), f64::from(vertex[2])];
         if point.iter().any(|value| !value.is_finite()) {
             return Err("a mesh vertex is not finite".into());
         }
@@ -1136,10 +1020,7 @@ fn record_from_mesh(
 
     let mut vertices_record = Vec::with_capacity(points.len());
     for point in &points {
-        vertices_record.push(record::Vertex {
-            point: *point,
-            tolerance: 1e-7,
-        });
+        vertices_record.push(record::Vertex { point: *point, tolerance: 1e-7 });
     }
     let mut edges: Vec<record::Edge> = Vec::new();
     let mut edge_index: BTreeMap<(u32, u32), u32> = BTreeMap::new();
@@ -1178,19 +1059,12 @@ fn record_from_mesh(
         let vc = (pc[0] - pa[0]) * v[0] + (pc[1] - pa[1]) * v[1] + (pc[2] - pa[2]) * v[2];
         let mut loop_edges = Vec::with_capacity(3);
         for (start, end) in [(a, b), (b, c), (c, a)] {
-            let (low, high) = if start < end {
-                (start, end)
-            } else {
-                (end, start)
-            };
+            let (low, high) = if start < end { (start, end) } else { (end, start) };
             let edge = *edge_index.entry((low, high)).or_insert_with(|| {
                 let start_point = points[low as usize];
                 let end_point = points[high as usize];
                 edges.push(record::Edge {
-                    curve: record::Curve::Line {
-                        start: start_point,
-                        end: end_point,
-                    },
+                    curve: record::Curve::Line { start: start_point, end: end_point },
                     nurbs: None,
                     interval: [0.0, 1.0],
                     vertices: [low, high],
@@ -1203,22 +1077,11 @@ fn record_from_mesh(
                 knots: vec![0.0, 0.0, 1.0, 1.0],
                 points: vec![[ua, va], [ub, vb]],
             };
-            loop_edges.push(record::OrientedEdge {
-                edge,
-                forward: start == low,
-                pcurve,
-            });
+            loop_edges.push(record::OrientedEdge { edge, forward: start == low, pcurve });
         }
-        oriented_faces.push(record::OrientedFace {
-            face: faces.len() as u32,
-            forward: true,
-        });
+        oriented_faces.push(record::OrientedFace { face: faces.len() as u32, forward: true });
         faces.push(record::Face {
-            surface: record::Surface::Plane {
-                origin: pa,
-                u_axis: u,
-                v_axis: v,
-            },
+            surface: record::Surface::Plane { origin: pa, u_axis: u, v_axis: v },
             nurbs: None,
             domain: [
                 [ua.min(ub).min(uc), ua.max(ub).max(uc)],
@@ -1234,19 +1097,10 @@ fn record_from_mesh(
         version: record::VERSION,
         tolerance: 1e-6,
         regions: vec![
-            record::Region {
-                shells: Vec::new(),
-                void: false,
-            },
-            record::Region {
-                shells: vec![0],
-                void: false,
-            },
+            record::Region { shells: Vec::new(), void: false },
+            record::Region { shells: vec![0], void: false },
         ],
-        shells: vec![record::Shell::Faces {
-            faces: oriented_faces,
-            wires: Vec::new(),
-        }],
+        shells: vec![record::Shell::Faces { faces: oriented_faces, wires: Vec::new() }],
         faces,
         edges,
         vertices: vertices_record,
@@ -1272,19 +1126,14 @@ pub fn write_step_faceted(
         options.product_name = stem.clone();
     }
     let brep = record_from_mesh(vertices, triangles)?;
-    let bodies = vec![ExportBody {
-        name: stem,
-        color: None,
-        placement: None,
-        sheet: false,
-        brep,
-    }];
+    let bodies = vec![ExportBody { name: stem, color: None, placement: None, sheet: false, brep }];
     write_step_with_options(path, &bodies, &options)
 }
 
 /// Signed volume of a schema-4 record, through the ops body.
 pub fn record_volume(brep: &record::Brep) -> Result<f64, String> {
-    let (body, _) = solidcore_ops::Body::from_record(brep, false).map_err(|error| error.to_string())?;
+    let (body, _) =
+        solidcore_ops::Body::from_record(brep, false).map_err(|error| error.to_string())?;
     body.volume(1e-9).map_err(|error| error.to_string())
 }
 
@@ -1314,21 +1163,12 @@ mod tests {
             u_axis: [1.0, 0.0, 0.0],
             v_axis: [0.0, 1.0, 0.0],
         };
-        assert!(matches!(
-            surface_geometry(&surface),
-            Ok(SolvedSurfaceGeometry::Plane(_))
-        ));
+        assert!(matches!(surface_geometry(&surface), Ok(SolvedSurfaceGeometry::Plane(_))));
     }
 
     #[test]
     fn a_line_maps_to_cadir() {
-        let curve = record::Curve::Line {
-            start: [0.0, 0.0, 0.0],
-            end: [0.0, 0.0, 4.0],
-        };
-        assert!(matches!(
-            curve_geometry(&curve),
-            Ok(SolvedCurveGeometry::Line(_))
-        ));
+        let curve = record::Curve::Line { start: [0.0, 0.0, 0.0], end: [0.0, 0.0, 4.0] };
+        assert!(matches!(curve_geometry(&curve), Ok(SolvedCurveGeometry::Line(_))));
     }
 }

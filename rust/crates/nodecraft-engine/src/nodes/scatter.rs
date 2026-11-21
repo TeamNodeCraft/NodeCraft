@@ -70,10 +70,9 @@ impl BuiltinNode for Scatter {
             let mut instance_sketches = source.sketches.clone();
             for sketch in &mut instance_sketches {
                 sketch.placement = sketch.placement.then(BodyTransform::Scale { factor });
-                sketch.placement = sketch.placement.then(BodyTransform::Place {
-                    offset: [x, y, 0.0],
-                    rotation: [0.0; 3],
-                });
+                sketch.placement = sketch
+                    .placement
+                    .then(BodyTransform::Place { offset: [x, y, 0.0], rotation: [0.0; 3] });
             }
             sketches.extend(instance_sketches);
         }
@@ -114,9 +113,7 @@ impl BuiltinNode for Scatter {
 
 /// Scatter repeat count through the contract, clamped like the old arm.
 fn count_values(values: &serde_json::Value) -> usize {
-    crate::contract_number("scatter", values, "count")
-        .round()
-        .clamp(1.0, 5000.0) as usize
+    crate::contract_number("scatter", values, "count").round().clamp(1.0, 5000.0) as usize
 }
 
 #[cfg(test)]
@@ -174,10 +171,7 @@ mod tests {
         let values = serde_json::json!({"count": 3});
         let view = crate::nodes::NodeView::new("scatter", "scatter", &values, false);
         assert_eq!(
-            builtin.body_layout(
-                view,
-                &[("shape", vec!["box".to_owned(), "sphere".to_owned()])],
-            ),
+            builtin.body_layout(view, &[("shape", vec!["box".to_owned(), "sphere".to_owned()])],),
             Some(vec![
                 "box".to_owned(),
                 "sphere".to_owned(),

@@ -49,8 +49,8 @@ pub mod edge;
 pub mod error;
 pub mod exact;
 mod fillet_corner;
-mod ops_blend;
 pub mod missing;
+mod ops_blend;
 pub mod preview;
 pub mod treatment;
 
@@ -59,8 +59,10 @@ pub use edge::{
     select_edges_by_midpoints, select_edges_by_ordinals, select_edges_from_values, tangent_chain,
 };
 pub use error::BlendError;
+pub use exact::{
+    fillet_brep_exact, fillet_brep_exact_with_kernel, fillet_brep_exact_with_kernel_warned,
+};
 pub use ops_blend::Blended;
-pub use exact::{fillet_brep_exact, fillet_brep_exact_with_kernel, fillet_brep_exact_with_kernel_warned};
 pub use preview::{
     FILLET_SEGMENTS, apply_edge_treatment, chamfer_brep_exact, chamfer_brep_exact_warned,
     chamfer_brep_exact_with_kernel, chamfer_brep_exact_with_kernel_warned, edge_treatment_preview,
@@ -87,13 +89,7 @@ pub fn box_brep(length: f64, width: f64, height: f64) -> Result<(Kernel, Brep), 
         )));
     }
     let mut kernel = nodecraft_solidcore::kernel::kernel();
-    let brep = api::create_box(
-        &mut kernel,
-        Point3::new(0.0, 0.0, 0.0),
-        length,
-        width,
-        height,
-    )
-    .map_err(|error| BlendError::Kernel(format!("create_box: {error}")))?;
+    let brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), length, width, height)
+        .map_err(|error| BlendError::Kernel(format!("create_box: {error}")))?;
     Ok((kernel, brep))
 }

@@ -72,18 +72,34 @@ pub(crate) fn primitive_brep_with_kernel(
     match kind {
         "box" => {
             let (length, width, height) = (number("length")?, number("width")?, number("height")?);
-            api::create_box(kernel, Point3::new(-length / 2.0, -width / 2.0, -height / 2.0), length, width, height).map_err(|error| error.to_string())
+            api::create_box(
+                kernel,
+                Point3::new(-length / 2.0, -width / 2.0, -height / 2.0),
+                length,
+                width,
+                height,
+            )
+            .map_err(|error| error.to_string())
         }
         "cylinder" => {
             let (radius, height) = (number("radius")?, number("height")?);
-            api::create_cylinder(kernel, Point3::new(0.0, 0.0, -height / 2.0), radius, height).map_err(|error| error.to_string())
+            api::create_cylinder(kernel, Point3::new(0.0, 0.0, -height / 2.0), radius, height)
+                .map_err(|error| error.to_string())
         }
         "cone" => {
-            let (base, top, height) = (number("bottomRadius")?, number("topRadius")?, number("height")?);
-            api::create_cone(kernel, Point3::new(0.0, 0.0, -height / 2.0), base, top, height).map_err(|error| error.to_string())
+            let (base, top, height) =
+                (number("bottomRadius")?, number("topRadius")?, number("height")?);
+            api::create_cone(kernel, Point3::new(0.0, 0.0, -height / 2.0), base, top, height)
+                .map_err(|error| error.to_string())
         }
-        "sphere" => api::create_sphere(kernel, Point3::new(0.0, 0.0, 0.0), number("radius")?).map_err(|error| error.to_string()),
-        "sphereNoPole" => api::create_sphere_no_pole(kernel, Point3::new(0.0, 0.0, 0.0), number("radius").unwrap_or(20.0)).map_err(|error| error.to_string()),
+        "sphere" => api::create_sphere(kernel, Point3::new(0.0, 0.0, 0.0), number("radius")?)
+            .map_err(|error| error.to_string()),
+        "sphereNoPole" => api::create_sphere_no_pole(
+            kernel,
+            Point3::new(0.0, 0.0, 0.0),
+            number("radius").unwrap_or(20.0),
+        )
+        .map_err(|error| error.to_string()),
         "partialSphere" => api::create_partial_sphere(
             kernel,
             Point3::new(0.0, 0.0, 0.0),
@@ -111,10 +127,17 @@ pub(crate) fn primitive_brep_with_kernel(
             number("endAngle")?,
         )
         .map_err(|error| error.to_string()),
-        "torus" => api::create_torus(kernel, Point3::new(0.0, 0.0, 0.0), number("majorRadius")?, number("minorRadius")?).map_err(|error| error.to_string()),
+        "torus" => api::create_torus(
+            kernel,
+            Point3::new(0.0, 0.0, 0.0),
+            number("majorRadius")?,
+            number("minorRadius")?,
+        )
+        .map_err(|error| error.to_string()),
         "pyramid" => {
             let (length, height) = (number("length")?, number("height")?);
-            api::create_pyramid(kernel, Point3::new(0.0, 0.0, -height / 2.0), length, height).map_err(|error| error.to_string())
+            api::create_pyramid(kernel, Point3::new(0.0, 0.0, -height / 2.0), length, height)
+                .map_err(|error| error.to_string())
         }
         other => Err(format!("primitive {other:?} has no exact closed-solid BRep")),
     }

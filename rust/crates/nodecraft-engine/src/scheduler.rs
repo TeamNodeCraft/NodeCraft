@@ -10,9 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub type TaskJob<T> = Box<dyn FnOnce(&mut Kernel) -> Result<T, String> + Send + 'static>;
 pub type TaskBuilder<T> = Box<
-    dyn FnOnce(&BTreeMap<String, Result<T, String>>) -> Result<TaskJob<T>, String>
-        + Send
-        + 'static,
+    dyn FnOnce(&BTreeMap<String, Result<T, String>>) -> Result<TaskJob<T>, String> + Send + 'static,
 >;
 
 pub struct ScheduledTask<T> {
@@ -30,15 +28,10 @@ impl<T> ScheduledTask<T> {
         dependencies: Vec<String>,
         seed: u64,
         build: impl FnOnce(&BTreeMap<String, Result<T, String>>) -> Result<TaskJob<T>, String>
-            + Send
-            + 'static,
+        + Send
+        + 'static,
     ) -> Self {
-        Self {
-            id: id.into(),
-            dependencies,
-            seed,
-            build: Box::new(build),
-        }
+        Self { id: id.into(), dependencies, seed, build: Box::new(build) }
     }
 
     /// A task whose job needs no dependency values.
@@ -156,7 +149,9 @@ pub fn run_levels_with_limit<T: Send + 'static>(
     Ok(results)
 }
 
-fn dependency_levels<T>(tasks: &BTreeMap<String, ScheduledTask<T>>) -> Result<Vec<Vec<String>>, ScheduleError> {
+fn dependency_levels<T>(
+    tasks: &BTreeMap<String, ScheduledTask<T>>,
+) -> Result<Vec<Vec<String>>, ScheduleError> {
     fn depth<T>(
         id: &str,
         tasks: &BTreeMap<String, ScheduledTask<T>>,
@@ -245,7 +240,8 @@ mod tests {
                 Ok(index as u32)
             }));
         }
-        let results = run_levels_with_limit(&pool, tasks, RevisionToken::new(), 1).expect("schedule");
+        let results =
+            run_levels_with_limit(&pool, tasks, RevisionToken::new(), 1).expect("schedule");
         assert_eq!(results.len(), 4);
         assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
@@ -256,10 +252,7 @@ mod tests {
         let token = RevisionToken::new();
         token.cancel();
         let task = ScheduledTask::leaf("a", 1, |_| Ok(1u32));
-        assert_eq!(
-            run_levels(&pool, vec![task], token),
-            Err(ScheduleError::Cancelled)
-        );
+        assert_eq!(run_levels(&pool, vec![task], token), Err(ScheduleError::Cancelled));
     }
 
     #[test]
@@ -270,7 +263,8 @@ mod tests {
             ScheduledTask::new("b", vec!["a".into()], 2, |_| Ok(Box::new(|_| Ok(2u32)))),
         ];
         assert_eq!(run_levels(&pool, cycle, RevisionToken::new()), Err(ScheduleError::Cycle));
-        let missing = vec![ScheduledTask::new("a", vec!["nope".into()], 1, |_| Ok(Box::new(|_| Ok(1u32))))];
+        let missing =
+            vec![ScheduledTask::new("a", vec!["nope".into()], 1, |_| Ok(Box::new(|_| Ok(1u32))))];
         assert!(matches!(
             run_levels(&pool, missing, RevisionToken::new()),
             Err(ScheduleError::MissingDependency { .. })

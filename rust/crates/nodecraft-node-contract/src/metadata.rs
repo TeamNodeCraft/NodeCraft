@@ -10,7 +10,7 @@
 
 use serde_json::Value;
 
-use super::{resolve_choice, PRIMITIVE_TYPES};
+use super::{PRIMITIVE_TYPES, resolve_choice};
 
 /// The tool-dock category a node type is listed under.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -374,15 +374,7 @@ pub const NODE_METADATA: &[NodeMetadata] = &[
         None,
     ),
     docked(
-        plain(
-            "surfaceloft",
-            "surfaceloft",
-            "Node",
-            "VALUES",
-            "Surface Loft",
-            "Surface Loft",
-            "",
-        ),
+        plain("surfaceloft", "surfaceloft", "Node", "VALUES", "Surface Loft", "Surface Loft", ""),
         DockSection::Create,
         "Features",
         22,
@@ -455,15 +447,7 @@ pub const NODE_METADATA: &[NodeMetadata] = &[
     ),
     docked(
         with_dock_label(
-            plain(
-                "linkedpart",
-                "linked",
-                "Output",
-                "VALUES",
-                "Linkedpart",
-                "Linked Part",
-                "",
-            ),
+            plain("linkedpart", "linked", "Output", "VALUES", "Linkedpart", "Linked Part", ""),
             "Linked Part",
         ),
         DockSection::Io,
@@ -492,36 +476,20 @@ pub const NODE_METADATA: &[NodeMetadata] = &[
         ),
         DescriptionKind::GroupSummary,
     ),
-    plain(
-        "groupinput",
-        "box",
-        "Interface",
-        "GRAPH INTERFACE",
-        "Graph Input",
-        "Graph Input",
-        "",
-    ),
-    plain(
-        "groupoutput",
-        "box",
-        "Interface",
-        "GRAPH INTERFACE",
-        "Graph Output",
-        "Graph Output",
-        "",
-    ),
+    plain("groupinput", "box", "Interface", "GRAPH INTERFACE", "Graph Input", "Graph Input", ""),
+    plain("groupoutput", "box", "Interface", "GRAPH INTERFACE", "Graph Output", "Graph Output", ""),
     plain("time", "box", "Node", "VALUES", "Time", "Node", ""),
-    plain(
-        "sceneTransform",
-        "box",
-        "Node",
-        "VALUES",
-        "SceneTransform",
-        "Node",
-        "",
-    ),
+    plain("sceneTransform", "box", "Node", "VALUES", "SceneTransform", "Node", ""),
     docked(
-        plain("look", "look", "Feature", "LOOK", "Look", "Look", "Applies a colour to every body in the incoming Part. The geometry is unchanged."),
+        plain(
+            "look",
+            "look",
+            "Feature",
+            "LOOK",
+            "Look",
+            "Look",
+            "Applies a colour to every body in the incoming Part. The geometry is unchanged.",
+        ),
         DockSection::Organise,
         "",
         2,
@@ -547,8 +515,18 @@ pub const PRIMITIVE_METADATA: &[PrimitiveMetadata] = &[
     PrimitiveMetadata { kind: "torus", icon: "torus", dock_order: 4, dock_label: "Torus" },
     PrimitiveMetadata { kind: "pyramid", icon: "pyramid", dock_order: 5, dock_label: "Pyramid" },
     PrimitiveMetadata { kind: "wedge", icon: "wedge", dock_order: 6, dock_label: "Wedge" },
-    PrimitiveMetadata { kind: "partialSphere", icon: "sphere", dock_order: 7, dock_label: "Partial Sphere" },
-    PrimitiveMetadata { kind: "partialTorus", icon: "torus", dock_order: 8, dock_label: "Partial Torus" },
+    PrimitiveMetadata {
+        kind: "partialSphere",
+        icon: "sphere",
+        dock_order: 7,
+        dock_label: "Partial Sphere",
+    },
+    PrimitiveMetadata {
+        kind: "partialTorus",
+        icon: "torus",
+        dock_order: 8,
+        dock_label: "Partial Torus",
+    },
 ];
 
 const BOOLEAN_ICONS: &[(&str, &str)] = &[
@@ -563,19 +541,14 @@ const BOOLEAN_ICONS: &[(&str, &str)] = &[
 
 const BOOLEAN_DESCRIPTIONS: &[(&str, &str)] = &[
     ("subtract", "A minus B: removes the second shape from the first."),
-    (
-        "subtract-reverse",
-        "B minus A: removes the first shape from the second.",
-    ),
+    ("subtract-reverse", "B minus A: removes the first shape from the second."),
     ("intersect", "Shared volume of both input shapes."),
 ];
 
 /// The metadata row for a node type.
 #[must_use]
 pub fn metadata(node_type: &str) -> Option<&'static NodeMetadata> {
-    NODE_METADATA
-        .iter()
-        .find(|metadata| metadata.node_type == node_type)
+    NODE_METADATA.iter().find(|metadata| metadata.node_type == node_type)
 }
 
 /// Every metadata row.
@@ -592,20 +565,14 @@ pub fn primitive_metadata(kind: &str) -> Option<&'static PrimitiveMetadata> {
 /// The label for a primitive kind, from the contract's label table.
 #[must_use]
 pub fn primitive_label(kind: &str) -> Option<&'static str> {
-    PRIMITIVE_TYPES
-        .iter()
-        .find(|(name, _)| *name == kind)
-        .map(|(_, label)| *label)
+    PRIMITIVE_TYPES.iter().find(|(name, _)| *name == kind).map(|(_, label)| *label)
 }
 
 /// The icon key for a Boolean mode. Unknown modes use the Union icon, matching
 /// the canvas's previous fallback.
 #[must_use]
 pub fn boolean_icon(mode: &str) -> &'static str {
-    BOOLEAN_ICONS
-        .iter()
-        .find(|(name, _)| *name == mode)
-        .map_or("union", |(_, icon)| *icon)
+    BOOLEAN_ICONS.iter().find(|(name, _)| *name == mode).map_or("union", |(_, icon)| *icon)
 }
 
 /// The description text for a Boolean mode. Unknown modes use Union's text.
@@ -634,28 +601,19 @@ pub fn description(node_type: &str, values: &Value) -> Option<String> {
             Some(boolean_description(mode.as_ref()).to_owned())
         }
         DescriptionKind::GroupSummary => {
-            let count = values
-                .get("nodes")
-                .and_then(Value::as_array)
-                .map_or(0, |nodes| {
-                    nodes
-                        .iter()
-                        .filter(|node| {
-                            !matches!(
-                                node.get("type").and_then(Value::as_str),
-                                Some("groupinput" | "groupoutput")
-                            )
-                        })
-                        .count()
-                });
-            let inputs = values
-                .get("inputs")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
-            let outputs = values
-                .get("outputs")
-                .and_then(Value::as_array)
-                .map_or(0, Vec::len);
+            let count = values.get("nodes").and_then(Value::as_array).map_or(0, |nodes| {
+                nodes
+                    .iter()
+                    .filter(|node| {
+                        !matches!(
+                            node.get("type").and_then(Value::as_str),
+                            Some("groupinput" | "groupoutput")
+                        )
+                    })
+                    .count()
+            });
+            let inputs = values.get("inputs").and_then(Value::as_array).map_or(0, Vec::len);
+            let outputs = values.get("outputs").and_then(Value::as_array).map_or(0, Vec::len);
             Some(
                 metadata
                     .description
@@ -746,7 +704,9 @@ mod tests {
         });
         assert_eq!(
             description("group", &group).as_deref(),
-            Some("Graph with 1 child node(s), 1 input port(s) and 0 output port(s). It is flattened into the parent graph during evaluation."),
+            Some(
+                "Graph with 1 child node(s), 1 input port(s) and 0 output port(s). It is flattened into the parent graph during evaluation."
+            ),
         );
         assert_eq!(description("graph", &serde_json::json!({})), None);
     }

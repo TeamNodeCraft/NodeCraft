@@ -1,6 +1,9 @@
 //! Continuous-curvature rounded rectangles (squircles) used by the app chrome.
 
-use egui::{Color32, Pos2, Rect, Shape, Stroke, epaint::{PathShape, PathStroke}};
+use egui::{
+    Color32, Pos2, Rect, Shape, Stroke,
+    epaint::{PathShape, PathStroke},
+};
 
 /// Append one quarter of a superellipse corner to `points`.
 fn corner(center: Pos2, radius: f32, start: f32, points: &mut Vec<Pos2>) {
@@ -67,13 +70,7 @@ pub fn shape(rect: Rect, radius: f32, fill: Color32, stroke: Stroke) -> Shape {
 }
 
 /// Paint a texture clipped to a squircle. Used by the floating panel glass.
-pub fn image(
-    painter: &egui::Painter,
-    texture: egui::TextureId,
-    rect: Rect,
-    uv: Rect,
-    radius: f32,
-) {
+pub fn image(painter: &egui::Painter, texture: egui::TextureId, rect: Rect, uv: Rect, radius: f32) {
     let points = points(rect, radius);
     if points.len() < 3 {
         return;

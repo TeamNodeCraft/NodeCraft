@@ -22,8 +22,8 @@ use solidcore::kernel::Kernel;
 use solidcore::topology::Brep;
 use solidcore_ops::Body;
 
-use crate::error_map::{map_error, OpKind};
 use crate::SessionError;
+use crate::error_map::{OpKind, map_error};
 
 /// An exact axis-aligned box: the least corner, then the greatest.
 pub type Bounds = ([f64; 3], [f64; 3]);
@@ -217,7 +217,9 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Body::from_brep`] and [`Body::copy_held_on`].
     pub fn ops_copy(&self, kernel: &mut Kernel) -> Result<Body, SessionError> {
-        self.kernel_body(kernel)?.copy_held_on(kernel).map_err(|error| map_error(OpKind::Body, error))
+        self.kernel_body(kernel)?
+            .copy_held_on(kernel)
+            .map_err(|error| map_error(OpKind::Body, error))
     }
 
     /// Prove this body now, under `kernel`'s settings, and keep the proof: the check the
@@ -258,10 +260,14 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Self::ops_copy`] and [`Body::volume`].
     pub fn volume(&self, kernel: &mut Kernel) -> Result<f64, SessionError> {
-        if let Some(volume) = *self.volume.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        if let Some(volume) = *self.volume.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             return Ok(volume);
         }
-        let volume = self.ops_copy(kernel)?.volume(1.0e-8).map_err(|error| map_error(OpKind::Body, error))?;
+        let volume = self
+            .ops_copy(kernel)?
+            .volume(1.0e-8)
+            .map_err(|error| map_error(OpKind::Body, error))?;
         *self.volume.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(volume);
         Ok(volume)
     }
@@ -273,10 +279,12 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Self::ops_copy`] and [`Body::bounds`].
     pub fn bounds(&self, kernel: &mut Kernel) -> Result<Bounds, SessionError> {
-        if let Some(bounds) = *self.bounds.lock().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        if let Some(bounds) = *self.bounds.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
             return Ok(bounds);
         }
-        let bounds = self.ops_copy(kernel)?.bounds().map_err(|error| map_error(OpKind::Body, error))?;
+        let bounds =
+            self.ops_copy(kernel)?.bounds().map_err(|error| map_error(OpKind::Body, error))?;
         *self.bounds.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bounds);
         Ok(bounds)
     }

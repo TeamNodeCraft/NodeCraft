@@ -37,11 +37,8 @@ pub(super) struct DocumentTab {
     pub(super) node_width: f32,
     pub(super) inspector_width: f32,
     pub(super) mesh: Option<Mesh>,
-    pub(super) display: Option<(
-        std::sync::Arc<nodecraft_display::service::DisplayFrame>,
-        String,
-        bool,
-    )>,
+    pub(super) display:
+        Option<(std::sync::Arc<nodecraft_display::service::DisplayFrame>, String, bool)>,
     pub(super) status: String,
     pub(super) error: Option<String>,
     pub(super) evaluation_ms: f64,
@@ -49,7 +46,6 @@ pub(super) struct DocumentTab {
     pub(super) cache_misses: u32,
     pub(super) view: Option<crate::viewport::ViewSnapshot>,
 }
-
 
 impl NodeCraftApp {
     pub(super) fn open(&mut self, path: PathBuf) {
@@ -66,11 +62,8 @@ impl NodeCraftApp {
         };
         let document_id = document_id_for_path(&path);
         let canonical = PathBuf::from(&document_id);
-        let document_id = self
-            .documents
-            .id_for_path(&canonical)
-            .map(str::to_owned)
-            .unwrap_or(document_id);
+        let document_id =
+            self.documents.id_for_path(&canonical).map(str::to_owned).unwrap_or(document_id);
         if let Some(index) = self.tabs.iter().position(|tab| tab.document_id == document_id) {
             self.remember_document(&path);
             self.activate_tab(index);
@@ -107,7 +100,11 @@ impl NodeCraftApp {
         else {
             return;
         };
-        let Some(parent_document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else { return };
+        let Some(parent_document_id) =
+            self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone())
+        else {
+            return;
+        };
         // Double-clicking a graph that is already open focuses its existing
         // editing tab instead of creating a second session for the same body.
         if let Some(index) = self.tabs.iter().position(|tab| {
@@ -145,11 +142,7 @@ impl NodeCraftApp {
         let inputs = payload.inputs;
         let outputs = payload.outputs;
         let collapsed = payload.collapsed;
-        self.open_session(
-            Session::new(child_document),
-            None,
-            format!("Editing graph {group_id}"),
-        );
+        self.open_session(Session::new(child_document), None, format!("Editing graph {group_id}"));
         self.group_tabs.insert(
             tab_id,
             GroupTab {
@@ -190,7 +183,8 @@ impl NodeCraftApp {
             .unwrap_or_default();
         let (source_document_id, definition, breadcrumb_base) = match reference {
             GraphReference::Local(definition_id) => {
-                let active_document_id = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone());
+                let active_document_id =
+                    self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone());
                 let source_document_id = active_document_id
                     .as_ref()
                     .and_then(|id| {
@@ -224,14 +218,12 @@ impl NodeCraftApp {
                     .and_then(|tab| self.group_tabs.get(&tab.id))
                     .map(|meta| meta.breadcrumb.clone())
                     .or_else(|| {
-                        self.tabs
-                            .get(self.active_tab)
-                            .map(|tab| {
-                                vec![BreadcrumbEntry {
-                                    label: self.document_title(tab),
-                                    definition_id: None,
-                                }]
-                            })
+                        self.tabs.get(self.active_tab).map(|tab| {
+                            vec![BreadcrumbEntry {
+                                label: self.document_title(tab),
+                                definition_id: None,
+                            }]
+                        })
                     })
                     .unwrap_or_default();
                 (source_document_id, definition, breadcrumb_base)
@@ -356,13 +348,19 @@ impl NodeCraftApp {
             outputs: meta.outputs.clone(),
         };
         let Ok(values) = group_values(&payload) else { return };
-        let Some(mut parent) = self.documents.session(&meta.view.document_id).cloned() else { return };
+        let Some(mut parent) = self.documents.session(&meta.view.document_id).cloned() else {
+            return;
+        };
         let fields = ["nodes", "connections", "inputs", "outputs", "collapsed"];
         let commands: Vec<Command> = fields
             .iter()
             .filter_map(|field| {
                 let value = values.get(*field)?.clone();
-                Some(Command::SetValue { node: meta.group_id.clone(), field: (*field).to_owned(), value })
+                Some(Command::SetValue {
+                    node: meta.group_id.clone(),
+                    field: (*field).to_owned(),
+                    value,
+                })
             })
             .collect();
         set_session_source_hashes(&self.source_changes, &mut parent);
@@ -377,7 +375,10 @@ impl NodeCraftApp {
 
     pub(super) fn save_active_tab_impl(&mut self, move_mesh: bool) {
         let Some(session) = self.session.clone() else { return };
-        let Some(document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone()) else { return };
+        let Some(document_id) = self.tabs.get(self.active_tab).map(|tab| tab.document_id.clone())
+        else {
+            return;
+        };
         let definition_view = self
             .tabs
             .get(self.active_tab)
@@ -397,7 +398,11 @@ impl NodeCraftApp {
             }
         }
         let mesh = if move_mesh { self.mesh.take() } else { self.mesh.clone() };
-        let display = if move_mesh { self.last_applied_display.take() } else { self.last_applied_display.clone() };
+        let display = if move_mesh {
+            self.last_applied_display.take()
+        } else {
+            self.last_applied_display.clone()
+        };
         let Some(tab) = self.tabs.get_mut(self.active_tab) else { return };
         tab.session_generation = self.session_generation;
         tab.path = self.path.clone();
@@ -541,7 +546,12 @@ impl NodeCraftApp {
 
     /// Start a native dialog off the event thread. Ignored while another dialog
     /// is already open.
-    pub(super) fn start_dialog(&mut self, ctx: &egui::Context, action: DialogAction, kind: FileDialogKind) {
+    pub(super) fn start_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        action: DialogAction,
+        kind: FileDialogKind,
+    ) {
         if self.pending_dialog.is_some() {
             return;
         }
@@ -644,10 +654,8 @@ impl NodeCraftApp {
                 self.install_session(None);
                 return;
             };
-            let Some((definition, definitions)) = self
-                .documents
-                .session(&meta.view.document_id)
-                .and_then(|parent| {
+            let Some((definition, definitions)) =
+                self.documents.session(&meta.view.document_id).and_then(|parent| {
                     parent
                         .document()
                         .definition(&definition_id)
@@ -716,8 +724,7 @@ impl NodeCraftApp {
         if let Some((frame, target, feature_ghost)) = display {
             self.apply_display_frame(&frame, &target, feature_ghost, true);
         } else if self.mesh.is_some() {
-            self.viewport
-                .set_mesh_preserving_camera(self.mesh.as_ref());
+            self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
         }
         self.evaluate();
     }
@@ -740,9 +747,7 @@ impl NodeCraftApp {
             {
                 self.session.as_ref().map(Session::document)
             } else {
-                self.documents
-                    .session(&meta.view.document_id)
-                    .map(Session::document)
+                self.documents.session(&meta.view.document_id).map(Session::document)
             };
             if let Some(definition_id) = meta.view.definition_id.as_deref() {
                 let name = parent_document
@@ -755,9 +760,7 @@ impl NodeCraftApp {
                 .and_then(|document| document.nodes.iter().find(|node| node.id == meta.group_id))
                 .and_then(|node| node.values.get("name").and_then(serde_json::Value::as_str))
                 .filter(|name| !name.is_empty());
-            return name
-                .map(str::to_owned)
-                .unwrap_or_else(|| format!("Graph {}", meta.group_id));
+            return name.map(str::to_owned).unwrap_or_else(|| format!("Graph {}", meta.group_id));
         }
         tab.path
             .as_ref()
@@ -766,7 +769,11 @@ impl NodeCraftApp {
             .to_owned()
     }
 
-    fn graph_tab_icon(&mut self, ctx: &egui::Context, theme: &crate::theme::Theme) -> egui::TextureHandle {
+    fn graph_tab_icon(
+        &mut self,
+        ctx: &egui::Context,
+        theme: &crate::theme::Theme,
+    ) -> egui::TextureHandle {
         let colour = theme.color(theme.text);
         if let Some((cached, texture)) = &self.graph_tab_icon
             && *cached == colour
@@ -781,11 +788,7 @@ impl NodeCraftApp {
         .replace("currentColor", &hex);
         let image = egui_extras::image::load_svg_bytes_with_size(
             svg.as_bytes(),
-            egui::SizeHint::Size {
-                width: 64,
-                height: 64,
-                maintain_aspect_ratio: true,
-            },
+            egui::SizeHint::Size { width: 64, height: 64, maintain_aspect_ratio: true },
             &Default::default(),
         )
         .unwrap_or_else(|_| egui::ColorImage::example());
@@ -818,7 +821,11 @@ impl NodeCraftApp {
                     .is_some_and(|meta| meta.view.definition_id.is_some());
                 let width = ui
                     .painter()
-                    .layout_no_wrap(title.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE)
+                    .layout_no_wrap(
+                        title.clone(),
+                        egui::FontId::proportional(13.0),
+                        egui::Color32::WHITE,
+                    )
                     .size()
                     .x
                     + if graph { 60.0 } else { 42.0 };
@@ -840,14 +847,11 @@ impl NodeCraftApp {
         // popup layers. Using Foreground here made tabs paint over an open File
         // menu because both layers had the same order and the tab layer was
         // created later.
-        let mut tab_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(strip)
-                .layer_id(egui::LayerId::new(
-                    TAB_LAYER_ORDER,
-                    egui::Id::new("document-tabs-layer"),
-                )),
-        );
+        let mut tab_ui =
+            ui.new_child(egui::UiBuilder::new().max_rect(strip).layer_id(egui::LayerId::new(
+                TAB_LAYER_ORDER,
+                egui::Id::new("document-tabs-layer"),
+            )));
         let ui = &mut tab_ui;
         let start = strip.min.x;
         let dragging_id = self.tab_drag.as_ref().map(|drag| drag.id);
@@ -940,7 +944,8 @@ impl NodeCraftApp {
                 continue;
             }
             let x = *self.tab_positions.get(&tab.id).unwrap_or(&targets[index]);
-            let rect = egui::Rect::from_min_size(egui::pos2(x, strip.min.y), egui::vec2(tab.width, 30.0));
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(x, strip.min.y), egui::vec2(tab.width, 30.0));
             let fill = theme.color(if tab.active { theme.control } else { theme.window });
             let response = ui.interact(
                 rect,
@@ -969,7 +974,11 @@ impl NodeCraftApp {
             );
             let text_colour = theme.color(if tab.active { theme.text } else { theme.muted });
             let text_offset = if tab.graph { egui::vec2(10.0, 0.0) } else { egui::Vec2::ZERO };
-            ui.painter().galley(rect.center() - galley.size() * 0.5 + text_offset, galley, text_colour);
+            ui.painter().galley(
+                rect.center() - galley.size() * 0.5 + text_offset,
+                galley,
+                text_colour,
+            );
             let mut close_hovered = false;
             // Only the active tab exposes its close button.
             if tab.active {
@@ -991,10 +1000,20 @@ impl NodeCraftApp {
                     let arm = 4.0;
                     let stroke = egui::Stroke::new(
                         1.4,
-                        if close.hovered() { theme.color(theme.text) } else { theme.color(theme.muted) },
+                        if close.hovered() {
+                            theme.color(theme.text)
+                        } else {
+                            theme.color(theme.muted)
+                        },
                     );
-                    ui.painter().line_segment([centre + egui::vec2(-arm, -arm), centre + egui::vec2(arm, arm)], stroke);
-                    ui.painter().line_segment([centre + egui::vec2(arm, -arm), centre + egui::vec2(-arm, arm)], stroke);
+                    ui.painter().line_segment(
+                        [centre + egui::vec2(-arm, -arm), centre + egui::vec2(arm, arm)],
+                        stroke,
+                    );
+                    ui.painter().line_segment(
+                        [centre + egui::vec2(arm, -arm), centre + egui::vec2(-arm, arm)],
+                        stroke,
+                    );
                 }
                 if close.clicked() {
                     requested_close = Some(index);
@@ -1005,10 +1024,7 @@ impl NodeCraftApp {
                 && let Some(pointer) = pointer
             {
                 drag = Some(TabDrag { id: tab.id, grab_offset: pointer.x - x });
-            } else if !reorderable
-                && cfg!(target_os = "macos")
-                && response.drag_started()
-            {
+            } else if !reorderable && cfg!(target_os = "macos") && response.drag_started() {
                 // A lone tab has no reorder destination; its drag is a window
                 // drag. Start it directly so the foreground tab layer cannot
                 // swallow the gesture before the title-bar interaction sees it.
@@ -1056,10 +1072,8 @@ impl NodeCraftApp {
         {
             let tab = &meta[index];
             let x = pointer.x - drag.grab_offset;
-            let rect = egui::Rect::from_min_size(
-                egui::pos2(x, strip.min.y),
-                egui::vec2(tab.width, 30.0),
-            );
+            let rect =
+                egui::Rect::from_min_size(egui::pos2(x, strip.min.y), egui::vec2(tab.width, 30.0));
             ui.painter().rect_filled(
                 rect.translate(egui::vec2(0.0, 3.0)),
                 egui::CornerRadius::same(8),
@@ -1090,15 +1104,18 @@ impl NodeCraftApp {
                 theme.color(theme.text),
             );
             let text_offset = if tab.graph { egui::vec2(10.0, 0.0) } else { egui::Vec2::ZERO };
-            ui.painter().galley(rect.center() - galley.size() * 0.5 + text_offset, galley, theme.color(theme.text));
+            ui.painter().galley(
+                rect.center() - galley.size() * 0.5 + text_offset,
+                galley,
+                theme.color(theme.text),
+            );
         }
 
         (requested_tab, requested_close, requested_move)
     }
 
     pub(super) fn move_tab(&mut self, from: usize, to: usize) {
-        let Some((insert, active)) =
-            reorder_tab_index(self.tabs.len(), from, to, self.active_tab)
+        let Some((insert, active)) = reorder_tab_index(self.tabs.len(), from, to, self.active_tab)
         else {
             return;
         };
@@ -1147,9 +1164,8 @@ impl NodeCraftApp {
 
     /// Replace the graph in the active tab without opening another tab.
     pub(super) fn replace_active_session(&mut self, session: Session, status: String) {
-        let selected_nodes: HashSet<String> = initial_viewer_target(session.document())
-            .into_iter()
-            .collect();
+        let selected_nodes: HashSet<String> =
+            initial_viewer_target(session.document()).into_iter().collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
         self.install_session(Some(session.clone()));
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -1187,7 +1203,11 @@ impl NodeCraftApp {
             tab.cache_hits = 0;
             tab.cache_misses = 0;
         } else {
-            self.open_session(self.session.clone().expect("session was just set"), None, self.status.clone());
+            self.open_session(
+                self.session.clone().expect("session was just set"),
+                None,
+                self.status.clone(),
+            );
             return;
         }
         self.evaluate();
@@ -1195,8 +1215,15 @@ impl NodeCraftApp {
 
     pub(super) fn open_linked_part_document(&mut self, node_id: &str) {
         let Some(session) = &self.session else { return };
-        let Some(node) = session.document().nodes.iter().find(|node| node.id == node_id) else { return };
-        let path = node.values.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        let Some(node) = session.document().nodes.iter().find(|node| node.id == node_id) else {
+            return;
+        };
+        let path = node
+            .values
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
         if path.is_empty() {
             self.error = Some("Linked part has no .nodecraft path".to_owned());
             return;
@@ -1276,9 +1303,8 @@ impl NodeCraftApp {
         if let Some(path) = &path {
             self.documents.set_path(&document_id, path);
         }
-        let selected_nodes: HashSet<String> = initial_viewer_target(session.document())
-            .into_iter()
-            .collect();
+        let selected_nodes: HashSet<String> =
+            initial_viewer_target(session.document()).into_iter().collect();
         let viewer_breakpoint = selected_nodes.iter().next().cloned();
         let tab = DocumentTab {
             id,
@@ -1340,9 +1366,7 @@ impl NodeCraftApp {
         }
         self.check_importer_sources();
     }
-
 }
-
 
 #[cfg(test)]
 mod layer_tests {

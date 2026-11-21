@@ -7,7 +7,9 @@
 use std::sync::{Arc, Mutex};
 
 use egui_wgpu::wgpu;
-use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Renderer, SceneSlot, clip_hatches, clip_planes};
+use solidcraft_viewport_gpu::view::{
+    Frame, GpuScene, GpuTarget, Renderer, SceneSlot, clip_hatches, clip_planes,
+};
 
 // The framebuffer is rendered wider/taller than the displayed panel so the
 // blur can sample content just outside the crop instead of clamping at its edge.
@@ -218,11 +220,7 @@ fn low_gamma(in: O) -> @location(0) vec4<f32> {
 
 fn srgb_to_linear(v: u8) -> f32 {
     let c = f32::from(v) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
 type Pair = (wgpu::Texture, wgpu::TextureView);
@@ -260,10 +258,20 @@ pub struct BackdropRenderer {
     texture_id: egui::TextureId,
 }
 
-fn make_texture(device: &wgpu::Device, label: &str, format: wgpu::TextureFormat, width: u32, height: u32) -> Pair {
+fn make_texture(
+    device: &wgpu::Device,
+    label: &str,
+    format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> Pair {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -282,17 +290,13 @@ impl BackdropRenderer {
         // Prefer the linear HDR path, but fall back to 8-bit textures when the
         // adapter cannot both render and filter Rgba16Float.
         let force_rgba8 = std::env::var_os("NODECRAFT_FORCE_RGBA8").is_some();
-        let float_features = rs
-            .adapter
-            .get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
+        let float_features =
+            rs.adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float);
         let linear = if !force_rgba8
-            && float_features
-                .flags
-                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+            && float_features.flags.contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
             && float_features.allowed_usages.contains(
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            )
-        {
+            ) {
             wgpu::TextureFormat::Rgba16Float
         } else {
             eprintln!("node backdrop: Rgba16Float unsupported, falling back to Rgba8Unorm");
@@ -305,7 +309,8 @@ impl BackdropRenderer {
         // egui's window target is Bgra8Unorm: values are gamma-encoded and written
         // raw. Render the scene into the same raw format, decode once into the
         // linear float scratch, and encode only on the final display pass.
-        let (scene, scene_view) = make_texture(&rs.device, "node-backdrop-scene", scene_format, WIDTH, HEIGHT);
+        let (scene, scene_view) =
+            make_texture(&rs.device, "node-backdrop-scene", scene_format, WIDTH, HEIGHT);
         let depth_texture = rs.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("node-backdrop-depth"),
             size: wgpu::Extent3d { width: WIDTH, height: HEIGHT, depth_or_array_layers: 1 },
@@ -324,11 +329,21 @@ impl BackdropRenderer {
             make_texture(&rs.device, "node-backdrop-down-4", linear, WIDTH / 16, HEIGHT / 16),
             make_texture(&rs.device, "node-backdrop-down-5", linear, WIDTH / 32, HEIGHT / 32),
         ];
-        let (_blur_a, blur_a_view) = make_texture(&rs.device, "node-backdrop-blur-a", linear, BLUR_WIDTH, BLUR_HEIGHT);
-        let (_blur_b, blur_b_view) = make_texture(&rs.device, "node-backdrop-blur-b", linear, BLUR_WIDTH, BLUR_HEIGHT);
-        let (_final_texture, final_view) = make_texture(&rs.device, "node-backdrop-final", display, WIDTH, HEIGHT);
+        let (_blur_a, blur_a_view) =
+            make_texture(&rs.device, "node-backdrop-blur-a", linear, BLUR_WIDTH, BLUR_HEIGHT);
+        let (_blur_b, blur_b_view) =
+            make_texture(&rs.device, "node-backdrop-blur-b", linear, BLUR_WIDTH, BLUR_HEIGHT);
+        let (_final_texture, final_view) =
+            make_texture(&rs.device, "node-backdrop-final", display, WIDTH, HEIGHT);
 
-        let target = GpuTarget { format: scene_format, depth: Some(depth), samples: 1, tess: false, oit: false };
+        let target = GpuTarget {
+            format: scene_format,
+            depth: Some(depth),
+            samples: 1,
+            tess: false,
+            oit: false,
+            edges: false,
+        };
         let renderer = Renderer::with_window_target(&rs.device, target, target, None);
 
         let params = rs.device.create_buffer(&wgpu::BufferDescriptor {
@@ -381,14 +396,26 @@ impl BackdropRenderer {
                 label: Some("node-backdrop-bg"),
                 layout: &bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&sampler),
+                    },
                     wgpu::BindGroupEntry { binding: 2, resource: params.as_entire_binding() },
                 ],
             })
         };
         let bind_scene = bind(&scene_view);
-        let bind_down = [bind(&levels[0].1), bind(&levels[1].1), bind(&levels[2].1), bind(&levels[3].1), bind(&levels[4].1)];
+        let bind_down = [
+            bind(&levels[0].1),
+            bind(&levels[1].1),
+            bind(&levels[2].1),
+            bind(&levels[3].1),
+            bind(&levels[4].1),
+        ];
         let bind_levels = bind_down.clone();
         let bind_blur_a = bind(&blur_a_view);
         let bind_blur_b = bind(&blur_b_view);
@@ -406,7 +433,12 @@ impl BackdropRenderer {
             rs.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
-                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &module,
                     entry_point: Some(entry),
@@ -433,7 +465,8 @@ impl BackdropRenderer {
         let mix_gamma = pipeline("mix_gamma", "node-backdrop-mix-gamma", display, true);
         let gaussian_h = pipeline("gaussian_h_frag", "node-backdrop-gaussian-h", linear, false);
         let gaussian_v = pipeline("gaussian_v_frag", "node-backdrop-gaussian-v", linear, false);
-        let gaussian_final = pipeline("gaussian_final", "node-backdrop-gaussian-final", display, false);
+        let gaussian_final =
+            pipeline("gaussian_final", "node-backdrop-gaussian-final", display, false);
         let texture_id = {
             let mut egui = rs.renderer.write();
             egui.register_native_texture(&rs.device, &final_view, wgpu::FilterMode::Linear)
@@ -473,7 +506,7 @@ impl BackdropRenderer {
     }
 
     pub fn set_scene(&mut self, scene: GpuScene) {
-                if let Ok(mut slot) = self.slot.lock() {
+        if let Ok(mut slot) = self.slot.lock() {
             *slot = Some(scene);
         }
     }
@@ -495,10 +528,7 @@ impl BackdropRenderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.params.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 2, resource: self.params.as_entire_binding() },
             ],
         })
     }
@@ -514,7 +544,7 @@ impl BackdropRenderer {
         external_source: Option<(&wgpu::TextureView, [f32; 4])>,
         mut profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>,
     ) {
-                let theme = crate::theme::get();
+        let theme = crate::theme::get();
         // A neutral theme surface used as the frosted film; high coverage keeps
         // the blurred scene subtle rather than reading as a dark see-through panel.
         let glass = theme.blur_tint;
@@ -617,48 +647,45 @@ impl BackdropRenderer {
                     multiview_mask: None,
                 },
                 |pass| {
-                    self.renderer.paint(
-                        &backdrop,
-                        pass,
-                        [0.0, 0.0, WIDTH as f32, HEIGHT as f32],
-                    );
+                    self.renderer.paint(&backdrop, pass, [0.0, 0.0, WIDTH as f32, HEIGHT as f32]);
                 },
             );
         }
 
-        let blur_pass = |encoder: &mut wgpu::CommandEncoder,
-                         view: &wgpu::TextureView,
-                         pipeline: &wgpu::RenderPipeline,
-                         bind: &wgpu::BindGroup,
-                         label: &'static str,
-                         profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>| {
-            crate::gpu_profiler::render_pass(
-                profiler,
-                label,
-                encoder,
-                wgpu::RenderPassDescriptor {
-                    label: Some(label),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                },
-                |pass| {
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, bind, &[]);
-                    pass.draw(0..3, 0..1);
-                },
-            );
-        };
+        let blur_pass =
+            |encoder: &mut wgpu::CommandEncoder,
+             view: &wgpu::TextureView,
+             pipeline: &wgpu::RenderPipeline,
+             bind: &wgpu::BindGroup,
+             label: &'static str,
+             profiler: Option<&mut crate::gpu_profiler::GpuProfilerSlot>| {
+                crate::gpu_profiler::render_pass(
+                    profiler,
+                    label,
+                    encoder,
+                    wgpu::RenderPassDescriptor {
+                        label: Some(label),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    },
+                    |pass| {
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, bind, &[]);
+                        pass.draw(0..3, 0..1);
+                    },
+                );
+            };
 
         let bind_scene = external_bind.as_ref().unwrap_or(&self.bind_scene);
         if blur_scale[1] <= f32::EPSILON {
@@ -700,6 +727,13 @@ impl BackdropRenderer {
             crate::gpu_profiler::pass::BACKDROP_BLUR_FINAL,
             profiler.as_deref_mut(),
         );
-        let _ = (&self._scene, &self._final_texture, &self.levels, &self.blur_a_view, &self.blur_b_view);        let _ = (&self._scene, &self._final_texture);
+        let _ = (
+            &self._scene,
+            &self._final_texture,
+            &self.levels,
+            &self.blur_a_view,
+            &self.blur_b_view,
+        );
+        let _ = (&self._scene, &self._final_texture);
     }
 }

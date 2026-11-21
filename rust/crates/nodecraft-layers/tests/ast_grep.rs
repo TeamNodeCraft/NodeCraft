@@ -57,8 +57,7 @@ fn error_rule_ids(root: &Path) -> Vec<String> {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
         let id = text.lines().find_map(|line| line.strip_prefix("id: ")).map(str::trim);
-        let severity =
-            text.lines().find_map(|line| line.strip_prefix("severity: ")).map(str::trim);
+        let severity = text.lines().find_map(|line| line.strip_prefix("severity: ")).map(str::trim);
         if let (Some(id), Some("error")) = (id, severity) {
             ids.push(id.to_owned());
         }

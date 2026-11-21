@@ -57,12 +57,7 @@ impl Default for Affine3 {
 
 impl Affine3 {
     pub const IDENTITY: Self = Self {
-        m: [
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 1.0],
-        ],
+        m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]],
     };
 
     #[must_use]
@@ -96,11 +91,8 @@ impl Affine3 {
     /// then Z).
     #[must_use]
     pub fn from_rotation(rotation: [f64; 3]) -> Self {
-        let (rx, ry, rz) = (
-            rotation[0].to_radians(),
-            rotation[1].to_radians(),
-            rotation[2].to_radians(),
-        );
+        let (rx, ry, rz) =
+            (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
         let (sx, cx) = rx.sin_cos();
         let (sy, cy) = ry.sin_cos();
         let (sz, cz) = rz.sin_cos();
@@ -201,9 +193,18 @@ impl Affine3 {
     #[must_use]
     pub fn apply_point(self, point: [f64; 3]) -> [f64; 3] {
         [
-            self.m[0][0] * point[0] + self.m[0][1] * point[1] + self.m[0][2] * point[2] + self.m[0][3],
-            self.m[1][0] * point[0] + self.m[1][1] * point[1] + self.m[1][2] * point[2] + self.m[1][3],
-            self.m[2][0] * point[0] + self.m[2][1] * point[1] + self.m[2][2] * point[2] + self.m[2][3],
+            self.m[0][0] * point[0]
+                + self.m[0][1] * point[1]
+                + self.m[0][2] * point[2]
+                + self.m[0][3],
+            self.m[1][0] * point[0]
+                + self.m[1][1] * point[1]
+                + self.m[1][2] * point[2]
+                + self.m[1][3],
+            self.m[2][0] * point[0]
+                + self.m[2][1] * point[1]
+                + self.m[2][2] * point[2]
+                + self.m[2][3],
         ]
     }
 
@@ -706,21 +707,15 @@ fn apply_transform_brep(
     use solidcore::math::{Point3, Vec3};
     match transform {
         DisplayTransform::Place { offset, rotation } => {
-            let (rx, ry, rz) = (
-                rotation[0].to_radians(),
-                rotation[1].to_radians(),
-                rotation[2].to_radians(),
-            );
+            let (rx, ry, rz) =
+                (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
             let (sx, cx) = rx.sin_cos();
             let (sy, cy) = ry.sin_cos();
             let (sz, cz) = rz.sin_cos();
             let x_axis = Vec3::new(cy * cz, cy * sz, -sy);
             let y_axis = Vec3::new(sx * sy * cz - cx * sz, sx * sy * sz + cx * cz, sx * cy);
-            let placement = Axis2Placement::new(
-                Point3::new(offset[0], offset[1], offset[2]),
-                x_axis,
-                y_axis,
-            );
+            let placement =
+                Axis2Placement::new(Point3::new(offset[0], offset[1], offset[2]), x_axis, y_axis);
             solidcore::topology::brep::p5::transform(kernel, brep, &placement, None, true)
                 .map_err(|error| error.to_string())
         }
@@ -882,10 +877,8 @@ mod tests {
         placement_stats::reset();
         let mut placement = Placement::identity();
         for _ in 0..100 {
-            placement = placement.then(DisplayTransform::Place {
-                offset: [1.0, 0.0, 0.0],
-                rotation: [0.0; 3],
-            });
+            placement = placement
+                .then(DisplayTransform::Place { offset: [1.0, 0.0, 0.0], rotation: [0.0; 3] });
         }
         let cloned = placement.clone();
         assert_eq!(cloned.depth(), 100);
@@ -901,9 +894,10 @@ mod tests {
 
     #[test]
     fn mirror_and_rigid_flags_track_the_chain() {
-        let placement = Placement::from_ops([
-            DisplayTransform::Place { offset: [1.0, 0.0, 0.0], rotation: [0.0; 3] },
-        ]);
+        let placement = Placement::from_ops([DisplayTransform::Place {
+            offset: [1.0, 0.0, 0.0],
+            rotation: [0.0; 3],
+        }]);
         assert!(placement.is_rigid());
         assert!(!placement.has_mirror());
 

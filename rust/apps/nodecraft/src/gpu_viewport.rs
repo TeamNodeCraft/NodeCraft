@@ -9,23 +9,26 @@ use std::sync::{Arc, Mutex};
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt as _;
 
-use egui_wgpu::{wgpu, CallbackTrait, RenderState};
-use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
+use egui_wgpu::{CallbackTrait, RenderState, wgpu};
 use solidcore_record::Vec3;
+use solidcraft_geom::{Aabb3, Mesh as CraftMesh};
 
 use crate::viewport::{ViewSettings, draws_grid};
+use solidcraft_viewport::Camera;
+use solidcraft_viewport::surface::OpaqueSurface;
 use solidcraft_viewport_gpu::depth_format;
 use solidcraft_viewport_gpu::view::{
     FACE_BIAS, depth_bias, depth_compare, gpu_view_proj, reversed_depth,
 };
-use solidcraft_viewport_gpu::view::{Frame, GpuScene, GpuTarget, Palette, PaletteIndex, Renderer, SceneSlot, clip_hatches, clip_planes};
-use solidcraft_viewport::surface::OpaqueSurface;
-use solidcraft_viewport::Camera;
+use solidcraft_viewport_gpu::view::{
+    Frame, GpuScene, GpuTarget, Palette, PaletteIndex, Renderer, SceneSlot, clip_hatches,
+    clip_planes,
+};
 
 use crate::adapter::DisplayMesh;
 use crate::edge_ribbon::EdgeCpuBatch;
-use crate::viewport_grid::grid_step;
 use crate::gpu_backdrop::BackdropRenderer;
+use crate::viewport_grid::grid_step;
 use solidcraft_geom::prelude::*;
 
 const EMPTY_GRID_RADIUS: f64 = 100.0;
@@ -98,10 +101,13 @@ pub fn msaa_samples() -> u32 {
 /// The scene pass's color attachment and resolve target. wgpu rejects a resolve
 /// from a single-sampled attachment, so without MSAA the pass draws directly into
 /// the texture the viewport later blits from.
-fn scene_color_attachment<'a, T>(samples: u32, color: &'a T, resolve: &'a T) -> (&'a T, Option<&'a T>) {
+fn scene_color_attachment<'a, T>(
+    samples: u32,
+    color: &'a T,
+    resolve: &'a T,
+) -> (&'a T, Option<&'a T>) {
     if samples > 1 { (color, Some(resolve)) } else { (resolve, None) }
 }
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -152,7 +158,12 @@ fn invert4x4(columns: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
             }
         }
         if rows[pivot][column].abs() < 1.0e-12 {
-            return [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+            return [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ];
         }
         rows.swap(column, pivot);
         let scale = rows[column][column];
@@ -329,7 +340,6 @@ fn fs(in: VsOut) -> FragOut {
 }
 "#;
 
-
 /// Unlit ghost shader. Ghosts are an overlay, not material: keep the authored
 /// colour and opacity, with no lighting, roughness or metallic response.
 pub(crate) const GHOST_SHADER: &str = r#"
@@ -420,9 +430,8 @@ impl ObjectFaceIds {
     /// `tri_face` is the only identity available.
     fn from_mesh(mesh: &CraftMesh) -> Self {
         let faces = mesh.tri_face.iter().copied().max().unwrap_or(0);
-        let by_face = (0..=faces)
-            .map(|face| crate::gpu_pick::face_pick_id(0, face, false))
-            .collect();
+        let by_face =
+            (0..=faces).map(|face| crate::gpu_pick::face_pick_id(0, face, false)).collect();
         Self {
             by_face,
             by_face_body: vec![0; faces as usize + 1],
@@ -449,10 +458,7 @@ impl ObjectFaceIds {
     }
 
     fn face_index(&self, mesh: &CraftMesh, triangle: usize) -> u32 {
-        mesh.tri_face
-            .get(triangle)
-            .copied()
-            .unwrap_or(triangle as u32)
+        mesh.tri_face.get(triangle).copied().unwrap_or(triangle as u32)
     }
 }
 
@@ -465,11 +471,7 @@ fn fallback_body_id(body: u32) -> u64 {
 
 /// The stable identity for one body of a display mesh.
 fn display_body_id(display: &DisplayMesh, body: u32) -> u64 {
-    display
-        .body_ids
-        .get(body as usize)
-        .copied()
-        .unwrap_or_else(|| fallback_body_id(body))
+    display.body_ids.get(body as usize).copied().unwrap_or_else(|| fallback_body_id(body))
 }
 
 /// The body a display face string belongs to, even when its face part is not
@@ -792,11 +794,7 @@ fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> [f32; 3] {
         _ => (chroma, 0.0, x),
     };
     let offset = lightness - chroma * 0.5;
-    [
-        (red + offset) as f32,
-        (green + offset) as f32,
-        (blue + offset) as f32,
-    ]
+    [(red + offset) as f32, (green + offset) as f32, (blue + offset) as f32]
 }
 
 /// One body's face colour in Face colours mode.
@@ -916,17 +914,22 @@ pub(crate) fn prepare_object(display: &DisplayMesh, view: &ViewSettings) -> Prep
         } else if ignore_look {
             DEFAULT_FACE_COLOUR
         } else {
-            display
-                .face_colors
-                .get(triangle_index)
-                .copied()
-                .unwrap_or(DEFAULT_FACE_COLOUR)
+            display.face_colors.get(triangle_index).copied().unwrap_or(DEFAULT_FACE_COLOUR)
         };
         let face = faces.pick(mesh, triangle_index);
         for (index, point) in [(a, pa), (b, pb), (c, pc)] {
-            let normal = mesh.normals.get(index).copied().filter(|normal| normal.len() > 1.0e-9).unwrap_or(fallback);
+            let normal = mesh
+                .normals
+                .get(index)
+                .copied()
+                .filter(|normal| normal.len() > 1.0e-9)
+                .unwrap_or(fallback);
             indices.push(vertices.len() as u32);
-            vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
+            vertices.push(ObjectVertex {
+                position: point.to_f32(),
+                normal: normal.to_f32(),
+                colour,
+            });
             face_ids.push(face);
         }
     }
@@ -998,7 +1001,11 @@ const OBJECT_INSTANCE_ATTRIBUTES: [wgpu::VertexAttribute; 9] = [
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 64, shader_location: 7 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 80, shader_location: 8 },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 96, shader_location: 9 },
-    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 112, shader_location: 10 },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 112,
+        shader_location: 10,
+    },
     wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 128, shader_location: 11 },
 ];
 
@@ -1015,9 +1022,21 @@ fn object_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: std::mem::size_of::<ObjectVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 12,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 24,
+                shader_location: 2,
+            },
         ],
     }
 }
@@ -1053,7 +1072,11 @@ fn flat_object_mesh(
     let mut indices = Vec::new();
     for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
         let [a, b, c] = triangle.map(|index| index as usize);
-        let (Some(pa), Some(pb), Some(pc)) = (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c)) else { continue };
+        let (Some(pa), Some(pb), Some(pc)) =
+            (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+        else {
+            continue;
+        };
         let fallback = (*pb - *pa).cross(*pc - *pa);
         let normal = fallback.normalized().unwrap_or(solidcore_record::Vec3::Z).to_f32();
         let face = faces.pick(mesh, triangle_index);
@@ -1082,11 +1105,7 @@ fn smoothed_object_mesh(
     // seams.
     const CREASE_COS: f64 = 0.5; // 60 degrees
     let key = |p: &Vec3| {
-        (
-            (p.x * 1.0e3).round() as i64,
-            (p.y * 1.0e3).round() as i64,
-            (p.z * 1.0e3).round() as i64,
-        )
+        ((p.x * 1.0e3).round() as i64, (p.y * 1.0e3).round() as i64, (p.z * 1.0e3).round() as i64)
     };
     // Creases follow B-rep faces, not just the angle between triangles. A chamfer
     // face is only 45° from the faces beside it: an angular threshold alone
@@ -1097,11 +1116,9 @@ fn smoothed_object_mesh(
     let mut face_normals = Vec::with_capacity(mesh.triangles.len());
     for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
         let [a, b, c] = triangle.map(|index| index as usize);
-        let (Some(pa), Some(pb), Some(pc)) = (
-            mesh.positions.get(a),
-            mesh.positions.get(b),
-            mesh.positions.get(c),
-        ) else {
+        let (Some(pa), Some(pb), Some(pc)) =
+            (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+        else {
             face_normals.push(None);
             continue;
         };
@@ -1168,11 +1185,7 @@ fn indexed_object_mesh(
         if !(normal.len() > 1.0e-9) {
             return None;
         }
-        vertices.push(ObjectVertex {
-            position: point.to_f32(),
-            normal: normal.to_f32(),
-            colour,
-        });
+        vertices.push(ObjectVertex { position: point.to_f32(), normal: normal.to_f32(), colour });
     }
     let mut face_ids = vec![0u32; vertices.len()];
     let mut indices = Vec::with_capacity(mesh.triangles.len() * 3);
@@ -1248,7 +1261,11 @@ impl ObjectRenderer {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             }],
         });
@@ -1266,7 +1283,10 @@ impl ObjectRenderer {
         let ghost_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport-object-ghost-bind-group"),
             layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ghost_uniforms.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ghost_uniforms.as_entire_binding(),
+            }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-object-layout"),
@@ -1286,7 +1306,11 @@ impl ObjectRenderer {
                 module: &module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1299,7 +1323,11 @@ impl ObjectRenderer {
                 ..Default::default()
             },
             depth_stencil: Some(opaque_face_depth(reversed).state(depth)),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -1322,9 +1350,17 @@ impl ObjectRenderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
             depth_stencil: Some(translucent_face_depth(reversed).state(depth)),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -1347,9 +1383,17 @@ impl ObjectRenderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
             depth_stencil: Some(ghost_face_depth(reversed).state(depth)),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -1387,7 +1431,8 @@ impl ObjectRenderer {
         let uploaded_triangles = indices.len() as u64 / 3;
         let uploaded_object_bytes = (vertices.len() * std::mem::size_of::<ObjectVertex>()
             + face_ids.len() * std::mem::size_of::<u32>()
-            + indices.len() * std::mem::size_of::<u32>()) as u64;
+            + indices.len() * std::mem::size_of::<u32>())
+            as u64;
         let chunks = chunk_object_mesh(vertices, face_ids, indices);
         self.chunk_spans.clear();
         self.draws.clear();
@@ -1503,7 +1548,8 @@ impl ObjectRenderer {
             self.instances = if self.draws.is_empty() {
                 None
             } else {
-                let instances: Vec<GpuInstance> = self.draws.iter().map(GpuDrawItem::instance).collect();
+                let instances: Vec<GpuInstance> =
+                    self.draws.iter().map(GpuDrawItem::instance).collect();
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("viewport-object-instances"),
                     size: (instances.len() * std::mem::size_of::<GpuInstance>()) as u64,
@@ -1521,7 +1567,9 @@ impl ObjectRenderer {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(1, instances.slice(..));
         let emit = |draw: &GpuDrawItem, pass: &mut wgpu::RenderPass<'static>, index: usize| {
-            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { return };
+            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else {
+                return;
+            };
             pass.set_vertex_buffer(0, asset.vertices.slice(..));
             pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
             // Each draw reads its own slot in the shared instance buffer.
@@ -1574,7 +1622,9 @@ impl ObjectRenderer {
             if draw.ghost {
                 continue;
             }
-            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else { continue };
+            let Some(asset) = self.assets.iter().find(|asset| asset.key == draw.asset_key) else {
+                continue;
+            };
             pass.set_vertex_buffer(0, asset.vertices.slice(..));
             pass.set_vertex_buffer(1, asset.face_ids.slice(..));
             pass.set_index_buffer(asset.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -1613,12 +1663,7 @@ fn paint_pick_face_ids(
 }
 
 pub(crate) fn identity_matrix() -> [[f32; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ]
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
 }
 
 /// A pipeline's depth state, kept as a value so tests can assert the model
@@ -1745,7 +1790,8 @@ fn normal_matrix(model: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
             m[0][0] * m[1][1] - m[0][1] * m[1][0],
         ],
     ];
-    let determinant = m[0][0] * cofactor[0][0] + m[0][1] * cofactor[0][1] + m[0][2] * cofactor[0][2];
+    let determinant =
+        m[0][0] * cofactor[0][0] + m[0][1] * cofactor[0][1] + m[0][2] * cofactor[0][2];
     if !determinant.is_finite() || determinant.abs() <= 1.0e-12 {
         return identity_matrix();
     }
@@ -1784,20 +1830,14 @@ fn transform_bounds(bounds: Aabb3, matrix: [[f32; 4]; 4]) -> Aabb3 {
     let mut min = [f64::INFINITY; 3];
     let mut max = [f64::NEG_INFINITY; 3];
     for corner in corners {
-        let point = transform_point(
-            matrix,
-            [corner[0] as f32, corner[1] as f32, corner[2] as f32],
-        );
+        let point = transform_point(matrix, [corner[0] as f32, corner[1] as f32, corner[2] as f32]);
         for axis in 0..3 {
             let value = f64::from(point[axis]);
             min[axis] = min[axis].min(value);
             max[axis] = max[axis].max(value);
         }
     }
-    Aabb3 {
-        min: Vec3::new(min[0], min[1], min[2]),
-        max: Vec3::new(max[0], max[1], max[2]),
-    }
+    Aabb3 { min: Vec3::new(min[0], min[1], min[2]), max: Vec3::new(max[0], max[1], max[2]) }
 }
 
 /// `a * b` for column-major 4x4 matrices (apply `b` first, then `a`).
@@ -1818,7 +1858,12 @@ struct GridRenderer {
 }
 
 impl GridRenderer {
-    fn install(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32, depth: wgpu::TextureFormat) -> Self {
+    fn install(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        depth: wgpu::TextureFormat,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport-grid"),
             source: wgpu::ShaderSource::Wgsl(GRID_SHADER.into()),
@@ -1845,10 +1890,7 @@ impl GridRenderer {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport-grid-bind-group"),
             layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-grid-layout"),
@@ -1886,7 +1928,11 @@ impl GridRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -1950,7 +1996,12 @@ struct AxisRenderer {
 }
 
 impl AxisRenderer {
-    fn install(device: &wgpu::Device, format: wgpu::TextureFormat, samples: u32, depth: wgpu::TextureFormat) -> Self {
+    fn install(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        depth: wgpu::TextureFormat,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("viewport-axis"),
             source: wgpu::ShaderSource::Wgsl(AXIS_SHADER.into()),
@@ -1977,10 +2028,7 @@ impl AxisRenderer {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport-axis-bind-group"),
             layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport-axis-layout"),
@@ -2018,7 +2066,11 @@ impl AxisRenderer {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -2037,12 +2089,7 @@ impl AxisRenderer {
 }
 
 fn colour(rgba: [u8; 4], alpha: f32) -> [f32; 4] {
-    [
-        f32::from(rgba[0]) / 255.0,
-        f32::from(rgba[1]) / 255.0,
-        f32::from(rgba[2]) / 255.0,
-        alpha,
-    ]
+    [f32::from(rgba[0]) / 255.0, f32::from(rgba[1]) / 255.0, f32::from(rgba[2]) / 255.0, alpha]
 }
 
 const BLIT_SHADER: &str = r#"
@@ -2090,11 +2137,7 @@ impl SceneTarget {
         samples: u32,
     ) -> Self {
         let size = [size[0].max(1), size[1].max(1)];
-        let extent = wgpu::Extent3d {
-            width: size[0],
-            height: size[1],
-            depth_or_array_layers: 1,
-        };
+        let extent = wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 };
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("viewport-scene-msaa"),
             size: extent,
@@ -2112,8 +2155,7 @@ impl SceneTarget {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -2207,7 +2249,11 @@ impl SceneTarget {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: samples, mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
@@ -2264,11 +2310,7 @@ impl DrawnPreview {
         base_backdrop_view_proj: [[f32; 4]; 4],
         state: Option<PreviewState>,
     ) -> Self {
-        Self {
-            base_view_proj,
-            base_backdrop_view_proj,
-            state,
-        }
+        Self { base_view_proj, base_backdrop_view_proj, state }
     }
 
     fn set_state(&mut self, state: Option<PreviewState>) {
@@ -2282,17 +2324,13 @@ impl DrawnPreview {
     fn scene_view_proj(&self) -> [[f32; 4]; 4] {
         self.state
             .as_ref()
-            .map_or(self.base_view_proj, |preview| {
-                preview.scene_view_proj(self.base_view_proj)
-            })
+            .map_or(self.base_view_proj, |preview| preview.scene_view_proj(self.base_view_proj))
     }
 
     fn backdrop_view_proj(&self) -> [[f32; 4]; 4] {
-        self.state
-            .as_ref()
-            .map_or(self.base_backdrop_view_proj, |preview| {
-                preview.backdrop_view_proj(self.base_backdrop_view_proj)
-            })
+        self.state.as_ref().map_or(self.base_backdrop_view_proj, |preview| {
+            preview.backdrop_view_proj(self.base_backdrop_view_proj)
+        })
     }
 }
 
@@ -2303,7 +2341,6 @@ fn sync_drawn_preview(drawn: &mut DrawnPreview, frame: &mut Frame, state: Option
     drawn.set_state(state);
     frame.view_proj = drawn.scene_view_proj();
 }
-
 
 /// Stable GPU/display facts for the debug overlay.
 #[derive(Clone, Debug)]
@@ -2316,10 +2353,7 @@ pub struct GpuDebugInfo {
     pub object_bytes: u64,
 }
 
-pub(crate) fn resolve_pick(
-    data: &GhostPickData,
-    index: u32,
-) -> Option<(String, [f64; 3])> {
+pub(crate) fn resolve_pick(data: &GhostPickData, index: u32) -> Option<(String, [f64; 3])> {
     if index == 0 {
         return None;
     }
@@ -2468,8 +2502,7 @@ impl DisplaySwap {
     /// copy keeps the CPU mirror and timeline in step with the GPU swap.
     fn take_ready(&mut self, plan_activation: u64, plan_snapshot: u64) -> Option<PendingDisplay> {
         let ready = self.pending.as_ref().is_some_and(|pending| {
-            pending.wait_activation <= plan_activation
-                && pending.edges.snapshot == plan_snapshot
+            pending.wait_activation <= plan_activation && pending.edges.snapshot == plan_snapshot
         });
         if !ready {
             return None;
@@ -2585,6 +2618,7 @@ impl GpuViewport {
             samples: msaa_samples(),
             tess: false,
             oit: false,
+            edges: false,
         };
         let window = GpuTarget {
             format: rs.target_format,
@@ -2592,6 +2626,7 @@ impl GpuViewport {
             samples: msaa_samples(),
             tess: false,
             oit: false,
+            edges: false,
         };
         let renderer = Renderer::with_window_target(&rs.device, scene, window, None);
         rs.renderer.write().callback_resources.insert(renderer);
@@ -2607,20 +2642,19 @@ impl GpuViewport {
             source: wgpu::ShaderSource::Wgsl(CLEAR_SHADER.into()),
         });
         let bind_group_layout =
-            rs.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("viewport-clear-bind-layout"),
-                    entries: &[wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }],
-                });
+            rs.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("viewport-clear-bind-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let theme = crate::theme::get();
         let background = [
             f32::from(theme.window[0]) / 255.0,
@@ -2674,18 +2708,19 @@ impl GpuViewport {
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
-            multisample: wgpu::MultisampleState { count: msaa_samples(), mask: !0, alpha_to_coverage_enabled: false },
+            multisample: wgpu::MultisampleState {
+                count: msaa_samples(),
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
             multiview_mask: None,
             cache: None,
         });
-        rs.renderer
-            .write()
-            .callback_resources
-            .insert(ViewportClear {
-                pipeline,
-                bind_group: clear_bind_group,
-                buffer: clear_buffer,
-            });
+        rs.renderer.write().callback_resources.insert(ViewportClear {
+            pipeline,
+            bind_group: clear_bind_group,
+            buffer: clear_buffer,
+        });
         rs.renderer.write().callback_resources.insert(GridRenderer::install(
             &rs.device,
             rs.target_format,
@@ -2836,14 +2871,9 @@ impl GpuViewport {
         snapshot: u64,
         retire_preview: bool,
     ) {
-        let wait_activation = self
-            .plan
-            .lock()
-            .map(|plan| plan.activation().wrapping_add(1))
-            .unwrap_or(0);
-        let prepared = display
-            .as_ref()
-            .map(|display| prepare_object(display, &self.view));
+        let wait_activation =
+            self.plan.lock().map(|plan| plan.activation().wrapping_add(1)).unwrap_or(0);
+        let prepared = display.as_ref().map(|display| prepare_object(display, &self.view));
         // The payload carries the preview it will show with. Retiring it here,
         // rather than immediately after the app stages the display, keeps the
         // current geometry previewed until this pair activates. A live drag
@@ -2866,9 +2896,8 @@ impl GpuViewport {
         // activation frame carries it explicitly.
         let (key, key_serial) = self.reserve_scene_key();
         if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-            let (edges, radius) = display.as_ref().map_or((0, 0.0), |display| {
-                (display.edges.len(), display.radius)
-            });
+            let (edges, radius) =
+                display.as_ref().map_or((0, 0.0), |display| (display.edges.len(), display.radius));
             eprintln!(
                 "[display] stage key={key} wait_activation={wait_activation} snapshot={snapshot} edges={edges} radius={radius:.3} target={target:?}",
             );
@@ -2908,11 +2937,7 @@ impl GpuViewport {
     }
 
     pub(crate) fn take_activated_display(&mut self) -> Option<DisplayActivation> {
-        let active = self
-            .display_swap
-            .lock()
-            .ok()?
-            .take_activated(&mut self.display_synced)?;
+        let active = self.display_swap.lock().ok()?.take_activated(&mut self.display_synced)?;
         // The staging frame's activation handed the renderer `active.key`.
         // Later frames must use that same key (unless a newer upload already
         // advanced it), or the renderer would reject the next scene as stale.
@@ -2931,10 +2956,7 @@ impl GpuViewport {
     }
 
     pub(crate) fn committed_snapshot(&self) -> u64 {
-        self.display_swap
-            .lock()
-            .map(|swap| swap.committed_snapshot)
-            .unwrap_or(0)
+        self.display_swap.lock().map(|swap| swap.committed_snapshot).unwrap_or(0)
     }
 
     pub(crate) fn pending_display_bounds(&self) -> Option<(f64, solidcore_record::Vec3)> {
@@ -3019,9 +3041,8 @@ impl GpuViewport {
             self.set_preview_unit(None);
         }
         self.take_scene_key();
-        self.display_pick = display
-            .map(|display| build_ghost_pick_data(&display.edges))
-            .unwrap_or_default();
+        self.display_pick =
+            display.map(|display| build_ghost_pick_data(&display.edges)).unwrap_or_default();
         self.pick_key = self.pick_key.wrapping_add(1);
         let radius = display.map_or(EMPTY_GRID_RADIUS, |display| display.radius);
         self.display_radius = radius;
@@ -3249,10 +3270,7 @@ impl GpuViewport {
     /// The display unit's current preview. This is the single source every
     /// per-frame consumer reads.
     fn preview_unit(&self) -> Option<PreviewState> {
-        self.display_swap
-            .lock()
-            .ok()
-            .and_then(|swap| swap.preview.clone())
+        self.display_swap.lock().ok().and_then(|swap| swap.preview.clone())
     }
 
     fn set_preview_unit(&mut self, preview: Option<PreviewState>) {
@@ -3264,11 +3282,7 @@ impl GpuViewport {
     /// Compare the app mirror with the display unit. An activation may have
     /// retired the preview before the app synced its CPU copy; forwarding an
     /// apparently unchanged preview must still reach the unit.
-    pub(crate) fn preview_matches(
-        &self,
-        transform: Option<[[f32; 4]; 4]>,
-        alpha: f32,
-    ) -> bool {
+    pub(crate) fn preview_matches(&self, transform: Option<[[f32; 4]; 4]>, alpha: f32) -> bool {
         match (transform, self.preview_unit()) {
             (None, None) => true,
             (Some(transform), Some(preview)) => {
@@ -3301,11 +3315,17 @@ impl GpuViewport {
             let mesh: &CraftMesh = &display.mesh;
             if include_pbr {
                 let surface = OpaqueSurface::new(Vec3::new(0.32, 0.34, 0.37), 0.0, 0.44, 1.62)
-                    .unwrap_or_else(|_| OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5).expect("fallback surface"));
-                let face_ids = view
-                    .face_colours
-                    .then(|| ObjectFaceIds::from_display(display));
-                for (triangle_index, triangle) in mesh.triangles.iter().enumerate().step_by(backdrop_pbr_stride(mesh.triangles.len())) {
+                    .unwrap_or_else(|_| {
+                        OpaqueSurface::new(Vec3::new(0.6, 0.6, 0.6), 0.0, 0.44, 1.5)
+                            .expect("fallback surface")
+                    });
+                let face_ids = view.face_colours.then(|| ObjectFaceIds::from_display(display));
+                for (triangle_index, triangle) in mesh
+                    .triangles
+                    .iter()
+                    .enumerate()
+                    .step_by(backdrop_pbr_stride(mesh.triangles.len()))
+                {
                     let [a, b, c] = triangle.map(|index| index as usize);
                     let (Some(pa), Some(pb), Some(pc)) =
                         (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
@@ -3321,7 +3341,11 @@ impl GpuViewport {
                     let surface = colour
                         .and_then(|color| {
                             OpaqueSurface::new(
-                                Vec3::new(f64::from(color[0]), f64::from(color[1]), f64::from(color[2])),
+                                Vec3::new(
+                                    f64::from(color[0]),
+                                    f64::from(color[1]),
+                                    f64::from(color[2]),
+                                ),
                                 0.0,
                                 0.44,
                                 1.62,
@@ -3339,10 +3363,21 @@ impl GpuViewport {
             if view.triangles {
                 let mut seen = std::collections::HashSet::new();
                 for triangle in mesh.triangles.iter() {
-                    for pair in [[triangle[0], triangle[1]], [triangle[1], triangle[2]], [triangle[2], triangle[0]]] {
+                    for pair in [
+                        [triangle[0], triangle[1]],
+                        [triangle[1], triangle[2]],
+                        [triangle[2], triangle[0]],
+                    ] {
                         let key = (pair[0].min(pair[1]), pair[0].max(pair[1]));
-                        if !seen.insert(key) { continue; }
-                        let (Some(a), Some(b)) = (mesh.positions.get(pair[0] as usize), mesh.positions.get(pair[1] as usize)) else { continue };
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        let (Some(a), Some(b)) = (
+                            mesh.positions.get(pair[0] as usize),
+                            mesh.positions.get(pair[1] as usize),
+                        ) else {
+                            continue;
+                        };
                         scene.line(a.to_f32(), b.to_f32(), triangle_edge, 0.7, false);
                     }
                 }
@@ -3350,13 +3385,20 @@ impl GpuViewport {
             if view.normals {
                 // Aggregate triangles by display face, then draw one area-weighted
                 // face normal from each face centroid.
-                let mut faces: std::collections::HashMap<u32, (Vec3, Vec3, f64)> = std::collections::HashMap::new();
+                let mut faces: std::collections::HashMap<u32, (Vec3, Vec3, f64)> =
+                    std::collections::HashMap::new();
                 for (index, triangle) in mesh.triangles.iter().enumerate() {
                     let [a, b, c] = triangle.map(|index| index as usize);
-                    let (Some(pa), Some(pb), Some(pc)) = (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c)) else { continue };
+                    let (Some(pa), Some(pb), Some(pc)) =
+                        (mesh.positions.get(a), mesh.positions.get(b), mesh.positions.get(c))
+                    else {
+                        continue;
+                    };
                     let cross = (*pb - *pa).cross(*pc - *pa);
                     let area = cross.len() * 0.5;
-                    if area <= 1.0e-12 { continue; }
+                    if area <= 1.0e-12 {
+                        continue;
+                    }
                     let normal = cross.normalized().unwrap_or(Vec3::Z);
                     let centroid = (*pa + *pb + *pc) / 3.0;
                     let face = mesh.tri_face.get(index).copied().unwrap_or(index as u32);
@@ -3367,7 +3409,9 @@ impl GpuViewport {
                 }
                 let length = display.radius * 0.075;
                 for (_face, (normal, centroid, area)) in faces {
-                    if area <= 1.0e-12 { continue; }
+                    if area <= 1.0e-12 {
+                        continue;
+                    }
                     let Some(normal) = normal.normalized() else { continue };
                     let center = centroid / area;
                     let tip = centroid / area + normal * length;
@@ -3398,17 +3442,15 @@ impl GpuViewport {
         backdrop_crop: [f32; 4],
         backdrop_blur_scale: [f32; 4],
     ) -> GpuCallback {
-        let bounds = solidcraft_viewport::vec::Bounds {
-            min: bounds.min,
-            max: bounds.max,
-        };
+        let bounds = solidcraft_viewport::vec::Bounds { min: bounds.min, max: bounds.max };
         let aspect = f64::from(width) / f64::from(height.max(1.0));
         let half_height = camera.half_height();
         let (grid_minor, grid_major, grid_fine_weight) =
             crate::viewport_grid::adaptive_grid_crossfade(half_height);
         let back_vec = camera.back();
         let slant = back_vec.z;
-        let grid_extent = crate::viewport_grid::adaptive_grid_extent(half_height, grid_major, slant);
+        let grid_extent =
+            crate::viewport_grid::adaptive_grid_extent(half_height, grid_major, slant);
         let grid_center = crate::viewport_grid::adaptive_grid_center(
             [camera.target.x, camera.target.y, camera.target.z],
             [back_vec.x, back_vec.y, back_vec.z],
@@ -3426,24 +3468,15 @@ impl GpuViewport {
             crate::viewport_grid::adaptive_grid_fade(half_height, slant, grid_extent, far_reach);
         // Keep the model's normal near/far planes. Expanding them for the grid
         // destroys depth precision and makes large perspective models flicker.
-        let view_proj = shift_view_proj(
-            camera.view_proj_bounds(aspect, &bounds).to_f32(),
-            lens_shift,
-        );
+        let view_proj =
+            shift_view_proj(camera.view_proj_bounds(aspect, &bounds).to_f32(), lens_shift);
         // The display unit's preview is the one source for this frame. It
         // transforms the scene projection instead of rebuilding edge geometry.
         // `prepare` may replace this value in the same step as a staged
         // activation.
-        let unit_preview = self
-            .display_swap
-            .lock()
-            .ok()
-            .and_then(|swap| swap.preview.clone());
-        let drawn = DrawnPreview::new(
-            view_proj,
-            crop_view_proj(view_proj, backdrop_crop),
-            unit_preview,
-        );
+        let unit_preview = self.display_swap.lock().ok().and_then(|swap| swap.preview.clone());
+        let drawn =
+            DrawnPreview::new(view_proj, crop_view_proj(view_proj, backdrop_crop), unit_preview);
         let scene_view_proj = drawn.scene_view_proj();
         let eye = camera.eye().to_f32();
         let back = camera.back().to_f32();
@@ -3460,12 +3493,7 @@ impl GpuViewport {
                 origin: [0.0, 0.0, 0.0, 1.0],
                 right: {
                     let r = right.to_f32();
-                    [
-                        r[0],
-                        r[1],
-                        r[2],
-                        if camera.fov > 0.0 { 1.0 } else { 0.0 },
-                    ]
+                    [r[0], r[1], r[2], if camera.fov > 0.0 { 1.0 } else { 0.0 }]
                 },
                 up: {
                     let u = up.to_f32();
@@ -3480,12 +3508,7 @@ impl GpuViewport {
                     aspect as f32,
                     if camera.fov > 0.0 { 1.0 } else { 0.0 },
                 ],
-                grid: [
-                    grid_minor as f32,
-                    0.07,
-                    0.22,
-                    grid_extent as f32,
-                ],
+                grid: [grid_minor as f32, 0.07, 0.22, grid_extent as f32],
                 minor: colour(theme.grid_minor, 1.0),
                 major: colour(theme.grid_major, 1.0),
                 axis_x: {
@@ -3527,11 +3550,7 @@ impl GpuViewport {
             ],
             extra_model: identity_matrix(),
         };
-        let plan_available = self
-            .plan
-            .lock()
-            .map(|plan| plan.is_available())
-            .unwrap_or(false);
+        let plan_available = self.plan.lock().map(|plan| plan.is_available()).unwrap_or(false);
         let (pick_segments, ghost_edges) = if self.ghost_edge_present {
             (self.ghost_pick.segments.clone(), true)
         } else if plan_available {
@@ -3561,43 +3580,43 @@ impl GpuViewport {
             view: self.view,
             chrome_visible: self.chrome_visible,
             frame: Mutex::new(Frame {
-            product: false,
-            preview_bounds: None,
-            // Ghost edges are part of the same ribbon pass: the ghost matrix
-            // is a uniform, so there is no separate moving scene slot.
-            moving: None,
-            product_lights: None,
-            upload_error: None,
-            clouds: Vec::new(),
-            key: self.key,
-            turned_depth: None,
-            slot: self.slot.clone(),
-            sketch_key: 0,
-            sketch_slot: Arc::new(Mutex::new(None)),
-            hl_key: 0,
-            hl_slot: Arc::new(Mutex::new(None)),
-            pv_key: 0,
-            pv_slot: Arc::new(Mutex::new(None)),
-            pv_hide: false,
-            view_proj: scene_view_proj,
-            back,
-            size_px: [width * pixels_per_point, height * pixels_per_point],
-            clip: clip_planes(&[]),
-            clip_hatch: clip_hatches(&[]),
-            cap: [0.0; 4],
-            images: Vec::new(),
-            analysis: [0.0; 8],
-            analysis_colors: [0.0; 36],
-            access: None,
-            outline: false,
-            eye: [eye[0], eye[1], eye[2], if camera.fov > 0.0 { 1.0 } else { 0.0 }],
-            ao_radius: 0.0,
-            ao_samples: solidcraft_viewport_gpu::view::AO_SAMPLES,
-            ssaa: 1.0,
-            hover_tint: [0.0; 3],
-            selection_tint: [0.0; 3],
-            hatch: Default::default(),
-            sky: [0.0, 1.0, 0.0, 0.0],
+                product: false,
+                preview_bounds: None,
+                // Ghost edges are part of the same ribbon pass: the ghost matrix
+                // is a uniform, so there is no separate moving scene slot.
+                moving: None,
+                product_lights: None,
+                upload_error: None,
+                clouds: Vec::new(),
+                key: self.key,
+                turned_depth: None,
+                slot: self.slot.clone(),
+                sketch_key: 0,
+                sketch_slot: Arc::new(Mutex::new(None)),
+                hl_key: 0,
+                hl_slot: Arc::new(Mutex::new(None)),
+                pv_key: 0,
+                pv_slot: Arc::new(Mutex::new(None)),
+                pv_hide: false,
+                view_proj: scene_view_proj,
+                back,
+                size_px: [width * pixels_per_point, height * pixels_per_point],
+                clip: clip_planes(&[]),
+                clip_hatch: clip_hatches(&[]),
+                cap: [0.0; 4],
+                images: Vec::new(),
+                analysis: [0.0; 8],
+                analysis_colors: [0.0; 36],
+                access: None,
+                outline: false,
+                eye: [eye[0], eye[1], eye[2], if camera.fov > 0.0 { 1.0 } else { 0.0 }],
+                ao_radius: 0.0,
+                ao_samples: solidcraft_viewport_gpu::view::AO_SAMPLES,
+                ssaa: 1.0,
+                hover_tint: [0.0; 3],
+                selection_tint: [0.0; 3],
+                hatch: Default::default(),
+                sky: [0.0, 1.0, 0.0, 0.0],
             }),
             preview: Mutex::new(drawn),
             backdrop_blur_scale,
@@ -3627,12 +3646,7 @@ fn crop_view_proj(vp: [[f32; 4]; 4], crop: [f32; 4]) -> [[f32; 4]; 4] {
     let sy = 2.0 / (ny1 - ny0).max(1.0e-6);
     let tx = -sx * (nx0 + nx1) * 0.5;
     let ty = -sy * (ny0 + ny1) * 0.5;
-    let m = [
-        [sx, 0.0, 0.0, 0.0],
-        [0.0, sy, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [tx, ty, 0.0, 1.0],
-    ];
+    let m = [[sx, 0.0, 0.0, 0.0], [0.0, sy, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [tx, ty, 0.0, 1.0]];
     multiply_matrix(m, vp)
 }
 
@@ -3727,16 +3741,10 @@ impl GpuCallback {
         };
         if let Some(pending) = pending {
             if std::env::var_os("NODECRAFT_TIMELINE").is_some() {
-                let edges = pending
-                    .edges
-                    .display
-                    .as_ref()
-                    .map_or(0, |display| display.edges.len());
+                let edges = pending.edges.display.as_ref().map_or(0, |display| display.edges.len());
                 eprintln!(
                     "[display] activate key={} plan_activation={plan_activation} snapshot={} edges={edges} target={:?}",
-                    pending.edges.key,
-                    pending.edges.snapshot,
-                    pending.target,
+                    pending.edges.key, pending.edges.snapshot, pending.target,
                 );
             }
             // The scene and its key must reach the renderer in one call: a new
@@ -3789,10 +3797,8 @@ impl GpuCallback {
             renderer.prepare(device, queue, encoder, &frame);
         }
         let samples = msaa_samples();
-        let size = [
-            frame.size_px[0].round().max(1.0) as u32,
-            frame.size_px[1].round().max(1.0) as u32,
-        ];
+        let size =
+            [frame.size_px[0].round().max(1.0) as u32, frame.size_px[1].round().max(1.0) as u32];
         let clear = resources.get::<ViewportClear>();
         let object = resources.get::<Arc<Mutex<ObjectRenderer>>>();
         let renderer = resources.get::<Renderer>();
@@ -3846,20 +3852,11 @@ impl GpuCallback {
                             multiview_mask: None,
                         },
                         |pass| {
-                            pass.set_viewport(
-                                0.0,
-                                0.0,
-                                size[0] as f32,
-                                size[1] as f32,
-                                0.0,
-                                1.0,
-                            );
+                            pass.set_viewport(0.0, 0.0, size[0] as f32, size[1] as f32, 0.0, 1.0);
                             pass.set_pipeline(&clear.pipeline);
                             pass.set_bind_group(0, &clear.bind_group, &[]);
                             pass.draw(0..3, 0..1);
-                            if plan_active
-                                && let Ok(plan) = self.plan.lock()
-                            {
+                            if plan_active && let Ok(plan) = self.plan.lock() {
                                 plan.paint(pass);
                             }
                             if let Ok(object) = object.lock() {
@@ -3935,21 +3932,30 @@ impl GpuCallback {
                     let object_state = resources
                         .get::<Arc<Mutex<ObjectRenderer>>>()
                         .and_then(|object| object.lock().ok());
-                    pick.encode(device, queue, encoder, &uniforms, &pick_frame, request, |pass, passes, binds| {
-                        paint_pick_face_ids(
-                            plan_active,
-                            plan_active
-                                && !self
-                                    .pick_frame
-                                    .as_ref()
-                                    .is_some_and(|frame| frame.ghost_edges),
-                            plan_state.as_deref(),
-                            object_state.as_deref(),
-                            pass,
-                            passes,
-                            binds,
-                        );
-                    }, profiler.as_deref_mut());
+                    pick.encode(
+                        device,
+                        queue,
+                        encoder,
+                        &uniforms,
+                        &pick_frame,
+                        request,
+                        |pass, passes, binds| {
+                            paint_pick_face_ids(
+                                plan_active,
+                                plan_active
+                                    && !self
+                                        .pick_frame
+                                        .as_ref()
+                                        .is_some_and(|frame| frame.ghost_edges),
+                                plan_state.as_deref(),
+                                object_state.as_deref(),
+                                pass,
+                                passes,
+                                binds,
+                            );
+                        },
+                        profiler.as_deref_mut(),
+                    );
                 }
             }
         }
@@ -4027,7 +4033,11 @@ mod tests {
     #[test]
     fn object_mesh_is_chunked_with_local_indices() {
         let vertices: Vec<ObjectVertex> = (0..8)
-            .map(|i| ObjectVertex { position: [i as f32, 0.0, 0.0], normal: [0.0, 0.0, 1.0], colour: [1.0, 0.0, 0.0] })
+            .map(|i| ObjectVertex {
+                position: [i as f32, 0.0, 0.0],
+                normal: [0.0, 0.0, 1.0],
+                colour: [1.0, 0.0, 0.0],
+            })
             .collect();
         let face_ids: Vec<u32> = (0..8).map(|i| 100 + i).collect();
         let indices = vec![0, 1, 2, 2, 3, 4, 4, 5, 6, 6, 7, 0];
@@ -4045,7 +4055,12 @@ mod tests {
     #[test]
     fn lens_shift_is_constant_after_perspective_divide() {
         // clip.x = x, clip.w = z; after divide ndc.x = x/z.
-        let vp = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 0.0]];
+        let vp = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ];
         let shifted = shift_view_proj(vp, [0.25, -0.5]);
         let apply = |m: [[f32; 4]; 4], x: f32, z: f32| {
             let mut out = [0.0f32; 4];
@@ -4088,7 +4103,8 @@ mod tests {
         };
         let display = crate::adapter::display_mesh(&source);
         let faces = ObjectFaceIds::from_display(&display);
-        let prepared = indexed_object_mesh(&display.mesh, [0.2, 0.3, 0.4], &faces).expect("indexed mesh");
+        let prepared =
+            indexed_object_mesh(&display.mesh, [0.2, 0.3, 0.4], &faces).expect("indexed mesh");
         assert_eq!(prepared.vertices.len(), 3);
         assert_eq!(prepared.face_ids.len(), 3);
         assert_eq!(prepared.indices, vec![0, 1, 2]);
@@ -4117,9 +4133,12 @@ mod tests {
                 && (vertex.normal[1] - exact[1]).abs() < 1.0e-6
                 && (vertex.normal[2] - exact[2]).abs() < 1.0e-6
         }));
-        assert!(prepared.face_ids.iter().all(|id| {
-            crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:0")
-        }));
+        assert!(
+            prepared
+                .face_ids
+                .iter()
+                .all(|id| { crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:0") })
+        );
     }
 
     #[test]
@@ -4129,12 +4148,7 @@ mod tests {
         // 45 degrees apart, so an angular-only smoother merges them and makes
         // a flat chamfer look rounded.
         let source = NodeMesh {
-            vertices: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
+            vertices: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             normals: vec![[0.0, 0.0, 1.0]; 4],
             faces: vec![[0, 1, 2], [0, 1, 3]],
             face_groups: vec!["face:0".to_owned(), "face:1".to_owned()],
@@ -4142,8 +4156,7 @@ mod tests {
         };
         let display = crate::adapter::display_mesh(&source);
         let faces = ObjectFaceIds::from_display(&display);
-        let prepared =
-            smoothed_object_mesh(&display.mesh, [0.2, 0.3, 0.4], &faces).expect("mesh");
+        let prepared = smoothed_object_mesh(&display.mesh, [0.2, 0.3, 0.4], &faces).expect("mesh");
         assert_eq!(prepared.vertices.len(), 6, "the two B-rep faces must not share normals");
     }
 
@@ -4217,7 +4230,10 @@ mod tests {
         let normal = normal_matrix(model);
         for column in 0..4 {
             for row in 0..4 {
-                assert!((normal[column][row] - model[column][row]).abs() < 1.0e-6, "{column} {row}");
+                assert!(
+                    (normal[column][row] - model[column][row]).abs() < 1.0e-6,
+                    "{column} {row}"
+                );
             }
         }
     }
@@ -4294,13 +4310,13 @@ mod tests {
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Y],
                 midpoint: [0.0, 0.5, 0.0],
                 class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                },
+            },
             crate::adapter::DisplayEdge {
                 id: "edge:2".into(),
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Z],
                 midpoint: [0.0, 0.0, 0.5],
                 class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                },
+            },
         ];
         let data = build_ghost_pick_data(&edges);
         assert_eq!(data.edges.get(2).map(|entry| entry.0.as_str()), Some("edge:2"));
@@ -4320,29 +4336,29 @@ mod tests {
                 key,
                 key_serial: key.wrapping_add(1),
                 display: Some(Arc::new(DisplayMesh {
-                mesh: Arc::new(CraftMesh::default()),
-                lods: Vec::new(),
-                face_ids: Vec::new(),
-                exact_normals: false,
-                face_colors: Vec::new(),
-                body_ids: Vec::new(),
-                edges: vec![crate::adapter::DisplayEdge {
-                    id: edge_id.to_owned(),
-                    points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
-                    midpoint: [0.5, 0.0, 0.0],
-                    class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                        }],
-                comparison: None,
-                selection_edges: None,
-                radius: 1.0,
-                center: solidcore_record::Vec3::ZERO,
+                    mesh: Arc::new(CraftMesh::default()),
+                    lods: Vec::new(),
+                    face_ids: Vec::new(),
+                    exact_normals: false,
+                    face_colors: Vec::new(),
+                    body_ids: Vec::new(),
+                    edges: vec![crate::adapter::DisplayEdge {
+                        id: edge_id.to_owned(),
+                        points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
+                        midpoint: [0.5, 0.0, 0.0],
+                        class: nodecraft_layers::PlanEdgeClass::NORMAL,
+                    }],
+                    comparison: None,
+                    selection_edges: None,
+                    radius: 1.0,
+                    center: solidcore_record::Vec3::ZERO,
                 })),
                 edge_batch: EdgeCpuBatch::from_display_edges(&[crate::adapter::DisplayEdge {
                     id: edge_id.to_owned(),
                     points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
                     midpoint: [0.5, 0.0, 0.0],
                     class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                        }]),
+                }]),
                 scene: GpuScene::default(),
             },
             source_mesh: None,
@@ -4432,7 +4448,7 @@ mod tests {
                         points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
                         midpoint: [0.5, 0.0, 0.0],
                         class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                                }],
+                    }],
                     comparison: None,
                     selection_edges: None,
                     radius: 1.0,
@@ -4519,12 +4535,8 @@ mod tests {
     }
 
     fn whole_preview(matrix: [[f32; 4]; 4]) -> PreviewState {
-        PreviewState {
-            transform: matrix,
-            alpha: 1.0,
-        }
+        PreviewState { transform: matrix, alpha: 1.0 }
     }
-
 
     /// The snap-back bug: the app used to clear the plan preview right after
     /// `set_display`, while the already-built frame still carried the preview in
@@ -4625,7 +4637,7 @@ mod tests {
                 points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Y],
                 midpoint: [0.0, 0.5, 0.0],
                 class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                },
+            },
         ];
         let data = build_ghost_pick_data(&edges);
         assert_eq!(data.segments.len(), 1);
@@ -4678,8 +4690,14 @@ mod tests {
     /// object path is identifiable even when the plan path also draws a box.
     fn face_box_display(face_ids: Vec<String>, tri_face: Vec<u32>) -> DisplayMesh {
         let corners: [[f64; 3]; 8] = [
-            [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
         ];
         let faces: [[usize; 4]; 6] = [
             [4, 5, 6, 7], // +z
@@ -4756,10 +4774,21 @@ mod tests {
         object: Option<&ObjectRenderer>,
         plan_active: bool,
     ) -> Option<crate::gpu_pick::PickResult> {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("face-pick test") });
-        picker.encode(device, queue, &mut encoder, uniforms, frame, request, |pass, passes, binds| {
-            paint_pick_face_ids(plan_active, plan_active, plan, object, pass, passes, binds);
-        }, None);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("face-pick test"),
+        });
+        picker.encode(
+            device,
+            queue,
+            &mut encoder,
+            uniforms,
+            frame,
+            request,
+            |pass, passes, binds| {
+                paint_pick_face_ids(plan_active, plan_active, plan, object, pass, passes, binds);
+            },
+            None,
+        );
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
@@ -4792,11 +4821,9 @@ mod tests {
             commit: false,
             kind: crate::gpu_pick::PickKind::Faces,
         };
-        run_face_pick(
-            picker, device, queue, uniforms, frame, request, plan, object, plan_active,
-        )
-        .map(|result| result.index)
-        .unwrap_or(0)
+        run_face_pick(picker, device, queue, uniforms, frame, request, plan, object, plan_active)
+            .map(|result| result.index)
+            .unwrap_or(0)
     }
 
     /// One plan, one mesh, four placements: the original body, two translated
@@ -4833,10 +4860,8 @@ mod tests {
         let mesh = &display.mesh;
         let mut best = (f64::NEG_INFINITY, 0u32);
         for (triangle, group) in mesh.faces.iter().zip(&mesh.face_groups) {
-            let face = group
-                .strip_prefix("face:")
-                .and_then(|tail| tail.parse::<u32>().ok())
-                .unwrap_or(0);
+            let face =
+                group.strip_prefix("face:").and_then(|tail| tail.parse::<u32>().ok()).unwrap_or(0);
             let mut centre = [0.0f64; 3];
             let mut count = 0usize;
             for index in triangle {
@@ -4958,7 +4983,13 @@ mod tests {
         (pixels, bytes_per_row)
     }
 
-    fn pixel_at(pixels: &[u8], bytes_per_row: u32, vp: [[f32; 4]; 4], point: [f32; 3], size: [u32; 2]) -> [u8; 4] {
+    fn pixel_at(
+        pixels: &[u8],
+        bytes_per_row: u32,
+        vp: [[f32; 4]; 4],
+        point: [f32; 3],
+        size: [u32; 2],
+    ) -> [u8; 4] {
         let px = project_px(vp, point, [size[0] as f32, size[1] as f32]);
         let x = px[0].round().clamp(0.0, size[0] as f32 - 1.0) as usize;
         let y = px[1].round().clamp(0.0, size[1] as f32 - 1.0) as usize;
@@ -4979,10 +5010,7 @@ mod tests {
         let size = [384u32, 128u32];
         let eye = [0.0, 0.0, 260.0];
         let view = look_at_rh(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let vp = gpu_view_proj(
-            multiply_matrix(perspective_rh(0.5, 3.0, 0.1, 1000.0), view),
-            false,
-        );
+        let vp = gpu_view_proj(multiply_matrix(perspective_rh(0.5, 3.0, 0.1, 1000.0), view), false);
         let uniforms = ObjectUniforms {
             view_proj: vp,
             back: [0.0, 0.0, 1.0, 1.0],
@@ -5024,11 +5052,7 @@ mod tests {
             edge_classes: std::sync::Arc::from(Vec::new()),
         };
         plan.set_plans(
-            vec![
-                instance(red, -25.0),
-                instance(green, 0.0),
-                instance(Vec::new(), 25.0),
-            ],
+            vec![instance(red, -25.0), instance(green, 0.0), instance(Vec::new(), 25.0)],
             true,
             None,
             1,
@@ -5052,16 +5076,11 @@ mod tests {
         let red_px = pixel_at(&pixels, row, vp, [-25.0, 0.0, 5.0], size);
         let green_px = pixel_at(&pixels, row, vp, [0.0, 0.0, 5.0], size);
         let default_px = pixel_at(&pixels, row, vp, [25.0, 0.0, 5.0], size);
-        for (name, pixel) in [
-            ("red", red_px),
-            ("green", green_px),
-            ("default", default_px),
-        ] {
+        for (name, pixel) in [("red", red_px), ("green", green_px), ("default", default_px)] {
             assert_eq!(pixel[3], 255, "the {name} body must be opaque");
         }
         assert!(
-            red_px[0] > red_px[1].saturating_add(30)
-                && red_px[0] > red_px[2].saturating_add(30),
+            red_px[0] > red_px[1].saturating_add(30) && red_px[0] > red_px[2].saturating_add(30),
             "the red body's +z face must use its own table slice: {red_px:?}",
         );
         assert!(
@@ -5089,10 +5108,7 @@ mod tests {
         let size = [256u32, 256u32];
         let eye = [30.0, -20.0, 30.0];
         let view = look_at_rh(eye, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let vp = gpu_view_proj(
-            multiply_matrix(perspective_rh(0.7, 1.0, 0.1, 1000.0), view),
-            false,
-        );
+        let vp = gpu_view_proj(multiply_matrix(perspective_rh(0.7, 1.0, 0.1, 1000.0), view), false);
         let uniforms = ObjectUniforms {
             view_proj: vp,
             back: [0.0, 0.0, 1.0, 1.0],
@@ -5225,12 +5241,7 @@ mod tests {
             edge_ids: std::sync::Arc::from(Vec::new()),
             edge_classes: std::sync::Arc::from(Vec::new()),
         };
-        let four = || {
-            shared_plan_placements()
-                .into_iter()
-                .map(instance)
-                .collect::<Vec<_>>()
-        };
+        let four = || shared_plan_placements().into_iter().map(instance).collect::<Vec<_>>();
         if immediate {
             plan.set_plans(vec![instance(nodecraft_display::Placement::identity())], true, None, 0);
             plan.prepare_chunks(device, queue);
@@ -5261,17 +5272,10 @@ mod tests {
     /// the instances share one matrix, the last placement overwrites the rest
     /// and the other bodies have no shaded pixels at all (only their separately
     /// transformed edges remain).
-    fn assert_mirrored_plan_render(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        immediate: bool,
-    ) {
+    fn assert_mirrored_plan_render(device: &wgpu::Device, queue: &wgpu::Queue, immediate: bool) {
         let size = [256u32, 128u32];
         let view = look_at_rh([10.0, 0.0, 200.0], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let vp = gpu_view_proj(
-            multiply_matrix(perspective_rh(0.2, 2.0, 0.1, 1000.0), view),
-            false,
-        );
+        let vp = gpu_view_proj(multiply_matrix(perspective_rh(0.2, 2.0, 0.1, 1000.0), view), false);
         let uniforms = ObjectUniforms {
             view_proj: vp,
             back: [0.0, 0.0, 1.0, 1.0],
@@ -5415,17 +5419,10 @@ mod tests {
         }
     }
 
-    fn assert_mirrored_plan_pick(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        immediate: bool,
-    ) {
+    fn assert_mirrored_plan_pick(device: &wgpu::Device, queue: &wgpu::Queue, immediate: bool) {
         let size = [256.0f32, 128.0];
         let view = look_at_rh([10.0, 0.0, 200.0], [10.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let vp = gpu_view_proj(
-            multiply_matrix(perspective_rh(0.2, 2.0, 0.1, 1000.0), view),
-            false,
-        );
+        let vp = gpu_view_proj(multiply_matrix(perspective_rh(0.2, 2.0, 0.1, 1000.0), view), false);
         let plan = mirrored_plan_pair(&device, &queue, immediate);
         let uniforms = crate::gpu_pick::PickUniforms {
             view_proj: vp,
@@ -5450,22 +5447,23 @@ mod tests {
             wgpu::TextureFormat::Depth32Float,
             false,
         );
-        let points = [
-            [0.0, 0.0, 5.0],
-            [-20.0, 0.0, 5.0],
-            [40.0, 0.0, 5.0],
-            [20.0, 0.0, 5.0],
-        ];
+        let points = [[0.0, 0.0, 5.0], [-20.0, 0.0, 5.0], [40.0, 0.0, 5.0], [20.0, 0.0, 5.0]];
         for (body, point) in points.iter().enumerate() {
             let id = pick_faces_at(
-                &mut picker, &device, &queue, &uniforms, &frame, Some(&plan), None, true,
-                body as u64 + 1, *point,
+                &mut picker,
+                &device,
+                &queue,
+                &uniforms,
+                &frame,
+                Some(&plan),
+                None,
+                true,
+                body as u64 + 1,
+                *point,
             );
             let resolved = crate::gpu_pick::resolve_face_id(id);
             assert!(
-                resolved
-                    .as_deref()
-                    .is_some_and(|id| id.starts_with(&format!("body:{body}:face:"))),
+                resolved.as_deref().is_some_and(|id| id.starts_with(&format!("body:{body}:face:"))),
                 "instance {body} must pick its own face string, got {resolved:?} ({id}) \
                  (immediate={immediate})",
             );
@@ -5499,9 +5497,11 @@ mod tests {
         ] {
             let prepared = prepare_object(&display, &view);
             assert!(!prepared.face_ids.is_empty());
-            assert!(prepared.face_ids.iter().all(|id| {
-                crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:7")
-            }));
+            assert!(
+                prepared.face_ids.iter().all(|id| {
+                    crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:7")
+                })
+            );
         }
 
         // A merged one-body mesh still carries `body:0:` prefixes; the plan
@@ -5510,9 +5510,12 @@ mod tests {
         let view = ViewSettings::default();
         let prepared = prepare_object(&display, &view);
         assert!(!prepared.face_ids.is_empty());
-        assert!(prepared.face_ids.iter().all(|id| {
-            crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:4")
-        }));
+        assert!(
+            prepared
+                .face_ids
+                .iter()
+                .all(|id| { crate::gpu_pick::resolve_face_id(*id).as_deref() == Some("face:4") })
+        );
 
         // Two bodies switch to the plan path's `body:N:face:M` form.
         display.face_ids = vec!["body:1:face:4".into(), "body:2:face:5".into()];
@@ -5541,10 +5544,7 @@ mod tests {
         };
         let size = [128.0f32, 128.0];
         let view = look_at_rh([0.0, 0.0, 3.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
-        let vp = gpu_view_proj(
-            multiply_matrix(perspective_rh(0.8, 1.0, 0.1, 100.0), view),
-            false,
-        );
+        let vp = gpu_view_proj(multiply_matrix(perspective_rh(0.8, 1.0, 0.1, 100.0), view), false);
         let object_face = 42u32;
         let object_pick = crate::gpu_pick::face_pick_id(0, object_face, false);
         let display = face_box_display(vec![format!("face:{object_face}")], vec![0; 12]);
@@ -5600,17 +5600,30 @@ mod tests {
         // Plans are off (face-colour mode / empty plan set): the object mesh
         // supplies the id.
         let picked = pick_faces_at(
-            &mut picker, &device, &queue, &uniforms, &frame, None, Some(&object), false, 1,
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            None,
+            Some(&object),
+            false,
+            1,
             [0.0, 0.0, 0.5],
         );
         assert_eq!(picked, object_pick);
-        assert_eq!(
-            crate::gpu_pick::resolve_face_id(picked).as_deref(),
-            Some("face:42"),
-        );
+        assert_eq!(crate::gpu_pick::resolve_face_id(picked).as_deref(), Some("face:42"),);
         // Off the body: the target clears to zero, so there is no id.
         let miss = pick_faces_at(
-            &mut picker, &device, &queue, &uniforms, &frame, None, Some(&object), false, 2,
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            None,
+            Some(&object),
+            false,
+            2,
             [1.2, 1.2, 0.5],
         );
         assert_eq!(miss, 0);
@@ -5622,7 +5635,15 @@ mod tests {
         object.set_transform(Some(preview), 1.0);
         object.prepare(&device, &queue, &object_uniforms);
         let picked = pick_faces_at(
-            &mut picker, &device, &queue, &uniforms, &frame, None, Some(&object), false, 3,
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            None,
+            Some(&object),
+            false,
+            3,
             [0.2, 0.0, 0.5],
         );
         assert_eq!(picked, object_pick, "pick must follow the drawn preview instance");
@@ -5658,14 +5679,21 @@ mod tests {
         plan.prepare_chunks(&device, &queue);
         assert!(plan.is_available(), "the plan set must be drawable");
         let plan_id = pick_faces_at(
-            &mut picker, &device, &queue, &uniforms, &frame, Some(&plan), Some(&object), true, 4,
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            Some(&plan),
+            Some(&object),
+            true,
+            4,
             [0.0, 0.0, 0.5],
         );
         assert_ne!(plan_id, 0, "the plan box must be under the cursor");
         assert_ne!(plan_id, object_pick, "plan chunks must own the face id when active");
         assert!(crate::gpu_pick::resolve_face_id(plan_id).is_some());
     }
-
 
     #[test]
     fn depth_model_matches_solidcraft() {
@@ -5679,10 +5707,7 @@ mod tests {
 
         let reversed = opaque_face_depth(true);
         assert_eq!(reversed.compare, GreaterEqual);
-        assert_eq!(
-            reversed.bias.constant, -8,
-            "reversed depth keeps the push away from the eye",
-        );
+        assert_eq!(reversed.bias.constant, -8, "reversed depth keeps the push away from the eye",);
         assert_eq!(reversed.bias.slope_scale, -1.0);
 
         let translucent = translucent_face_depth(false);
@@ -5715,14 +5740,15 @@ mod tests {
         assert_eq!(depth_compare(true, Greater), wgpu::CompareFunction::Less);
     }
 
-
     /// A one-pixel ribbon that falls between two rows of pixel centres covers
     /// none of them and the edge disappears for that segment. The shared ribbon
     /// now draws a narrow edge at least 1.3 px wide, so a curved edge covers
     /// every segment; SolidCraft's standard edge uses the same floor.
     #[test]
     fn a_one_pixel_edge_covers_a_curved_polyline() {
-        use crate::edge_ribbon::{EdgeCpuBatch, EdgeRenderer, EdgeStyle, EdgeUniforms, GpuEdgeBatch};
+        use crate::edge_ribbon::{
+            EdgeCpuBatch, EdgeRenderer, EdgeStyle, EdgeUniforms, GpuEdgeBatch,
+        };
         let Some((device, queue)) = headless_device() else {
             eprintln!("skip: no adapter");
             return;
@@ -5758,7 +5784,9 @@ mod tests {
             class: nodecraft_layers::PlanEdgeClass::NORMAL,
         };
         let cpu = EdgeCpuBatch::from_display_edges(&[edge]);
-        let Some(batch) = GpuEdgeBatch::upload(&mut renderer, &device, &queue, &cpu) else { return };
+        let Some(batch) = GpuEdgeBatch::upload(&mut renderer, &device, &queue, &cpu) else {
+            return;
+        };
         let colour = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("edge coverage colour"),
             size: wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
@@ -5781,7 +5809,9 @@ mod tests {
             view_formats: &[],
         });
         let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("edge coverage") });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("edge coverage"),
+        });
         {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("edge coverage pass"),
@@ -5796,7 +5826,10 @@ mod tests {
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Discard }),
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(0.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
                     stencil_ops: None,
                 }),
                 timestamp_writes: None,
@@ -5814,14 +5847,28 @@ mod tests {
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &colour, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size[1]) } },
+            wgpu::TexelCopyTextureInfo {
+                texture: &colour,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size[1]),
+                },
+            },
             wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         );
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         receiver.recv().expect("map callback").expect("map");
         let pixels = slice.get_mapped_range().expect("map range").to_vec();
@@ -5839,7 +5886,11 @@ mod tests {
             let b = [pair[1].x as f32, pair[1].y as f32];
             for step in 1..=7 {
                 let t = step as f32 / 8.0;
-                let px = project_px(vp, [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.0], [size[0] as f32, size[1] as f32]);
+                let px = project_px(
+                    vp,
+                    [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 0.0],
+                    [size[0] as f32, size[1] as f32],
+                );
                 let mut dark = false;
                 for dx in -1..=1 {
                     for dy in -1..=1 {
@@ -5850,7 +5901,9 @@ mod tests {
                     }
                 }
                 total += 1;
-                if dark { covered += 1; }
+                if dark {
+                    covered += 1;
+                }
             }
         }
         let coverage = covered as f64 / total as f64;
@@ -5877,21 +5930,14 @@ mod tests {
         );
     }
 
-
     /// The cone in the seam report: one primitive cone with the contract's
     /// defaults, planned through the same preview path the viewport uses, with
     /// the edge classes that path derives.
     fn seam_cone_display() -> nodecraft_layers::TessDisplay {
         use nodecraft_solidcore::solidcore::{math::Point3, primitive::api_primitives as api};
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let mut brep = api::create_cone(
-            &mut kernel,
-            Point3::new(0.0, 0.0, -20.0),
-            20.0,
-            0.0,
-            40.0,
-        )
-        .expect("cone");
+        let mut brep = api::create_cone(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 0.0, 40.0)
+            .expect("cone");
         nodecraft_layers::tessellate_kernel_preview(&mut kernel, &mut brep, 2)
             .expect("cone preview plan")
     }
@@ -5938,14 +5984,28 @@ mod tests {
             label: Some("cone seam readback"),
         });
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: colour, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &readback, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size[1]) } },
+            wgpu::TexelCopyTextureInfo {
+                texture: colour,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(size[1]),
+                },
+            },
             wgpu::Extent3d { width: size[0], height: size[1], depth_or_array_layers: 1 },
         );
         queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| { let _ = sender.send(result); });
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
         let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         receiver.recv().expect("map callback").expect("map");
         let pixels = slice.get_mapped_range().expect("map range").to_vec();
@@ -6195,9 +6255,8 @@ mod tests {
                 nodecraft_display::Placement::identity(),
             )]
         };
-        let (hidden, vp) = render_seam_scene(
-            &device, &queue, instance(), size, 4.0, false, false, 0.0, false,
-        );
+        let (hidden, vp) =
+            render_seam_scene(&device, &queue, instance(), size, 4.0, false, false, 0.0, false);
         assert!(
             !seam_is_dark(&hidden, size, vp, seam_point),
             "the default setting must not draw the cone's seam",
@@ -6206,9 +6265,8 @@ mod tests {
             seam_is_dark(&hidden, size, vp, base_point),
             "the cone's base circle is not a seam and stays drawn",
         );
-        let (shown, vp) = render_seam_scene(
-            &device, &queue, instance(), size, 4.0, false, false, 0.0, true,
-        );
+        let (shown, vp) =
+            render_seam_scene(&device, &queue, instance(), size, 4.0, false, false, 0.0, true);
         assert!(
             seam_is_dark(&shown, size, vp, seam_point),
             "the setting draws the same edge without re-uploading it",
@@ -6283,15 +6341,16 @@ mod tests {
         let cone_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
             std::sync::Arc::from(cone_display.edge_classes.clone());
         let box_plan = box_plan_sized(20.0);
-        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> = std::sync::Arc::from(
-            vec![nodecraft_layers::PlanEdgeClass::NORMAL; box_plan.edges.len()],
-        );
-        let box_placement = nodecraft_display::Placement::from(
-            nodecraft_display::DisplayTransform::Place {
+        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(vec![
+                nodecraft_layers::PlanEdgeClass::NORMAL;
+                box_plan.edges.len()
+            ]);
+        let box_placement =
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [40.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            },
-        );
+            });
         let size = [1664u32, 1640u32];
         let (pixels, vp) = render_seam_scene(
             &device,
@@ -6332,15 +6391,16 @@ mod tests {
         let cone_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
             std::sync::Arc::from(cone_display.edge_classes.clone());
         let box_plan = box_plan_sized(20.0);
-        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> = std::sync::Arc::from(
-            vec![nodecraft_layers::PlanEdgeClass::NORMAL; box_plan.edges.len()],
-        );
-        let box_placement = nodecraft_display::Placement::from(
-            nodecraft_display::DisplayTransform::Place {
+        let box_classes: std::sync::Arc<[nodecraft_layers::PlanEdgeClass]> =
+            std::sync::Arc::from(vec![
+                nodecraft_layers::PlanEdgeClass::NORMAL;
+                box_plan.edges.len()
+            ]);
+        let box_placement =
+            nodecraft_display::Placement::from(nodecraft_display::DisplayTransform::Place {
                 offset: [40.0, 0.0, 0.0],
                 rotation: [0.0; 3],
-            },
-        );
+            });
         let size = [1664u32, 1640u32];
         let (pixels, vp) = render_seam_scene(
             &device,
@@ -6366,5 +6426,4 @@ mod tests {
             "a translucent body must not hide the edge behind it",
         );
     }
-
 }

@@ -14,11 +14,7 @@ use nodecraft_blend::{
 const CENTER: [f64; 3] = [20.0, 15.0, 10.0];
 
 fn centred(point: [f64; 3]) -> [f64; 3] {
-    [
-        point[0] - CENTER[0],
-        point[1] - CENTER[1],
-        point[2] - CENTER[2],
-    ]
+    [point[0] - CENTER[0], point[1] - CENTER[1], point[2] - CENTER[2]]
 }
 
 #[test]
@@ -41,10 +37,7 @@ fn equal_chamfer_removes_the_edge_and_stays_closed() {
         .expect("chamfer preview");
 
     assert!(mesh.faces.len() > 12, "chamfer adds facets");
-    assert!(
-        common::count_group(&mesh, "blend:chamfer") > 0,
-        "chamfer cap facets"
-    );
+    assert!(common::count_group(&mesh, "blend:chamfer") > 0, "chamfer cap facets");
     let (edges, bad) = common::closure_report(&mesh);
     assert!(edges > 0);
     assert_eq!(bad, 0, "chamfered preview must stay watertight");
@@ -57,24 +50,13 @@ fn equal_chamfer_removes_the_edge_and_stays_closed() {
     );
 
     // Cut corners on both adjacent faces.
-    assert!(common::has_vertex_near(
-        &mesh,
-        centred([40.0, 0.0, 18.0]),
-        0.05
-    ));
-    assert!(common::has_vertex_near(
-        &mesh,
-        centred([38.0, 0.0, 20.0]),
-        0.05
-    ));
+    assert!(common::has_vertex_near(&mesh, centred([40.0, 0.0, 18.0]), 0.05));
+    assert!(common::has_vertex_near(&mesh, centred([38.0, 0.0, 20.0]), 0.05));
 
     // Box volume minus the 0.5 * d^2 * edge_length prism.
     let expected = 40.0 * 30.0 * 20.0 - 0.5 * 2.0 * 2.0 * 30.0;
     let volume = common::volume(&mesh);
-    assert!(
-        (volume - expected).abs() < 1.0,
-        "volume {volume} != {expected}"
-    );
+    assert!((volume - expected).abs() < 1.0, "volume {volume} != {expected}");
 }
 
 #[test]
@@ -126,20 +108,8 @@ fn two_distance_chamfer_is_asymmetric() {
             )
         })
         .collect();
-    assert!(
-        corner_distances
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min)
-            < 1.05
-    );
-    assert!(
-        corner_distances
-            .iter()
-            .cloned()
-            .fold(f64::NEG_INFINITY, f64::max)
-            > 3.95
-    );
+    assert!(corner_distances.iter().cloned().fold(f64::INFINITY, f64::min) < 1.05);
+    assert!(corner_distances.iter().cloned().fold(f64::NEG_INFINITY, f64::max) > 3.95);
     // The two cut-back lines: 4 on one face, 1 on the other (order depends on face order).
     let cut_a = common::has_vertex_near(&mesh, centred([40.0, 0.0, 16.0]), 0.05)
         && common::has_vertex_near(&mesh, centred([39.0, 0.0, 20.0]), 0.05);
@@ -189,10 +159,7 @@ fn distance_angle_chamfer_matches_the_angle_construction() {
     );
 
     // 45 degrees is the equal-distance chamfer: plane distance = 2 / sqrt(2).
-    let equal = EdgeTreatment {
-        angle: Some(45.0),
-        ..treatment
-    };
+    let equal = EdgeTreatment { angle: Some(45.0), ..treatment };
     let equal_mesh = apply_edge_treatment(&kernel, &brep, &selections[..1], &equal).expect("45");
     let equal_plane = common::blend_plane(&equal_mesh, "blend:").expect("facets");
     let equal_distance = common::plane_distance(centred([40.0, 0.0, 20.0]), equal_plane);
@@ -276,15 +243,9 @@ fn unsupported_treatments_return_explicit_errors() {
     };
     let error = apply_edge_treatment(&kernel, &brep, &selections[..1], &g2).expect_err("G2");
     match &error {
-        BlendError::Unsupported {
-            feature, missing, ..
-        } => {
+        BlendError::Unsupported { feature, missing, .. } => {
             assert_eq!(*feature, "fillet G2/G3");
-            assert!(
-                missing
-                    .iter()
-                    .any(|call| call.contains("SmBSplineFilletLaw"))
-            );
+            assert!(missing.iter().any(|call| call.contains("SmBSplineFilletLaw")));
         }
         other => panic!("expected Unsupported, got {other:?}"),
     }
@@ -303,11 +264,7 @@ fn unsupported_treatments_return_explicit_errors() {
     let error = apply_edge_treatment(&kernel, &brep, &selections[..1], &wide).expect_err("neg d2");
     assert!(matches!(error, BlendError::InvalidInput(_)));
 
-    let zero = EdgeTreatment {
-        mode: EdgeMode::Chamfer,
-        length: 0.0,
-        ..EdgeTreatment::default()
-    };
+    let zero = EdgeTreatment { mode: EdgeMode::Chamfer, length: 0.0, ..EdgeTreatment::default() };
     let error = apply_edge_treatment(&kernel, &brep, &selections[..1], &zero).expect_err("zero");
     assert!(matches!(error, BlendError::InvalidInput(_)));
 
@@ -326,12 +283,8 @@ fn curved_edges_are_rejected_without_panicking() {
         .expect("cylinder");
     let selections = edge_selections(&kernel, &cylinder).expect("cylinder edges");
     assert!(!selections.is_empty());
-    let result = apply_edge_treatment(
-        &kernel,
-        &cylinder,
-        &selections[..1],
-        &EdgeTreatment::default(),
-    );
+    let result =
+        apply_edge_treatment(&kernel, &cylinder, &selections[..1], &EdgeTreatment::default());
     match result {
         Err(BlendError::Unsupported { .. }) | Err(BlendError::InvalidInput(_)) => {}
         other => panic!("curved edge treatment must fail explicitly, got {other:?}"),

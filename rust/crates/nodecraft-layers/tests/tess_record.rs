@@ -14,9 +14,7 @@ fn fixture_record(name: &str) -> Brep {
     let path = format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
     let bytes = std::fs::read(path).expect("fixture file");
     let mut json = String::new();
-    GzDecoder::new(&bytes[..])
-        .read_to_string(&mut json)
-        .expect("gunzip fixture");
+    GzDecoder::new(&bytes[..]).read_to_string(&mut json).expect("gunzip fixture");
     let record: Brep = serde_json::from_str(&json).expect("fixture record");
     record.validate().expect("fixture record validates");
     record
@@ -25,31 +23,21 @@ fn fixture_record(name: &str) -> Brep {
 #[test]
 fn upstream_tess_meshes_a_record_box() {
     let record = fixture_record("box_10x6x4.json.gz");
-    let display = nodecraft_layers::tessellate_record(
-        &record,
-        &MeshTolerance::display(0.05),
-        12.33,
-    )
-    .expect("tessellate");
+    let display =
+        nodecraft_layers::tessellate_record(&record, &MeshTolerance::display(0.05), 12.33)
+            .expect("tessellate");
 
     assert_eq!(display.stats.faces, 6);
     assert!(!display.mesh.faces.is_empty());
     assert_eq!(display.mesh.vertices.len(), display.mesh.normals.len());
-    assert!(
-        display.mesh.exact_normals,
-        "an evaluated plan's normals are the surface normals"
-    );
+    assert!(display.mesh.exact_normals, "an evaluated plan's normals are the surface normals");
     assert_eq!(display.mesh.face_groups.len(), display.mesh.faces.len());
     let groups: std::collections::HashSet<_> = display.mesh.face_groups.iter().collect();
     assert_eq!(groups.len(), 6, "one face group per B-rep face");
     assert_eq!(display.edge_polylines.len(), 12, "one polyline per B-rep edge");
     for (edge, polyline) in display.edge_polylines.iter().enumerate() {
         for pair in polyline.windows(2) {
-            assert!(
-                pair[0] != pair[1],
-                "edge {edge} has a zero-length segment at {:?}",
-                pair[0]
-            );
+            assert!(pair[0] != pair[1], "edge {edge} has a zero-length segment at {:?}", pair[0]);
         }
     }
 
@@ -73,10 +61,10 @@ fn ops_shell_round_trips_a_kernel_box() {
     use solidcore::primitive::api_primitives as api;
 
     let mut kernel = solidcore::kernel::Kernel::default();
-    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
-        .expect("box");
-    let shelled = nodecraft_layers::shell_kernel(&mut kernel, &mut brep, &[], -1.0)
-        .expect("ops shell");
+    let mut brep =
+        api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0).expect("box");
+    let shelled =
+        nodecraft_layers::shell_kernel(&mut kernel, &mut brep, &[], -1.0).expect("ops shell");
     let mut record_kernel = solidcore::kernel::Kernel::default();
     let mut shelled = shelled;
     let (record, _order) = solidcore_convert::brep::to_record(&mut record_kernel, &mut shelled)
@@ -90,8 +78,8 @@ fn ops_offset_faces_round_trips_a_kernel_box() {
     use solidcore::primitive::api_primitives as api;
 
     let mut kernel = solidcore::kernel::Kernel::default();
-    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
-        .expect("box");
+    let mut brep =
+        api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0).expect("box");
     let face = brep.faces().ids().next().expect("face");
     let offset = nodecraft_layers::offset_faces_kernel(&mut kernel, &mut brep, &[face], 1.0)
         .expect("ops offset_faces");
@@ -101,12 +89,9 @@ fn ops_offset_faces_round_trips_a_kernel_box() {
 #[test]
 fn display_lod_levels_reduce_triangles_with_a_finite_error() {
     let record = fixture_record("box_10x6x4.json.gz");
-    let display = nodecraft_layers::tessellate_record(
-        &record,
-        &MeshTolerance::display(0.05),
-        12.33,
-    )
-    .expect("tessellate");
+    let display =
+        nodecraft_layers::tessellate_record(&record, &MeshTolerance::display(0.05), 12.33)
+            .expect("tessellate");
     let full = display.mesh.faces.len();
     let levels = nodecraft_layers::simplify_display(&display, &[full / 2, full / 4]);
     assert!(!levels.is_empty());
@@ -133,13 +118,10 @@ fn kernel_brep_converts_to_record_and_tessellates() {
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives as api;
 
-    assert_eq!(
-        nodecraft_layers::record_bridge(),
-        nodecraft_layers::RecordBridge::Available
-    );
+    assert_eq!(nodecraft_layers::record_bridge(), nodecraft_layers::RecordBridge::Available);
     let mut kernel = solidcore::kernel::Kernel::default();
-    let mut brep = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0)
-        .expect("box");
+    let mut brep =
+        api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0).expect("box");
     let display = nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05)
         .expect("kernel tessellation");
     assert_eq!(display.stats.faces, 6);
@@ -164,12 +146,9 @@ fn ops_boolean_difference_returns_a_tessellatable_record() {
     let difference = nodecraft_layers::boolean_records(&a, &b, BooleanOp::Subtract)
         .expect("ops boolean")
         .expect("non-empty difference");
-    let display = nodecraft_layers::tessellate_record(
-        &difference,
-        &MeshTolerance::display(0.05),
-        10.0,
-    )
-    .expect("difference tessellation");
+    let display =
+        nodecraft_layers::tessellate_record(&difference, &MeshTolerance::display(0.05), 10.0)
+            .expect("difference tessellation");
     assert_eq!(display.stats.faces, 6);
     assert!(!display.mesh.faces.is_empty());
     assert_eq!(display.mesh.face_groups.len(), display.mesh.faces.len());

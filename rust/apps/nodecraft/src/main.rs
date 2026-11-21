@@ -11,34 +11,34 @@ mod adapter;
 mod app;
 mod control_server;
 mod crash_report;
+#[cfg(feature = "gpu-viewport")]
+mod edge_ribbon;
 mod engine_bridge;
 mod expression_input;
 mod file_dialog;
-mod hover;
-mod theme;
-mod sketch_gui;
-mod source_service;
-mod ui_shape;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_backdrop;
-mod gpu_profiler;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_pick;
-mod plan_math;
-#[cfg(feature = "gpu-viewport")]
-mod gpu_viewport;
 #[cfg(feature = "gpu-viewport")]
 mod gpu_plan;
+mod gpu_profiler;
 #[cfg(feature = "gpu-viewport")]
-mod edge_ribbon;
+mod gpu_viewport;
+mod hover;
+mod plan_math;
+mod sketch_gui;
+mod source_service;
+mod theme;
+mod ui_shape;
 // Measurement-only harness; its test is `#[ignore]`d and never runs by default.
 #[cfg(test)]
 mod edit_overhead;
 mod inspector;
 mod view_navigator;
+mod viewer_gizmo;
 mod viewport;
 mod viewport_grid;
-mod viewer_gizmo;
 mod widgets;
 mod window_chrome;
 
@@ -126,13 +126,7 @@ fn run() -> eframe::Result {
         "NodeCraft",
         options,
         Box::new(move |cc| {
-            Ok(Box::new(app::NodeCraftApp::new(
-                cc,
-                initial,
-                screenshot,
-                render_model,
-                crash_test,
-            )))
+            Ok(Box::new(app::NodeCraftApp::new(cc, initial, screenshot, render_model, crash_test)))
         }),
     )
 }
@@ -148,10 +142,7 @@ fn wgpu_options_with_timestamps() -> egui_wgpu::WgpuConfiguration {
         let base = setup.device_descriptor.clone();
         setup.device_descriptor = std::sync::Arc::new(move |adapter| {
             let mut descriptor = base(adapter);
-            if adapter
-                .features()
-                .contains(eframe::wgpu::Features::TIMESTAMP_QUERY)
-            {
+            if adapter.features().contains(eframe::wgpu::Features::TIMESTAMP_QUERY) {
                 descriptor.required_features |= eframe::wgpu::Features::TIMESTAMP_QUERY;
             }
             descriptor
@@ -166,16 +157,15 @@ fn check(path: Option<PathBuf>) -> eframe::Result {
         eprintln!("usage: nodecraft --check <document.nodecraft>");
         std::process::exit(2);
     };
-    let document: nodecraft_session::GraphDocument = serde_json::from_str(
-        &std::fs::read_to_string(&path).unwrap_or_else(|error| {
+    let document: nodecraft_session::GraphDocument =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap_or_else(|error| {
             eprintln!("{}: {error}", path.display());
             std::process::exit(2);
-        }),
-    )
-    .unwrap_or_else(|error| {
-        eprintln!("{}: {error}", path.display());
-        std::process::exit(2);
-    });
+        }))
+        .unwrap_or_else(|error| {
+            eprintln!("{}: {error}", path.display());
+            std::process::exit(2);
+        });
     let Some(target) = engine_bridge::target_for(&document, None) else {
         eprintln!("{}: document has no target", path.display());
         std::process::exit(2);
@@ -201,11 +191,14 @@ fn check(path: Option<PathBuf>) -> eframe::Result {
     let mesh = evaluation
         .exact_parts
         .get(&target)
-        .and_then(|part| nodecraft_display::mesh_part(
-            part,
-            nodecraft_display::default_quality(),
-            &mut plan_cache,
-        ).ok())
+        .and_then(|part| {
+            nodecraft_display::mesh_part(
+                part,
+                nodecraft_display::default_quality(),
+                &mut plan_cache,
+            )
+            .ok()
+        })
         .map(|display| display.mesh);
     println!(
         "{} target={} ok={} verts={} tris={} edges={} elapsed_ms={:.1}",

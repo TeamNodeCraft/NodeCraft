@@ -7,9 +7,9 @@ pub use nodecraft_solidcore::solidcore::kernel::CancelToken;
 use nodecraft_solidcore::solidcore::kernel::Kernel;
 use std::any::Any;
 use std::collections::VecDeque;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 
 pub use nodecraft_solidcore::solidcore::kernel::CancelToken as RevisionToken;
@@ -85,21 +85,15 @@ impl Shared {
             }
             // Only idle capacity runs background work: a queued foreground job is always
             // taken first, and a worker waiting for one is woken by `push`.
-            if let Some(work) = self
-                .background
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .pop_front()
+            if let Some(work) =
+                self.background.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop_front()
             {
                 return Some(work);
             }
             if self.shutdown.load(Ordering::Acquire) {
                 return None;
             }
-            queue = self
-                .ready
-                .wait(queue)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queue = self.ready.wait(queue).unwrap_or_else(|poisoned| poisoned.into_inner());
         }
     }
 
@@ -107,10 +101,7 @@ impl Shared {
         if self.shutdown.load(Ordering::Acquire) {
             return false;
         }
-        let mut queue = self
-            .background
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut queue = self.background.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         queue.push_back(work);
         drop(queue);
         self.ready.notify_one();
@@ -241,21 +232,14 @@ impl KernelPool {
         T: Send + 'static,
         F: FnOnce(&mut Kernel) -> Result<T, String> + Send + 'static,
     {
-        let received = self
-            .submit(seed, token, job)
-            .recv()
-            .map_err(|_| "kernel worker stopped".to_owned())?;
+        let received =
+            self.submit(seed, token, job).recv().map_err(|_| "kernel worker stopped".to_owned())?;
         received?
     }
 
     /// Submit one job and return its result channel. The closure must own all
     /// geometry it mutates; shared inputs should be `Arc<Brep>`.
-    pub fn submit<T, F>(
-        &self,
-        seed: u64,
-        token: CancelToken,
-        job: F,
-    ) -> Receiver<Result<T, String>>
+    pub fn submit<T, F>(&self, seed: u64, token: CancelToken, job: F) -> Receiver<Result<T, String>>
     where
         T: Send + 'static,
         F: FnOnce(&mut Kernel) -> T + Send + 'static,
@@ -274,7 +258,12 @@ impl KernelPool {
                 }
             }
         });
-        if !self.shared.push(Work { seed, token, job: erased, submitted: std::time::Instant::now() }) {
+        if !self.shared.push(Work {
+            seed,
+            token,
+            job: erased,
+            submitted: std::time::Instant::now(),
+        }) {
             let (tx, rx) = channel();
             let _ = tx.send(Err("kernel pool is shut down".to_owned()));
             return rx;
@@ -308,7 +297,12 @@ impl KernelPool {
                 }
             }
         });
-        if !self.shared.push_background(Work { seed, token, job: erased, submitted: std::time::Instant::now() }) {
+        if !self.shared.push_background(Work {
+            seed,
+            token,
+            job: erased,
+            submitted: std::time::Instant::now(),
+        }) {
             let (tx, rx) = channel();
             let _ = tx.send(Err("kernel pool is shut down".to_owned()));
             return rx;
@@ -344,9 +338,7 @@ pub fn configure_threads(threads: usize) {
 fn pool_threads(requested: &std::sync::atomic::AtomicUsize) -> usize {
     let requested = requested.load(std::sync::atomic::Ordering::Relaxed);
     if requested == 0 {
-        std::thread::available_parallelism()
-            .map(|count| count.get())
-            .unwrap_or(1)
+        std::thread::available_parallelism().map(|count| count.get()).unwrap_or(1)
     } else {
         requested
     }
@@ -424,9 +416,7 @@ mod tests {
         let token = RevisionToken::new();
         token.cancel();
         set_current_revision_token(token);
-        let cancelled = pool
-            .execute(1, |kernel| Ok(kernel.is_cancelled()))
-            .expect("job");
+        let cancelled = pool.execute(1, |kernel| Ok(kernel.is_cancelled())).expect("job");
         assert!(cancelled);
         set_current_revision_token(RevisionToken::new());
     }
@@ -497,7 +487,6 @@ mod tests {
         assert!(cancelled);
     }
 }
-
 
 /// Reset the exact kernel pool after an explicit rebuild.
 pub fn reset_kernel_caches() {

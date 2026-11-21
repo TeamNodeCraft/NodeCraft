@@ -51,11 +51,8 @@ fn selects_each_edge_by_its_approximate_midpoint() {
     let selections = edge_selections(&kernel, &brep).expect("selections");
     for expected in &selections {
         // "Approximate": offset the midpoint slightly, as a viewer pick would be.
-        let jittered = [
-            expected.midpoint[0] + 0.2,
-            expected.midpoint[1] - 0.1,
-            expected.midpoint[2] + 0.05,
-        ];
+        let jittered =
+            [expected.midpoint[0] + 0.2, expected.midpoint[1] - 0.1, expected.midpoint[2] + 0.05];
         let selected = select_edge_by_midpoint(&kernel, &brep, jittered).expect("select");
         assert_eq!(
             selected.ordinal, expected.ordinal,
@@ -88,10 +85,7 @@ fn selects_edges_by_ordinal_and_deduplicates() {
 #[test]
 fn edge_selection_errors_are_explicit() {
     let (kernel, brep) = common::box_40_30_20();
-    assert_eq!(
-        brep_center(&kernel, &brep).expect("centre"),
-        [20.0, 15.0, 10.0]
-    );
+    assert_eq!(brep_center(&kernel, &brep).expect("centre"), [20.0, 15.0, 10.0]);
 
     let out_of_range = select_edges_by_ordinals(&kernel, &brep, &[99]).expect_err("range");
     assert!(matches!(out_of_range, BlendError::InvalidInput(_)));
@@ -124,10 +118,8 @@ fn a_stale_edge_id_falls_back_to_its_exact_centre() {
         .find(|selection| selection.midpoint != selections[0].midpoint)
         .expect("second edge")
         .clone();
-    let wrong = selections
-        .iter()
-        .find(|selection| selection.edge != expected.edge)
-        .expect("wrong edge");
+    let wrong =
+        selections.iter().find(|selection| selection.edge != expected.edge).expect("wrong edge");
     let values = serde_json::json!({
         "edges": [{
             "id": format!("edge:{}", wrong.ordinal),
@@ -151,7 +143,6 @@ fn a_matching_edge_id_is_authoritative() {
     let resolved = select_edges_from_values(&kernel, &brep, &values).expect("resolve");
     assert_eq!(resolved, vec![expected]);
 }
-
 
 /// `tangent_chain` copies the B-rep to run the kernel's walk, and the copy numbers its
 /// entities anew. The walker's answer must be mapped back to the input B-rep's own edge ids:

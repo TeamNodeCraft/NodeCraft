@@ -4,11 +4,11 @@
 //! Used by the generic report tooling under reports/; it deliberately takes one file
 //! per process so a bad import cannot take down a batch.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use nodecraft_engine::{evaluate_exact, EngineCache};
+use nodecraft_engine::{EngineCache, evaluate_exact};
 use nodecraft_protocol::Request;
 
 fn main() {
@@ -89,7 +89,7 @@ fn run(input: &PathBuf) -> (serde_json::Value, Option<MeshData>) {
             return (
                 serde_json::json!({"ok": false, "error": error.to_string(), "category": "request"}),
                 None,
-            )
+            );
         }
     };
     let output = evaluate_exact(request.clone(), EngineCache::new(), None);
@@ -100,12 +100,8 @@ fn run(input: &PathBuf) -> (serde_json::Value, Option<MeshData>) {
         nodecraft_display::DisplayQuality::Full(0.35),
         &mut plans,
     );
-    let error = output
-        .response
-        .node_errors
-        .get("n1")
-        .cloned()
-        .filter(|error| !error.trim().is_empty());
+    let error =
+        output.response.node_errors.get("n1").cloned().filter(|error| !error.trim().is_empty());
     let mesh = meshes.get("n1").map(|payload| &payload.mesh);
     if let Some(error) = error {
         return (
@@ -137,16 +133,9 @@ fn run(input: &PathBuf) -> (serde_json::Value, Option<MeshData>) {
             None,
         );
     }
-    let vertices = mesh
-        .vertices
-        .iter()
-        .map(|v| [v[0] as f64, v[1] as f64, v[2] as f64])
-        .collect::<Vec<_>>();
-    let faces = mesh
-        .faces
-        .iter()
-        .map(|f| [f[0], f[1], f[2]])
-        .collect::<Vec<_>>();
+    let vertices =
+        mesh.vertices.iter().map(|v| [v[0] as f64, v[1] as f64, v[2] as f64]).collect::<Vec<_>>();
+    let faces = mesh.faces.iter().map(|f| [f[0], f[1], f[2]]).collect::<Vec<_>>();
     (
         serde_json::json!({
             "ok": true,
@@ -164,7 +153,10 @@ fn classify(error: &str) -> &'static str {
     let text = error.to_ascii_lowercase();
     if text.contains("no solidcore step importer") {
         "unsupported"
-    } else if text.contains("tessellation") || text.contains("display mesh") || text.contains("triangle") {
+    } else if text.contains("tessellation")
+        || text.contains("display mesh")
+        || text.contains("triangle")
+    {
         "tessellation"
     } else if text.contains("timed out") {
         "timeout"

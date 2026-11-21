@@ -18,7 +18,6 @@ pub struct GridLine {
     pub alpha: f32,
 }
 
-
 fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     let t = ((value - edge0) / (edge1 - edge0).max(1.0e-6)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -38,7 +37,6 @@ pub fn grid_step(_radius: f64) -> f64 {
 /// distance is three model radii, so `distance / 3` is the model scale; snapping
 /// it to the nearest decade keeps roughly the same number of cells on screen and
 /// subdivides the pattern as the user zooms in or out.
-
 
 /// Upstream-style grid spacing for a view of the given half height.
 ///
@@ -96,27 +94,15 @@ pub fn adaptive_grid_extent(half_height: f64, major: f64, slant: f64) -> f64 {
 }
 
 /// Centre the XY grid under the camera target while keeping it near the view.
-pub fn adaptive_grid_center(
-    target: [f64; 3],
-    back: [f64; 3],
-    extent: f64,
-    major: f64,
-) -> [f64; 3] {
+pub fn adaptive_grid_center(target: [f64; 3], back: [f64; 3], extent: f64, major: f64) -> [f64; 3] {
     let under = [target[0], target[1], 0.0];
     let slant = back[2];
     if slant.abs() <= 1.0e-3 {
         let major = major.max(1.0e-6);
-        return [
-            (under[0] / major).round() * major,
-            (under[1] / major).round() * major,
-            0.0,
-        ];
+        return [(under[0] / major).round() * major, (under[1] / major).round() * major, 0.0];
     }
-    let hit = [
-        target[0] - back[0] * (target[2] / slant),
-        target[1] - back[1] * (target[2] / slant),
-        0.0,
-    ];
+    let hit =
+        [target[0] - back[0] * (target[2] / slant), target[1] - back[1] * (target[2] / slant), 0.0];
     let along = [hit[0] - under[0], hit[1] - under[1], 0.0];
     let len = (along[0] * along[0] + along[1] * along[1]).sqrt();
     let center = if len > extent && len > 0.0 {
@@ -129,20 +115,11 @@ pub fn adaptive_grid_center(
     // continuously, the pattern would stay fixed on screen while the model
     // and axes moved.
     let major = major.max(1.0e-6);
-    [
-        (center[0] / major).round() * major,
-        (center[1] / major).round() * major,
-        0.0,
-    ]
+    [(center[0] / major).round() * major, (center[1] / major).round() * major, 0.0]
 }
 
 /// How far the XY plane is visible before the camera's far plane cuts it.
-pub fn adaptive_grid_far_reach(
-    eye: [f64; 3],
-    back: [f64; 3],
-    far: f64,
-    center: [f64; 3],
-) -> f64 {
+pub fn adaptive_grid_far_reach(eye: [f64; 3], back: [f64; 3], far: f64, center: [f64; 3]) -> f64 {
     let view = [-back[0], -back[1], -back[2]];
     let forward = [view[0], view[1], 0.0];
     let len = (forward[0] * forward[0] + forward[1] * forward[1]).sqrt();
@@ -152,20 +129,11 @@ pub fn adaptive_grid_far_reach(
     let depth = (center[0] - eye[0]) * view[0]
         + (center[1] - eye[1]) * view[1]
         + (center[2] - eye[2]) * view[2];
-    if far <= depth {
-        0.0
-    } else {
-        (far - depth) / len
-    }
+    if far <= depth { 0.0 } else { (far - depth) / len }
 }
 
 /// Start and end distance for the grid's distance fade.
-pub fn adaptive_grid_fade(
-    half_height: f64,
-    slant: f64,
-    extent: f64,
-    far_reach: f64,
-) -> (f64, f64) {
+pub fn adaptive_grid_fade(half_height: f64, slant: f64, extent: f64, far_reach: f64) -> (f64, f64) {
     let reach = half_height / slant.abs().max(0.25);
     let end = (2.2 * reach).min(extent).min(far_reach);
     (0.6 * reach.min(end), end)
@@ -198,33 +166,30 @@ pub fn grid_lines(radius: f64) -> Vec<GridLine> {
     let half = half_cells as i32;
     let mut lines = Vec::with_capacity((half as usize * 4) + 3);
     let fade_segments = 8usize;
-    let push_segment = |lines: &mut Vec<GridLine>, start: [f32; 3], end: [f32; 3], kind: GridKind| {
-        for segment in 0..fade_segments {
-            let t0 = segment as f32 / fade_segments as f32;
-            let t1 = (segment + 1) as f32 / fade_segments as f32;
-            let a = [
-                start[0] + (end[0] - start[0]) * t0,
-                start[1] + (end[1] - start[1]) * t0,
-                start[2] + (end[2] - start[2]) * t0,
-            ];
-            let b = [
-                start[0] + (end[0] - start[0]) * t1,
-                start[1] + (end[1] - start[1]) * t1,
-                start[2] + (end[2] - start[2]) * t1,
-            ];
-            let midpoint = [
-                (a[0] + b[0]) * 0.5,
-                (a[1] + b[1]) * 0.5,
-                (a[2] + b[2]) * 0.5,
-            ];
-            let radius = (midpoint[0] * midpoint[0] + midpoint[1] * midpoint[1]).sqrt();
-            let t = (radius / extent).clamp(0.0, 1.0);
-            let alpha = 1.0 - smoothstep(0.30, 0.92, t);
-            if alpha > 0.01 {
-                lines.push(GridLine { start: a, end: b, kind, alpha });
+    let push_segment =
+        |lines: &mut Vec<GridLine>, start: [f32; 3], end: [f32; 3], kind: GridKind| {
+            for segment in 0..fade_segments {
+                let t0 = segment as f32 / fade_segments as f32;
+                let t1 = (segment + 1) as f32 / fade_segments as f32;
+                let a = [
+                    start[0] + (end[0] - start[0]) * t0,
+                    start[1] + (end[1] - start[1]) * t0,
+                    start[2] + (end[2] - start[2]) * t0,
+                ];
+                let b = [
+                    start[0] + (end[0] - start[0]) * t1,
+                    start[1] + (end[1] - start[1]) * t1,
+                    start[2] + (end[2] - start[2]) * t1,
+                ];
+                let midpoint = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5, (a[2] + b[2]) * 0.5];
+                let radius = (midpoint[0] * midpoint[0] + midpoint[1] * midpoint[1]).sqrt();
+                let t = (radius / extent).clamp(0.0, 1.0);
+                let alpha = 1.0 - smoothstep(0.30, 0.92, t);
+                if alpha > 0.01 {
+                    lines.push(GridLine { start: a, end: b, kind, alpha });
+                }
             }
-        }
-    };
+        };
     for index in -half..=half {
         if index == 0 {
             continue;
@@ -235,9 +200,24 @@ pub fn grid_lines(radius: f64) -> Vec<GridLine> {
         push_segment(&mut lines, [-extent, coordinate, 0.0], [extent, coordinate, 0.0], kind);
         push_segment(&mut lines, [coordinate, -extent, 0.0], [coordinate, extent, 0.0], kind);
     }
-    lines.push(GridLine { start: [0.0; 3], end: [extent, 0.0, 0.0], kind: GridKind::AxisX, alpha: 1.0 });
-    lines.push(GridLine { start: [0.0; 3], end: [0.0, extent, 0.0], kind: GridKind::AxisY, alpha: 1.0 });
-    lines.push(GridLine { start: [0.0; 3], end: [0.0, 0.0, extent], kind: GridKind::AxisZ, alpha: 1.0 });
+    lines.push(GridLine {
+        start: [0.0; 3],
+        end: [extent, 0.0, 0.0],
+        kind: GridKind::AxisX,
+        alpha: 1.0,
+    });
+    lines.push(GridLine {
+        start: [0.0; 3],
+        end: [0.0, extent, 0.0],
+        kind: GridKind::AxisY,
+        alpha: 1.0,
+    });
+    lines.push(GridLine {
+        start: [0.0; 3],
+        end: [0.0, 0.0, extent],
+        kind: GridKind::AxisZ,
+        alpha: 1.0,
+    });
     lines
 }
 
@@ -289,10 +269,13 @@ mod tests {
     fn grid_is_centred_on_the_xy_plane() {
         let lines = grid_lines(10.0);
         assert!(!lines.is_empty());
-        assert!(lines
-            .iter()
-            .filter(|line| matches!(line.kind, GridKind::Minor | GridKind::Major))
-            .all(|line| line.start[2] == 0.0 && line.end[2] == 0.0 && (0.0..=1.0).contains(&line.alpha)));
+        assert!(
+            lines.iter().filter(|line| matches!(line.kind, GridKind::Minor | GridKind::Major)).all(
+                |line| line.start[2] == 0.0
+                    && line.end[2] == 0.0
+                    && (0.0..=1.0).contains(&line.alpha)
+            )
+        );
         let axis_z = lines.iter().find(|line| line.kind == GridKind::AxisZ).expect("z axis");
         assert_eq!(axis_z.start, [0.0; 3]);
         assert!(axis_z.end[2] > 0.0);

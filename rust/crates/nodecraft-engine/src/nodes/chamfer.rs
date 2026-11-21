@@ -51,9 +51,7 @@ impl BuiltinNode for Chamfer {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -110,7 +108,8 @@ mod tests {
     /// rather than running a zero-size blend.
     #[test]
     fn no_edges_passes_the_source_part_through() {
-        let output = crate::evaluate_exact(request(serde_json::json!([])), crate::EngineCache::new(), None);
+        let output =
+            crate::evaluate_exact(request(serde_json::json!([])), crate::EngineCache::new(), None);
         assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
         let box_part = output.exact_parts.get("box").expect("box exact part");
         let chamfer_part = output.exact_parts.get("chamfer").expect("chamfer exact part");
@@ -173,7 +172,8 @@ mod tests {
     fn warnings_are_recorded_on_the_node() {
         use super::super::PartEval as _;
         let request = request(serde_json::json!([{"ordinal": 0}]));
-        let node = request.nodes.iter().find(|node| node.id == "chamfer").expect("chamfer node").clone();
+        let node =
+            request.nodes.iter().find(|node| node.id == "chamfer").expect("chamfer node").clone();
         let mut eval = crate::Eval::new(&request, None);
         {
             let mut ctx = crate::nodes::EnginePartEval::new(&mut eval, &node);

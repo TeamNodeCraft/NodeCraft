@@ -8,7 +8,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use nodecraft_expr::{eval_with, ExprError, Kind};
+use nodecraft_expr::{ExprError, Kind, eval_with};
 use nodecraft_node_contract::NumberKind;
 
 #[derive(Clone, Default)]
@@ -34,10 +34,9 @@ thread_local! {
 /// the node contract.
 #[must_use]
 pub fn parse_number(text: &str, kind: NumberKind) -> Option<f64> {
-    let value = eval_with(text, &|name| {
-        Err(ExprError::Expr(format!("unknown parameter `{name}`")))
-    })
-    .ok()?;
+    let value =
+        eval_with(text, &|name| Err(ExprError::Expr(format!("unknown parameter `{name}`"))))
+            .ok()?;
     match kind {
         NumberKind::Length => value.to_kind(Kind::Length).ok(),
         NumberKind::Angle => value.to_kind(Kind::Angle).ok().map(f64::to_degrees),
@@ -106,30 +105,27 @@ pub fn number_drag<'a>(
         display_text(shown.as_deref(), number, decimals)
     };
     let parser_ctx = ui.ctx().clone();
-    egui::DragValue::new(value)
-        .speed(step)
-        .custom_formatter(formatter)
-        .custom_parser(move |text| {
-            let parsed = parse_number(text, kind);
-            FIELDS.with(|fields| {
-                let mut fields = fields.borrow_mut();
-                let state = fields.entry(id).or_default();
-                if parsed.is_some() {
-                    state.expression = Some(text.to_owned());
-                    state.dirty_expression = true;
-                    // Return commits to the number; normal text updates leave
-                    // the current display mode alone (typing is already in the
-                    // expression mode, and focus loss has already set the number).
-                    if parser_ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
-                        state.show_number = true;
-                    }
-                } else {
-                    state.expression = None;
-                    state.dirty_expression = true;
+    egui::DragValue::new(value).speed(step).custom_formatter(formatter).custom_parser(move |text| {
+        let parsed = parse_number(text, kind);
+        FIELDS.with(|fields| {
+            let mut fields = fields.borrow_mut();
+            let state = fields.entry(id).or_default();
+            if parsed.is_some() {
+                state.expression = Some(text.to_owned());
+                state.dirty_expression = true;
+                // Return commits to the number; normal text updates leave
+                // the current display mode alone (typing is already in the
+                // expression mode, and focus loss has already set the number).
+                if parser_ctx.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    state.show_number = true;
                 }
-            });
-            parsed
-        })
+            } else {
+                state.expression = None;
+                state.dirty_expression = true;
+            }
+        });
+        parsed
+    })
 }
 
 /// Remember where the field was drawn, for the next frame's click detection.
@@ -169,19 +165,11 @@ pub fn format_number(number: f64, decimals: usize) -> String {
     let text = match text.split_once('.') {
         Some((whole, fraction)) => {
             let fraction = fraction.trim_end_matches('0');
-            if fraction.is_empty() {
-                whole.to_owned()
-            } else {
-                format!("{whole}.{fraction}")
-            }
+            if fraction.is_empty() { whole.to_owned() } else { format!("{whole}.{fraction}") }
         }
         None => text,
     };
-    if text.is_empty() || text == "-0" {
-        "0".to_owned()
-    } else {
-        text
-    }
+    if text.is_empty() || text == "-0" { "0".to_owned() } else { text }
 }
 
 #[cfg(test)]
@@ -206,7 +194,6 @@ mod tests {
         assert_eq!(parse_number("2 mm", NumberKind::Unitless), None);
     }
 
-
     #[test]
     fn the_focus_check_uses_the_drag_values_widget_id() {
         let ctx = egui::Context::default();
@@ -216,12 +203,17 @@ mod tests {
         let mut actual = None;
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(300.0, 120.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(300.0, 120.0),
+                )),
                 ..Default::default()
             },
             |ui| {
                 expected = Some(ui.next_auto_id());
-                actual = Some(ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None)).id);
+                actual = Some(
+                    ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None)).id,
+                );
             },
         );
         output.textures_delta.clear();
@@ -243,30 +235,60 @@ mod tests {
             if step == 1 {
                 let at = rect.center();
                 input.events.push(Event::PointerMoved(at));
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                });
             }
-            if step == 2 { input.events.push(Event::Text("2".into())); }
-            if step == 3 { input.events.push(Event::Text("/".into())); }
-            if step == 4 { input.events.push(Event::Text("1".into())); }
+            if step == 2 {
+                input.events.push(Event::Text("2".into()));
+            }
+            if step == 3 {
+                input.events.push(Event::Text("/".into()));
+            }
+            if step == 4 {
+                input.events.push(Event::Text("1".into()));
+            }
             if step == 5 {
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
             }
             let mut output = ctx.run_ui(input, |ui| {
-                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
+                let response =
+                    ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
                 rect = response.rect;
                 widget = Some(response.id);
             });
             output.textures_delta.clear();
         }
         if let Some(widget) = widget {
-            assert!(!ctx.memory(|memory| memory.has_focus(widget)), "Return should leave text editing");
+            assert!(
+                !ctx.memory(|memory| memory.has_focus(widget)),
+                "Return should leave text editing"
+            );
         }
         assert_eq!(value, 2.0);
     }
-
-
 
     #[test]
     fn a_stored_expression_loads_in_number_mode() {
@@ -275,7 +297,10 @@ mod tests {
         let id = egui::Id::new("stored-expression-test");
         let mut output = ctx.run_ui(
             egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(300.0, 120.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::Vec2::new(300.0, 120.0),
+                )),
                 ..Default::default()
             },
             |ui| {
@@ -303,24 +328,54 @@ mod tests {
             if step == 1 || step == 7 {
                 let at = rect.center();
                 input.events.push(Event::PointerMoved(at));
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                });
             }
-            if step == 2 { input.events.push(Event::Text("2".into())); }
-            if step == 3 { input.events.push(Event::Text("/".into())); }
-            if step == 4 { input.events.push(Event::Text("1".into())); }
+            if step == 2 {
+                input.events.push(Event::Text("2".into()));
+            }
+            if step == 3 {
+                input.events.push(Event::Text("/".into()));
+            }
+            if step == 4 {
+                input.events.push(Event::Text("1".into()));
+            }
             if step == 5 {
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
             }
             let mut output = ctx.run_ui(input, |ui| {
-                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
+                let response =
+                    ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
                 rect = response.rect;
                 remember_rect(id, rect);
             });
             output.textures_delta.clear();
             if step == 6 {
-                show_after_return = FIELDS.with(|fields| fields.borrow().get(&id).map(|state| state.show_number));
+                show_after_return =
+                    FIELDS.with(|fields| fields.borrow().get(&id).map(|state| state.show_number));
             }
         }
         assert_eq!(value, 2.0);
@@ -357,24 +412,46 @@ mod tests {
             if step == 1 {
                 let at = rect.center();
                 input.events.push(Event::PointerMoved(at));
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-                input.events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                });
             }
             if (2..=5).contains(&step) {
                 let text = ["4", "0", "/", "2"][step - 2];
                 input.events.push(Event::Text(text.to_owned()));
             }
             if step == 6 {
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
-                input.events.push(Event::Key { key: egui::Key::Enter, physical_key: None, pressed: false, repeat: false, modifiers: Default::default() });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+                input.events.push(Event::Key {
+                    key: egui::Key::Enter,
+                    physical_key: None,
+                    pressed: false,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
             }
             let mut output = ctx.run_ui(input, |ui| {
-                let response = ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
+                let response =
+                    ui.add(number_drag(ui, &mut value, NumberKind::Length, 0.1, 2, id, None));
                 rect = response.rect;
             });
             output.textures_delta.clear();
         }
         assert_eq!(value, 20.0);
     }
-
 }

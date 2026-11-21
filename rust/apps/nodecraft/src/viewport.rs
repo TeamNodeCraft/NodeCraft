@@ -4,17 +4,17 @@
 //! adapter lands. Keeping the camera/scene/raster on SolidCraft types means the
 //! switch is local to this module.
 
-use solidcraft_viewport::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView};
 use nodecraft_protocol::Mesh as NodeMesh;
+use solidcraft_viewport::{Camera, Rgb, Scene, SceneLine, SceneMesh, StandardView};
 
 use crate::adapter::{self, DisplayMesh};
-use crate::hover::HoverMap;
-use crate::viewer_gizmo::{self, Gizmo, GizmoState};
-use crate::viewport_grid::{grid_lines, GridKind};
 #[cfg(feature = "gpu-viewport")]
 use crate::gpu_viewport::GpuViewport;
-use solidcraft_geom::prelude::*;
+use crate::hover::HoverMap;
+use crate::viewer_gizmo::{self, Gizmo, GizmoState};
+use crate::viewport_grid::{GridKind, grid_lines};
 use solidcore_record::Vec3;
+use solidcraft_geom::prelude::*;
 
 /// The shared world origin used by both the XY construction grid and the
 /// Home/ISO framing. Keeping one constant makes the view centre and the grid
@@ -156,7 +156,6 @@ impl ViewSettings {
             || (self.ghost_opacity - 0.45).abs() > f32::EPSILON
             || (self.display_error_px - default_display_error_px()).abs() > f64::EPSILON
             || (self.edge_width_px - default_edge_width_px()).abs() > f32::EPSILON
-
     }
 }
 
@@ -167,7 +166,6 @@ pub enum SelectionMode {
     Face,
     Edge,
 }
-
 
 fn distance_to_segment(point: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     let ab = b - a;
@@ -248,7 +246,8 @@ struct DisplayPrep {
 impl Default for DisplayPrep {
     fn default() -> Self {
         let (tx, requests) = std::sync::mpsc::channel::<(u64, u64, NodeMesh, ViewSettings)>();
-        let (results, rx) = std::sync::mpsc::channel::<(u64, u64, DisplayMesh, Option<PreparedObject>)>();
+        let (results, rx) =
+            std::sync::mpsc::channel::<(u64, u64, DisplayMesh, Option<PreparedObject>)>();
         std::thread::Builder::new()
             .name("nodecraft-display-prep".into())
             .spawn(move || {
@@ -273,11 +272,7 @@ impl Default for DisplayPrep {
 
 fn ghost_plan_colour() -> [f32; 3] {
     let colour = crate::theme::get().ghost;
-    [
-        f32::from(colour[0]) / 255.0,
-        f32::from(colour[1]) / 255.0,
-        f32::from(colour[2]) / 255.0,
-    ]
+    [f32::from(colour[0]) / 255.0, f32::from(colour[1]) / 255.0, f32::from(colour[2]) / 255.0]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -431,7 +426,10 @@ fn navigator_home_rect(outer: egui::Rect) -> egui::Rect {
 fn navigator_projection_icon_rect(outer: egui::Rect) -> egui::Rect {
     let home_icon = navigator_home_icon_rect(outer);
     egui::Rect::from_min_size(
-        egui::pos2(home_icon.right() - home_icon.width(), navigator_home_rect(outer).bottom() + 10.0),
+        egui::pos2(
+            home_icon.right() - home_icon.width(),
+            navigator_home_rect(outer).bottom() + 10.0,
+        ),
         home_icon.size(),
     )
 }
@@ -595,7 +593,7 @@ impl Default for Viewport {
             display_retires_preview: true,
             edit_ghost_transform: None,
             edit_ghost_edges: Vec::new(),
-                    edit_ghost_plans: Vec::new(),
+            edit_ghost_plans: Vec::new(),
             feature_ghost_plans: Vec::new(),
             edit_ghost_color: [0; 4],
             edit_ghost_alpha: 0.45,
@@ -713,7 +711,9 @@ impl Viewport {
             return Some(current);
         };
         let accepted = if raw_index < current_index {
-            BOUNDS.get(current_index.saturating_sub(1)).is_some_and(|boundary| ratio < boundary * 0.9)
+            BOUNDS
+                .get(current_index.saturating_sub(1))
+                .is_some_and(|boundary| ratio < boundary * 0.9)
         } else {
             BOUNDS.get(current_index).is_some_and(|boundary| ratio > boundary * 1.1)
         };
@@ -777,8 +777,7 @@ impl Viewport {
     pub fn plan_debug(&self) -> Option<serde_json::Value> {
         #[cfg(feature = "gpu-viewport")]
         {
-            self.plan_debug_struct()
-                .and_then(|debug| serde_json::to_value(debug).ok())
+            self.plan_debug_struct().and_then(|debug| serde_json::to_value(debug).ok())
         }
         #[cfg(not(feature = "gpu-viewport"))]
         {
@@ -950,8 +949,6 @@ impl Viewport {
         // the display unit; this path keeps a live drag preview in step.
         self.update_mesh(mesh, false);
     }
-
-
 
     pub fn set_exact_comparison_mesh(
         &mut self,
@@ -1146,10 +1143,12 @@ impl Viewport {
                     eprintln!("[viewport] async display prep faces={}", mesh.faces.len());
                 }
                 let generation = self.display_generation;
-                let _ = self
-                    .display_prep
-                    .tx
-                    .send((generation, self.plans_snapshot, mesh.clone(), self.view));
+                let _ = self.display_prep.tx.send((
+                    generation,
+                    self.plans_snapshot,
+                    mesh.clone(),
+                    self.view,
+                ));
                 self.dirty = true;
                 #[cfg(feature = "gpu-viewport")]
                 if let Some(gpu) = self.gpu.as_mut() {
@@ -1425,7 +1424,6 @@ impl Viewport {
         std::mem::take(&mut self.edge_picks)
     }
 
-
     pub fn set_selection_mode(&mut self, mode: SelectionMode) {
         if mode != self.selection_mode {
             self.selected_edges.clear();
@@ -1460,7 +1458,6 @@ impl Viewport {
         self.hovered_edge = None;
     }
 
-
     pub fn edge_picking_enabled(&self) -> bool {
         self.edge_picking_enabled
     }
@@ -1490,10 +1487,8 @@ impl Viewport {
             self.selected_edges.clear();
             return;
         };
-        let ghost_edges = self
-            .edit_ghost_edges
-            .iter()
-            .filter(|edge| !edge.id.starts_with("preview-edge:"));
+        let ghost_edges =
+            self.edit_ghost_edges.iter().filter(|edge| !edge.id.starts_with("preview-edge:"));
         let available: std::collections::HashSet<&str> = if self.picking_input_ghost_only() {
             ghost_edges.map(|edge| edge.id.as_str()).collect()
         } else {
@@ -1503,11 +1498,8 @@ impl Viewport {
                 .map(|edge| edge.id.as_str())
                 .collect()
         };
-        self.selected_edges = ids
-            .iter()
-            .filter(|id| available.contains(id.as_str()))
-            .cloned()
-            .collect();
+        self.selected_edges =
+            ids.iter().filter(|id| available.contains(id.as_str())).cloned().collect();
     }
 
     pub fn select_edges_by_centers(&mut self, centers: &[[f64; 3]]) {
@@ -1544,10 +1536,7 @@ impl Viewport {
     }
 
     fn topology_edges<'a>(&'a self, display: &'a DisplayMesh) -> &'a [crate::adapter::DisplayEdge] {
-        display
-            .selection_edges
-            .as_deref()
-            .unwrap_or(display.edges.as_slice())
+        display.selection_edges.as_deref().unwrap_or(display.edges.as_slice())
     }
 
     /// Face ids in display-triangle order, derived from the display target's
@@ -1563,9 +1552,7 @@ impl Viewport {
                     .triangles
                     .iter()
                     .filter(|triangle| {
-                        triangle
-                            .iter()
-                            .all(|index| (*index as usize) < face.uv.len())
+                        triangle.iter().all(|index| (*index as usize) < face.uv.len())
                     })
                     .count();
                 let id = if multiple {
@@ -1591,10 +1578,7 @@ impl Viewport {
         self.display
             .as_ref()
             .map(|display| {
-                self.topology_edges(display)
-                    .iter()
-                    .map(|edge| edge.id.clone())
-                    .collect()
+                self.topology_edges(display).iter().map(|edge| edge.id.clone()).collect()
             })
             .unwrap_or_default()
     }
@@ -1606,10 +1590,8 @@ impl Viewport {
         }
         #[cfg(feature = "gpu-viewport")]
         if self.plan_set_staged
-            && let Some((radius, center)) = self
-                .gpu
-                .as_ref()
-                .and_then(crate::gpu_viewport::GpuViewport::pending_display_bounds)
+            && let Some((radius, center)) =
+                self.gpu.as_ref().and_then(crate::gpu_viewport::GpuViewport::pending_display_bounds)
         {
             let (yaw, pitch) = StandardView::Iso.angles();
             self.camera.target = center;
@@ -1640,11 +1622,7 @@ impl Viewport {
 
     /// Fit distance for a bounding radius and viewport aspect ratio.
     fn fit_distance(&self, radius: f64, aspect: f64) -> f64 {
-        let tan_half = if self.camera.fov > 0.0 {
-            (self.camera.fov * 0.5).tan()
-        } else {
-            0.4
-        };
+        let tan_half = if self.camera.fov > 0.0 { (self.camera.fov * 0.5).tan() } else { 0.4 };
         let vertical = radius / (tan_half * 0.9);
         let horizontal = radius / (tan_half * aspect.max(1.0e-3) * 0.9);
         vertical.max(horizontal).max(1.0)
@@ -1711,10 +1689,7 @@ impl Viewport {
         for (index, row) in camera.view().0.iter().enumerate() {
             rows.push(DebugRow::new(
                 "View row",
-                format!(
-                    "{index}: {:.3} {:.3} {:.3} {:.3}",
-                    row[0], row[1], row[2], row[3]
-                ),
+                format!("{index}: {:.3} {:.3} {:.3} {:.3}", row[0], row[1], row[2], row[3]),
             ));
         }
         rows
@@ -1730,17 +1705,10 @@ impl Viewport {
         if let Some(full) = self.last_full {
             rows.push(DebugRow::new(
                 "Viewport",
-                format!(
-                    "{}×{}",
-                    full.width().round() as i32,
-                    full.height().round() as i32
-                ),
+                format!("{}×{}", full.width().round() as i32, full.height().round() as i32),
             ));
         }
-        rows.push(DebugRow::new(
-            "Frame",
-            format!("{frame_ms:.1} ms  {fps:.0} fps"),
-        ));
+        rows.push(DebugRow::new("Frame", format!("{frame_ms:.1} ms  {fps:.0} fps")));
         #[cfg(feature = "gpu-viewport")]
         {
             if let Some(gpu) = self.gpu.as_ref().and_then(|gpu| gpu.debug_info()) {
@@ -1812,11 +1780,8 @@ impl Viewport {
 
     fn apply_pending_view_restore(&mut self, full: egui::Rect, visible: egui::Rect) {
         let Some(snapshot) = self.pending_view_restore.take() else { return };
-        let old_aspect = if snapshot.visible[1] > 1.0 {
-            snapshot.visible[0] / snapshot.visible[1]
-        } else {
-            1.0
-        };
+        let old_aspect =
+            if snapshot.visible[1] > 1.0 { snapshot.visible[0] / snapshot.visible[1] } else { 1.0 };
         let new_aspect = visible.width() / visible.height().max(1.0);
         if new_aspect < old_aspect && new_aspect > 1.0e-6 {
             self.camera.distance *= f64::from(old_aspect / new_aspect);
@@ -1863,10 +1828,7 @@ impl Viewport {
     }
 
     pub fn set_transform_gizmo(&mut self, gizmo: Option<Gizmo>) {
-        if self
-            .transform_gizmo
-            .as_ref()
-            .map(|current| current.node_id.as_str())
+        if self.transform_gizmo.as_ref().map(|current| current.node_id.as_str())
             != gizmo.as_ref().map(|next| next.node_id.as_str())
         {
             self.gizmo_state.reset();
@@ -1925,10 +1887,7 @@ impl Viewport {
     /// feature's pickable ghost. Plan edges are the exact body's edge polylines
     /// and carry body-scoped ids, independent of the displayed result/LOD.
     fn polyline_midpoint(points: &[Vec3]) -> Vec3 {
-        let length: f64 = points
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).len())
-            .sum();
+        let length: f64 = points.windows(2).map(|pair| (pair[1] - pair[0]).len()).sum();
         if length <= 1.0e-18 {
             return points.first().copied().unwrap_or(Vec3::ZERO);
         }
@@ -1951,7 +1910,7 @@ impl Viewport {
         let multiple_bodies = self.edit_ghost_plans.len() > 1;
         let mut edges = Vec::new();
         for (body, instance) in self.edit_ghost_plans.iter().enumerate() {
-                        let matrix = crate::plan_math::instance_matrix(&instance.placement);
+            let matrix = crate::plan_math::instance_matrix(&instance.placement);
             for (index, polyline) in instance.plan.edges.iter().enumerate() {
                 let points: Vec<Vec3> = polyline
                     .iter()
@@ -1979,13 +1938,7 @@ impl Viewport {
                     .edge_ids
                     .get(index)
                     .and_then(Clone::clone)
-                    .map(|id| {
-                        if multiple_bodies {
-                            format!("body:{body}:{id}")
-                        } else {
-                            id
-                        }
-                    })
+                    .map(|id| if multiple_bodies { format!("body:{body}:{id}") } else { id })
                     .unwrap_or_else(|| {
                         if multiple_bodies {
                             format!("preview-edge:body:{body}:{index}")
@@ -1997,12 +1950,8 @@ impl Viewport {
                     id,
                     points,
                     midpoint: [midpoint.x, midpoint.y, midpoint.z],
-                    class: instance
-                        .edge_classes
-                        .get(index)
-                        .copied()
-                        .unwrap_or_default(),
-                        });
+                    class: instance.edge_classes.get(index).copied().unwrap_or_default(),
+                });
             }
         }
         if !edges.is_empty() {
@@ -2139,10 +2088,7 @@ impl Viewport {
         // mirror syncs. Requiring both to match keeps an apparently unchanged
         // preview from being dropped just because the mirror is stale.
         #[cfg(feature = "gpu-viewport")]
-        let gpu_matches = self
-            .gpu
-            .as_ref()
-            .is_none_or(|gpu| gpu.preview_matches(transform, alpha));
+        let gpu_matches = self.gpu.as_ref().is_none_or(|gpu| gpu.preview_matches(transform, alpha));
         #[cfg(not(feature = "gpu-viewport"))]
         let gpu_matches = true;
         if cpu_matches && gpu_matches {
@@ -2166,7 +2112,11 @@ impl Viewport {
 
     /// Whether `pointer` is in the view navigator's chrome, which takes the
     /// press before viewport picking or navigation sees it.
-    pub(crate) fn navigator_pointer_blocked(&self, viewport: egui::Rect, pointer: egui::Pos2) -> bool {
+    pub(crate) fn navigator_pointer_blocked(
+        &self,
+        viewport: egui::Rect,
+        pointer: egui::Pos2,
+    ) -> bool {
         self.chrome_visible && self.navigator_chrome(viewport).contains(pointer)
     }
 
@@ -2217,17 +2167,14 @@ impl Viewport {
             let mut gone = false;
             for event in &input.events {
                 match event {
-                    egui::Event::PointerButton {
-                        pos,
-                        button,
-                        pressed: true,
-                        ..
-                    } if press.is_none() => press = Some((*button, *pos)),
-                    egui::Event::PointerButton {
-                        button,
-                        pressed: false,
-                        ..
-                    } => release = Some(*button),
+                    egui::Event::PointerButton { pos, button, pressed: true, .. }
+                        if press.is_none() =>
+                    {
+                        press = Some((*button, *pos))
+                    }
+                    egui::Event::PointerButton { button, pressed: false, .. } => {
+                        release = Some(*button)
+                    }
                     egui::Event::PointerGone => gone = true,
                     _ => {}
                 }
@@ -2276,8 +2223,7 @@ impl Viewport {
     /// The held press position and ownership, for tests and diagnostics.
     #[cfg(test)]
     fn chrome_pointer(&self) -> Option<(egui::PointerButton, egui::Pos2, bool)> {
-        self.chrome_pointer
-            .map(|gesture| (gesture.button, gesture.origin, gesture.owned))
+        self.chrome_pointer.map(|gesture| (gesture.button, gesture.origin, gesture.owned))
     }
 
     fn draw_transform_gizmo(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -2392,9 +2338,8 @@ impl Viewport {
         // or wheel over those controls is still a viewport camera gesture.
         // Only real overlay panels own gestures as well; the two rules stay
         // separate instead of reusing one over-broad flag.
-        let pointer_button_blocked = pointer_over_overlay
-            || chrome_owned
-            || self.chrome_contains_pointer(ui, rect);
+        let pointer_button_blocked =
+            pointer_over_overlay || chrome_owned || self.chrome_contains_pointer(ui, rect);
         let navigation_blocked = pointer_over_overlay;
         if response.hovered() && !navigation_blocked && gesture.has_navigation() {
             if (gesture.zoom - 1.0).abs() > f32::EPSILON {
@@ -2402,8 +2347,7 @@ impl Viewport {
                 self.camera.zoom_at(f64::from(1.0 / gesture.zoom), None);
             } else if gesture.wheel != egui::Vec2::ZERO {
                 // Mouse wheel: preserve the existing zoom behaviour.
-                self.camera
-                    .zoom_at(f64::from((-gesture.wheel.y * 0.0015).exp()), None);
+                self.camera.zoom_at(f64::from((-gesture.wheel.y * 0.0015).exp()), None);
             } else if gesture.pan != egui::Vec2::ZERO {
                 // Latch the mode for the whole gesture. macOS scroll momentum can
                 // keep delivering pan deltas after the Shift key-up; using the
@@ -2439,9 +2383,7 @@ impl Viewport {
         }
         self.sync_edit_ghost_theme();
         let size = [width.min(1400), height.min(1000)];
-        if !self.gpu_active()
-            && (self.dirty || self.texture.is_none() || self.last_size != size)
-        {
+        if !self.gpu_active() && (self.dirty || self.texture.is_none() || self.last_size != size) {
             if self.display.is_some() {
                 self.render_texture(ui.ctx(), size);
             }
@@ -2546,30 +2488,27 @@ impl Viewport {
             || !pointer.is_some_and(|pos| viewport.contains(pos))
             || self.selection_mode != SelectionMode::Edge
         {
-            if self.hovered_edge.take().is_some() { ui.ctx().request_repaint(); }
+            if self.hovered_edge.take().is_some() {
+                ui.ctx().request_repaint();
+            }
             return;
         }
         let Some(pointer) = pointer else { return };
         #[cfg(feature = "gpu-viewport")]
         if self.gpu_active() && self.edge_picking_enabled {
             use crate::gpu_pick::{
-                accept_pick, edge_click_action, resolve_face_id, EdgeClickAction, PickKind,
-                PickOutcome,
+                EdgeClickAction, PickKind, PickOutcome, accept_pick, edge_click_action,
+                resolve_face_id,
             };
             let ppp = ui.ctx().pixels_per_point();
-            let physical = [
-                (pointer.x - viewport.min.x) * ppp,
-                (pointer.y - viewport.min.y) * ppp,
-            ];
+            let physical = [(pointer.x - viewport.min.x) * ppp, (pointer.y - viewport.min.y) * ppp];
             let physical_at = |pointer: egui::Pos2| {
-                [
-                    (pointer.x - viewport.min.x) * ppp,
-                    (pointer.y - viewport.min.y) * ppp,
-                ]
+                [(pointer.x - viewport.min.x) * ppp, (pointer.y - viewport.min.y) * ppp]
             };
-            let (key, ghost_matrix) = self.gpu.as_ref().map_or((0, None), |gpu| {
-                (gpu.pick_key(), gpu.ghost_edge_matrix())
-            });
+            let (key, ghost_matrix) = self
+                .gpu
+                .as_ref()
+                .map_or((0, None), |gpu| (gpu.pick_key(), gpu.ghost_edge_matrix()));
             let inputs = (physical, key, ghost_matrix, self.camera);
             let moved = self.last_gpu_pick_inputs != Some(inputs);
             self.last_gpu_pick_inputs = Some(inputs);
@@ -2636,11 +2575,9 @@ impl Viewport {
                                     && self.pending_face_empty.is_none()
                                     && Some(result.id) == self.latest_hover_pick
                                 {
-                                    let id = crate::gpu_viewport::resolve_pick(
-                                        &gpu.pick_data(),
-                                        index,
-                                    )
-                                    .map(|(id, _)| id);
+                                    let id =
+                                        crate::gpu_viewport::resolve_pick(&gpu.pick_data(), index)
+                                            .map(|(id, _)| id);
                                     if id != self.hovered_edge {
                                         self.hovered_edge = id;
                                         ui.ctx().request_repaint();
@@ -2660,10 +2597,7 @@ impl Viewport {
                                             if !self.selected_edges.remove(&edge_id) {
                                                 self.selected_edges.insert(edge_id.clone());
                                             }
-                                            self.edge_picks.push(EdgePick {
-                                                id: edge_id,
-                                                center,
-                                            });
+                                            self.edge_picks.push(EdgePick { id: edge_id, center });
                                             ui.ctx().request_repaint();
                                         }
                                     }
@@ -2765,7 +2699,12 @@ impl Viewport {
     }
 
     #[cfg(not(feature = "gpu-viewport"))]
-    fn nearest_edge(&self, pointer: egui::Pos2, viewport: egui::Rect, threshold: f32) -> Option<(String, [f64; 3])> {
+    fn nearest_edge(
+        &self,
+        pointer: egui::Pos2,
+        viewport: egui::Rect,
+        threshold: f32,
+    ) -> Option<(String, [f64; 3])> {
         if !self.edge_picking_enabled {
             return None;
         }
@@ -2820,7 +2759,11 @@ impl Viewport {
 
     /// Project an overlay point through the same camera and preview transform
     /// as the shaded solid, so mesh-derived overlays cannot drift from it.
-    fn project_to_viewport(&self, point: solidcore_record::Vec3, viewport: egui::Rect) -> Option<egui::Pos2> {
+    fn project_to_viewport(
+        &self,
+        point: solidcore_record::Vec3,
+        viewport: egui::Rect,
+    ) -> Option<egui::Pos2> {
         let display = self.display.as_ref()?;
         let width = f64::from(viewport.width()).max(1.0);
         let height = f64::from(viewport.height()).max(1.0);
@@ -2866,7 +2809,9 @@ impl Viewport {
                     self.project_to_viewport(*point, viewport)
                 })
                 .collect();
-            if points.len() != 3 { continue; }
+            if points.len() != 3 {
+                continue;
+            }
             let mut mesh = egui::Mesh::default();
             for point in points {
                 mesh.colored_vertex(point, colour);
@@ -2882,7 +2827,10 @@ impl Viewport {
         }
         let theme = crate::theme::get();
         let colour = egui::Color32::from_rgba_unmultiplied(
-            theme.accent[0], theme.accent[1], theme.accent[2], 150,
+            theme.accent[0],
+            theme.accent[1],
+            theme.accent[2],
+            150,
         );
         self.draw_face_ids(ui, viewport, colour, |id| self.selected_faces.contains(id));
     }
@@ -2891,7 +2839,10 @@ impl Viewport {
         let Some(hovered) = self.hovered_face.as_deref() else { return };
         let theme = crate::theme::get();
         let colour = egui::Color32::from_rgba_unmultiplied(
-            theme.highlight[0], theme.highlight[1], theme.highlight[2], 90,
+            theme.highlight[0],
+            theme.highlight[1],
+            theme.highlight[2],
+            90,
         );
         self.draw_face_ids(ui, viewport, colour, |id| id == hovered);
     }
@@ -2901,35 +2852,47 @@ impl Viewport {
         let Some(comparison) = &display.comparison else { return };
         let theme = crate::theme::get();
         let painter = ui.painter().with_clip_rect(viewport);
-        let draw_layer = |triangles: &[([solidcore_record::Vec3; 3], [solidcore_record::Vec3; 3])], color: egui::Color32| {
-            for (points, _) in triangles {
-                let projected: Vec<egui::Pos2> = points
-                    .iter()
-                    .filter_map(|point| self.project_to_viewport(*point, viewport))
-                    .collect();
-                if projected.len() != 3 { continue; }
-                let mut mesh = egui::Mesh::default();
-                for point in projected {
-                    mesh.colored_vertex(point, color);
+        let draw_layer =
+            |triangles: &[([solidcore_record::Vec3; 3], [solidcore_record::Vec3; 3])],
+             color: egui::Color32| {
+                for (points, _) in triangles {
+                    let projected: Vec<egui::Pos2> = points
+                        .iter()
+                        .filter_map(|point| self.project_to_viewport(*point, viewport))
+                        .collect();
+                    if projected.len() != 3 {
+                        continue;
+                    }
+                    let mut mesh = egui::Mesh::default();
+                    for point in projected {
+                        mesh.colored_vertex(point, color);
+                    }
+                    mesh.add_triangle(0, 1, 2);
+                    painter.add(egui::Shape::mesh(mesh));
                 }
-                mesh.add_triangle(0, 1, 2);
-                painter.add(egui::Shape::mesh(mesh));
-            }
-        };
+            };
         // Display-only comparison layer. It is painted above the shaded result,
         // never enters the display mesh, and therefore never feeds face/edge/vertex
         // picking. 50% alpha keeps the result readable underneath.
         let overlay_alpha = if self.comparison_ghost { 14 } else { 38 };
         let add = theme.preview_add;
-        draw_layer(&comparison.added, egui::Color32::from_rgba_unmultiplied(add[0], add[1], add[2], overlay_alpha));
+        draw_layer(
+            &comparison.added,
+            egui::Color32::from_rgba_unmultiplied(add[0], add[1], add[2], overlay_alpha),
+        );
         let cut = theme.preview_cut;
-        draw_layer(&comparison.removed, egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], overlay_alpha));
+        draw_layer(
+            &comparison.removed,
+            egui::Color32::from_rgba_unmultiplied(cut[0], cut[1], cut[2], overlay_alpha),
+        );
     }
 
     fn draw_comparison_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
         let Some(display) = self.display.as_ref() else { return };
         let Some(comparison) = &display.comparison else { return };
-        if comparison.edges.is_empty() { return; }
+        if comparison.edges.is_empty() {
+            return;
+        }
         let theme = crate::theme::get();
         let cut = theme.preview_cut;
         let painter = ui.painter().with_clip_rect(viewport);
@@ -2973,15 +2936,14 @@ impl Viewport {
             + f64::from(matrix[1][2]) * point.y
             + f64::from(matrix[2][2]) * point.z
             + f64::from(matrix[3][2]);
-        self.project_to_viewport(
-            solidcore_record::Vec3::new(x, y, z),
-            viewport,
-        )
+        self.project_to_viewport(solidcore_record::Vec3::new(x, y, z), viewport)
     }
 
     fn draw_edit_ghost_edges(&self, ui: &mut egui::Ui, viewport: egui::Rect) {
         let Some(matrix) = self.edit_ghost_transform else { return };
-        if self.edit_ghost_edges.is_empty() { return; }
+        if self.edit_ghost_edges.is_empty() {
+            return;
+        }
         let painter = ui.painter().with_clip_rect(viewport);
         let [r, g, b, a] = crate::theme::get().ghost_edge;
         // Edge selection is a quiet guide until an edge is picked; selected
@@ -3004,10 +2966,7 @@ impl Viewport {
                         + f64::from(matrix[1][2]) * point.y
                         + f64::from(matrix[2][2]) * point.z
                         + f64::from(matrix[3][2]);
-                    self.project_to_viewport(
-                        solidcore_record::Vec3::new(x, y, z),
-                        viewport,
-                    )
+                    self.project_to_viewport(solidcore_record::Vec3::new(x, y, z), viewport)
                 })
                 .collect();
             for pair in projected.windows(2) {
@@ -3069,7 +3028,8 @@ impl Viewport {
         let width = f64::from(viewport.width()).max(1.0);
         let height = f64::from(viewport.height()).max(1.0);
         let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
-        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+        let y =
+            f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
         let (origin, direction) = self.camera.ray(x, y, width, height);
         raycast_face(&display.mesh, display.face_ids.as_slice(), origin, direction).is_some()
     }
@@ -3085,24 +3045,19 @@ impl Viewport {
             self.hovered_face = None;
             return;
         };
-        if !viewport.contains(pointer) || self.dock_rect.is_some_and(|dock| dock.contains(pointer)) {
+        if !viewport.contains(pointer) || self.dock_rect.is_some_and(|dock| dock.contains(pointer))
+        {
             self.hovered_face = None;
             return;
         }
         #[cfg(feature = "gpu-viewport")]
         if self.gpu_active() && self.edge_picking_enabled {
-            use crate::gpu_pick::{accept_pick, resolve_face_id, PickKind, PickOutcome};
+            use crate::gpu_pick::{PickKind, PickOutcome, accept_pick, resolve_face_id};
             let ppp = ui.ctx().pixels_per_point();
-            let physical = [
-                (pointer.x - viewport.min.x) * ppp,
-                (pointer.y - viewport.min.y) * ppp,
-            ];
+            let physical = [(pointer.x - viewport.min.x) * ppp, (pointer.y - viewport.min.y) * ppp];
             let key = self.gpu.as_ref().map_or(0, |gpu| gpu.pick_key());
             let physical_at = |pointer: egui::Pos2| {
-                [
-                    (pointer.x - viewport.min.x) * ppp,
-                    (pointer.y - viewport.min.y) * ppp,
-                ]
+                [(pointer.x - viewport.min.x) * ppp, (pointer.y - viewport.min.y) * ppp]
             };
             let mut pending_click = self.pending_gpu_pick.map(|(id, _, _)| id);
             if let Some(gpu) = self.gpu.as_mut() {
@@ -3200,7 +3155,8 @@ impl Viewport {
         let width = f64::from(viewport.width()).max(1.0);
         let height = f64::from(viewport.height()).max(1.0);
         let x = f64::from(pointer.x - viewport.min.x) - f64::from(self.lens_shift[0]) * width * 0.5;
-        let y = f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
+        let y =
+            f64::from(pointer.y - viewport.min.y) + f64::from(self.lens_shift[1]) * height * 0.5;
         let (origin, direction) = self.camera.ray(x, y, width, height);
         let plan_ids = self.plan_face_ids();
         let face_ids = plan_ids.as_deref().unwrap_or(display.face_ids.as_slice());
@@ -3283,11 +3239,7 @@ impl Viewport {
             .interact(home_rect, egui::Id::new("viewport-axis-home"), egui::Sense::click())
             .on_hover_text("Home / isometric view");
         if home.hovered() {
-            painter.circle_filled(
-                icon_rect.center(),
-                14.0,
-                theme.with_alpha(theme.highlight, 26),
-            );
+            painter.circle_filled(icon_rect.center(), 14.0, theme.with_alpha(theme.highlight, 26));
             painter.circle_stroke(
                 icon_rect.center(),
                 14.0,
@@ -3369,7 +3321,11 @@ impl Viewport {
             .on_hover_text("Display modes");
         if view.hovered() {
             painter.circle_filled(view_icon.center(), 14.0, theme.with_alpha(theme.highlight, 26));
-            painter.circle_stroke(view_icon.center(), 14.0, egui::Stroke::new(1.0, theme.with_alpha(theme.muted, 100)));
+            painter.circle_stroke(
+                view_icon.center(),
+                14.0,
+                egui::Stroke::new(1.0, theme.with_alpha(theme.muted, 100)),
+            );
         }
         if view.hovered() || view.clicked() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -3440,9 +3396,7 @@ impl Viewport {
                 ui.add_sized(
                     [34.0, 18.0],
                     egui::Label::new(
-                        egui::RichText::new(format!("{value:.decimals$}"))
-                            .size(11.0)
-                            .monospace(),
+                        egui::RichText::new(format!("{value:.decimals$}")).size(11.0).monospace(),
                     ),
                 );
                 ui.spacing_mut().slider_width = 118.0;
@@ -3452,9 +3406,7 @@ impl Viewport {
                     egui::FontId::proportional(Self::SETTINGS_SLIDER_FONT_SIZE),
                 );
                 ui.spacing_mut().interact_size.y = Self::SETTINGS_SLIDER_HEIGHT;
-                changed = ui
-                    .add(egui::Slider::new(value, range).show_value(false))
-                    .changed();
+                changed = ui.add(egui::Slider::new(value, range).show_value(false)).changed();
                 *ui.style_mut() = previous_style;
             });
         });
@@ -3506,20 +3458,10 @@ impl Viewport {
                 );
 
                 Self::settings_section(ui, "Material");
-                changed |= Self::settings_slider(
-                    ui,
-                    "Roughness",
-                    &mut edited.roughness,
-                    0.045..=1.0,
-                    2,
-                );
-                changed |= Self::settings_slider(
-                    ui,
-                    "Metallic",
-                    &mut edited.metallic,
-                    0.0..=1.0,
-                    2,
-                );
+                changed |=
+                    Self::settings_slider(ui, "Roughness", &mut edited.roughness, 0.045..=1.0, 2);
+                changed |=
+                    Self::settings_slider(ui, "Metallic", &mut edited.metallic, 0.0..=1.0, 2);
                 ui.add_space(6.0);
             });
         if changed {
@@ -3531,8 +3473,14 @@ impl Viewport {
         #[cfg(feature = "gpu-viewport")]
         if let Some(gpu) = &self.gpu {
             let uv = egui::Rect::from_min_max(
-                egui::pos2(crate::gpu_backdrop::INNER_UV_MIN[0], crate::gpu_backdrop::INNER_UV_MIN[1]),
-                egui::pos2(crate::gpu_backdrop::INNER_UV_MAX[0], crate::gpu_backdrop::INNER_UV_MAX[1]),
+                egui::pos2(
+                    crate::gpu_backdrop::INNER_UV_MIN[0],
+                    crate::gpu_backdrop::INNER_UV_MIN[1],
+                ),
+                egui::pos2(
+                    crate::gpu_backdrop::INNER_UV_MAX[0],
+                    crate::gpu_backdrop::INNER_UV_MAX[1],
+                ),
             );
             return Some((gpu.backdrop_texture_id(), uv));
         }
@@ -3569,14 +3517,10 @@ impl Viewport {
         let scene = scene_for(display, &self.camera, self.lod_index, &self.view);
         let canvas = solidcraft_viewport::render(&scene, &self.camera, width, height);
         let image = egui::ColorImage::from_rgba_unmultiplied([canvas.w, canvas.h], &canvas.rgba);
-        self.texture = Some(ctx.load_texture(
-            "nodecraft-viewport",
-            image,
-            egui::TextureOptions::LINEAR,
-        ));
+        self.texture =
+            Some(ctx.load_texture("nodecraft-viewport", image, egui::TextureOptions::LINEAR));
     }
 }
-
 
 fn add_grid(
     scene: &mut Scene,
@@ -3642,13 +3586,7 @@ fn scene_for(
         t * t * (3.0 - 2.0 * t)
     };
     if draws_grid(view) {
-        add_grid(
-            &mut scene,
-            display.radius,
-            VIEW_ORIGIN,
-            camera.fov > 0.0,
-            ortho_fade,
-        );
+        add_grid(&mut scene, display.radius, VIEW_ORIGIN, camera.fov > 0.0, ortho_fade);
     }
     scene.meshes.push(SceneMesh::solid(
         std::sync::Arc::new(display.render_mesh(lod_index).clone()),
@@ -3670,8 +3608,6 @@ fn scene_for(
     scene
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3689,12 +3625,7 @@ mod tests {
         focused: bool,
     ) -> AxisFrame {
         let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(rect),
-                events,
-                focused,
-                ..Default::default()
-            },
+            egui::RawInput { screen_rect: Some(rect), events, focused, ..Default::default() },
             |ui| viewport.axis_gizmo(ui, rect),
         );
         let cursor = output.platform_output.cursor_icon;
@@ -3743,12 +3674,7 @@ mod tests {
 
     fn test_quad_mesh() -> NodeMesh {
         NodeMesh {
-            vertices: vec![
-                [-1.0, -1.0, 0.0],
-                [1.0, -1.0, 0.0],
-                [1.0, 1.0, 0.0],
-                [-1.0, 1.0, 0.0],
-            ],
+            vertices: vec![[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]],
             faces: vec![[0, 1, 2], [0, 2, 3]],
             ..Default::default()
         }
@@ -3784,12 +3710,7 @@ mod tests {
     }
 
     fn pointer_button(at: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
-        egui::Event::PointerButton {
-            pos: at,
-            button,
-            pressed,
-            modifiers: Default::default(),
-        }
+        egui::Event::PointerButton { pos: at, button, pressed, modifiers: Default::default() }
     }
 
     fn run_viewport_frame(
@@ -3810,12 +3731,7 @@ mod tests {
         events: Vec<egui::Event>,
     ) {
         let mut output = ctx.run_ui(
-            egui::RawInput {
-                screen_rect: Some(rect),
-                events,
-                focused: true,
-                ..Default::default()
-            },
+            egui::RawInput { screen_rect: Some(rect), events, focused: true, ..Default::default() },
             |ui| {
                 viewport.show_with_backdrop_blockers(ui, overlay, blockers, rect);
             },
@@ -3833,7 +3749,12 @@ mod tests {
         let middle = egui::PointerButton::Middle;
         run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(start)]);
         run_viewport_frame(ctx, rect, viewport, vec![pointer_button(start, middle, true)]);
-        run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(start.lerp(end, 0.5))]);
+        run_viewport_frame(
+            ctx,
+            rect,
+            viewport,
+            vec![egui::Event::PointerMoved(start.lerp(end, 0.5))],
+        );
         run_viewport_frame(ctx, rect, viewport, vec![egui::Event::PointerMoved(end)]);
         run_viewport_frame(ctx, rect, viewport, vec![pointer_button(end, middle, false)]);
     }
@@ -3908,14 +3829,7 @@ mod tests {
         );
         run_viewport_frame_blocked(&ctx, rect, &mut viewport, overlay, blockers, Vec::new());
         let before = viewport.camera;
-        run_viewport_frame_blocked(
-            &ctx,
-            rect,
-            &mut viewport,
-            overlay,
-            blockers,
-            gesture.events(),
-        );
+        run_viewport_frame_blocked(&ctx, rect, &mut viewport, overlay, blockers, gesture.events());
         (before, viewport.camera)
     }
 
@@ -3964,11 +3878,7 @@ mod tests {
             chrome.rects(),
             "the blockers must be exactly the rects axis_gizmo draws",
         );
-        for point in [
-            chrome.home.center(),
-            chrome.projection.center(),
-            chrome.display.center(),
-        ] {
+        for point in [chrome.home.center(), chrome.projection.center(), chrome.display.center()] {
             assert!(
                 viewport.navigator_pointer_blocked(rect, point),
                 "the drawn control at {point:?} must also block picking",
@@ -4019,19 +3929,34 @@ mod tests {
         let primary = egui::PointerButton::Primary;
         for (name, start) in controls {
             run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(start, primary, true)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(start, primary, true)],
+            );
             assert_eq!(
                 viewport.chrome_pointer(),
                 Some((primary, start, true)),
                 "the press on {name} is owned by chrome",
             );
             let elsewhere = rect.min + egui::vec2(40.0, 40.0);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(elsewhere)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![egui::Event::PointerMoved(elsewhere)],
+            );
             assert!(
                 viewport.pointer_owned_by_chrome(),
                 "{name}: ownership must survive moving the pointer into the viewport",
             );
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(elsewhere, primary, false)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(elsewhere, primary, false)],
+            );
             assert!(
                 viewport.pointer_owned_by_chrome(),
                 "{name}: the release frame still sees chrome ownership",
@@ -4046,7 +3971,12 @@ mod tests {
         run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
         run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(start, primary, true)]);
         assert_eq!(viewport.chrome_pointer(), Some((primary, start, false)));
-        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(rect.center())]);
+        run_viewport_frame(
+            &ctx,
+            rect,
+            &mut viewport,
+            vec![egui::Event::PointerMoved(rect.center())],
+        );
         assert!(!viewport.pointer_owned_by_chrome());
     }
 
@@ -4141,9 +4071,19 @@ mod tests {
             viewport.take_face_picks();
             viewport.take_selection_miss();
             run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(press)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(press, primary, true)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(press, primary, true)],
+            );
             run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(release)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(release, primary, false)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(release, primary, false)],
+            );
             assert!(
                 viewport.take_face_picks().is_empty(),
                 "{name}: a short drag across the control edge must not pick a face",
@@ -4156,16 +4096,30 @@ mod tests {
 
         // Press on chrome, release in the viewport: the gesture still belongs
         // to the chrome, so no pick is requested at the release point.
-        for (name, point) in [
-            ("Home", chrome.home.center()),
-            ("projection toggle", chrome.projection.center()),
-        ] {
+        for (name, point) in
+            [("Home", chrome.home.center()), ("projection toggle", chrome.projection.center())]
+        {
             viewport.take_face_picks();
             viewport.take_selection_miss();
             run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(point)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(point, primary, true)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(viewport_point)]);
-            run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(viewport_point, primary, false)]);
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(point, primary, true)],
+            );
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![egui::Event::PointerMoved(viewport_point)],
+            );
+            run_viewport_frame(
+                &ctx,
+                rect,
+                &mut viewport,
+                vec![pointer_button(viewport_point, primary, false)],
+            );
             assert!(
                 viewport.take_face_picks().is_empty(),
                 "{name}: a press on chrome must not pick when released over the model",
@@ -4178,8 +4132,18 @@ mod tests {
         viewport.take_face_picks();
         viewport.take_selection_miss();
         let point = chrome.projection.center();
-        run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(viewport_point)]);
-        run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(viewport_point, primary, true)]);
+        run_viewport_frame(
+            &ctx,
+            rect,
+            &mut viewport,
+            vec![egui::Event::PointerMoved(viewport_point)],
+        );
+        run_viewport_frame(
+            &ctx,
+            rect,
+            &mut viewport,
+            vec![pointer_button(viewport_point, primary, true)],
+        );
         run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(point)]);
         run_viewport_frame(&ctx, rect, &mut viewport, vec![pointer_button(point, primary, false)]);
         assert!(viewport.take_face_picks().is_empty());
@@ -4216,12 +4180,9 @@ mod tests {
         let viewport = Viewport::default();
         let controls = gesture_controls(rect, &viewport);
         let empty = rect.min + egui::vec2(20.0, 20.0);
-        for gesture in [
-            ViewGesture::Pan,
-            ViewGesture::Orbit,
-            ViewGesture::Pinch,
-            ViewGesture::Wheel,
-        ] {
+        for gesture in
+            [ViewGesture::Pan, ViewGesture::Orbit, ViewGesture::Pinch, ViewGesture::Wheel]
+        {
             let (empty_before, expected) = gesture_camera(rect, empty, gesture);
             assert_ne!(
                 expected,
@@ -4252,12 +4213,9 @@ mod tests {
         let overlay = egui::Rect::from_min_max(egui::pos2(300.0, rect.min.y), rect.max);
         let panel = egui::Rect::from_min_max(egui::pos2(600.0, 350.0), egui::pos2(780.0, 580.0));
         let at = panel.center();
-        for gesture in [
-            ViewGesture::Pan,
-            ViewGesture::Orbit,
-            ViewGesture::Pinch,
-            ViewGesture::Wheel,
-        ] {
+        for gesture in
+            [ViewGesture::Pan, ViewGesture::Orbit, ViewGesture::Pinch, ViewGesture::Wheel]
+        {
             let (open_before, open) = gesture_camera(rect, at, gesture);
             assert_ne!(
                 open,
@@ -4298,12 +4256,7 @@ mod tests {
                 let before = viewport.camera;
                 let before_view = viewport.view;
                 let before_drag = viewport.navigator_drag;
-                run_viewport_frame(
-                    &ctx,
-                    rect,
-                    &mut viewport,
-                    vec![egui::Event::PointerMoved(at)],
-                );
+                run_viewport_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(at)]);
                 run_viewport_frame(&ctx, rect, &mut viewport, Vec::new());
                 run_viewport_frame(&ctx, rect, &mut viewport, gesture.events());
                 assert_eq!(
@@ -4360,10 +4313,7 @@ mod tests {
         let viewport = Viewport::default();
         let camera = viewport.camera_debug_rows();
         assert!(camera.iter().any(|row| row.label == "Yaw"));
-        assert_eq!(
-            camera.iter().filter(|row| row.label == "View row").count(),
-            4
-        );
+        assert_eq!(camera.iter().filter(|row| row.label == "View row").count(), 4);
         let gpu = viewport.gpu_debug_rows(16.7);
         assert!(gpu.iter().any(|row| row.label == "Frame" && row.value.contains("16.7 ms")));
         assert!(gpu.iter().any(|row| row.label == "Tessellation warnings"));
@@ -4395,7 +4345,9 @@ mod tests {
         let layout = crate::view_navigator::layout(rect, viewport.chrome_right_inset);
         assert_eq!(layout.outer.width(), crate::view_navigator::AXIS_VIEW_SIZE);
         assert!(viewport.navigator_pointer_blocked(rect, layout.centre));
-        assert!(viewport.navigator_pointer_blocked(rect, navigator_home_rect(layout.outer).center()));
+        assert!(
+            viewport.navigator_pointer_blocked(rect, navigator_home_rect(layout.outer).center())
+        );
         assert!(viewport.navigator_pointer_blocked(rect, layout.outer.min));
         assert!(viewport.navigator_pointer_blocked(rect, layout.outer.max));
         assert!(!viewport.navigator_pointer_blocked(rect, layout.outer.min - egui::vec2(1.0, 0.0)));
@@ -4422,16 +4374,15 @@ mod tests {
             .expect("x tip")
             .2;
 
-        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(x_tip)]);
+        let hover =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(x_tip)]);
         assert_eq!(hover.cursor, egui::CursorIcon::PointingHand);
         let press = run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(x_tip, true)]);
-        let release = run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(x_tip, false)]);
+        let release =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(x_tip, false)]);
         assert_ne!(press.cursor, egui::CursorIcon::None);
         assert_ne!(release.cursor, egui::CursorIcon::None);
-        assert!(
-            cursor_warps(&release).is_empty(),
-            "a plain tip click never warps the pointer"
-        );
+        assert!(cursor_warps(&release).is_empty(), "a plain tip click never warps the pointer");
         assert!(!viewport.navigator_drag.moving);
         assert!(
             viewport.camera.back().dist(solidcore_record::Vec3::X) < 1e-5,
@@ -4444,7 +4395,12 @@ mod tests {
         assert!(blockers.contains(&home_rect), "the Home button blocks picking");
 
         // Home returns to the isometric framing through our camera path.
-        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(home_rect.center())]);
+        let hover = run_axis_frame(
+            &ctx,
+            rect,
+            &mut viewport,
+            vec![egui::Event::PointerMoved(home_rect.center())],
+        );
         assert_eq!(hover.cursor, egui::CursorIcon::PointingHand);
         run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home_rect.center(), true)]);
         run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(home_rect.center(), false)]);
@@ -4484,9 +4440,14 @@ mod tests {
         assert_eq!(home, expected_home_rect(layout.outer));
         assert_eq!(perspective, expected_perspective_rect(home, layout.outer));
         let icon = egui::Rect::from_center_size(home.center(), egui::vec2(18.0, 18.0));
-        assert_eq!(icon.right(), layout.outer.right(), "the icon shares the compass box's right edge");
+        assert_eq!(
+            icon.right(),
+            layout.outer.right(),
+            "the icon shares the compass box's right edge"
+        );
         assert_eq!(icon.top(), layout.outer.bottom() + 10.0, "10 points below the compass box");
-        let perspective_icon = egui::Rect::from_center_size(perspective.center(), egui::vec2(18.0, 18.0));
+        let perspective_icon =
+            egui::Rect::from_center_size(perspective.center(), egui::vec2(18.0, 18.0));
         assert_eq!(
             perspective_icon.top(),
             home.bottom() + 10.0,
@@ -4565,13 +4526,15 @@ mod tests {
         let moved = start + egui::vec2(45.0, 8.0);
         let press = |at, pressed| navigator_press(at, pressed);
 
-        let hover = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
+        let hover =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
         assert_eq!(hover.cursor, egui::CursorIcon::Grab);
         let pressed = run_axis_frame(&ctx, rect, &mut viewport, vec![press(start, true)]);
         assert_ne!(pressed.cursor, egui::CursorIcon::None, "a press alone shows the pointer");
         assert!(!viewport.navigator_drag.moving, "the threshold has not been passed");
 
-        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        let dragging =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
         assert_eq!(dragging.cursor, egui::CursorIcon::None, "the orbit drag hides the pointer");
         assert!(viewport.navigator_drag.moving);
         assert_eq!(viewport.navigator_drag.start, Some(start));
@@ -4583,11 +4546,7 @@ mod tests {
         assert_ne!(released.cursor, egui::CursorIcon::None, "release shows the pointer again");
         assert!(!viewport.navigator_drag.moving);
         assert!(viewport.navigator_drag.at.is_none());
-        assert_eq!(
-            cursor_warps(&released),
-            vec![start],
-            "release warps to where the drag began"
-        );
+        assert_eq!(cursor_warps(&released), vec![start], "release warps to where the drag began");
 
         let after = run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
         assert_ne!(after.cursor, egui::CursorIcon::None);
@@ -4606,7 +4565,8 @@ mod tests {
         // The pointer is lost mid-drag.
         run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
         run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
-        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        let dragging =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
         assert_eq!(dragging.cursor, egui::CursorIcon::None);
         let gone = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerGone]);
         assert_ne!(gone.cursor, egui::CursorIcon::None, "a lost drag shows the pointer");
@@ -4617,7 +4577,8 @@ mod tests {
         // The window loses focus mid-drag.
         run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
         run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
-        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        let dragging =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
         assert_eq!(dragging.cursor, egui::CursorIcon::None);
         let unfocused = run_axis_frame_focused(&ctx, rect, &mut viewport, Vec::new(), false);
         assert_ne!(unfocused.cursor, egui::CursorIcon::None, "focus loss shows the pointer");
@@ -4627,7 +4588,8 @@ mod tests {
         // A drag state reset is the same one-state path: hiding follows it.
         run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(start)]);
         run_axis_frame(&ctx, rect, &mut viewport, vec![navigator_press(start, true)]);
-        let dragging = run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
+        let dragging =
+            run_axis_frame(&ctx, rect, &mut viewport, vec![egui::Event::PointerMoved(moved)]);
         assert_eq!(dragging.cursor, egui::CursorIcon::None);
         viewport.navigator_drag = crate::view_navigator::Drag::default();
         let reset = run_axis_frame(&ctx, rect, &mut viewport, Vec::new());
@@ -4729,10 +4691,7 @@ mod tests {
         view.grid = false;
         viewport.set_view(view);
         assert!(viewport.dirty, "the grid toggle must repaint the viewport");
-        assert!(
-            !viewport.plan_set_staged,
-            "the grid toggle must not restage the plan set"
-        );
+        assert!(!viewport.plan_set_staged, "the grid toggle must not restage the plan set");
     }
 
     #[test]
@@ -4752,18 +4711,16 @@ mod tests {
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
         let point = solidcore_record::Vec3::new(1.0, 0.5, 0.0);
         let shift = solidcore_record::Vec3::new(4.0, 0.0, 0.0);
-        let shifted = viewport
-            .project_to_viewport(point + shift, rect)
-            .expect("shifted point projects");
+        let shifted =
+            viewport.project_to_viewport(point + shift, rect).expect("shifted point projects");
         let mut preview = [[0.0f32; 4]; 4];
         for (axis, column) in preview.iter_mut().enumerate() {
             column[axis] = 1.0;
         }
         preview[3][0] = shift.x as f32;
         viewport.preview_transform = Some(preview);
-        let previewed = viewport
-            .project_to_viewport(point, rect)
-            .expect("previewed point projects");
+        let previewed =
+            viewport.project_to_viewport(point, rect).expect("previewed point projects");
         // Drawing a previewed point must equal drawing the moved point, so mesh
         // overlays cannot drift away from the shaded solid during a drag.
         assert!((previewed - shifted).length() < 1.0e-3, "{previewed:?} {shifted:?}");
@@ -4971,13 +4928,10 @@ mod tests {
             body_ids: Vec::new(),
             edges: vec![crate::adapter::DisplayEdge {
                 id: "edge:downstream".into(),
-                points: vec![
-                    solidcore_record::Vec3::ZERO,
-                    solidcore_record::Vec3::X,
-                ],
+                points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::X],
                 midpoint: [0.5, 0.0, 0.0],
                 class: nodecraft_layers::PlanEdgeClass::NORMAL,
-                }],
+            }],
             comparison: None,
             selection_edges: None,
             radius: 1.0,
@@ -4993,10 +4947,7 @@ mod tests {
         ]);
         viewport.edit_ghost_edges = vec![crate::adapter::DisplayEdge {
             id: "body:0:edge:0".into(),
-            points: vec![
-                solidcore_record::Vec3::ZERO,
-                solidcore_record::Vec3::Y,
-            ],
+            points: vec![solidcore_record::Vec3::ZERO, solidcore_record::Vec3::Y],
             midpoint: [0.0, 0.5, 0.0],
             class: nodecraft_layers::PlanEdgeClass::NORMAL,
         }];
@@ -5090,7 +5041,6 @@ mod tests {
         assert_eq!(viewport.lens_shift, lens_shift_for_visible(full, visible));
     }
 
-
     #[test]
     fn edge_width_defaults_to_the_old_standard_width() {
         assert_eq!(ViewSettings::default().edge_width_px, 1.0);
@@ -5119,5 +5069,4 @@ mod tests {
         assert!(explicit.show_seam_edges);
         assert!(explicit.any_extra(), "showing seams is an active display override");
     }
-
 }

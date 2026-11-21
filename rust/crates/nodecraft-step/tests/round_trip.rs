@@ -14,10 +14,7 @@ fn temp_path(tag: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "nodecraft-step-{}-{serial}-{tag}.step",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("nodecraft-step-{}-{serial}-{tag}.step", std::process::id()))
 }
 
 fn read(path: &std::path::Path) -> CadImport {
@@ -38,12 +35,7 @@ fn box_brep(size: f64) -> solidcore::topology::Brep {
 }
 
 fn translation(x: f64) -> [[f64; 4]; 4] {
-    [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [x, 0.0, 0.0, 1.0],
-    ]
+    [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [x, 0.0, 0.0, 1.0]]
 }
 
 #[test]
@@ -114,10 +106,7 @@ fn a_multi_body_part_round_trips_with_names_colours_and_placements() {
     assert!(translations.iter().any(|x| (*x - 100.0).abs() < 1e-9), "{translations:?}");
     assert!(translations.iter().any(|x| (*x - 200.0).abs() < 1e-9), "{translations:?}");
     assert!(text.contains("NEXT_ASSEMBLY_USAGE_OCCURRENCE"), "not written as an assembly");
-    assert!(
-        text.contains("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"),
-        "no placed occurrence"
-    );
+    assert!(text.contains("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION"), "no placed occurrence");
     assert!(text.contains("ITEM_DEFINED_TRANSFORMATION"));
 }
 
@@ -133,22 +122,14 @@ fn nested_occurrences_compose_their_placements() {
             sheet: false,
             brep: record_a,
         },
-        ExportBody {
-            name: "C".into(),
-            color: None,
-            placement: None,
-            sheet: false,
-            brep: record_b,
-        },
+        ExportBody { name: "C".into(), color: None, placement: None, sheet: false, brep: record_b },
     ];
     let path = temp_path("nested");
     let mut ir = nodecraft_step::cadir_export::cadir(&bodies, "nested").expect("cadir");
     // Make C a child of A. C's local placement is 5, so its world placement is 15.
     let parent = ir.model.occurrences[0].id.clone();
     let child = &mut ir.model.occurrences[1];
-    child.parent = cadmpeg_ir::products::OccurrenceParent::Occurrence {
-        occurrence: parent,
-    };
+    child.parent = cadmpeg_ir::products::OccurrenceParent::Occurrence { occurrence: parent };
     child.transform = cadmpeg_ir::transform::Transform::affine([
         [1.0, 0.0, 0.0, 5.0],
         [0.0, 1.0, 0.0, 0.0],
@@ -175,11 +156,9 @@ fn encode(ir: &cadmpeg_ir::CadIr) -> Vec<u8> {
     use cadmpeg_codec_step::{StepCodec, StepWriteOptions};
     use cadmpeg_ir::codec::write::target::TargetRequest;
     use cadmpeg_ir::codec::write::{EncodeInput, Encoder};
-    let plan = StepCodec {
-        options: StepWriteOptions::default(),
-    }
-    .plan(EncodeInput::new(ir, None), TargetRequest::Explicit("ap242e1"))
-    .expect("plan");
+    let plan = StepCodec { options: StepWriteOptions::default() }
+        .plan(EncodeInput::new(ir, None), TargetRequest::Explicit("ap242e1"))
+        .expect("plan");
     let mut bytes = Vec::new();
     plan.write_to(&mut bytes).expect("write");
     bytes
@@ -212,10 +191,8 @@ fn a_faceted_mesh_round_trips_through_cadir() {
         [3, 4, 7],
     ];
     let path = temp_path("faceted");
-    let options = StepExportOptions {
-        product_name: "faceted".into(),
-        ..StepExportOptions::default()
-    };
+    let options =
+        StepExportOptions { product_name: "faceted".into(), ..StepExportOptions::default() };
     write_step_faceted(path.to_str().unwrap(), &vertices, &triangles, &options).expect("write");
     let import = read(&path);
     let _ = std::fs::remove_file(&path);
@@ -243,10 +220,8 @@ fn an_imported_planar_body_reexports_with_volume_and_placement() {
             brep: body.brep.clone(),
         }];
         let path = temp_path("block-reexport");
-        let options = StepExportOptions {
-            product_name: "block".into(),
-            ..StepExportOptions::default()
-        };
+        let options =
+            StepExportOptions { product_name: "block".into(), ..StepExportOptions::default() };
         nodecraft_step::write_step_with_options(path.to_str().unwrap(), &bodies, &options)
             .expect("re-export");
         let back = read(&path);
@@ -259,7 +234,6 @@ fn an_imported_planar_body_reexports_with_volume_and_placement() {
         assert_eq!(back.bodies[0].placement, placement);
     }
 }
-
 
 // Curved, blended, boolean and spline round trips: export -> cadmpeg import ->
 // read_bodies keeps one body with the same volume (and face count where it is fixed).
@@ -331,10 +305,7 @@ fn blended(kind: nodecraft_ops::OpsBlend) -> solidcore::topology::Brep {
     let mut kernel = nodecraft_kernel_profile::kernel();
     let block = api::create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).unwrap();
     let edge = block.edge_list()[0];
-    OpsSession::new(&mut kernel)
-        .blend(&block, &[edge], 1.0, kind)
-        .expect("blend")
-        .brep
+    OpsSession::new(&mut kernel).blend(&block, &[edge], 1.0, kind).expect("blend").brep
 }
 
 #[test]

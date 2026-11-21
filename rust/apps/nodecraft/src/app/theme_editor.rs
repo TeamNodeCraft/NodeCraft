@@ -9,10 +9,7 @@ pub(super) fn layout_roi(
     let mut min = egui::Pos2::new(f32::INFINITY, f32::INFINITY);
     let mut max = egui::Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
     for node in &document.nodes {
-        let (x, y) = positions
-            .get(&node.id)
-            .copied()
-            .unwrap_or((node.x, node.y));
+        let (x, y) = positions.get(&node.id).copied().unwrap_or((node.x, node.y));
         let x = x as f32;
         let y = y as f32;
         min.x = min.x.min(x - NODE_LEFT_PADDING);
@@ -70,16 +67,12 @@ pub(super) fn theme_revert_button(ui: &mut egui::Ui, enabled: bool) -> egui::Res
     } else {
         theme.icon
     };
-    let svg = std::str::from_utf8(include_bytes!(
-        "../../../../../vendor/fluent/arrow_clockwise.svg"
-    ))
-    .unwrap_or_default();
+    let svg =
+        std::str::from_utf8(include_bytes!("../../../../../vendor/fluent/arrow_clockwise.svg"))
+            .unwrap_or_default();
     let svg = tint_svg(svg.as_bytes(), &crate::theme::Theme::hex(tint));
-    let image = egui::Image::from_bytes(
-        "bytes://theme-revert-defaults.svg",
-        svg.into_bytes(),
-    )
-    .fit_to_exact_size(egui::Vec2::splat(16.0));
+    let image = egui::Image::from_bytes("bytes://theme-revert-defaults.svg", svg.into_bytes())
+        .fit_to_exact_size(egui::Vec2::splat(16.0));
     ui.put(rect.shrink(5.0), image);
     response
 }
@@ -109,21 +102,15 @@ pub(super) fn theme_edit_button(ui: &mut egui::Ui, enabled: bool) -> egui::Respo
     let svg = std::str::from_utf8(include_bytes!("../../../../../vendor/fluent/edit.svg"))
         .unwrap_or_default();
     let svg = tint_svg(svg.as_bytes(), &crate::theme::Theme::hex(tint));
-    let image = egui::Image::from_bytes(
-        "bytes://theme-edit-name.svg",
-        svg.into_bytes(),
-    )
-    .fit_to_exact_size(egui::Vec2::splat(15.0));
+    let image = egui::Image::from_bytes("bytes://theme-edit-name.svg", svg.into_bytes())
+        .fit_to_exact_size(egui::Vec2::splat(15.0));
     ui.put(rect.shrink(5.0), image);
     if !enabled {
         // Built-in themes cannot be renamed: show a crossed-out pencil rather
         // than merely dimming it.
         let slash = egui::Stroke::new(1.4, theme.color(theme.muted));
         ui.painter().line_segment(
-            [
-                rect.left_top() + egui::vec2(6.0, 6.0),
-                rect.right_bottom() - egui::vec2(6.0, 6.0),
-            ],
+            [rect.left_top() + egui::vec2(6.0, 6.0), rect.right_bottom() - egui::vec2(6.0, 6.0)],
             slash,
         );
     }
@@ -141,22 +128,15 @@ pub(super) fn theme_add_button(ui: &mut egui::Ui) -> egui::Response {
         );
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let color = if response.hovered() {
-        theme.color(theme.icon_hover)
-    } else {
-        theme.color(theme.icon)
-    };
+    let color =
+        if response.hovered() { theme.color(theme.icon_hover) } else { theme.color(theme.icon) };
     let center = rect.center();
     let arm = 6.0;
     let stroke = egui::Stroke::new(1.6, color);
-    ui.painter().line_segment(
-        [center + egui::vec2(-arm, 0.0), center + egui::vec2(arm, 0.0)],
-        stroke,
-    );
-    ui.painter().line_segment(
-        [center + egui::vec2(0.0, -arm), center + egui::vec2(0.0, arm)],
-        stroke,
-    );
+    ui.painter()
+        .line_segment([center + egui::vec2(-arm, 0.0), center + egui::vec2(arm, 0.0)], stroke);
+    ui.painter()
+        .line_segment([center + egui::vec2(0.0, -arm), center + egui::vec2(0.0, arm)], stroke);
     response
 }
 
@@ -173,10 +153,7 @@ pub(super) fn theme_hex_edit(ui: &mut egui::Ui, key: &str, rgba: [u8; 4]) -> Opt
     let field_id = egui::Id::new(("theme-hex-field", key));
     let mut draft = ui
         .data(|data| data.get_temp::<ThemeHexDraft>(data_id))
-        .unwrap_or_else(|| ThemeHexDraft {
-            text: crate::theme::Theme::hex_rgba(rgba),
-            rgba,
-        });
+        .unwrap_or_else(|| ThemeHexDraft { text: crate::theme::Theme::hex_rgba(rgba), rgba });
 
     let response = ui
         .add_sized(
@@ -226,14 +203,9 @@ pub(super) fn theme_palette_row(
         crate::theme::ThemeValue::Number { value, .. } => format!("{value:.1}"),
     };
 
-    let row_rect = egui::Rect::from_min_size(
-        ui.cursor().min,
-        egui::vec2(row_width, 20.0),
-    );
+    let row_rect = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(row_width, 20.0));
     let pointer_over_foreground = ui.ctx().pointer_latest_pos().is_some_and(|pointer| {
-        ui.ctx()
-            .layer_id_at(pointer)
-            .is_some_and(|layer| layer.order >= egui::Order::Middle)
+        ui.ctx().layer_id_at(pointer).is_some_and(|layer| layer.order >= egui::Order::Middle)
     });
     if !pointer_over_foreground && ui.rect_contains_pointer(row_rect) {
         ui.painter().rect_filled(
@@ -243,110 +215,100 @@ pub(super) fn theme_palette_row(
         );
     }
 
-    ui.scope_builder(
-        egui::UiBuilder::new().max_rect(row_rect),
-        |ui| {
-            ui.horizontal(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(DOT_WIDTH, 20.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_width(DOT_WIDTH);
-                if let crate::theme::ThemeValue::Color(rgba) = entry.value {
-                    let dot = theme_color_dot(ui, rgba).on_hover_text(format!(
-                        "theme.json: {}\n{}\nClick to edit",
-                        entry.key, entry.description
-                    ));
-                    let popup_id = egui::Id::new(("theme-color-picker", entry.key));
-                    let rect_id = egui::Id::new(("theme-color-picker-rect", entry.key));
-                    let popup_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
-                    let previous_rect = ui.data(|data| data.get_temp::<egui::Rect>(rect_id));
-                    if popup_open {
-                        if previous_rect.is_some_and(|rect| {
-                            pointer_interacted_outside(ui, rect)
-                        }) {
-                            egui::Popup::close_id(ui.ctx(), popup_id);
-                        }
-                        picker_pointer_blocker(ui, entry.key);
-                    }
-                    egui::Popup::menu(&dot)
-                        .id(popup_id)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .style(crate::theme::menu_style)
-                        .show(|ui| {
-                            let rect = ui.max_rect();
-                            ui.data_mut(|data| data.insert_temp(rect_id, rect));
-                            if let Some(color) = nodecraft_color_picker::color_picker(
-                                ui,
-                                egui::Id::new(("theme-color-wheel", entry.key)),
-                                rgba,
-                                nodecraft_color_picker::ColorPickerStyle {
-                                    icon: crate::theme::get().icon,
-                                    border: crate::theme::get().border_strong,
-                                },
-                            ) {
-                                let _ = theme.set_color(entry.key, color);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(row_rect), |ui| {
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(DOT_WIDTH, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(DOT_WIDTH);
+                    if let crate::theme::ThemeValue::Color(rgba) = entry.value {
+                        let dot = theme_color_dot(ui, rgba).on_hover_text(format!(
+                            "theme.json: {}\n{}\nClick to edit",
+                            entry.key, entry.description
+                        ));
+                        let popup_id = egui::Id::new(("theme-color-picker", entry.key));
+                        let rect_id = egui::Id::new(("theme-color-picker-rect", entry.key));
+                        let popup_open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+                        let previous_rect = ui.data(|data| data.get_temp::<egui::Rect>(rect_id));
+                        if popup_open {
+                            if previous_rect
+                                .is_some_and(|rect| pointer_interacted_outside(ui, rect))
+                            {
+                                egui::Popup::close_id(ui.ctx(), popup_id);
                             }
-                        });
-                } else {
-                    ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-                }
-            },
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(label_width, 20.0),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                ui.set_width(label_width);
-                ui.add(egui::Label::new(entry.label).truncate())
-                    .on_hover_text(format!(
-                        "theme.json: {}\n{}",
-                        entry.key, entry.description
-                    ));
-            },
-        );
-        ui.allocate_ui_with_layout(
-            egui::vec2(VALUE_WIDTH, 20.0),
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| {
-                ui.set_width(VALUE_WIDTH);
-                if let crate::theme::ThemeValue::Number {
-                    value: number,
-                    min,
-                    max,
-                    step,
-                } = entry.value
-                {
-                    let mut number = number;
-                    let response = if entry.key == "backdrop_blur" {
-                        ui.add(
-                            egui::Slider::new(&mut number, min..=max)
-                                .step_by(f64::from(step))
-                                .show_value(true),
-                        )
+                            picker_pointer_blocker(ui, entry.key);
+                        }
+                        egui::Popup::menu(&dot)
+                            .id(popup_id)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .style(crate::theme::menu_style)
+                            .show(|ui| {
+                                let rect = ui.max_rect();
+                                ui.data_mut(|data| data.insert_temp(rect_id, rect));
+                                if let Some(color) = nodecraft_color_picker::color_picker(
+                                    ui,
+                                    egui::Id::new(("theme-color-wheel", entry.key)),
+                                    rgba,
+                                    nodecraft_color_picker::ColorPickerStyle {
+                                        icon: crate::theme::get().icon,
+                                        border: crate::theme::get().border_strong,
+                                    },
+                                ) {
+                                    let _ = theme.set_color(entry.key, color);
+                                }
+                            });
                     } else {
-                        ui.add(
-                            egui::DragValue::new(&mut number)
-                                .range(min..=max)
-                                .speed(step)
-                                .max_decimals(1),
-                        )
-                    };
-                    if response.changed() {
-                        let _ = theme.set_number(entry.key, number);
+                        ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
                     }
-                } else if let crate::theme::ThemeValue::Color(rgba) = entry.value {
-                    if let Some(color) = theme_hex_edit(ui, entry.key, rgba) {
-                        let _ = theme.set_color(entry.key, color);
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(label_width, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_width(label_width);
+                    ui.add(egui::Label::new(entry.label).truncate())
+                        .on_hover_text(format!("theme.json: {}\n{}", entry.key, entry.description));
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(VALUE_WIDTH, 20.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    ui.set_width(VALUE_WIDTH);
+                    if let crate::theme::ThemeValue::Number { value: number, min, max, step } =
+                        entry.value
+                    {
+                        let mut number = number;
+                        let response = if entry.key == "backdrop_blur" {
+                            ui.add(
+                                egui::Slider::new(&mut number, min..=max)
+                                    .step_by(f64::from(step))
+                                    .show_value(true),
+                            )
+                        } else {
+                            ui.add(
+                                egui::DragValue::new(&mut number)
+                                    .range(min..=max)
+                                    .speed(step)
+                                    .max_decimals(1),
+                            )
+                        };
+                        if response.changed() {
+                            let _ = theme.set_number(entry.key, number);
+                        }
+                    } else if let crate::theme::ThemeValue::Color(rgba) = entry.value {
+                        if let Some(color) = theme_hex_edit(ui, entry.key, rgba) {
+                            let _ = theme.set_color(entry.key, color);
+                        }
+                    } else {
+                        ui.monospace(value);
                     }
-                } else {
-                    ui.monospace(value);
-                }
-            },
-        );
-            });
-        },
-    );
+                },
+            );
+        });
+    });
 }
 
 /// Any pointer press or scroll outside the picker dismisses it.
@@ -354,8 +316,7 @@ fn pointer_interacted_outside(ui: &egui::Ui, popup: egui::Rect) -> bool {
     ui.ctx().input(|input| {
         let pointer = input.pointer.interact_pos();
         pointer.is_some_and(|pointer| !popup.contains(pointer))
-            && (input.pointer.any_pressed()
-                || input.smooth_scroll_delta != egui::Vec2::ZERO)
+            && (input.pointer.any_pressed() || input.smooth_scroll_delta != egui::Vec2::ZERO)
     })
 }
 

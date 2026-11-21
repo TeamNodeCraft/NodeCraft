@@ -52,17 +52,11 @@ impl BuiltinNode for Exporter {
             return Ok(None);
         }
         let input = ctx.export_input(node);
-        let directory = node
-            .values
-            .get("directory")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let root =
-            std::env::var("NODECRAFT_PROJECT_ROOT").unwrap_or_else(|_| ".".into());
-        let project_folder = ctx
-            .project_directory()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from);
+        let directory =
+            node.values.get("directory").and_then(serde_json::Value::as_str).unwrap_or("");
+        let root = std::env::var("NODECRAFT_PROJECT_ROOT").unwrap_or_else(|_| ".".into());
+        let project_folder =
+            ctx.project_directory().filter(|value| !value.trim().is_empty()).map(PathBuf::from);
         let mut output = if directory.is_empty() {
             project_folder.unwrap_or_else(|| PathBuf::from(root.clone()).join("output"))
         } else {
@@ -109,25 +103,16 @@ impl BuiltinNode for Exporter {
 
 /// Every Stepio failure names the file it was operating on.
 fn stepio_error(path: &str, error: String) -> String {
-    if path.is_empty() || error.starts_with(path) {
-        error
-    } else {
-        format!("{path}: {error}")
-    }
+    if path.is_empty() || error.starts_with(path) { error } else { format!("{path}: {error}") }
 }
 
 /// The exporter's presentation options. One resolver, matching the display
 /// writer and the old engine test options.
 fn step_options(values: &serde_json::Value) -> Result<nodecraft_step::StepExportOptions, String> {
-    let unit = values
-        .get("unit")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("mm")
-        .to_ascii_lowercase();
+    let unit =
+        values.get("unit").and_then(serde_json::Value::as_str).unwrap_or("mm").to_ascii_lowercase();
     if !matches!(unit.as_str(), "" | "mm" | "millimetre" | "millimeter") {
-        return Err(format!(
-            "STEP export writes millimetres; {unit:?} output is not supported"
-        ));
+        return Err(format!("STEP export writes millimetres; {unit:?} output is not supported"));
     }
     let color = values
         .get("color")
@@ -157,21 +142,14 @@ fn step_options(values: &serde_json::Value) -> Result<nodecraft_step::StepExport
             .and_then(serde_json::Value::as_str)
             .unwrap_or("ap242")
             .to_string(),
-        author: values
-            .get("author")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        author: values.get("author").and_then(serde_json::Value::as_str).unwrap_or("").to_string(),
         organization: values
             .get("organization")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("NodeCraft")
             .to_string(),
         color,
-        layer: values
-            .get("layer")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string),
+        layer: values.get("layer").and_then(serde_json::Value::as_str).map(str::to_string),
     })
 }
 
@@ -210,23 +188,14 @@ fn export_part_bodies(
     if solids.is_empty() {
         return Err("Part has no solids".into());
     }
-    let stem = Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .unwrap_or("model")
-        .to_string();
+    let stem =
+        Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or("model").to_string();
     let mut bodies = Vec::with_capacity(solids.len());
     for (index, solid) in solids.iter().enumerate() {
         let instance = part.bodies.get(index);
-        let name = instance
-            .and_then(|body| body.name.clone())
-            .unwrap_or_else(|| {
-                if solids.len() == 1 {
-                    stem.clone()
-                } else {
-                    format!("{stem}_{}", index + 1)
-                }
-            });
+        let name = instance.and_then(|body| body.name.clone()).unwrap_or_else(|| {
+            if solids.len() == 1 { stem.clone() } else { format!("{stem}_{}", index + 1) }
+        });
         bodies.push(nodecraft_step::ExportBody {
             name,
             color: instance.and_then(|body| body.color),
@@ -254,10 +223,7 @@ fn export_faceted(
     let mut cache = nodecraft_display::PlanCache::new(8);
     let mesh = nodecraft_display::export_mesh(
         &exact,
-        nodecraft_display::ExportOptions {
-            tolerance: 0.05,
-            require_closed: false,
-        },
+        nodecraft_display::ExportOptions { tolerance: 0.05, require_closed: false },
         &mut cache,
     )?;
     nodecraft_step::write_step_faceted(path, &mesh.mesh.vertices, &mesh.mesh.faces, options)
@@ -271,10 +237,8 @@ fn export_combine_assembly(
 ) -> Result<(), String> {
     let mut bodies = Vec::new();
     for member in &input.combine_members {
-        let chain = member
-            .chain
-            .as_ref()
-            .ok_or("assembly export requires STEP import or Extrude parts")?;
+        let chain =
+            member.chain.as_ref().ok_or("assembly export requires STEP import or Extrude parts")?;
         let brep = member.brep.as_ref().map_err(Clone::clone)?;
         let record = nodecraft_step::record_of_brep(brep)?;
         let moved = chain.offset != [0.0; 3] || chain.rotation != [0.0; 3];
@@ -303,11 +267,7 @@ fn export_imported_step(
     else {
         return Err("no STEP import in chain".into());
     };
-    let source = importer
-        .values
-        .get("path")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
+    let source = importer.values.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
     if source.is_empty() {
         return Err("STEP import has no path".into());
     }
@@ -317,9 +277,9 @@ fn export_imported_step(
     for mut body in import.bodies {
         let moved = *offset != [0.0; 3] || *rotation != [0.0; 3];
         if moved {
-            let placement = body
-                .placement
-                .map(|placement| crate::compose_placement(crate::placement_of(*offset, *rotation), placement));
+            let placement = body.placement.map(|placement| {
+                crate::compose_placement(crate::placement_of(*offset, *rotation), placement)
+            });
             body.placement = placement.or_else(|| Some(crate::placement_of(*offset, *rotation)));
         }
         bodies.push(nodecraft_step::ExportBody {
@@ -384,26 +344,17 @@ mod tests {
         let path_text = path.to_str().expect("utf-8 path");
         let input = exact_export_input(Ok(vec![Brep::default()]));
 
-        let error = export_exact_or_part(
-            &input,
-            path_text,
-            &nodecraft_step::StepExportOptions::default(),
-        )
-        .expect_err("an exact writer failure must not fall back to faceted output");
+        let error =
+            export_exact_or_part(&input, path_text, &nodecraft_step::StepExportOptions::default())
+                .expect_err("an exact writer failure must not fall back to faceted output");
         let error = stepio_error(path_text, error);
         assert!(
             error.to_ascii_lowercase().contains("step")
                 || error.to_ascii_lowercase().contains("geometry"),
             "error should name the exact writer failure: {error}"
         );
-        assert!(
-            error.starts_with(path_text),
-            "error should carry the file path: {error}"
-        );
-        assert!(
-            !path.exists(),
-            "exact-write failure wrote a faceted file: {error}"
-        );
+        assert!(error.starts_with(path_text), "error should carry the file path: {error}");
+        assert!(!path.exists(), "exact-write failure wrote a faceted file: {error}");
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -419,20 +370,14 @@ mod tests {
         let path_text = path.to_str().expect("utf-8 path");
         let input = exact_export_input(Ok(Vec::new()));
 
-        let error = export_exact_or_part(
-            &input,
-            path_text,
-            &nodecraft_step::StepExportOptions::default(),
-        )
-        .expect_err("no exact bodies must not fall back to faceted output");
+        let error =
+            export_exact_or_part(&input, path_text, &nodecraft_step::StepExportOptions::default())
+                .expect_err("no exact bodies must not fall back to faceted output");
         assert!(
             error.contains("no exact B-rep bodies"),
             "error should explain that no exact bodies exist: {error}"
         );
-        assert!(
-            !path.exists(),
-            "missing exact breps wrote a faceted file: {error}"
-        );
+        assert!(!path.exists(), "missing exact breps wrote a faceted file: {error}");
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -481,7 +426,8 @@ mod tests {
     #[test]
     fn validation_does_not_write_an_export_file() {
         assert!(crate::nodes::handles("exporter"), "exporter registered");
-        let directory = std::env::temp_dir().join(format!("sn-export-validation-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-export-validation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let output = crate::evaluate_exact(
             export_request(&directory, false, &["e"]),
@@ -497,7 +443,8 @@ mod tests {
     /// successful export: no file and the exporter carries the input's error.
     #[test]
     fn an_errored_input_does_not_write() {
-        let directory = std::env::temp_dir().join(format!("sn-export-errored-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-export-errored-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
@@ -526,7 +473,8 @@ mod tests {
     /// recorded on the effect node. The valid `shape` input alone would write.
     #[test]
     fn an_errored_input_on_another_port_does_not_write() {
-        let directory = std::env::temp_dir().join(format!("sn-export-other-port-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-export-other-port-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let request: Request = serde_json::from_value(serde_json::json!({
             "requestId": 1,
@@ -563,7 +511,8 @@ mod tests {
     #[test]
     fn a_cancelled_revision_writes_nothing() {
         assert!(crate::nodes::handles("exporter"), "exporter registered");
-        let directory = std::env::temp_dir().join(format!("sn-export-cancelled-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-export-cancelled-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let token = crate::kernel_pool::RevisionToken::new();
         token.cancel();

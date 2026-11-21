@@ -104,7 +104,15 @@ pub fn evaluate_with_linked_progress(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_with_linked_progress_comparison(document, cache, selected, linked_documents, progress, None, false)
+    evaluate_with_linked_progress_comparison(
+        document,
+        cache,
+        selected,
+        linked_documents,
+        progress,
+        None,
+        false,
+    )
 }
 
 pub fn evaluate_with_linked_progress_comparison(
@@ -147,14 +155,24 @@ pub fn evaluate_with_linked_progress_comparison(
             );
         }
     };
-    evaluate_flat_with_progress_comparison(&expanded, target, cache, progress, comparison, run_exporters)
+    evaluate_flat_with_progress_comparison(
+        &expanded,
+        target,
+        cache,
+        progress,
+        comparison,
+        run_exporters,
+    )
 }
 
 /// Evaluate an already-flattened graph. Linked-document expansion is cached by
 /// [`nodecraft_session::flat::FlatGraphCache`], so this function must not expand
 /// again.
 /// Immediate a/b sources when `target` is a Boolean with both operands.
-pub(crate) fn pre_merge_sources(document: &GraphDocument, target: &str) -> Option<(String, String)> {
+pub(crate) fn pre_merge_sources(
+    document: &GraphDocument,
+    target: &str,
+) -> Option<(String, String)> {
     let node = document.nodes.iter().find(|node| node.id == target)?;
     if !matches!(node.node_type.as_str(), "boolean" | "fuse") {
         return None;
@@ -378,9 +396,7 @@ pub(crate) fn document_hashes(
     document: &GraphDocument,
     imports: &nodecraft_engine::ImportContext,
 ) -> std::collections::BTreeMap<String, nodecraft_session::ContentHash> {
-    document
-        .node_hashes_with_sources(&imports.source_hashes)
-        .unwrap_or_default()
+    document.node_hashes_with_sources(&imports.source_hashes).unwrap_or_default()
 }
 
 /// Materialise the engine request from an already-hashed document.
@@ -483,7 +499,11 @@ pub(crate) fn build_exact_request(
                 suppressed: node.suppressed,
                 cache: Some(CacheState {
                     key: hashes.get(&node.id).map(|hash| {
-                        format!("{}@{}", hash.to_hex(), nodecraft_kernel_profile::profile_generation())
+                        format!(
+                            "{}@{}",
+                            hash.to_hex(),
+                            nodecraft_kernel_profile::profile_generation()
+                        )
                     }),
                     state: Some(if dirty_nodes.contains(&node.id) {
                         "dirty".into()
@@ -509,7 +529,8 @@ pub(crate) fn build_exact_request(
         run_exporters,
         mesh_tolerance: None,
         preview_detail,
-        comparison_targets: comparison.map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
+        comparison_targets: comparison
+            .map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
         bypass_cache,
     }
 }
@@ -560,7 +581,8 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
         bypass_cache,
         progress.is_some(),
     );
-    let output = nodecraft_engine::evaluate_exact_with_imports(request, cache, progress, imports.clone());
+    let output =
+        nodecraft_engine::evaluate_exact_with_imports(request, cache, progress, imports.clone());
     let cache = output.cache;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let cache_stats = output.response.cache_stats;
@@ -582,49 +604,70 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
         None
     } else {
         let started = Instant::now();
-        let result = exact_parts.get(&target).and_then(|part| {
-            nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
-        });
+        let result = exact_parts
+            .get(&target)
+            .and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok());
         display_ms = started.elapsed().as_secs_f64() * 1000.0;
         result.map(|mut display| {
-            for plan in &mut display.plans { plan.target.clone_from(&target); }
+            for plan in &mut display.plans {
+                plan.target.clone_from(&target);
+            }
             plans = display.plans;
             feature_plans = display.feature_plans;
-            tessellation_diagnostics.extend(display.stats.iter().flat_map(|stats| stats.diagnostics.iter().cloned()));
+            tessellation_diagnostics
+                .extend(display.stats.iter().flat_map(|stats| stats.diagnostics.iter().cloned()));
             display.mesh
         })
     };
-    let edit_preview_mesh = if exact_only { None } else {
+    let edit_preview_mesh = if exact_only {
+        None
+    } else {
         edit_preview.and_then(|id| exact_parts.get(id)).and_then(|part| {
-            nodecraft_display::mesh_part(part, quality, &mut display_cache).ok().map(|display| display.mesh)
+            nodecraft_display::mesh_part(part, quality, &mut display_cache)
+                .ok()
+                .map(|display| display.mesh)
         })
     };
     let edit_preview_target = edit_preview.map(str::to_owned);
-    let (ghost_mesh, ghost_plans) = if exact_only { (None, Vec::new()) } else {
+    let (ghost_mesh, ghost_plans) = if exact_only {
+        (None, Vec::new())
+    } else {
         ghost_input
             .and_then(|id| exact_parts.get(id))
             .and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())
             .map(|display| (Some(display.mesh), display.plans))
             .unwrap_or((None, Vec::new()))
     };
-    let comparison = if exact_only { None } else {
+    let comparison = if exact_only {
+        None
+    } else {
         comparison.and_then(|(before, after)| {
-            let before = exact_parts.get(before).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
-            let after = exact_parts.get(after).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            let before = exact_parts
+                .get(before)
+                .and_then(|part| {
+                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
+                })?
+                .mesh;
+            let after = exact_parts
+                .get(after)
+                .and_then(|part| {
+                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
+                })?
+                .mesh;
             Some((before, after))
         })
     };
     let mut difference_plans = None;
-    let difference = if exact_only { None } else {
+    let difference = if exact_only {
+        None
+    } else {
         exact_comparison.as_ref().and_then(|comparison| {
-            let added = comparison
-                .added
-                .as_ref()
-                .and_then(|brep| nodecraft_display::brep_display(brep, quality, &mut display_cache).ok());
-            let removed = comparison
-                .removed
-                .as_ref()
-                .and_then(|brep| nodecraft_display::brep_display(brep, quality, &mut display_cache).ok());
+            let added = comparison.added.as_ref().and_then(|brep| {
+                nodecraft_display::brep_display(brep, quality, &mut display_cache).ok()
+            });
+            let removed = comparison.removed.as_ref().and_then(|brep| {
+                nodecraft_display::brep_display(brep, quality, &mut display_cache).ok()
+            });
             difference_plans = Some((
                 added.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
                 removed.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
@@ -635,11 +678,24 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             ))
         })
     };
-    let difference_error = exact_comparison.as_ref().and_then(|comparison| comparison.error.clone());
-    let pre_merge = if exact_only { None } else {
+    let difference_error =
+        exact_comparison.as_ref().and_then(|comparison| comparison.error.clone());
+    let pre_merge = if exact_only {
+        None
+    } else {
         pre_merge.and_then(|(a, b)| {
-            let a_mesh = exact_parts.get(&a).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
-            let b_mesh = exact_parts.get(&b).and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())?.mesh;
+            let a_mesh = exact_parts
+                .get(&a)
+                .and_then(|part| {
+                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
+                })?
+                .mesh;
+            let b_mesh = exact_parts
+                .get(&b)
+                .and_then(|part| {
+                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
+                })?
+                .mesh;
             Some(PreMerge { a: (a, a_mesh), b: (b, b_mesh) })
         })
     };
@@ -751,18 +807,12 @@ mod tests {
         );
         let evaluation = evaluation.expect("evaluation");
         assert_eq!(evaluation.target, "t");
-        let part = evaluation
-            .exact_parts
-            .get("t")
-            .expect("suppressed target has a Part under its own id");
+        let part =
+            evaluation.exact_parts.get("t").expect("suppressed target has a Part under its own id");
         assert!(!part.bodies.is_empty());
         assert_eq!(
             part.bodies.iter().map(|body| body.key).collect::<Vec<_>>(),
-            evaluation.exact_parts["a"]
-                .bodies
-                .iter()
-                .map(|body| body.key)
-                .collect::<Vec<_>>(),
+            evaluation.exact_parts["a"].bodies.iter().map(|body| body.key).collect::<Vec<_>>(),
         );
     }
 
@@ -848,9 +898,8 @@ mod tests {
         let dirty: HashSet<String> = change.dirty_nodes.iter().cloned().collect();
         assert_eq!(dirty, HashSet::from(["a".to_owned(), "b".to_owned()]));
 
-        let hashes = session
-            .hashes_for_sources(session.source_hashes())
-            .expect("session revision hashes");
+        let hashes =
+            session.hashes_for_sources(session.source_hashes()).expect("session revision hashes");
         let request = build_exact_request(
             session.document(),
             "b",
@@ -875,11 +924,7 @@ mod tests {
         assert_eq!(cache_state(&request, "b"), "dirty");
         assert_eq!(
             cache_key(&request, "a"),
-            format!(
-                "{}@{}",
-                hashes["a"].to_hex(),
-                nodecraft_kernel_profile::profile_generation()
-            )
+            format!("{}@{}", hashes["a"].to_hex(), nodecraft_kernel_profile::profile_generation())
         );
     }
 
@@ -888,15 +933,12 @@ mod tests {
     #[test]
     fn history_and_source_changes_keep_request_keys_and_dirty_sets() {
         let mut document = translate_document();
-        document.nodes.insert(
-            0,
-            {
-                let mut importer = node("imp");
-                importer.node_type = "stepimporter".into();
-                importer.values = serde_json::json!({"path": "input.step"});
-                importer
-            },
-        );
+        document.nodes.insert(0, {
+            let mut importer = node("imp");
+            importer.node_type = "stepimporter".into();
+            importer.values = serde_json::json!({"path": "input.step"});
+            importer
+        });
         document.connections.insert(
             0,
             nodecraft_session::GraphConnection {
@@ -909,10 +951,8 @@ mod tests {
         let mut session = nodecraft_session::Session::new(document);
         let initial = session.node_hashes().expect("initial hashes");
 
-        let sources = std::collections::BTreeMap::from([(
-            "imp".to_owned(),
-            "source-v1".to_owned(),
-        )]);
+        let sources =
+            std::collections::BTreeMap::from([("imp".to_owned(), "source-v1".to_owned())]);
         session.set_source_hashes(sources.clone());
         nodecraft_session::reset_thread_node_hash_pass_count();
         let change = session

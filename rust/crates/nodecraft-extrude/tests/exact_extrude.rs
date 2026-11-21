@@ -1,26 +1,21 @@
 //! Integration tests for the exact `create_taper_extrude` route.
 
+use nodecraft_extrude::{
+    ExtrudeError, brep_is_connected_solid, extrude_planar_face, extrude_planar_face_exact,
+    extrude_profile_curves, face_boundary, face_plane,
+};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::kernel::Kernel;
-use solidcore::mass::integrator::properties::{
-    PropertyAttributes, brep_area, brep_volume,
-};
+use solidcore::mass::integrator::properties::{PropertyAttributes, brep_area, brep_volume};
 use solidcore::math::{Point3, Vec3};
 use solidcore::primitive::api_primitives as api;
 use solidcore::query::api_queries::{brep_is_manifold_solid, face_get_boundary_loops};
 use solidcore::sweep::api_brep::create_taper_extrude;
 use solidcore::{Brep, FaceId};
-use nodecraft_extrude::{
-    ExtrudeError, brep_is_connected_solid, extrude_planar_face, extrude_planar_face_exact,
-    extrude_profile_curves, face_boundary, face_plane,
-};
 
 fn measure(k: &Kernel, brep: &Brep) -> (f64, f64) {
     let store = AttributeStore::default();
-    let attributes = PropertyAttributes {
-        store: &store,
-        key_of: &|_| ObjectKey(0),
-    };
+    let attributes = PropertyAttributes { store: &store, key_of: &|_| ObjectKey(0) };
     let mut copy = brep.clone_standing_for_self().expect("standing copy");
     let area = brep_area(k, &mut copy, 1e-4).expect("area");
     let mut copy = brep.clone_standing_for_self().expect("standing copy");
@@ -72,11 +67,7 @@ fn bounds(k: &Kernel, brep: &Brep) -> ([f64; 3], [f64; 3]) {
 /// exactly two faces.
 fn assert_closed_solid(brep: &Brep, faces: usize, edges: usize, vertices: usize) {
     assert_eq!(brep.face_list().len(), faces, "listed faces");
-    assert_eq!(
-        brep.faces().len(),
-        faces,
-        "no unlisted face records may remain"
-    );
+    assert_eq!(brep.faces().len(), faces, "no unlisted face records may remain");
     assert_eq!(brep.edge_list().len(), edges, "edges");
     assert_eq!(brep.vertex_list().len(), vertices, "vertices");
     assert!(brep_is_manifold_solid(brep).expect("manifold query"));
@@ -162,8 +153,8 @@ fn exact_extrude_matches_the_box_primitive_measures() {
 
     // Extruding the top face by the box height reproduces the box exactly.
     let extruded = extrude_planar_face_exact(&mut k, &source, top, 20.0).expect("extrude");
-    let primitive = api::create_box(&mut k, Point3::new(0.0, 0.0, 20.0), 10.0, 4.0, 20.0)
-        .expect("box");
+    let primitive =
+        api::create_box(&mut k, Point3::new(0.0, 0.0, 20.0), 10.0, 4.0, 20.0).expect("box");
     assert_closed_solid(&extruded, 6, 12, 8);
     let (extruded_area, extruded_volume) = measure(&k, &extruded);
     let (primitive_area, primitive_volume) = measure(&k, &primitive);
@@ -175,8 +166,8 @@ fn exact_extrude_matches_the_box_primitive_measures() {
 #[test]
 fn exact_extrude_triangle_profile_is_closed_and_exact() {
     let mut k = Kernel::default();
-    let pyramid = api::create_pyramid(&mut k, Point3::new(0.0, 0.0, 0.0), 8.0, 6.0)
-        .expect("pyramid");
+    let pyramid =
+        api::create_pyramid(&mut k, Point3::new(0.0, 0.0, 0.0), 8.0, 6.0).expect("pyramid");
     let mut triangle = None;
     for (face, _) in pyramid.faces().iter() {
         if let Ok(loops) = face_get_boundary_loops(&pyramid, face) {
@@ -187,13 +178,10 @@ fn exact_extrude_triangle_profile_is_closed_and_exact() {
     }
     let triangle = triangle.expect("triangular side face");
 
-    let profile = nodecraft_extrude::planar_face_profile(&k, &pyramid, triangle)
-        .expect("triangle profile");
+    let profile =
+        nodecraft_extrude::planar_face_profile(&k, &pyramid, triangle).expect("triangle profile");
     let points = &profile.loops[0].points;
-    let triangle_area = (points[1] - points[0])
-        .cross(points[2] - points[0])
-        .length()
-        * 0.5;
+    let triangle_area = (points[1] - points[0]).cross(points[2] - points[0]).length() * 0.5;
     let perimeter = (points[1] - points[0]).length()
         + (points[2] - points[1]).length()
         + (points[0] - points[2]).length();
@@ -228,16 +216,16 @@ fn exact_extrude_curve_route_matches_the_face_route() {
 #[test]
 fn periodic_profile_extrudes_successfully() {
     let mut k = Kernel::default();
-    let cylinder = api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0)
-        .expect("cylinder");
+    let cylinder =
+        api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0).expect("cylinder");
     let cap = face_with_normal(&k, &cylinder, Vec3::new(0.0, 0.0, 1.0));
     let loops = face_boundary(&k, &cylinder, cap).expect("cap boundary");
     assert_eq!(loops[0].segments.len(), 1, "a full circle is one closed curve");
     let curves = loops[0].oriented_curves(&k).expect("cap curve");
     let refs: Vec<Option<&solidcore::curve::curve::Curve>> = curves.iter().map(Some).collect();
 
-    let result = create_taper_extrude(&mut k, &refs, 3.0, 0.0, 3, false)
-        .expect("periodic-profile extrude");
+    let result =
+        create_taper_extrude(&mut k, &refs, 3.0, 0.0, 3, false).expect("periodic-profile extrude");
     assert!(!result.face_list().is_empty(), "no faces");
     assert!(
         solidcore::query::api_queries::brep_is_manifold_solid(&result).expect("manifold"),
@@ -250,8 +238,8 @@ fn periodic_profile_extrudes_successfully() {
 #[test]
 fn exact_extrude_circular_profile_uses_the_split_fallback() {
     let mut k = Kernel::default();
-    let cylinder = api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0)
-        .expect("cylinder");
+    let cylinder =
+        api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0).expect("cylinder");
     let cap = face_with_normal(&k, &cylinder, Vec3::new(0.0, 0.0, 1.0));
 
     // The wrapper splits the single closed circle into two half-arcs and succeeds.
@@ -260,20 +248,15 @@ fn exact_extrude_circular_profile_uses_the_split_fallback() {
     assert!(brep_is_manifold_solid(&solid).expect("manifold"));
 
     let store = AttributeStore::default();
-    let attributes = PropertyAttributes {
-        store: &store,
-        key_of: &|_| ObjectKey(0),
-    };
-    let mut volume_copy = solid.clone_standing_for_self().expect("standing copy"); let volume = brep_volume(&k, &mut volume_copy, 1e-6, &attributes).expect("volume");
+    let attributes = PropertyAttributes { store: &store, key_of: &|_| ObjectKey(0) };
+    let mut volume_copy = solid.clone_standing_for_self().expect("standing copy");
+    let volume = brep_volume(&k, &mut volume_copy, 1e-6, &attributes).expect("volume");
     assert_close(volume, std::f64::consts::PI * 4.0 * 3.0, 1.0e-4);
     // `brep_area` clamps its integration accuracy to 1e-4; the seam split keeps the
     // area within that accuracy of the analytic cylinder.
-    let mut area_copy = solid.clone_standing_for_self().expect("standing copy"); let area = brep_area(&k, &mut area_copy, 1e-4).expect("area");
-    assert_close(
-        area,
-        std::f64::consts::TAU * 4.0 + std::f64::consts::TAU * 2.0 * 3.0,
-        1.0e-2,
-    );
+    let mut area_copy = solid.clone_standing_for_self().expect("standing copy");
+    let area = brep_area(&k, &mut area_copy, 1e-4).expect("area");
+    assert_close(area, std::f64::consts::TAU * 4.0 + std::f64::consts::TAU * 2.0 * 3.0, 1.0e-2);
 }
 
 #[test]
@@ -287,19 +270,13 @@ fn exact_extrude_rejects_invalid_input() {
             .expect_err("reject invalid distance");
         assert!(matches!(error, ExtrudeError::InvalidDistance(_)), "got {error}");
     }
-    assert!(matches!(
-        extrude_profile_curves(&mut k, &[], 1.0),
-        Err(ExtrudeError::EmptyProfile)
-    ));
+    assert!(matches!(extrude_profile_curves(&mut k, &[], 1.0), Err(ExtrudeError::EmptyProfile)));
 
-    let cylinder = api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0)
-        .expect("cylinder");
+    let cylinder =
+        api::create_cylinder(&mut k, Point3::new(0.0, 0.0, 0.0), 2.0, 5.0).expect("cylinder");
     let mut lateral = None;
     for (face, _) in cylinder.faces().iter() {
-        if matches!(
-            face_plane(&k, &cylinder, face),
-            Err(ExtrudeError::NotPlanar { .. })
-        ) {
+        if matches!(face_plane(&k, &cylinder, face), Err(ExtrudeError::NotPlanar { .. })) {
             lateral = Some(face);
         }
     }

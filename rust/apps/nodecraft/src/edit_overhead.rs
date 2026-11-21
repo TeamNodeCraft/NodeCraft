@@ -159,15 +159,7 @@ fn fixture(shape: Shape, n: usize) -> Fixture {
     document.root.nodes = nodes;
     document.root.connections = connections;
     document.root.interface.outputs = vec![target.clone()];
-    Fixture {
-        shape,
-        n,
-        edges: n - 1,
-        document,
-        target,
-        edit_node: String::new(),
-        edit_field: "x",
-    }
+    Fixture { shape, n, edges: n - 1, document, target, edit_node: String::new(), edit_field: "x" }
 }
 
 fn edit_target(fixture: &Fixture, location: Location) -> (String, &'static str) {
@@ -225,11 +217,7 @@ fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
-        (sorted[middle - 1] + sorted[middle]) / 2.0
-    } else {
-        sorted[middle]
-    }
+    if sorted.len() % 2 == 0 { (sorted[middle - 1] + sorted[middle]) / 2.0 } else { sorted[middle] }
 }
 
 /// Nearest-rank p90 (the sample at ceil(0.9 * n), 1-based).
@@ -256,10 +244,7 @@ fn value_heap(value: &Value) -> usize {
         }
         Value::Object(map) => {
             map.len() * (std::mem::size_of::<String>() + std::mem::size_of::<Value>() + 16)
-                + map
-                    .iter()
-                    .map(|(key, value)| key.capacity() + value_heap(value))
-                    .sum::<usize>()
+                + map.iter().map(|(key, value)| key.capacity() + value_heap(value)).sum::<usize>()
         }
     }
 }
@@ -269,8 +254,7 @@ fn node_heap(node: &GraphNode) -> usize {
         + node.id.capacity()
         + node.node_type.capacity()
         + value_heap(&node.values)
-        + node.expressions.len()
-            * (std::mem::size_of::<String>() * 2 + 16)
+        + node.expressions.len() * (std::mem::size_of::<String>() * 2 + 16)
         + node
             .expressions
             .iter()
@@ -301,10 +285,14 @@ fn document_heap(document: &GraphDocument) -> usize {
             .connections
             .iter()
             .map(|link| {
-                link.from.capacity() + link.to.capacity() + link.input.capacity() + link.out.capacity()
+                link.from.capacity()
+                    + link.to.capacity()
+                    + link.input.capacity()
+                    + link.out.capacity()
             })
             .sum::<usize>()
-        + document.definitions.capacity() * std::mem::size_of::<nodecraft_session::GraphDefinition>()
+        + document.definitions.capacity()
+            * std::mem::size_of::<nodecraft_session::GraphDefinition>()
         + document.ingested_sources.capacity()
             * std::mem::size_of::<nodecraft_protocol::IngestRecord>()
 }
@@ -329,9 +317,8 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
     let imports = ImportContext::new(None, Vec::new());
 
     // Pre-edit evaluation: the cache a real edit starts from.
-    let pre_hashes = session
-        .hashes_with_sources(&imports.source_hashes)
-        .expect("pre-edit session hashes");
+    let pre_hashes =
+        session.hashes_with_sources(&imports.source_hashes).expect("pre-edit session hashes");
     let pre_request = engine_bridge::build_exact_request(
         session.document(),
         &target,
@@ -353,11 +340,7 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
         None,
         imports.clone(),
     );
-    assert!(
-        pre.response.node_errors.is_empty(),
-        "pre-edit errors: {:?}",
-        pre.response.node_errors
-    );
+    assert!(pre.response.node_errors.is_empty(), "pre-edit errors: {:?}", pre.response.node_errors);
     let mut cache = pre.cache;
 
     // 1. session: one small value edit through the real command path.
@@ -369,15 +352,10 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
         } else {
             json!(1.0 + (index as f64 + 1.0) * 0.25)
         };
-        let command = Command::SetValue {
-            node: edit_node.clone(),
-            field: edit_field.to_owned(),
-            value,
-        };
+        let command =
+            Command::SetValue { node: edit_node.clone(), field: edit_field.to_owned(), value };
         let started = Instant::now();
-        let result = session
-            .apply_commands(&[command])
-            .expect("benchmark edit applies");
+        let result = session.apply_commands(&[command]).expect("benchmark edit applies");
         let elapsed = ms(started);
         assert!(result.changed);
         if index >= WARMUP {
@@ -421,9 +399,8 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
     let pre_merge = pre_merge.as_ref().map(|(a, b)| (a.as_str(), b.as_str()));
     for _ in 0..RUNS {
         let started = Instant::now();
-        let hashes = session
-            .hashes_with_sources(&imports.source_hashes)
-            .expect("post-edit session hashes");
+        let hashes =
+            session.hashes_with_sources(&imports.source_hashes).expect("post-edit session hashes");
         hash_ms.push(ms(started));
         let started = Instant::now();
         let request = engine_bridge::build_exact_request(
@@ -447,9 +424,7 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
         post_request = Some(request);
     }
     let post_request = post_request.expect("one built request");
-    let request_bytes = serde_json::to_vec(&post_request)
-        .expect("request serialises")
-        .len();
+    let request_bytes = serde_json::to_vec(&post_request).expect("request serialises").len();
 
     // 4a. kernel increment: evaluate the post-edit request against the pre-edit
     // cache, so only the nodes whose content key changed miss. Three samples,
@@ -588,14 +563,9 @@ fn run_case(shape: Shape, n: usize, location: Location) -> CaseResult {
 }
 
 fn env_usize_list(name: &str) -> Option<Vec<usize>> {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|item| item.trim().parse::<usize>().ok())
-                .collect()
-        })
+    std::env::var(name).ok().map(|value| {
+        value.split(',').filter_map(|item| item.trim().parse::<usize>().ok()).collect()
+    })
 }
 
 fn env_shapes() -> Vec<Shape> {
@@ -626,19 +596,37 @@ fn per_edit_bookkeeping_measurements() {
                 let case = run_case(shape, n, location);
                 println!(
                     "RESULT\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    case.shape, case.n, case.edges, case.location, case.dirty,
-                    case.session_med, case.session_p90,
-                    case.clone_med, case.clone_p90,
-                    case.publish_med, case.publish_p90,
-                    case.hash_med, case.hash_p90,
-                    case.build_med, case.build_p90,
-                    case.engine_total_med, case.engine_total_p90,
-                    case.engine_prewarm_med, case.engine_walk_med,
-                    case.engine_order_med, case.engine_loop_med, case.engine_tail_med,
-                    case.total_med, case.total_p90,
-                    case.cold_ms, case.cold_misses, case.cold_hits,
-                    case.warm_hits, case.warm_misses,
-                    case.document_bytes, case.request_bytes,
+                    case.shape,
+                    case.n,
+                    case.edges,
+                    case.location,
+                    case.dirty,
+                    case.session_med,
+                    case.session_p90,
+                    case.clone_med,
+                    case.clone_p90,
+                    case.publish_med,
+                    case.publish_p90,
+                    case.hash_med,
+                    case.hash_p90,
+                    case.build_med,
+                    case.build_p90,
+                    case.engine_total_med,
+                    case.engine_total_p90,
+                    case.engine_prewarm_med,
+                    case.engine_walk_med,
+                    case.engine_order_med,
+                    case.engine_loop_med,
+                    case.engine_tail_med,
+                    case.total_med,
+                    case.total_p90,
+                    case.cold_ms,
+                    case.cold_misses,
+                    case.cold_hits,
+                    case.warm_hits,
+                    case.warm_misses,
+                    case.document_bytes,
+                    case.request_bytes,
                 );
             }
         }

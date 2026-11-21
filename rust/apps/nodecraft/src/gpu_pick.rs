@@ -32,10 +32,7 @@ pub(crate) fn face_pick_id(body: u32, face: u32, multiple: bool) -> u32 {
     if body > FACE_BODY_MASK || face > FACE_MASK {
         return 0;
     }
-    FACE_BASE
-        | if multiple { FACE_MULTIPLE } else { 0 }
-        | (body << FACE_BODY_SHIFT)
-        | face
+    FACE_BASE | if multiple { FACE_MULTIPLE } else { 0 } | (body << FACE_BODY_SHIFT) | face
 }
 
 pub(crate) fn is_face_pick(id: u32) -> bool {
@@ -251,7 +248,11 @@ pub(crate) fn decode_rows(bytes: &[u8], pick: usize, row_stride: usize) -> Vec<u
     for row in 0..pick {
         let start = row * row_stride;
         let Some(row_bytes) = bytes.get(start..start + pick * 4) else { break };
-        ids.extend(row_bytes.chunks_exact(4).map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]])));
+        ids.extend(
+            row_bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]])),
+        );
     }
     ids
 }
@@ -315,10 +316,7 @@ mod tests {
     #[test]
     fn edge_click_actions_apply_any_body_and_ignore_an_older_result() {
         let multi_body = PickResult { id: 2, ghost_key: 7, commit: true, index: 6 };
-        assert_eq!(
-            accept_pick(&multi_body, 7, Some(2)),
-            PickOutcome::Commit(6)
-        );
+        assert_eq!(accept_pick(&multi_body, 7, Some(2)), PickOutcome::Commit(6));
         assert_eq!(edge_click_action(PickOutcome::Commit(6), 6), EdgeClickAction::Apply(6));
         // The click has its own request id; a result for the earlier pick is
         // not allowed to resolve it.
@@ -343,7 +341,14 @@ mod tests {
     }
 
     fn request(id: u64, commit: bool) -> PickRequest {
-        PickRequest { id, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 1, commit , kind: PickKind::Edges }
+        PickRequest {
+            id,
+            px: [16.0, 16.0],
+            radius_px: 7.0,
+            ghost_key: 1,
+            commit,
+            kind: PickKind::Edges,
+        }
     }
 
     fn result(id: u64, commit: bool, index: u32) -> PickResult {
@@ -497,7 +502,8 @@ mod tests {
         frame: &PickFrame,
         request: PickRequest,
     ) -> Option<PickResult> {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
         picker.encode(device, queue, &mut encoder, uniforms, frame, request, |_, _, _| {}, None);
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
@@ -517,9 +523,8 @@ mod tests {
             return;
         };
         let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
-        let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(vec![
-            segment([-0.4, 0.2, 0.0], [0.4, 0.2, 0.0], 1),
-        ]);
+        let segments: std::sync::Arc<[PickSegment]> =
+            std::sync::Arc::from(vec![segment([-0.4, 0.2, 0.0], [0.4, 0.2, 0.0], 1)]);
         let frame = PickFrame {
             request: None,
             ghost_key: 10,
@@ -539,8 +544,16 @@ mod tests {
             extra_model: crate::plan_math::identity_f32(),
         };
         for id in 1..=4 {
-            let request = PickRequest { id, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 10, commit: false , kind: PickKind::Edges };
-            let result = run_pick(&mut picker, &device, &queue, &uniforms, &frame, request).expect("result");
+            let request = PickRequest {
+                id,
+                px: [16.0, 16.0],
+                radius_px: 7.0,
+                ghost_key: 10,
+                commit: false,
+                kind: PickKind::Edges,
+            };
+            let result =
+                run_pick(&mut picker, &device, &queue, &uniforms, &frame, request).expect("result");
             assert_eq!(result.id, id);
             assert_eq!(result.index, 1);
         }
@@ -558,7 +571,8 @@ mod tests {
         let positions = [[-1.0, -1.0, z], [1.0, -1.0, z], [1.0, 1.0, z], [-1.0, 1.0, z]];
         let mut bytes = vec![0u8; stride * positions.len()];
         for (index, position) in positions.iter().enumerate() {
-            bytes[index * stride..index * stride + 12].copy_from_slice(bytemuck::cast_slice(&position[..]));
+            bytes[index * stride..index * stride + 12]
+                .copy_from_slice(bytemuck::cast_slice(&position[..]));
         }
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test-quad-vertices"),
@@ -574,7 +588,8 @@ mod tests {
             mapped_at_creation: false,
         });
         queue.write_buffer(&indices, 0, bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]));
-        let instance = crate::gpu_viewport::GpuInstance::from_model(crate::plan_math::identity_f32(), 1.0);
+        let instance =
+            crate::gpu_viewport::GpuInstance::from_model(crate::plan_math::identity_f32(), 1.0);
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("test-quad-instance"),
             size: std::mem::size_of_val(&instance) as u64,
@@ -594,7 +609,8 @@ mod tests {
         request: PickRequest,
         faces: impl FnOnce(&mut wgpu::RenderPass<'_>, &PickPasses<'_>, &PickBinds<'_>),
     ) -> Option<PickResult> {
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
         picker.encode(device, queue, &mut encoder, uniforms, frame, request, faces, None);
         queue.submit([encoder.finish()]);
         for _ in 0..200 {
@@ -607,7 +623,12 @@ mod tests {
         None
     }
 
-    fn draw_mesh(pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, mesh: &TestMesh) {
+    fn draw_mesh(
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+        mesh: &TestMesh,
+    ) {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
@@ -623,13 +644,43 @@ mod tests {
             return;
         };
         let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
-        let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(vec![
-            segment([-0.8, -0.8, 0.5], [0.8, 0.8, 0.5], 1),
-        ]);
-        let frame = PickFrame { request: None, ghost_key: 11, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0], edge_width_px: 3.0, show_seam_edges: false };
-        let uniforms = PickUniforms { view_proj: crate::plan_math::identity_f32(), back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
-        let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 11, commit: false , kind: PickKind::Edges };
-        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, |_, _, _| {});
+        let segments: std::sync::Arc<[PickSegment]> =
+            std::sync::Arc::from(vec![segment([-0.8, -0.8, 0.5], [0.8, 0.8, 0.5], 1)]);
+        let frame = PickFrame {
+            request: None,
+            ghost_key: 11,
+            segments,
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: [32.0, 32.0],
+            edge_width_px: 3.0,
+            show_seam_edges: false,
+        };
+        let uniforms = PickUniforms {
+            view_proj: crate::plan_math::identity_f32(),
+            back: [0.0; 4],
+            eye: [0.0; 4],
+            params: [0.0; 4],
+            extra_model: crate::plan_math::identity_f32(),
+        };
+        let request = PickRequest {
+            id: 1,
+            px: [16.0, 16.0],
+            radius_px: 7.0,
+            ghost_key: 11,
+            commit: false,
+            kind: PickKind::Edges,
+        };
+        let result = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            |_, _, _| {},
+        );
         assert_eq!(result.expect("result").index, 1);
         let grid = picker.last_grid().expect("grid");
         assert!(grid.iter().filter(|id| **id != 0).count() >= 64);
@@ -648,7 +699,9 @@ mod tests {
         let _ = clip;
         let mut out = [0.0; 4];
         for row in 0..4 {
-            out[row] = (0..4).map(|column| vp[column][row] * if column == 3 { 1.0 } else { p[column] }).sum();
+            out[row] = (0..4)
+                .map(|column| vp[column][row] * if column == 3 { 1.0 } else { p[column] })
+                .sum();
         }
         let ndc = [out[0] / out[3], out[1] / out[3]];
         [(ndc[0] * 0.5 + 0.5) * size[0], (1.0 - (ndc[1] * 0.5 + 0.5)) * size[1]]
@@ -656,32 +709,46 @@ mod tests {
 
     fn test_box(device: &wgpu::Device, queue: &wgpu::Queue) -> TestMesh {
         let corners: [[f32; 3]; 8] = [
-            [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
         ];
         let tris = [
-            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
-            1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7, 6, 3, 0, 4, 3, 4, 7,
+            0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 2, 7,
+            6, 3, 0, 4, 3, 4, 7,
         ];
         let stride = solidcraft_viewport_gpu::VERTEX_STRIDE as usize;
         let mut bytes = vec![0u8; stride * corners.len()];
         for (index, position) in corners.iter().enumerate() {
-            bytes[index * stride..index * stride + 12].copy_from_slice(bytemuck::cast_slice(&position[..]));
+            bytes[index * stride..index * stride + 12]
+                .copy_from_slice(bytemuck::cast_slice(&position[..]));
         }
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-box-vertices"), size: bytes.len() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-box-vertices"),
+            size: bytes.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&vertices, 0, &bytes);
         let indices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-box-indices"), size: tris.len() as u64 * 4,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-box-indices"),
+            size: tris.len() as u64 * 4,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&indices, 0, bytemuck::cast_slice(&tris));
-        let instance = crate::gpu_viewport::GpuInstance::from_model(crate::plan_math::identity_f32(), 1.0);
+        let instance =
+            crate::gpu_viewport::GpuInstance::from_model(crate::plan_math::identity_f32(), 1.0);
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-box-instance"), size: std::mem::size_of_val(&instance) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-box-instance"),
+            size: std::mem::size_of_val(&instance) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&instance_buffer, 0, bytemuck::bytes_of(&instance));
         TestMesh { vertices, indices, instance: instance_buffer, count: tris.len() as u32 }
@@ -695,17 +762,37 @@ mod tests {
         };
         let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
         let corners = [
-            [-1.0f32, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [-1.0, 1.0, -1.0],
-            [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+            [-1.0f32, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [-1.0, 1.0, 1.0],
         ];
         let edges = [
-            (0u32, 1u32), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6),
-            (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7),
+            (0u32, 1u32),
+            (1, 2),
+            (2, 3),
+            (3, 0),
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4),
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7),
         ];
         let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(
-            edges.iter().enumerate().map(|(index, (a, b))| {
-                segment(corners[*a as usize], corners[*b as usize], index as u32 + 1)
-            }).collect::<Vec<_>>(),
+            edges
+                .iter()
+                .enumerate()
+                .map(|(index, (a, b))| {
+                    segment(corners[*a as usize], corners[*b as usize], index as u32 + 1)
+                })
+                .collect::<Vec<_>>(),
         );
         let size = [512.0f32, 512.0];
         let vp = solidcraft_viewport_gpu::view::gpu_view_proj(
@@ -715,14 +802,46 @@ mod tests {
             ),
             true,
         );
-        let frame = PickFrame { request: None, ghost_key: 20, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size, edge_width_px: 1.0, show_seam_edges: false };
-        let uniforms = PickUniforms { view_proj: vp, back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
+        let frame = PickFrame {
+            request: None,
+            ghost_key: 20,
+            segments,
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
+        };
+        let uniforms = PickUniforms {
+            view_proj: vp,
+            back: [0.0; 4],
+            eye: [0.0; 4],
+            params: [0.0; 4],
+            extra_model: crate::plan_math::identity_f32(),
+        };
         let mesh = test_box(&device, &queue);
         let mut pick_at = |picker: &mut PickRenderer, id: u64, point: [f32; 3]| {
             let px = project_px(vp, point, size);
-            let request = PickRequest { id, px, radius_px: 7.0, ghost_key: 20, commit: false , kind: PickKind::Edges };
-            run_pick_with_faces(picker, &device, &queue, &uniforms, &frame, request, |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &mesh))
-                .map(|result| result.index).unwrap_or(0)
+            let request = PickRequest {
+                id,
+                px,
+                radius_px: 7.0,
+                ghost_key: 20,
+                commit: false,
+                kind: PickKind::Edges,
+            };
+            run_pick_with_faces(
+                picker,
+                &device,
+                &queue,
+                &uniforms,
+                &frame,
+                request,
+                |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &mesh),
+            )
+            .map(|result| result.index)
+            .unwrap_or(0)
         };
         let front = pick_at(&mut picker, 1, [1.0, 1.0, 1.0]);
         assert!([6, 7, 11].contains(&front), "front corner edge id {front}");
@@ -738,10 +857,37 @@ mod tests {
             true,
         );
         let px = project_px(grazing_vp, [1.0, 0.0, 1.0], size);
-        let grazing_frame = PickFrame { request: None, ghost_key: 21, segments: frame.segments.clone(), ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: size, edge_width_px: 1.0, show_seam_edges: false };
+        let grazing_frame = PickFrame {
+            request: None,
+            ghost_key: 21,
+            segments: frame.segments.clone(),
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: size,
+            edge_width_px: 1.0,
+            show_seam_edges: false,
+        };
         let grazing_uniforms = PickUniforms { view_proj: grazing_vp, ..uniforms };
-        let request = PickRequest { id: 4, px, radius_px: 7.0, ghost_key: 21, commit: false , kind: PickKind::Edges };
-        let grazing = run_pick_with_faces(&mut picker, &device, &queue, &grazing_uniforms, &grazing_frame, request, |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &mesh)).map(|r| r.index).unwrap_or(0);
+        let request = PickRequest {
+            id: 4,
+            px,
+            radius_px: 7.0,
+            ghost_key: 21,
+            commit: false,
+            kind: PickKind::Edges,
+        };
+        let grazing = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &grazing_uniforms,
+            &grazing_frame,
+            request,
+            |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &mesh),
+        )
+        .map(|r| r.index)
+        .unwrap_or(0);
         assert_eq!(grazing, 6, "grazing edge id {grazing}");
     }
 
@@ -752,20 +898,66 @@ mod tests {
             return;
         };
         let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
-        let segments: std::sync::Arc<[PickSegment]> = std::sync::Arc::from(vec![
-            segment([-0.8, 0.1, 0.5], [0.8, 0.1, 0.5], 1),
-        ]);
-        let frame = PickFrame { request: None, ghost_key: 12, segments, ghost_edges: false, face_matrix: crate::plan_math::identity_f32(), ghost_matrix: crate::plan_math::identity_f32(), size_px: [32.0, 32.0], edge_width_px: 1.0, show_seam_edges: false };
-        let uniforms = PickUniforms { view_proj: crate::plan_math::identity_f32(), back: [0.0; 4], eye: [0.0; 4], params: [0.0; 4], extra_model: crate::plan_math::identity_f32() };
-        let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 12, commit: false , kind: PickKind::Edges };
+        let segments: std::sync::Arc<[PickSegment]> =
+            std::sync::Arc::from(vec![segment([-0.8, 0.1, 0.5], [0.8, 0.1, 0.5], 1)]);
+        let frame = PickFrame {
+            request: None,
+            ghost_key: 12,
+            segments,
+            ghost_edges: false,
+            face_matrix: crate::plan_math::identity_f32(),
+            ghost_matrix: crate::plan_math::identity_f32(),
+            size_px: [32.0, 32.0],
+            edge_width_px: 1.0,
+            show_seam_edges: false,
+        };
+        let uniforms = PickUniforms {
+            view_proj: crate::plan_math::identity_f32(),
+            back: [0.0; 4],
+            eye: [0.0; 4],
+            params: [0.0; 4],
+            extra_model: crate::plan_math::identity_f32(),
+        };
+        let request = PickRequest {
+            id: 1,
+            px: [16.0, 16.0],
+            radius_px: 7.0,
+            ghost_key: 12,
+            commit: false,
+            kind: PickKind::Edges,
+        };
         let near = test_quad(&device, &queue, 0.8);
-        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &near));
+        let result = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &near),
+        );
         assert_eq!(result.expect("hidden result").index, 0);
         let far = test_quad(&device, &queue, 0.2);
-        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &far));
+        let result = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &far),
+        );
         assert_eq!(result.expect("visible result").index, 1);
         let on = test_quad(&device, &queue, 0.5);
-        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &on));
+        let result = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            move |pass, passes, binds| draw_mesh(pass, passes.face, binds.main, &on),
+        );
         assert_eq!(result.expect("on-surface result").index, 1);
     }
 
@@ -787,8 +979,14 @@ mod tests {
         multiple: bool,
     ) -> TestFaceMesh {
         let corners: [[f32; 3]; 8] = [
-            [-0.5, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
-            [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
+            [-0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5],
+            [0.5, 0.5, -0.5],
+            [-0.5, 0.5, -0.5],
+            [-0.5, -0.5, 0.5],
+            [0.5, -0.5, 0.5],
+            [0.5, 0.5, 0.5],
+            [-0.5, 0.5, 0.5],
         ];
         let faces: [[usize; 4]; 6] = [
             [4, 5, 6, 7], // +z
@@ -813,24 +1011,32 @@ mod tests {
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-face-vertices"), size: vertices.len() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-face-vertices"),
+            size: vertices.len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&vertex_buffer, 0, &vertices);
         let face_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-face-ids"), size: bytemuck::cast_slice::<u32, u8>(&ids).len() as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-face-ids"),
+            size: bytemuck::cast_slice::<u32, u8>(&ids).len() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&face_buffer, 0, bytemuck::cast_slice(&ids));
         let index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-face-indices"), size: bytemuck::cast_slice::<u32, u8>(&indices).len() as u64,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-face-indices"),
+            size: bytemuck::cast_slice::<u32, u8>(&indices).len() as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&index_buffer, 0, bytemuck::cast_slice(&indices));
         let instance = crate::gpu_viewport::GpuInstance::from_model(model, 1.0);
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test-face-instance"), size: std::mem::size_of_val(&instance) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+            label: Some("test-face-instance"),
+            size: std::mem::size_of_val(&instance) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
         queue.write_buffer(&instance_buffer, 0, bytemuck::bytes_of(&instance));
         let body_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -850,7 +1056,12 @@ mod tests {
         }
     }
 
-    fn draw_face_mesh(pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, bind: &wgpu::BindGroup, mesh: &TestFaceMesh) {
+    fn draw_face_mesh(
+        pass: &mut wgpu::RenderPass<'_>,
+        pipeline: &wgpu::RenderPipeline,
+        bind: &wgpu::BindGroup,
+        mesh: &TestFaceMesh,
+    ) {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[]);
         pass.set_vertex_buffer(0, mesh.vertices.slice(..));
@@ -898,10 +1109,23 @@ mod tests {
         let front = face_pick_id(0, 0, false);
         let mut pick = |picker: &mut PickRenderer, id: u64, point: [f32; 3], frame: &PickFrame| {
             let px = project_px(vp, point, size);
-            let request = PickRequest { id, px, radius_px: 3.0, ghost_key: 30, commit: false, kind: PickKind::Faces };
-            let result = run_pick_with_faces(picker, &device, &queue, &uniforms, frame, request, |pass, passes, binds| {
-                draw_face_mesh(pass, passes.face_id, binds.main, &mesh)
-            })
+            let request = PickRequest {
+                id,
+                px,
+                radius_px: 3.0,
+                ghost_key: 30,
+                commit: false,
+                kind: PickKind::Faces,
+            };
+            let result = run_pick_with_faces(
+                picker,
+                &device,
+                &queue,
+                &uniforms,
+                frame,
+                request,
+                |pass, passes, binds| draw_face_mesh(pass, passes.face_id, binds.main, &mesh),
+            )
             .expect("face pick result");
             result.index
         };
@@ -959,8 +1183,16 @@ mod tests {
             extra_model: vp,
         };
         let px = project_px(vp, [0.0, 0.75, 0.0], size);
-        let request = PickRequest { id: 1, px, radius_px: 3.0, ghost_key: 31, commit: true, kind: PickKind::Edges };
-        let result = run_pick(&mut picker, &device, &queue, &uniforms, &frame, request).expect("pick result");
+        let request = PickRequest {
+            id: 1,
+            px,
+            radius_px: 3.0,
+            ghost_key: 31,
+            commit: true,
+            kind: PickKind::Edges,
+        };
+        let result = run_pick(&mut picker, &device, &queue, &uniforms, &frame, request)
+            .expect("pick result");
         let (edge_id, _) = crate::gpu_viewport::resolve_pick(&data, result.index).expect("edge id");
         assert_eq!(edge_id, "body:1:edge:0");
         assert_eq!(
@@ -1000,7 +1232,14 @@ mod tests {
             edge_width_px: 1.0,
             show_seam_edges: false,
         };
-        let request = PickRequest { id: 1, px: [16.0, 16.0], radius_px: 7.0, ghost_key: 9, commit: false , kind: PickKind::Edges };
+        let request = PickRequest {
+            id: 1,
+            px: [16.0, 16.0],
+            radius_px: 7.0,
+            ghost_key: 9,
+            commit: false,
+            kind: PickKind::Edges,
+        };
         let uniforms = PickUniforms {
             view_proj: crate::plan_math::identity_f32(),
             back: [0.0; 4],
@@ -1008,15 +1247,27 @@ mod tests {
             params: [0.0; 4],
             extra_model: crate::plan_math::identity_f32(),
         };
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
-        picker.encode(&device, &queue, &mut encoder, &uniforms, &frame, request, |_, _, _| {}, None);
+        let mut encoder =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test") });
+        picker.encode(
+            &device,
+            &queue,
+            &mut encoder,
+            &uniforms,
+            &frame,
+            request,
+            |_, _, _| {},
+            None,
+        );
         queue.submit([encoder.finish()]);
         let mut result = None;
         for _ in 0..200 {
             let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             picker.service(&device);
             result = picker.take_result().or(result);
-            if result.is_some() { break; }
+            if result.is_some() {
+                break;
+            }
         }
         let result = result.expect("pick result");
         assert_eq!(result.index, 1, "nearest edge should be id 1");
@@ -1104,14 +1355,30 @@ mod tests {
             extra_model: crate::plan_math::identity_f32(),
         };
         let px = project_px(vp, [midpoint[0] as f32, midpoint[1] as f32, midpoint[2] as f32], size);
-        let request = PickRequest { id: 1, px, radius_px: 7.0, ghost_key: 40, commit: false, kind: PickKind::Edges };
+        let request = PickRequest {
+            id: 1,
+            px,
+            radius_px: 7.0,
+            ghost_key: 40,
+            commit: false,
+            kind: PickKind::Edges,
+        };
         let mut picker = PickRenderer::install(&device, wgpu::TextureFormat::Depth32Float, true);
-        let result = run_pick_with_faces(&mut picker, &device, &queue, &uniforms, &frame, request, |pass, passes, binds| {
-            plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
-        })
+        let result = run_pick_with_faces(
+            &mut picker,
+            &device,
+            &queue,
+            &uniforms,
+            &frame,
+            request,
+            |pass, passes, binds| {
+                plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
+            },
+        )
         .expect("plan edge pick result");
         assert!(result.index > 0, "an edge id was written");
-        let (id, _) = crate::gpu_viewport::resolve_pick(&data, result.index).expect("edge id resolves");
+        let (id, _) =
+            crate::gpu_viewport::resolve_pick(&data, result.index).expect("edge id resolves");
         assert!(id.starts_with("edge:") || id.starts_with("body:"), "{id}");
     }
 
@@ -1178,11 +1445,7 @@ mod tests {
             params: [0.0; 4],
             extra_model: crate::plan_math::identity_f32(),
         };
-        let px = project_px(
-            vp,
-            [midpoint.x as f32, midpoint.y as f32, midpoint.z as f32],
-            size,
-        );
+        let px = project_px(vp, [midpoint.x as f32, midpoint.y as f32, midpoint.z as f32], size);
         let mut frame = PickFrame {
             request: None,
             ghost_key: 50,
@@ -1214,10 +1477,7 @@ mod tests {
                 plan.paint_edge_ids(pass, passes.plan_edge, binds.plan_edge);
             },
         );
-        assert!(
-            hidden.is_none_or(|result| result.index == 0),
-            "a hidden seam has no pick id",
-        );
+        assert!(hidden.is_none_or(|result| result.index == 0), "a hidden seam has no pick id",);
         frame.show_seam_edges = true;
         plan.set_show_seam_edges(true);
         let shown = run_pick_with_faces(
@@ -1234,7 +1494,6 @@ mod tests {
         .expect("the shown seam is pickable");
         assert!(shown.index > 0, "the shown seam writes its edge id");
     }
-
 }
 
 use egui_wgpu::wgpu;
@@ -1624,7 +1883,11 @@ impl PickRenderer {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             }],
         });
@@ -1642,14 +1905,20 @@ impl PickRenderer {
         let ghost_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("pick-ghost-bind-group"),
             layout: &layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: ghost_uniforms.as_entire_binding() }],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: ghost_uniforms.as_entire_binding(),
+            }],
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pick-pipeline-layout"),
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let face_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pick-face"), source: wgpu::ShaderSource::Wgsl(FACE_SHADER.into()) });
+        let face_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pick-face"),
+            source: wgpu::ShaderSource::Wgsl(FACE_SHADER.into()),
+        });
         let face_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("pick-face-pipeline"),
             layout: Some(&pipeline_layout),
@@ -1657,19 +1926,30 @@ impl PickRenderer {
                 module: &face_module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(crate::gpu_plan::plan_vertex_layout()), Some(crate::gpu_viewport::object_instance_layout())],
+                buffers: &[
+                    Some(crate::gpu_plan::plan_vertex_layout()),
+                    Some(crate::gpu_viewport::object_instance_layout()),
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &face_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
+                depth_compare: Some(if reversed {
+                    wgpu::CompareFunction::GreaterEqual
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: depth_bias(reversed, FACE_BIAS),
             }),
@@ -1677,7 +1957,10 @@ impl PickRenderer {
             multiview_mask: None,
             cache: None,
         });
-        let face_id_module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("pick-face-id"), source: wgpu::ShaderSource::Wgsl(FACE_ID_SHADER.into()) });
+        let face_id_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pick-face-id"),
+            source: wgpu::ShaderSource::Wgsl(FACE_ID_SHADER.into()),
+        });
         let plan_face_id_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pick-plan-face-id"),
             source: wgpu::ShaderSource::Wgsl(PLAN_FACE_ID_SHADER.into()),
@@ -1689,19 +1972,32 @@ impl PickRenderer {
                 module: &plan_face_id_module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(crate::gpu_plan::plan_vertex_layout()), Some(crate::gpu_plan::plan_face_layout()), Some(crate::gpu_viewport::object_instance_layout()), Some(crate::gpu_plan::plan_body_layout())],
+                buffers: &[
+                    Some(crate::gpu_plan::plan_vertex_layout()),
+                    Some(crate::gpu_plan::plan_face_layout()),
+                    Some(crate::gpu_viewport::object_instance_layout()),
+                    Some(crate::gpu_plan::plan_body_layout()),
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &plan_face_id_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
+                depth_compare: Some(if reversed {
+                    wgpu::CompareFunction::GreaterEqual
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: depth_bias(reversed, FACE_BIAS),
             }),
@@ -1713,33 +2009,46 @@ impl PickRenderer {
         // face-id draw needs the position-only object layout and a parallel
         // per-vertex face-id buffer. Objects bake the body into the vertex id,
         // so they use the original shader without a per-instance body buffer.
-        let object_face_id_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("pick-object-face-id-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &face_id_module,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[Some(crate::gpu_viewport::object_pick_vertex_layout()), Some(crate::gpu_plan::plan_face_layout()), Some(crate::gpu_viewport::object_instance_layout())],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &face_id_module,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: depth_format,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
-                stencil: wgpu::StencilState::default(),
-                bias: depth_bias(reversed, FACE_BIAS),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let object_face_id_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("pick-object-face-id-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &face_id_module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[
+                        Some(crate::gpu_viewport::object_pick_vertex_layout()),
+                        Some(crate::gpu_plan::plan_face_layout()),
+                        Some(crate::gpu_viewport::object_instance_layout()),
+                    ],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &face_id_module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Uint,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: depth_format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(if reversed {
+                        wgpu::CompareFunction::GreaterEqual
+                    } else {
+                        wgpu::CompareFunction::LessEqual
+                    }),
+                    stencil: wgpu::StencilState::default(),
+                    bias: depth_bias(reversed, FACE_BIAS),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         // The edit ghost writes depth for edge occlusion but must not overwrite
         // the face ids already drawn underneath its transparent surface.
         let ghost_depth_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1749,19 +2058,30 @@ impl PickRenderer {
                 module: &face_module,
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
-                buffers: &[Some(crate::gpu_plan::plan_vertex_layout()), Some(crate::gpu_viewport::object_instance_layout())],
+                buffers: &[
+                    Some(crate::gpu_plan::plan_vertex_layout()),
+                    Some(crate::gpu_viewport::object_instance_layout()),
+                ],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &face_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::empty() })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::empty(),
+                })],
             }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
+                depth_compare: Some(if reversed {
+                    wgpu::CompareFunction::GreaterEqual
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: depth_bias(reversed, FACE_BIAS),
             }),
@@ -1786,10 +2106,26 @@ impl PickRenderer {
                     array_stride: 32,
                     step_mode: wgpu::VertexStepMode::Instance,
                     attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 16, shader_location: 2 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 28, shader_location: 3 },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 12,
+                            shader_location: 1,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 28,
+                            shader_location: 3,
+                        },
                     ],
                 })],
             },
@@ -1797,13 +2133,21 @@ impl PickRenderer {
                 module: &edge_module,
                 entry_point: Some("fs"),
                 compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::R32Uint,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(if reversed { wgpu::CompareFunction::GreaterEqual } else { wgpu::CompareFunction::LessEqual }),
+                depth_compare: Some(if reversed {
+                    wgpu::CompareFunction::GreaterEqual
+                } else {
+                    wgpu::CompareFunction::LessEqual
+                }),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1876,15 +2220,16 @@ impl PickRenderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let buffers = std::array::from_fn(|_| device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pick-readback"),
-            size: 256 * PICK as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        let status = std::array::from_fn(|_| {
-            std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0))
+        let buffers = std::array::from_fn(|_| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pick-readback"),
+                size: 256 * PICK as u64,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         });
+        let status =
+            std::array::from_fn(|_| std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0)));
         Self {
             color_view: color.create_view(&wgpu::TextureViewDescriptor::default()),
             color,
@@ -1970,12 +2315,14 @@ impl PickRenderer {
             }
             if req.commit
                 && let Ok(path) = std::env::var("NODECRAFT_PICK_DUMP")
-                && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+                && let Ok(mut file) =
+                    std::fs::OpenOptions::new().create(true).append(true).open(path)
             {
                 use std::io::Write as _;
                 let _ = writeln!(file, "{grid}\n");
             }
-            let result = PickResult { id: req.id, ghost_key: req.ghost_key, commit: req.commit, index };
+            let result =
+                PickResult { id: req.id, ghost_key: req.ghost_key, commit: req.commit, index };
             best = Some(match best {
                 Some(old) => merge_result(Some(old), result),
                 None => result,
@@ -2017,15 +2364,17 @@ impl PickRenderer {
             }
             self.uploaded_key = frame.ghost_key;
         }
-        let crop = crop_matrix(request.px[0], request.px[1], frame.size_px[0], frame.size_px[1], PICK as f32);
+        let crop = crop_matrix(
+            request.px[0],
+            request.px[1],
+            frame.size_px[0],
+            frame.size_px[1],
+            PICK as f32,
+        );
         let view_proj = crate::plan_math::multiply_f32(crop, uniforms.view_proj);
         let mut main = PickUniforms { view_proj, extra_model: frame.face_matrix, ..*uniforms };
-        main.params = [
-            frame.edge_width_px,
-            if frame.show_seam_edges { 1.0 } else { 0.0 },
-            0.0,
-            0.0,
-        ];
+        main.params =
+            [frame.edge_width_px, if frame.show_seam_edges { 1.0 } else { 0.0 }, 0.0, 0.0];
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&main));
         let mut ghost = PickUniforms { view_proj, extra_model: frame.ghost_matrix, ..*uniforms };
         ghost.params = main.params;
@@ -2084,11 +2433,8 @@ impl PickRenderer {
                 faces(pass, &passes, &binds);
                 if !frame.segments.is_empty() {
                     pass.set_pipeline(&self.edge_pipeline);
-                    let edge_bind = if frame.ghost_edges {
-                        &self.ghost_bind_group
-                    } else {
-                        &self.bind_group
-                    };
+                    let edge_bind =
+                        if frame.ghost_edges { &self.ghost_bind_group } else { &self.bind_group };
                     pass.set_bind_group(0, edge_bind, &[]);
                     pass.set_vertex_buffer(0, self.segments.slice(..));
                     pass.draw(0..6, 0..frame.segments.len() as u32);
@@ -2104,12 +2450,14 @@ impl PickRenderer {
             },
             wgpu::TexelCopyBufferInfo {
                 buffer: &self.buffers[slot_index],
-                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(PICK) },
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(PICK),
+                },
             },
             wgpu::Extent3d { width: PICK, height: PICK, depth_or_array_layers: 1 },
         );
         self.ring.copied(slot_index, request);
     }
-
-
 }

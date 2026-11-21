@@ -194,12 +194,7 @@ impl EdgeUniforms {
         Self {
             view_proj,
             extra_model,
-            screen: [
-                size_px[0],
-                size_px[1],
-                width_px,
-                if use_instance_alpha { 1.0 } else { 0.0 },
-            ],
+            screen: [size_px[0], size_px[1], width_px, if use_instance_alpha { 1.0 } else { 0.0 }],
             colour,
             // Seams are hidden unless the caller opts in (the default setting).
             mask: [0; 4],
@@ -370,11 +365,7 @@ impl EdgeCpuBatch {
     ) -> Self {
         let mut batch = Self::default();
         for (edge_index, polyline) in plan.edges.iter().enumerate() {
-            let class = edge_classes
-                .get(edge_index)
-                .copied()
-                .unwrap_or_default()
-                .bits();
+            let class = edge_classes.get(edge_index).copied().unwrap_or_default().bits();
             let start = batch.vertices.len() as u32;
             for pair in polyline.windows(2) {
                 let (a, b) = (pair[0], pair[1]);
@@ -697,11 +688,7 @@ impl EdgeRenderer {
     }
 
     fn visible_pipeline(&self, style: EdgeStyle) -> &wgpu::RenderPipeline {
-        if style == EdgeStyle::Ghost {
-            &self.ghost_pipeline
-        } else {
-            &self.pipeline
-        }
+        if style == EdgeStyle::Ghost { &self.ghost_pipeline } else { &self.pipeline }
     }
 
     fn bind(&self, style: EdgeStyle) -> &wgpu::BindGroup {
@@ -841,7 +828,10 @@ mod tests {
             (corner.position[1] + EDGE_MIN_DRAWN_PX / 100.0).abs() < 1.0e-6,
             "the coverage floor is the drawn width",
         );
-        assert!((corner.alpha - 0.25 / EDGE_MIN_DRAWN_PX).abs() < 1.0e-6, "faded by the missing width");
+        assert!(
+            (corner.alpha - 0.25 / EDGE_MIN_DRAWN_PX).abs() < 1.0e-6,
+            "faded by the missing width"
+        );
     }
 
     #[test]
@@ -931,10 +921,8 @@ mod tests {
             ..TessPlan::default()
         };
         let ids = [Some("edge:a".to_owned()), None];
-        let classes = [
-            nodecraft_layers::PlanEdgeClass::NORMAL,
-            nodecraft_layers::PlanEdgeClass::SEAM,
-        ];
+        let classes =
+            [nodecraft_layers::PlanEdgeClass::NORMAL, nodecraft_layers::PlanEdgeClass::SEAM];
         let batch = EdgeCpuBatch::from_plan(&plan, &ids, &classes);
         assert_eq!(batch.ranges.len(), 2);
         assert_eq!(batch.vertices.len(), 6 * 3);
@@ -966,10 +954,23 @@ mod tests {
 
     #[test]
     fn ghost_edges_ignore_the_ghost_face_opacity() {
-        let standard = EdgeUniforms::new(identity_matrix(), identity_matrix(), [100.0, 100.0], 1.0, [0.0; 4], true);
-        let ghost = EdgeUniforms::new(identity_matrix(), identity_matrix(), [100.0, 100.0], 2.0, [0.0; 4], false);
+        let standard = EdgeUniforms::new(
+            identity_matrix(),
+            identity_matrix(),
+            [100.0, 100.0],
+            1.0,
+            [0.0; 4],
+            true,
+        );
+        let ghost = EdgeUniforms::new(
+            identity_matrix(),
+            identity_matrix(),
+            [100.0, 100.0],
+            2.0,
+            [0.0; 4],
+            false,
+        );
         assert_eq!(standard.screen[3], 1.0);
         assert_eq!(ghost.screen[3], 0.0, "ghost edge alpha is the theme alpha, not ghost_opacity");
     }
-
 }

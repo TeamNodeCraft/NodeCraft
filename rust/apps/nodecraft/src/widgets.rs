@@ -29,10 +29,7 @@ pub fn switch(ui: &mut Ui, value: &mut bool) -> Response {
             theme.color(theme.text).lerp_to_gamma(theme.color(theme.control), t * 0.25),
         )
     } else {
-        (
-            theme.with_alpha(theme.control, 110),
-            theme.with_alpha(theme.muted, 150),
-        )
+        (theme.with_alpha(theme.control, 110), theme.with_alpha(theme.muted, 150))
     };
     ui.painter().rect_filled(rect, rect.height() * 0.5, track);
     let radius = rect.height() * 0.5 - 2.0;
@@ -48,11 +45,8 @@ pub fn switch(ui: &mut Ui, value: &mut bool) -> Response {
 pub fn switch_row(ui: &mut Ui, label: impl Into<egui::WidgetText>, value: &mut bool) -> Response {
     ui.horizontal(|ui| {
         ui.label(label);
-        ui.with_layout(
-            egui::Layout::right_to_left(egui::Align::Center),
-            |ui| switch(ui, value),
-        )
-        .inner
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| switch(ui, value))
+            .inner
     })
     .inner
 }

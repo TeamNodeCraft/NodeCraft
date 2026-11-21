@@ -56,15 +56,13 @@ impl BuiltinNode for Shell {
         // or unresolvable reference is an error; silently dropping one would
         // turn the requested shell into a closed shell of the wrong shape.
         let references = parse_face_references(node.values)?;
-        let body_faces: Vec<usize> = solids
-            .iter()
-            .map(|solid| solid.brep().faces().ids().count())
-            .collect();
+        let body_faces: Vec<usize> =
+            solids.iter().map(|solid| solid.brep().faces().ids().count()).collect();
         let openings = resolve_face_references(&references, &body_faces)?;
         for (body, count) in body_faces.iter().enumerate() {
             if *count > 0 && openings[body].len() == *count {
                 return Err(
-                    "Can't remove every face — keep at least one face to make a wall.".to_owned(),
+                    "Can't remove every face — keep at least one face to make a wall.".to_owned()
                 );
             }
         }
@@ -77,9 +75,8 @@ impl BuiltinNode for Shell {
             })?;
             let crate::node_task::TaskResult { output, warnings } = result;
             ctx.warn(warnings);
-            let shelled = output
-                .into_shape()
-                .ok_or_else(|| "Shell task returned no shape".to_owned())?;
+            let shelled =
+                output.into_shape().ok_or_else(|| "Shell task returned no shape".to_owned())?;
             bodies.push(crate::BodyInstance {
                 body: shelled,
                 placement: nodecraft_exact::Placement::identity(),
@@ -98,9 +95,7 @@ impl BuiltinNode for Shell {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -121,11 +116,7 @@ mod tests {
         serde_json::json!({"from": from, "to": to, "in": "shape", "out": "shape"})
     }
 
-    fn two_box_request_with(
-        faces: serde_json::Value,
-        thickness: f64,
-        direction: &str,
-    ) -> Request {
+    fn two_box_request_with(faces: serde_json::Value, thickness: f64, direction: &str) -> Request {
         serde_json::from_value(serde_json::json!({
             "requestId": 1, "targets": ["shell"], "meshTargets": [], "binaryMesh": false,
             "nodes": [
@@ -175,11 +166,7 @@ mod tests {
         single_box_request_with(faces, thickness, "inward")
     }
 
-    fn cylinder_request(
-        faces: serde_json::Value,
-        thickness: f64,
-        direction: &str,
-    ) -> Request {
+    fn cylinder_request(faces: serde_json::Value, thickness: f64, direction: &str) -> Request {
         serde_json::from_value(serde_json::json!({
             "requestId": 3, "targets": ["shell"], "meshTargets": [], "binaryMesh": false,
             "nodes": [
@@ -222,9 +209,8 @@ mod tests {
         thickness: f64,
         direction: &str,
     ) -> Request {
-        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .join(relative);
+        let path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..").join(relative);
         serde_json::from_value(serde_json::json!({
             "requestId": 5, "targets": ["shell"], "meshTargets": [], "binaryMesh": false,
             "nodes": [
@@ -239,12 +225,7 @@ mod tests {
     }
 
     fn node_error(output: &crate::EngineOutput) -> String {
-        output
-            .response
-            .node_errors
-            .get("shell")
-            .cloned()
-            .unwrap_or_default()
+        output.response.node_errors.get("shell").cloned().unwrap_or_default()
     }
 
     fn single_body_volume(output: &crate::EngineOutput) -> f64 {
@@ -398,7 +379,11 @@ mod tests {
             ("non-string id", serde_json::json!([{"id": 5}]), "entry 1"),
             ("missing id", serde_json::json!([{}]), "entry 1"),
             ("faces is not a list", serde_json::json!({"id": "face:0"}), "list"),
-            ("malformed body prefix", serde_json::json!([{"id": "body:x:face:1"}]), "body:x:face:1"),
+            (
+                "malformed body prefix",
+                serde_json::json!([{"id": "body:x:face:1"}]),
+                "body:x:face:1",
+            ),
         ];
         for (case, faces, expected) in cases {
             let output = crate::evaluate_exact(
@@ -409,10 +394,7 @@ mod tests {
             let error = node_error(&output);
             assert!(!error.is_empty(), "{case}: the opening was silently ignored");
             assert!(error.contains(expected), "{case}: {error}");
-            assert!(
-                error.contains("Reselect the faces to remove"),
-                "{case}: {error}"
-            );
+            assert!(error.contains("Reselect the faces to remove"), "{case}: {error}");
         }
     }
 
@@ -421,10 +403,9 @@ mod tests {
     /// downgrade to a global face.
     #[test]
     fn shell_body_scoped_references_only_open_their_body_and_reject_unknown_bodies() {
-        for (case, reference) in [
-            ("malformed body", "body:x:face:1"),
-            ("unknown body", "body:9:face:1"),
-        ] {
+        for (case, reference) in
+            [("malformed body", "body:x:face:1"), ("unknown body", "body:9:face:1")]
+        {
             let output = crate::evaluate_exact(
                 single_box_request(serde_json::json!([{"id": reference}]), 1.0),
                 crate::EngineCache::new(),
@@ -554,14 +535,8 @@ mod tests {
     #[test]
     fn shell_too_thick_reports_shell_not_blend() {
         let cases = [
-            (
-                "box 50 inward",
-                single_box_request(serde_json::json!([]), 50.0),
-            ),
-            (
-                "cylinder 10.1 inward",
-                cylinder_request(serde_json::json!([]), 10.1, "inward"),
-            ),
+            ("box 50 inward", single_box_request(serde_json::json!([]), 50.0)),
+            ("cylinder 10.1 inward", cylinder_request(serde_json::json!([]), 10.1, "inward")),
         ];
         for (case, request) in cases {
             let output = crate::evaluate_exact(request, crate::EngineCache::new(), None);
@@ -611,9 +586,7 @@ mod tests {
                         "face {face} {direction}: raw status: {error}"
                     );
                     assert!(
-                        lower.contains("shell")
-                            || lower.contains("wall")
-                            || lower.contains("face"),
+                        lower.contains("shell") || lower.contains("wall") || lower.contains("face"),
                         "face {face} {direction}: no actionable advice: {error}"
                     );
                 } else {
@@ -663,14 +636,8 @@ mod tests {
         assert!(single.response.node_errors.is_empty(), "{:?}", single.response.node_errors);
         let single_volume = single_body_volume(&single);
         for (case, faces) in [
-            (
-                "the same face twice",
-                serde_json::json!([{"id": "face:0"}, {"id": "face:0"}]),
-            ),
-            (
-                "scoped and unscoped",
-                serde_json::json!([{"id": "face:0"}, {"id": "body:0:face:0"}]),
-            ),
+            ("the same face twice", serde_json::json!([{"id": "face:0"}, {"id": "face:0"}])),
+            ("scoped and unscoped", serde_json::json!([{"id": "face:0"}, {"id": "body:0:face:0"}])),
         ] {
             let output = crate::evaluate_exact(
                 single_box_request(faces, 1.0),
@@ -683,10 +650,7 @@ mod tests {
                 output.response.node_errors
             );
             let volume = single_body_volume(&output);
-            assert!(
-                (volume - single_volume).abs() < 1.0e-6,
-                "{case}: {volume} vs {single_volume}"
-            );
+            assert!((volume - single_volume).abs() < 1.0e-6, "{case}: {volume} vs {single_volume}");
         }
     }
 
@@ -705,10 +669,7 @@ mod tests {
             );
             let error = node_error(&output);
             assert!(!error.is_empty(), "{direction}: no node error");
-            assert!(
-                error.contains("Can't remove every face"),
-                "{direction}: {error}"
-            );
+            assert!(error.contains("Can't remove every face"), "{direction}: {error}");
             assert!(
                 error.contains("keep at least one face to make a wall"),
                 "{direction}: {error}"

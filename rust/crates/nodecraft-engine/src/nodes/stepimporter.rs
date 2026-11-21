@@ -136,7 +136,8 @@ mod tests {
         use nodecraft_solidcore::solidcore::math::Point3;
         use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
 
-        let directory = std::env::temp_dir().join(format!("sn-import-three-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("sn-import-three-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).expect("temp directory");
         let path = directory.join("three.step");

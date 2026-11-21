@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use nodecraft_exact::ExactPart;
 
-use crate::{BodyKey, DisplayQuality, PlanCache, PlanInstance, PartPlans};
+use crate::{BodyKey, DisplayQuality, PartPlans, PlanCache, PlanInstance};
 
 /// Exact inputs for one display revision.
 ///
@@ -142,7 +142,11 @@ impl DisplayService {
                 frame.feature_plans = display.feature_plans;
                 frame.breakpoint.insert(
                     target.clone(),
-                    PartPlans { plans: display.plans, stats: display.stats, bounds_mesh: display.mesh },
+                    PartPlans {
+                        plans: display.plans,
+                        stats: display.stats,
+                        bounds_mesh: display.mesh,
+                    },
                 );
             } else if !gpu_tess_ready() {
                 // The background GPU tessellation compile is still running.
@@ -187,7 +191,11 @@ impl DisplayService {
                     )?;
                     frame.breakpoint.insert(
                         target.clone(),
-                        PartPlans { plans: Vec::new(), stats: display.stats, bounds_mesh: display.mesh },
+                        PartPlans {
+                            plans: Vec::new(),
+                            stats: display.stats,
+                            bounds_mesh: display.mesh,
+                        },
                     );
                 }
             }
@@ -238,14 +246,8 @@ mod tests {
 
     fn box_part() -> ExactPart {
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = api::create_box(
-            &mut kernel,
-            Point3::new(-5.0, -5.0, -5.0),
-            10.0,
-            10.0,
-            10.0,
-        )
-        .expect("box");
+        let brep = api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
+            .expect("box");
         ExactPart {
             bodies: vec![nodecraft_exact::ExactBody::new(
                 nodecraft_exact::BodyKey::new(1, 0),
@@ -259,7 +261,10 @@ mod tests {
         let part = Arc::new(box_part());
         let snapshot = ExactSnapshot {
             breakpoint: BTreeMap::from([("look".into(), box_part())]),
-            overlays: vec![OverlayRequest { kind: OverlayKind::EditInput, part: Arc::clone(&part) }],
+            overlays: vec![OverlayRequest {
+                kind: OverlayKind::EditInput,
+                part: Arc::clone(&part),
+            }],
         };
         let mut service = DisplayService::new(8);
         let frame = service
@@ -291,9 +296,11 @@ mod tests {
     fn placed(part: &ExactPart, offsets: [[f64; 3]; 2]) -> ExactPart {
         let mut placed = part.clone();
         for (body, offset) in placed.bodies.iter_mut().zip(offsets) {
-            body.placement = nodecraft_exact::Placement::from(
-                nodecraft_exact::DisplayTransform::Place { offset, rotation: [0.0; 3] },
-            );
+            body.placement =
+                nodecraft_exact::Placement::from(nodecraft_exact::DisplayTransform::Place {
+                    offset,
+                    rotation: [0.0; 3],
+                });
         }
         placed
     }
@@ -328,10 +335,8 @@ mod tests {
             cached,
             "a placement-only change must reuse every body plan",
         );
-        for (old, new) in first.breakpoint["look"]
-            .plans
-            .iter()
-            .zip(&second.breakpoint["look"].plans)
+        for (old, new) in
+            first.breakpoint["look"].plans.iter().zip(&second.breakpoint["look"].plans)
         {
             assert!(
                 Arc::ptr_eq(&old.plan, &new.plan),
@@ -359,10 +364,8 @@ mod tests {
         let cached = service.cache.len();
         let second = service.plan(&request("look", part, 2)).expect("second frame");
         assert_eq!(service.cache.len(), cached);
-        for (old, new) in first.breakpoint["look"]
-            .plans
-            .iter()
-            .zip(&second.breakpoint["look"].plans)
+        for (old, new) in
+            first.breakpoint["look"].plans.iter().zip(&second.breakpoint["look"].plans)
         {
             assert!(
                 Arc::ptr_eq(&old.plan, &new.plan),
@@ -378,10 +381,8 @@ mod tests {
         let other = nodecraft_exact::BodyKey::new(2, 0);
         let mut service = DisplayService::new(8);
         let mut first = request("look", part.clone(), 1);
-        first.body_quality = BTreeMap::from([
-            (fine, DisplayQuality::Full(0.1)),
-            (other, DisplayQuality::Full(0.2)),
-        ]);
+        first.body_quality =
+            BTreeMap::from([(fine, DisplayQuality::Full(0.1)), (other, DisplayQuality::Full(0.2))]);
         let first = service.plan(&first).expect("first level set");
         let hits_after_first = service.cache.hits();
         assert_eq!(hits_after_first, 0, "the first level set is a miss");
@@ -389,10 +390,8 @@ mod tests {
         // A small zoom changes only one body's rung. The other body's plan must
         // come straight from the cache.
         let mut second = request("look", part, 2);
-        second.body_quality = BTreeMap::from([
-            (fine, DisplayQuality::Full(0.1)),
-            (other, DisplayQuality::Full(0.4)),
-        ]);
+        second.body_quality =
+            BTreeMap::from([(fine, DisplayQuality::Full(0.1)), (other, DisplayQuality::Full(0.4))]);
         let second = service.plan(&second).expect("second level set");
         assert!(
             service.cache.hits() > hits_after_first,
@@ -527,10 +526,7 @@ impl Drop for DisplayWorker {
 impl DisplayWorker {
     /// Start the worker. `repaint` runs after a frame is published; the app
     /// passes `egui::Context::request_repaint` there.
-    pub fn start(
-        cache_limit: usize,
-        repaint: impl Fn() + Send + 'static,
-    ) -> std::io::Result<Self> {
+    pub fn start(cache_limit: usize, repaint: impl Fn() + Send + 'static) -> std::io::Result<Self> {
         let request = Arc::new(LatestSlot::<DisplayRequest>::new());
         let frame = Arc::new(LatestSlot::<DisplayFrame>::new());
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -587,13 +583,7 @@ impl DisplayWorker {
                     }
                 }
             })?;
-        Ok(Self {
-            request,
-            frame,
-            stop,
-            thread: handle.thread().clone(),
-            handle: Some(handle),
-        })
+        Ok(Self { request, frame, stop, thread: handle.thread().clone(), handle: Some(handle) })
     }
 
     pub fn submit(&self, request: DisplayRequest) {

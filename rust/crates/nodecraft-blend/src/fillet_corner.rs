@@ -91,10 +91,7 @@ pub(crate) fn fillet_with_corner_patches(
         let record = session
             .corner(corner)
             .map_err(|error| BlendError::Kernel(format!("fillet corner: {error}")))?;
-        if record
-            .vertex
-            .is_some_and(|vertex| corners.contains(&vertex))
-        {
+        if record.vertex.is_some_and(|vertex| corners.contains(&vertex)) {
             session
                 .set_corner_setback(corner, setback)
                 .map_err(|error| BlendError::Kernel(format!("setback: {error}")))?;
@@ -125,21 +122,13 @@ fn check_setback_room(
     corners: &[VertexId],
     setback: f64,
 ) -> Result<(), BlendError> {
-    let lengths: std::collections::BTreeMap<EdgeId, f64> = selections
-        .iter()
-        .map(|selection| (selection.edge, selection.length))
-        .collect();
+    let lengths: std::collections::BTreeMap<EdgeId, f64> =
+        selections.iter().map(|selection| (selection.edge, selection.length)).collect();
     let mut corners_on_edge: std::collections::BTreeMap<EdgeId, usize> =
         std::collections::BTreeMap::new();
     for edge in brep.edge_list() {
-        let record = brep
-            .edge(*edge)
-            .map_err(|error| BlendError::Kernel(error.to_string()))?;
-        let at_corner = record
-            .vertices
-            .iter()
-            .filter(|vertex| corners.contains(vertex))
-            .count();
+        let record = brep.edge(*edge).map_err(|error| BlendError::Kernel(error.to_string()))?;
+        let at_corner = record.vertices.iter().filter(|vertex| corners.contains(vertex)).count();
         if at_corner > 0 {
             let end_count = if record.vertices[0] == record.vertices[1] { 1 } else { 2 };
             let affected = at_corner.min(end_count);
@@ -172,9 +161,7 @@ fn setback_vertices(
     let selected: BTreeSet<EdgeId> = selections.iter().map(|selection| selection.edge).collect();
     let mut incident: BTreeMap<VertexId, BTreeSet<EdgeId>> = BTreeMap::new();
     for edge in brep.edge_list() {
-        let record = brep
-            .edge(*edge)
-            .map_err(|error| BlendError::Kernel(error.to_string()))?;
+        let record = brep.edge(*edge).map_err(|error| BlendError::Kernel(error.to_string()))?;
         for vertex in record.vertices {
             incident.entry(vertex).or_default().insert(*edge);
         }

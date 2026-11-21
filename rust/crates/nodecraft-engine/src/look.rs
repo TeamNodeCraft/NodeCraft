@@ -5,10 +5,7 @@
 const LOOK_COLOR_ATTRIBUTE: u64 = 100; // solidcore `geom::attribute::ids::COLOR`
 
 pub(crate) fn parse_look_color(values: &serde_json::Value) -> Result<[f64; 3], String> {
-    let text = values
-        .get("color")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("#7fa0cf");
+    let text = values.get("color").and_then(serde_json::Value::as_str).unwrap_or("#7fa0cf");
     let hex = text.trim_start_matches('#');
     if hex.len() != 6 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
         return Err(format!("Look color must be #RRGGBB, got {text:?}"));
@@ -40,8 +37,7 @@ pub(crate) fn apply_look_color(
             })
             .collect();
         for handle in old {
-            brep.remove_attribute(entity, handle)
-                .map_err(|error| error.to_string())?;
+            brep.remove_attribute(entity, handle).map_err(|error| error.to_string())?;
         }
         brep.add_attribute(
             entity,
@@ -66,12 +62,15 @@ pub(crate) fn apply_brep_face_colors(
     use nodecraft_solidcore::solidcore::geom::attribute::AttributeValue;
     // Display face groups use the position in `face_list`, not the arena id:
     // booleans and fillets leave stale arena slots, so those indices diverge.
-    let mut by_face: std::collections::BTreeMap<usize, [f32; 3]> = std::collections::BTreeMap::new();
+    let mut by_face: std::collections::BTreeMap<usize, [f32; 3]> =
+        std::collections::BTreeMap::new();
     for (position, &face) in brep.face_list().iter().enumerate() {
-        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE) else {
+        let Some(attribute) = brep.find_attribute(EntityRef::Face(face), LOOK_COLOR_ATTRIBUTE)
+        else {
             continue;
         };
-        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value() else {
+        let (AttributeValue::Color(color) | AttributeValue::Vector3d(color)) = attribute.value()
+        else {
             continue;
         };
         by_face.insert(position, [color.x as f32, color.y as f32, color.z as f32]);
@@ -92,4 +91,3 @@ pub(crate) fn apply_brep_face_colors(
         })
         .collect();
 }
-

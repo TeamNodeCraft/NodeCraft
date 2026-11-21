@@ -38,13 +38,7 @@ pub fn capture_eval_phases<R>(f: impl FnOnce() -> R) -> (R, Vec<EvalPhaseTimings
 /// Start a phase clock only while capture is active, so an uninstrumented run
 /// reads the thread-local state and does nothing else.
 pub(crate) fn phase_clock() -> Option<Instant> {
-    CAPTURE.with(|capture| {
-        if capture.borrow().is_some() {
-            Some(Instant::now())
-        } else {
-            None
-        }
-    })
+    CAPTURE.with(|capture| if capture.borrow().is_some() { Some(Instant::now()) } else { None })
 }
 
 /// Milliseconds elapsed since `start`, or `0.0` when the phase was not clocked.
@@ -70,10 +64,8 @@ mod tests {
     /// A 64-node box-plus-translate chain, cached on every node so the second
     /// pass exercises the hit path.
     fn chain_request() -> Request {
-        let cached = |key: &str| CacheState {
-            key: Some(key.to_owned()),
-            state: Some("cached".to_owned()),
-        };
+        let cached =
+            |key: &str| CacheState { key: Some(key.to_owned()), state: Some("cached".to_owned()) };
         let mut nodes = vec![Node {
             id: "n0".to_owned(),
             node_type: "primitive".to_owned(),
@@ -130,26 +122,14 @@ mod tests {
         assert!(out.response.node_errors.is_empty(), "{:?}", out.response.node_errors);
 
         let (out2, phases) = capture_eval_phases(|| {
-            evaluate_exact_with_imports(
-                request.clone(),
-                out.cache,
-                None,
-                ImportContext::default(),
-            )
+            evaluate_exact_with_imports(request.clone(), out.cache, None, ImportContext::default())
         });
         assert_eq!(phases.len(), 1, "one evaluation must record once");
         let phase = phases[0];
         eprintln!("{phase:?}");
         assert!(phase.total_ms > 0.0, "total must be measured: {phase:?}");
-        let sum = phase.prewarm_ms
-            + phase.walk_ms
-            + phase.order_ms
-            + phase.loop_ms
-            + phase.tail_ms;
-        assert!(
-            sum <= phase.total_ms + 0.05,
-            "phases {phase:?} sum to {sum}ms, above total"
-        );
+        let sum = phase.prewarm_ms + phase.walk_ms + phase.order_ms + phase.loop_ms + phase.tail_ms;
+        assert!(sum <= phase.total_ms + 0.05, "phases {phase:?} sum to {sum}ms, above total");
         assert!(out2.response.node_errors.is_empty(), "{:?}", out2.response.node_errors);
         let stats = out2.response.cache_stats.expect("cache stats");
         assert!(stats.hits > 0, "second pass must hit the node cache: {stats:?}");

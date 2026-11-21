@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use nodecraft_ops::{ProofState, SolidBody};
 use nodecraft_protocol::Request;
 
-use crate::kernel_pool::{shared_pool, CancelToken};
+use crate::kernel_pool::{CancelToken, shared_pool};
 
 /// What a proof attempt did.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -200,7 +200,7 @@ impl Queue {
         generation
     }
 
-    fn end(&self) {
+    fn end(self: &Arc<Self>) {
         {
             let mut inner = self.lock();
             inner.active_evaluations = inner.active_evaluations.saturating_sub(1);
@@ -209,7 +209,7 @@ impl Queue {
     }
 
     fn register_all<'a>(
-        &self,
+        self: &Arc<Self>,
         generation: u64,
         bodies: impl IntoIterator<Item = (&'a str, ProofPriority, &'a SolidBody)>,
     ) {
@@ -261,8 +261,10 @@ impl Queue {
     }
 
     /// Start as many proofs as the idle capacity allows. Called when the last evaluation of a
-    /// batch ends and whenever a proof finishes.
-    fn pump(&self) {
+    /// batch ends and whenever a proof finishes. A started proof reports back to this queue
+    /// (it holds an `Arc` to it), never to the process-wide one, so a private queue keeps its
+    /// own results.
+    fn pump(self: &Arc<Self>) {
         let pool = shared_pool();
         // Leave at least half the workers for evaluation: proofs are background work.
         let max_in_flight = (pool.workers() / 2).max(1);
@@ -304,11 +306,12 @@ impl Queue {
             let meta = job.meta;
             let body = job.body.clone();
             let started = Instant::now();
-            let receiver = pool.submit_background(seed_for(id), CancelToken::new(), move |kernel| {
-                let outcome = body.prove(kernel);
-                let queue = QUEUE.get().expect("proof queue");
-                queue.finish(meta, id, outcome, started.elapsed());
-            });
+            let queue = Arc::clone(self);
+            let receiver =
+                pool.submit_background(seed_for(id), CancelToken::new(), move |kernel| {
+                    let outcome = body.prove(kernel);
+                    queue.finish(meta, id, outcome, started.elapsed());
+                });
             // The job's outcome is recorded by the closure itself; dropping the receiver keeps
             // the pool from storing a result nobody reads.
             drop(receiver);
@@ -316,7 +319,7 @@ impl Queue {
     }
 
     fn finish(
-        &self,
+        self: &Arc<Self>,
         meta: JobMeta,
         id: usize,
         outcome: Result<(), nodecraft_ops::SessionError>,
@@ -376,10 +379,10 @@ impl Queue {
     }
 }
 
-static QUEUE: OnceLock<Queue> = OnceLock::new();
+static QUEUE: OnceLock<Arc<Queue>> = OnceLock::new();
 
-fn queue() -> &'static Queue {
-    QUEUE.get_or_init(Queue::new)
+fn queue() -> &'static Arc<Queue> {
+    QUEUE.get_or_init(|| Arc::new(Queue::new()))
 }
 
 fn seed_for(id: usize) -> u64 {
@@ -398,6 +401,7 @@ fn is_closed_solid(body: &SolidBody) -> bool {
 /// A running evaluation's queue registration token; dropping it lets the proofs start.
 pub(crate) struct EvaluationGuard {
     generation: u64,
+    queue: Arc<Queue>,
 }
 
 impl EvaluationGuard {
@@ -408,15 +412,16 @@ impl EvaluationGuard {
 
 impl Drop for EvaluationGuard {
     fn drop(&mut self) {
-        queue().end();
+        self.queue.end();
     }
 }
 
 /// Start a generation for this request. Queued proof work for older requests is deprioritised;
 /// nothing is submitted until the guard drops (the exact pass has returned).
 pub(crate) fn begin(request: &Request) -> EvaluationGuard {
-    let generation = queue().begin(request);
-    EvaluationGuard { generation }
+    let queue = Arc::clone(queue());
+    let generation = queue.begin(request);
+    EvaluationGuard { generation, queue }
 }
 
 /// Hand a node's output bodies to the queue. The first node to register a body is its
@@ -517,7 +522,7 @@ mod tests {
 
     #[test]
     fn a_displayed_target_raises_an_intermediate_body_to_high() {
-        let queue = Queue::new();
+        let queue = Arc::new(Queue::new());
         let generation = queue.begin(&request());
         let body = SolidBody::new(nodecraft_solidcore::solidcore::topology::Brep::default());
         queue.register_all(generation, [("a", ProofPriority::Intermediate, &body)]);
@@ -547,7 +552,7 @@ mod tests {
 
     #[test]
     fn a_generation_sees_its_own_request() {
-        let queue = Queue::new();
+        let queue = Arc::new(Queue::new());
         let first = queue.begin(&request());
         queue.end();
         let second = queue.begin(&request());
@@ -556,5 +561,51 @@ mod tests {
         let inner = queue.lock();
         assert!(inner.contexts.get(&second).is_some());
         assert!(inner.active_evaluations == 0);
+    }
+
+    /// A refused body is attributed to the node that first produced it and names every
+    /// downstream node, transitively; the body keeps the refusal so nothing proves it again.
+    ///
+    /// The queue is private to this test, so no other test's evaluation can start a newer
+    /// generation and skip this job: one pass is enough, with no retry.
+    #[test]
+    fn a_refused_body_is_reported_on_its_producer_with_downstream_warnings() {
+        use nodecraft_solidcore::solidcore::math::Point3;
+        use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
+        use nodecraft_solidcore::solidcore::topology::face::p1::flip_face_orientation;
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["c"],
+            "meshTargets": [],
+            "nodes": [],
+            "connections": [
+                {"from": "a", "to": "b", "in": "shape", "out": "shape"},
+                {"from": "b", "to": "c", "in": "shape", "out": "shape"}
+            ]
+        }))
+        .expect("request");
+        let mut kernel = nodecraft_solidcore::kernel::kernel();
+        let mut brep = create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+            .expect("box");
+        for face in brep.face_list().to_vec() {
+            flip_face_orientation(&mut brep, face).expect("flip");
+        }
+        let body = SolidBody::new(brep);
+
+        let queue = Arc::new(Queue::new());
+        let generation = queue.begin(&request);
+        queue.register_all(generation, [("a", ProofPriority::Displayed, &body)]);
+        queue.end();
+        assert!(queue.wait(Duration::from_secs(30)), "the private queue drains");
+
+        let reports: Vec<ProofReport> = queue.lock().reports.drain(..).collect();
+        let report =
+            reports.iter().find(|report| report.producer == "a").expect("the producer is reported");
+        assert_eq!(report.downstream, vec!["b", "c"]);
+        assert!(report.failure.contains("closed solid"), "{}", report.failure);
+        assert_eq!(report.generation, generation);
+        assert!(body.refused().is_some(), "the body keeps the refusal");
+        assert_eq!(body.proof_attempts(), 1, "one proof, not one per reader");
+        assert_eq!(queue.lock().stats.refused, 1);
     }
 }

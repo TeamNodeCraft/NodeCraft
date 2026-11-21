@@ -65,11 +65,7 @@ pub fn button(
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let fill = if response.hovered() {
-        fill.gamma_multiply(1.08)
-    } else {
-        fill
-    };
+    let fill = if response.hovered() { fill.gamma_multiply(1.08) } else { fill };
     ui.painter().add(shape(rect, fill, stroke));
     ui.painter().text(
         rect.center(),
@@ -86,9 +82,7 @@ pub fn callout(ui: &mut Ui, text: &str) {
     let text_color = theme.color(theme.muted);
     let width = ui.available_width();
     let font = egui::FontId::proportional(12.0);
-    let galley = ui
-        .painter()
-        .layout(text.to_owned(), font, text_color, (width - 20.0).max(40.0));
+    let galley = ui.painter().layout(text.to_owned(), font, text_color, (width - 20.0).max(40.0));
     let height = galley.size().y + 20.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
     ui.painter().add(shape(

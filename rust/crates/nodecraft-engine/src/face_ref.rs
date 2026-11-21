@@ -41,9 +41,7 @@ pub(crate) fn face_reference_body_and_index(reference: &str) -> Option<(Option<u
     let parts: Vec<&str> = reference.split(':').collect();
     match parts.as_slice() {
         ["face", face] => Some((None, face.parse().ok()?)),
-        ["body", body, "face", face] => {
-            Some((Some(body.parse().ok()?), face.parse().ok()?))
-        }
+        ["body", body, "face", face] => Some((Some(body.parse().ok()?), face.parse().ok()?)),
         _ => None,
     }
 }
@@ -164,11 +162,7 @@ fn push_once(list: &mut Vec<usize>, face: usize) {
 
 /// `1 face` / `6 faces`, so a sentence does not say "1 faces".
 fn counted(count: usize, singular: &str, plural: &str) -> String {
-    if count == 1 {
-        format!("1 {singular}")
-    } else {
-        format!("{count} {plural}")
-    }
+    if count == 1 { format!("1 {singular}") } else { format!("{count} {plural}") }
 }
 
 #[cfg(test)]
@@ -181,14 +175,8 @@ mod tests {
 
     #[test]
     fn parses_both_reference_forms_exactly() {
-        assert_eq!(
-            face_reference_body_and_index("face:2"),
-            Some((None, 2))
-        );
-        assert_eq!(
-            face_reference_body_and_index("body:3:face:7"),
-            Some((Some(3), 7))
-        );
+        assert_eq!(face_reference_body_and_index("face:2"), Some((None, 2)));
+        assert_eq!(face_reference_body_and_index("body:3:face:7"), Some((Some(3), 7)));
         for malformed in [
             "body:x:face:1",
             "body:face:1",
@@ -226,7 +214,8 @@ mod tests {
             resolve_face_references(&refs, &[6, 6]).expect("resolved"),
             vec![vec![1], vec![1]]
         );
-        let only_the_big_body = references(serde_json::json!([{ "id": "face:4" }])).expect("parsed");
+        let only_the_big_body =
+            references(serde_json::json!([{ "id": "face:4" }])).expect("parsed");
         assert_eq!(
             resolve_face_references(&only_the_big_body, &[6, 3]).expect("resolved"),
             vec![vec![4], Vec::<usize>::new()]
@@ -264,9 +253,6 @@ mod tests {
             { "id": "body:0:face:0" }
         ]))
         .expect("parsed");
-        assert_eq!(
-            resolve_face_references(&refs, &[6]).expect("resolved"),
-            vec![vec![0]]
-        );
+        assert_eq!(resolve_face_references(&refs, &[6]).expect("resolved"), vec![vec![0]]);
     }
 }

@@ -18,7 +18,7 @@ pub use cadir::{
     application_protocol, is_cad_path, read_cad, read_schema,
 };
 pub use cadir_export::{
-    ExportBody, StepExportOptions, bodies_from_breps, record_bounds, record_of_brep,
-    record_volume, write_brep_exact, write_breps_exact, write_breps_exact_with_options, write_step,
+    ExportBody, StepExportOptions, bodies_from_breps, record_bounds, record_of_brep, record_volume,
+    write_brep_exact, write_breps_exact, write_breps_exact_with_options, write_step,
     write_step_faceted, write_step_with_options,
 };

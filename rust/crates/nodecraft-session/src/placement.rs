@@ -69,11 +69,7 @@ impl Affine3 {
     /// Rotation only, matching the mesh/BRep rotation order.
     pub fn rotation(values: &serde_json::Value) -> Self {
         let translate = translate_values(values);
-        Self(nodecraft_exact::Affine3::from_rotation([
-            translate.rx,
-            translate.ry,
-            translate.rz,
-        ]))
+        Self(nodecraft_exact::Affine3::from_rotation([translate.rx, translate.ry, translate.rz]))
     }
 
     /// Translation after X/Y/Z rotation, matching the mesh and BRep transform paths.
@@ -103,9 +99,7 @@ impl Affine3 {
             nodecraft_engine::nodes::TransformRole::Translate => {
                 Some(Self::from_translate(&node.values))
             }
-            nodecraft_engine::nodes::TransformRole::Mirror => {
-                Some(Self::from_mirror(&node.values))
-            }
+            nodecraft_engine::nodes::TransformRole::Mirror => Some(Self::from_mirror(&node.values)),
         }
     }
 
@@ -407,11 +401,7 @@ pub fn transform_chain(document: &GraphDocument, from: &str, to: &str) -> Option
 
 /// The one path from `from` to `to`, or `None` when there are zero or multiple
 /// paths. The reverse reachability set keeps the search bounded on large graphs.
-fn unique_document_path(
-    document: &GraphDocument,
-    from: &str,
-    to: &str,
-) -> Option<Vec<String>> {
+fn unique_document_path(document: &GraphDocument, from: &str, to: &str) -> Option<Vec<String>> {
     let mut reaches_to = std::collections::HashSet::from([to.to_owned()]);
     let mut scan = vec![to.to_owned()];
     while let Some(id) = scan.pop() {
@@ -450,19 +440,33 @@ fn unique_document_path(
 mod tests {
     use super::*;
 
-use crate::{GraphConnection, GraphDocument, GraphNode};
+    use crate::{GraphConnection, GraphDocument, GraphNode};
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
-        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        }
     }
 
     fn link(from: &str, to: &str) -> GraphConnection {
-        GraphConnection { from: from.into(), to: to.into(), input: "shape".into(), out: "shape".into() }
+        GraphConnection {
+            from: from.into(),
+            to: to.into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }
     }
 
     #[test]
     fn translate_chain_places_and_inverse_maps_world_delta() {
-        let translate = Affine3::from_translate(&serde_json::json!({"x": 10.0, "y": 0.0, "z": 0.0}));
+        let translate =
+            Affine3::from_translate(&serde_json::json!({"x": 10.0, "y": 0.0, "z": 0.0}));
         assert_eq!(translate.apply_point([0.0, 0.0, 0.0]), [10.0, 0.0, 0.0]);
         assert_eq!(translate.inverse().apply_point([10.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
     }
@@ -534,14 +538,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
 
         // `solid` is a body in the exact Part layout, so the pattern has four
         // displayed copies in body order.
-        assert_eq!(
-            part_body_layout(&document, "pattern"),
-            Some(vec!["box".to_owned(); 4]),
-        );
-        assert_eq!(
-            preview_body_scope(&document, "move", "pattern"),
-            Some(PreviewBodyScope::All),
-        );
+        assert_eq!(part_body_layout(&document, "pattern"), Some(vec!["box".to_owned(); 4]),);
+        assert_eq!(preview_body_scope(&document, "move", "pattern"), Some(PreviewBodyScope::All),);
         let chain = transform_chain(&document, "move", "pattern").expect("pattern chain");
         assert_eq!(chain.apply_point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
 
@@ -556,10 +554,7 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             part_body_layout(&document, "pattern"),
             Some(vec!["box".to_owned(), "box".to_owned()]),
         );
-        assert_eq!(
-            preview_body_scope(&document, "move", "pattern"),
-            Some(PreviewBodyScope::All),
-        );
+        assert_eq!(preview_body_scope(&document, "move", "pattern"), Some(PreviewBodyScope::All),);
         let chain = transform_chain(&document, "move", "pattern").expect("mirror chain");
         assert_eq!(chain.apply_point([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
     }
@@ -588,7 +583,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
 
     #[test]
     fn preview_transform_is_identity_for_unchanged_values() {
-        let values = serde_json::json!({"x": 1.0, "y": -2.0, "z": 0.5, "rx": 10.0, "ry": 20.0, "rz": 30.0});
+        let values =
+            serde_json::json!({"x": 1.0, "y": -2.0, "z": 0.5, "rx": 10.0, "ry": 20.0, "rz": 30.0});
         let preview = preview_transform(Affine3::identity(), &values, &values);
         for point in [[0.0, 0.0, 0.0], [3.0, -4.0, 5.0], [-2.0, 1.0, 7.0]] {
             let moved = preview.apply_point(point);
@@ -637,7 +633,11 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             }
         }
         let wrong = preview_transform(Affine3::identity(), &start, &current).compose(base);
-        assert!((wrong.apply_point([1.0, 0.0, 0.0])[0] - expected.apply_point([1.0, 0.0, 0.0])[0]).abs() > 1.0e-6);
+        assert!(
+            (wrong.apply_point([1.0, 0.0, 0.0])[0] - expected.apply_point([1.0, 0.0, 0.0])[0])
+                .abs()
+                > 1.0e-6
+        );
     }
 
     #[test]
@@ -689,15 +689,22 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
         ];
         document.connections = vec![
             link("box", "move"),
-            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
-            GraphConnection { from: "sphere".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+            GraphConnection {
+                from: "move".into(),
+                to: "boolean".into(),
+                input: "a".into(),
+                out: "shape".into(),
+            },
+            GraphConnection {
+                from: "sphere".into(),
+                to: "boolean".into(),
+                input: "b".into(),
+                out: "shape".into(),
+            },
             link("boolean", "fillet"),
             link("fillet", "look"),
         ];
-        assert_eq!(
-            preview_body_scope(&document, "move", "look"),
-            Some(PreviewBodyScope::Unknown)
-        );
+        assert_eq!(preview_body_scope(&document, "move", "look"), Some(PreviewBodyScope::Unknown));
     }
 
     /// The Boolean merge rule lives in the registry, not in the session. Both
@@ -714,8 +721,18 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
         ];
         document.connections = vec![
             link("box", "move"),
-            GraphConnection { from: "move".into(), to: "boolean".into(), input: "a".into(), out: "shape".into() },
-            GraphConnection { from: "sphere".into(), to: "boolean".into(), input: "b".into(), out: "shape".into() },
+            GraphConnection {
+                from: "move".into(),
+                to: "boolean".into(),
+                input: "a".into(),
+                out: "shape".into(),
+            },
+            GraphConnection {
+                from: "sphere".into(),
+                to: "boolean".into(),
+                input: "b".into(),
+                out: "shape".into(),
+            },
         ];
         let boolean = document.nodes.iter().find(|node| node.id == "boolean").expect("boolean");
         let view = nodecraft_engine::nodes::NodeView::new(
@@ -734,8 +751,7 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
                 out: link.out.clone(),
             })
             .collect();
-        let affected: std::collections::HashSet<String> =
-            ["move".to_owned()].into_iter().collect();
+        let affected: std::collections::HashSet<String> = ["move".to_owned()].into_iter().collect();
         assert_eq!(
             nodecraft_engine::nodes::merge_provenance(view, &connections, &affected),
             nodecraft_engine::nodes::MergeProvenance::LosesProvenance,
@@ -746,11 +762,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
         // source body keeps its own layout.
         let mut one_document = document.clone();
         one_document.connections.retain(|link| !(link.to == "boolean" && link.input == "b"));
-        let one_boolean = one_document
-            .nodes
-            .iter()
-            .find(|node| node.id == "boolean")
-            .expect("boolean");
+        let one_boolean =
+            one_document.nodes.iter().find(|node| node.id == "boolean").expect("boolean");
         let one_view = nodecraft_engine::nodes::NodeView::new(
             &one_boolean.id,
             &one_boolean.node_type,
@@ -827,10 +840,7 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             link("inner", "move"),
             link("move", "outer"),
         ];
-        assert_eq!(
-            preview_body_scope(&document, "move", "outer"),
-            Some(PreviewBodyScope::All)
-        );
+        assert_eq!(preview_body_scope(&document, "move", "outer"), Some(PreviewBodyScope::All));
     }
 
     #[test]
@@ -969,11 +979,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             node("part", "combine", serde_json::json!({})),
             node("shell", "shell", serde_json::json!({"thickness": 1.0})),
         ];
-        document.connections = vec![
-            link("big", "part"),
-            link("small", "part"),
-            link("part", "shell"),
-        ];
+        document.connections =
+            vec![link("big", "part"), link("small", "part"), link("part", "shell")];
         assert_eq!(
             part_body_layout(&document, "shell"),
             Some(vec!["big".to_owned(), "small".to_owned()]),
@@ -997,11 +1004,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
                 serde_json::json!({"distance": 1.0, "faces": [{"id": "body:1:face:1"}]}),
             ),
         ];
-        document.connections = vec![
-            link("big", "part"),
-            link("small", "part"),
-            link("part", "offset"),
-        ];
+        document.connections =
+            vec![link("big", "part"), link("small", "part"), link("part", "offset")];
         assert_eq!(
             part_body_layout(&document, "offset"),
             Some(vec!["big".to_owned(), "small".to_owned()]),
@@ -1042,11 +1046,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             node("part", "combine", serde_json::json!({})),
             node("pattern", "circularpattern", serde_json::json!({"count": 3})),
         ];
-        document.connections = vec![
-            link("box", "part"),
-            link("sphere", "part"),
-            link("part", "pattern"),
-        ];
+        document.connections =
+            vec![link("box", "part"), link("sphere", "part"), link("part", "pattern")];
         assert_eq!(
             part_body_layout(&document, "pattern"),
             Some(vec![
@@ -1061,10 +1062,7 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
 
         // A fresh node has no saved count and uses the contract default (6).
         document.nodes[3].values = serde_json::json!({});
-        assert_eq!(
-            part_body_layout(&document, "pattern").map(|layout| layout.len()),
-            Some(12),
-        );
+        assert_eq!(part_body_layout(&document, "pattern").map(|layout| layout.len()), Some(12),);
 
         // Copies have per-instance rotations, so the chain anchors at copy 0
         // (the source frame) instead of trying to encode every copy.
@@ -1089,12 +1087,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
             node("b", "translate", serde_json::json!({"x": 20.0})),
             node("merge", "boolean", serde_json::json!({"mode": "union"})),
         ];
-        document.connections = vec![
-            link("move", "a"),
-            link("move", "b"),
-            link("a", "merge"),
-            link("b", "merge"),
-        ];
+        document.connections =
+            vec![link("move", "a"), link("move", "b"), link("a", "merge"), link("b", "merge")];
         assert!(transform_chain(&document, "move", "merge").is_none());
 
         // A scatter below the edited node also repeats the body; the chain
@@ -1112,7 +1106,8 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
         let mut document = GraphDocument::new("suppressed-chain");
         document.nodes = vec![
             node("move", "translate", serde_json::json!({"x": 1.0})),
-            GraphNode { expressions: Default::default(),
+            GraphNode {
+                expressions: Default::default(),
                 id: "down".into(),
                 node_type: "translate".into(),
                 values: serde_json::json!({"x": 10.0}),
@@ -1134,5 +1129,4 @@ use crate::{GraphConnection, GraphDocument, GraphNode};
         document.connections = vec![link("move", "down")];
         assert!(transform_chain(&document, "move", "down").is_some());
     }
-
 }

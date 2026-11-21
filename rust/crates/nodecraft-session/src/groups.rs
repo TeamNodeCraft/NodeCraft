@@ -4,7 +4,9 @@
 //! expands it into namespaced flat nodes; the engine never sees a group,
 //! a nested runtime, or a nested cache.
 
-use crate::{GraphConnection, GraphDefinition, GraphDocument, GraphInterface, GraphNode, SessionError};
+use crate::{
+    GraphConnection, GraphDefinition, GraphDocument, GraphInterface, GraphNode, SessionError,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -30,7 +32,6 @@ pub struct GroupPayload {
     pub outputs: Vec<GroupPort>,
 }
 
-
 /// A graph node's definition reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphReference {
@@ -44,7 +45,8 @@ impl GraphReference {
     /// Read the reference from a graph node's values.
     #[must_use]
     pub fn from_node(node: &GraphNode) -> Option<Self> {
-        if let Some(definition) = node.values.get("definition").and_then(serde_json::Value::as_str) {
+        if let Some(definition) = node.values.get("definition").and_then(serde_json::Value::as_str)
+        {
             return Some(Self::Local(definition.to_owned()));
         }
         let external = node.values.get("external")?;
@@ -95,7 +97,8 @@ pub fn resize_graph_interface(
         )));
     }
     let mut payload = payload(node)?;
-    let mut used_nodes: BTreeSet<String> = payload.nodes.iter().map(|node| node.id.clone()).collect();
+    let mut used_nodes: BTreeSet<String> =
+        payload.nodes.iter().map(|node| node.id.clone()).collect();
     let mut removed_inputs = Vec::new();
     let mut removed_outputs = Vec::new();
     resize_port_list(
@@ -146,20 +149,14 @@ fn resize_port_list(
         .first()
         .map(|port| port.node.clone())
         .or_else(|| {
-            nodes
-                .iter()
-                .find(|node| node.node_type == node_type)
-                .map(|node| node.id.clone())
+            nodes.iter().find(|node| node.node_type == node_type).map(|node| node.id.clone())
         })
         .unwrap_or_else(|| next_marker_id(id_prefix, used_nodes));
     used_nodes.insert(marker_id.clone());
 
     let mut used_ports: BTreeSet<String> = existing.iter().map(|port| port.port.clone()).collect();
-    let mut target_names: Vec<String> = existing
-        .iter()
-        .take(count)
-        .map(|port| port.port.clone())
-        .collect();
+    let mut target_names: Vec<String> =
+        existing.iter().take(count).map(|port| port.port.clone()).collect();
     while target_names.len() < count {
         let port_name = next_port_name(&used_ports);
         used_ports.insert(port_name.clone());
@@ -212,13 +209,8 @@ fn resize_port_list(
             y: 0.0,
         });
     }
-    *ports = target_names
-        .into_iter()
-        .map(|port| GroupPort {
-            port,
-            node: marker_id.clone(),
-        })
-        .collect();
+    *ports =
+        target_names.into_iter().map(|port| GroupPort { port, node: marker_id.clone() }).collect();
 }
 
 fn next_port_name(used: &BTreeSet<String>) -> String {
@@ -345,11 +337,8 @@ fn migrate_graph_nodes(
             format!("{parent_definition}/{}", node.id)
         };
         let definition_id = unique_definition_id(&base_id, used_ids);
-        let requested_name = if payload.name.trim().is_empty() {
-            node.id.clone()
-        } else {
-            payload.name.clone()
-        };
+        let requested_name =
+            if payload.name.trim().is_empty() { node.id.clone() } else { payload.name.clone() };
         let name = unique_definition_name(&requested_name, used_names);
         let mut child_nodes = payload.nodes;
         migrate_graph_nodes(
@@ -372,8 +361,10 @@ fn migrate_graph_nodes(
             connections: payload.connections,
         });
         node.node_type = "graph".to_owned();
-        let interface_inputs: Vec<String> = payload.inputs.iter().map(|port| port.port.clone()).collect();
-        let interface_outputs: Vec<String> = payload.outputs.iter().map(|port| port.port.clone()).collect();
+        let interface_inputs: Vec<String> =
+            payload.inputs.iter().map(|port| port.port.clone()).collect();
+        let interface_outputs: Vec<String> =
+            payload.outputs.iter().map(|port| port.port.clone()).collect();
         node.values = serde_json::json!({
             "definition": definition_id,
             "name": name,
@@ -498,11 +489,7 @@ fn marker_ports(node: &GraphNode) -> Vec<&str> {
     if let Some(ports) = node.values.get("ports").and_then(|value| value.as_array()) {
         return ports.iter().filter_map(|port| port.as_str()).collect();
     }
-    node.values
-        .get("port")
-        .and_then(|value| value.as_str())
-        .into_iter()
-        .collect()
+    node.values.get("port").and_then(|value| value.as_str()).into_iter().collect()
 }
 
 fn interface_ports(
@@ -510,11 +497,8 @@ fn interface_ports(
     marker_type: &str,
     names: &[String],
 ) -> Result<Vec<GroupPort>, SessionError> {
-    let markers: Vec<&GraphNode> = definition
-        .nodes
-        .iter()
-        .filter(|node| node.node_type == marker_type)
-        .collect();
+    let markers: Vec<&GraphNode> =
+        definition.nodes.iter().filter(|node| node.node_type == marker_type).collect();
     let mut ports = Vec::with_capacity(names.len());
     for name in names {
         let marker = markers
@@ -526,10 +510,7 @@ fn interface_ports(
                     definition.id
                 ))
             })?;
-        ports.push(GroupPort {
-            port: name.clone(),
-            node: marker.id.clone(),
-        });
+        ports.push(GroupPort { port: name.clone(), node: marker.id.clone() });
     }
     Ok(ports)
 }
@@ -581,9 +562,8 @@ fn expand_groups_at(
 
     // Connections that do not touch a group or graph stay as they are.
     for connection in &document.connections {
-        let touches_reference = references
-            .iter()
-            .any(|node| node.id == connection.to || node.id == connection.from);
+        let touches_reference =
+            references.iter().any(|node| node.id == connection.to || node.id == connection.from);
         if !touches_reference {
             out.connections.push(connection.clone());
         }
@@ -604,30 +584,33 @@ fn expand_groups_at(
                     )
                 }
                 "graph" => {
-                    let reference_value = GraphReference::from_node(reference).ok_or_else(|| {
-                        SessionError::InvalidInput(format!(
-                            "Graph {} has no definition.",
-                            reference.id
-                        ))
-                    })?;
+                    let reference_value =
+                        GraphReference::from_node(reference).ok_or_else(|| {
+                            SessionError::InvalidInput(format!(
+                                "Graph {} has no definition.",
+                                reference.id
+                            ))
+                        })?;
                     let (definition, definitions, key) = match reference_value {
                         GraphReference::Local(id) => {
-                            let definition = document.definition(&id).cloned().ok_or_else(|| {
-                                SessionError::InvalidInput(format!(
-                                    "Missing graph definition {id}."
-                                ))
-                            })?;
+                            let definition =
+                                document.definition(&id).cloned().ok_or_else(|| {
+                                    SessionError::InvalidInput(format!(
+                                        "Missing graph definition {id}."
+                                    ))
+                                })?;
                             (definition, document.definitions.clone(), format!("local:{id}"))
                         }
                         GraphReference::External { path, definition } => {
                             let requested = definition;
                             let external = crate::store::load(std::path::Path::new(&path))
                                 .map_err(SessionError::InvalidInput)?;
-                            let definition = external.definition(&requested).cloned().ok_or_else(|| {
-                                SessionError::InvalidInput(format!(
-                                    "Missing external graph definition {requested} in {path}."
-                                ))
-                            })?;
+                            let definition =
+                                external.definition(&requested).cloned().ok_or_else(|| {
+                                    SessionError::InvalidInput(format!(
+                                        "Missing external graph definition {requested} in {path}."
+                                    ))
+                                })?;
                             (
                                 definition,
                                 external.definitions.clone(),
@@ -635,8 +618,10 @@ fn expand_groups_at(
                             )
                         }
                     };
-                    let inputs = interface_ports(&definition, "groupinput", &definition.interface.inputs)?;
-                    let outputs = interface_ports(&definition, "groupoutput", &definition.interface.outputs)?;
+                    let inputs =
+                        interface_ports(&definition, "groupinput", &definition.interface.inputs)?;
+                    let outputs =
+                        interface_ports(&definition, "groupoutput", &definition.interface.outputs)?;
                     (
                         definition.nodes,
                         definition.connections,
@@ -680,10 +665,8 @@ fn expand_groups_at(
 
         // External sources entering the reference by port.
         let mut input_sources: BTreeMap<String, Vec<GraphConnection>> = BTreeMap::new();
-        for connection in document
-            .connections
-            .iter()
-            .filter(|connection| connection.to == reference.id)
+        for connection in
+            document.connections.iter().filter(|connection| connection.to == reference.id)
         {
             let Some(port) = inputs.iter().find(|port| port.port == connection.input) else {
                 return Err(SessionError::InvalidInput(format!(
@@ -691,17 +674,12 @@ fn expand_groups_at(
                     reference.id, connection.input
                 )));
             };
-            input_sources
-                .entry(port.port.clone())
-                .or_default()
-                .push(connection.clone());
+            input_sources.entry(port.port.clone()).or_default().push(connection.clone());
         }
         // External targets leaving the reference by port.
         let mut output_targets: BTreeMap<String, Vec<GraphConnection>> = BTreeMap::new();
-        for connection in document
-            .connections
-            .iter()
-            .filter(|connection| connection.from == reference.id)
+        for connection in
+            document.connections.iter().filter(|connection| connection.from == reference.id)
         {
             let Some(port) = outputs.iter().find(|port| port.port == connection.out) else {
                 return Err(SessionError::InvalidInput(format!(
@@ -709,14 +687,12 @@ fn expand_groups_at(
                     reference.id, connection.out
                 )));
             };
-            output_targets
-                .entry(port.port.clone())
-                .or_default()
-                .push(connection.clone());
+            output_targets.entry(port.port.clone()).or_default().push(connection.clone());
         }
 
         let input_markers: BTreeSet<&str> = inputs.iter().map(|port| port.node.as_str()).collect();
-        let output_markers: BTreeSet<&str> = outputs.iter().map(|port| port.node.as_str()).collect();
+        let output_markers: BTreeSet<&str> =
+            outputs.iter().map(|port| port.node.as_str()).collect();
 
         // Keep a preview target for the graph card itself. The interface
         // markers are removed from the flat graph, so without this synthetic
@@ -730,15 +706,10 @@ fn expand_groups_at(
                 // A direct input->output passthrough has no child node to show.
                 // Use the external sources entering that marker so the graph
                 // card still gets a breakpoint target.
-                let ports: Vec<&GroupPort> = inputs
-                    .iter()
-                    .filter(|port| port.node == connection.from)
-                    .collect();
-                let from_port = if ports.len() == 1 {
-                    ports[0].port.clone()
-                } else {
-                    connection.out.clone()
-                };
+                let ports: Vec<&GroupPort> =
+                    inputs.iter().filter(|port| port.node == connection.from).collect();
+                let from_port =
+                    if ports.len() == 1 { ports[0].port.clone() } else { connection.out.clone() };
                 if let Some(sources) = input_sources.get(&from_port) {
                     for source in sources {
                         preview_sources.insert(source.from.clone());
@@ -784,26 +755,13 @@ fn expand_groups_at(
         }
 
         let input_port_for = |marker: &str, child_port: &str| -> String {
-            let ports: Vec<&GroupPort> = inputs
-                .iter()
-                .filter(|port| port.node == marker)
-                .collect();
-            if ports.len() == 1 {
-                ports[0].port.clone()
-            } else {
-                child_port.to_owned()
-            }
+            let ports: Vec<&GroupPort> = inputs.iter().filter(|port| port.node == marker).collect();
+            if ports.len() == 1 { ports[0].port.clone() } else { child_port.to_owned() }
         };
         let output_port_for = |marker: &str, child_port: &str| -> String {
-            let ports: Vec<&GroupPort> = outputs
-                .iter()
-                .filter(|port| port.node == marker)
-                .collect();
-            if ports.len() == 1 {
-                ports[0].port.clone()
-            } else {
-                child_port.to_owned()
-            }
+            let ports: Vec<&GroupPort> =
+                outputs.iter().filter(|port| port.node == marker).collect();
+            if ports.len() == 1 { ports[0].port.clone() } else { child_port.to_owned() }
         };
         for connection in child.root.connections {
             let from_is_input = input_markers.contains(connection.from.as_str());
@@ -813,10 +771,9 @@ fn expand_groups_at(
                     // A fresh graph starts as an input-to-output passthrough.
                     let from_port = input_port_for(&connection.from, &connection.out);
                     let to_port = output_port_for(&connection.to, &connection.input);
-                    if let (Some(sources), Some(targets)) = (
-                        input_sources.get(&from_port),
-                        output_targets.get(&to_port),
-                    ) {
+                    if let (Some(sources), Some(targets)) =
+                        (input_sources.get(&from_port), output_targets.get(&to_port))
+                    {
                         for source in sources {
                             for target in targets {
                                 out.connections.push(GraphConnection {
@@ -877,7 +834,8 @@ mod tests {
     use serde_json::json;
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
-        GraphNode { expressions: Default::default(),
+        GraphNode {
+            expressions: Default::default(),
             id: id.into(),
             node_type: node_type.into(),
             values,
@@ -888,12 +846,7 @@ mod tests {
     }
 
     fn connection(from: &str, to: &str, input: &str, out: &str) -> GraphConnection {
-        GraphConnection {
-            from: from.into(),
-            to: to.into(),
-            input: input.into(),
-            out: out.into(),
-        }
+        GraphConnection { from: from.into(), to: to.into(), input: input.into(), out: out.into() }
     }
 
     #[test]
@@ -919,14 +872,14 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                node("box", "primitive", json!({"primitiveType":"box"})),
-                node("g", "group", group_values),
-                node("after", "translate", json!({"y":2.0})),
-            ],
+                    node("box", "primitive", json!({"primitiveType":"box"})),
+                    node("g", "group", group_values),
+                    node("after", "translate", json!({"y":2.0})),
+                ],
                 connections: vec![
-                connection("box", "g", "shape", "shape"),
-                connection("g", "after", "shape", "shape"),
-            ],
+                    connection("box", "g", "shape", "shape"),
+                    connection("g", "after", "shape", "shape"),
+                ],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -936,12 +889,16 @@ mod tests {
         assert!(flat.nodes.iter().all(|node| node.node_type != "group"));
         assert!(flat.nodes.iter().all(|node| node.id != "in" && node.id != "out"));
         assert!(flat.nodes.iter().any(|node| node.id == "g::move"));
-        assert!(flat.connections.iter().any(|link| {
-            link.from == "box" && link.to == "g::move" && link.input == "shape"
-        }));
-        assert!(flat.connections.iter().any(|link| {
-            link.from == "g::move" && link.to == "after" && link.input == "shape"
-        }));
+        assert!(
+            flat.connections.iter().any(|link| {
+                link.from == "box" && link.to == "g::move" && link.input == "shape"
+            })
+        );
+        assert!(
+            flat.connections.iter().any(|link| {
+                link.from == "g::move" && link.to == "after" && link.input == "shape"
+            })
+        );
     }
 
     #[test]
@@ -954,31 +911,37 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                node("box", "primitive", json!({})),
-                node("g", "group", json!({
-                    "nodes": [
-                        node("in", "groupinput", json!({"port":"shape"})),
-                        node("out", "groupoutput", json!({"port":"shape"}))
-                    ],
-                    "connections": [connection("in", "out", "shape", "shape")],
-                    "inputs": [{"port":"shape","node":"in"}],
-                    "outputs": [{"port":"shape","node":"out"}]
-                })),
-                node("after", "translate", json!({})),
-            ],
+                    node("box", "primitive", json!({})),
+                    node(
+                        "g",
+                        "group",
+                        json!({
+                            "nodes": [
+                                node("in", "groupinput", json!({"port":"shape"})),
+                                node("out", "groupoutput", json!({"port":"shape"}))
+                            ],
+                            "connections": [connection("in", "out", "shape", "shape")],
+                            "inputs": [{"port":"shape","node":"in"}],
+                            "outputs": [{"port":"shape","node":"out"}]
+                        }),
+                    ),
+                    node("after", "translate", json!({})),
+                ],
                 connections: vec![
-                connection("box", "g", "shape", "shape"),
-                connection("g", "after", "shape", "shape"),
-            ],
+                    connection("box", "g", "shape", "shape"),
+                    connection("g", "after", "shape", "shape"),
+                ],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
             ingested_sources: Vec::new(),
         };
         let flat = expand_groups(&document).expect("expand");
-        assert!(flat.connections.iter().any(|link| {
-            link.from == "box" && link.to == "after" && link.input == "shape"
-        }));
+        assert!(
+            flat.connections
+                .iter()
+                .any(|link| { link.from == "box" && link.to == "after" && link.input == "shape" })
+        );
         assert!(flat.nodes.iter().all(|node| node.node_type != "group"));
     }
 
@@ -1045,12 +1008,7 @@ mod interface_tests {
     }
 
     fn connection(from: &str, to: &str, input: &str, out: &str) -> GraphConnection {
-        GraphConnection {
-            from: from.into(),
-            to: to.into(),
-            input: input.into(),
-            out: out.into(),
-        }
+        GraphConnection { from: from.into(), to: to.into(), input: input.into(), out: out.into() }
     }
 
     fn graph() -> GraphNode {
@@ -1089,8 +1047,10 @@ mod interface_tests {
         assert_eq!(edit.inputs[2].port, "shape3");
         assert_eq!(edit.outputs[0].port, "shape");
         assert_eq!(edit.outputs[1].port, "shape2");
-        let inputs: Vec<_> = edit.nodes.iter().filter(|node| node.node_type == "groupinput").collect();
-        let outputs: Vec<_> = edit.nodes.iter().filter(|node| node.node_type == "groupoutput").collect();
+        let inputs: Vec<_> =
+            edit.nodes.iter().filter(|node| node.node_type == "groupinput").collect();
+        let outputs: Vec<_> =
+            edit.nodes.iter().filter(|node| node.node_type == "groupoutput").collect();
         assert_eq!(inputs.len(), 1);
         assert_eq!(outputs.len(), 1);
         assert_eq!(inputs[0].values["ports"].as_array().unwrap().len(), 3);
@@ -1122,16 +1082,16 @@ mod interface_tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                node("a", "primitive", json!({"primitiveType":"box"})),
-                node("b", "primitive", json!({"primitiveType":"box"})),
-                node("g", "group", group_values),
-                node("after", "translate", json!({})),
-            ],
+                    node("a", "primitive", json!({"primitiveType":"box"})),
+                    node("b", "primitive", json!({"primitiveType":"box"})),
+                    node("g", "group", group_values),
+                    node("after", "translate", json!({})),
+                ],
                 connections: vec![
-                connection("a", "g", "shape", "shape"),
-                connection("b", "g", "shape2", "shape"),
-                connection("g", "after", "shape", "shape"),
-            ],
+                    connection("a", "g", "shape", "shape"),
+                    connection("b", "g", "shape2", "shape"),
+                    connection("g", "after", "shape", "shape"),
+                ],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -1172,8 +1132,14 @@ mod interface_tests {
         let edit = resize_definition_interface(&definition, 3, 2).expect("resize");
         assert_eq!(edit.definition.interface.inputs, vec!["shape", "shape2", "shape3"]);
         assert_eq!(edit.definition.interface.outputs, vec!["shape", "shape2"]);
-        assert_eq!(edit.definition.nodes.iter().filter(|node| node.node_type == "groupinput").count(), 1);
-        assert_eq!(edit.definition.nodes.iter().filter(|node| node.node_type == "groupoutput").count(), 1);
+        assert_eq!(
+            edit.definition.nodes.iter().filter(|node| node.node_type == "groupinput").count(),
+            1
+        );
+        assert_eq!(
+            edit.definition.nodes.iter().filter(|node| node.node_type == "groupoutput").count(),
+            1
+        );
         assert_eq!(edit.removed_inputs, Vec::<String>::new());
     }
 
@@ -1184,26 +1150,17 @@ mod interface_tests {
         let mut values = graph.values.clone();
         let object = values.as_object_mut().expect("object");
         object.insert("nodes".into(), serde_json::to_value(&edit.nodes).unwrap());
-        object.insert(
-            "connections".into(),
-            serde_json::to_value(&edit.connections).unwrap(),
-        );
+        object.insert("connections".into(), serde_json::to_value(&edit.connections).unwrap());
         object.insert("inputs".into(), serde_json::to_value(&edit.inputs).unwrap());
-        object.insert(
-            "outputs".into(),
-            serde_json::to_value(&edit.outputs).unwrap(),
-        );
+        object.insert("outputs".into(), serde_json::to_value(&edit.outputs).unwrap());
         let reloaded = GraphNode { values, ..graph };
         let payload = read_group(&reloaded).expect("read back");
         assert_eq!(payload.inputs.len(), 3);
         assert_eq!(payload.outputs.len(), 2);
         assert_eq!(payload.inputs[2].port, "shape3");
         assert_eq!(payload.outputs[1].port, "shape2");
-        let input_marker = payload
-            .nodes
-            .iter()
-            .find(|node| node.node_type == "groupinput")
-            .expect("input marker");
+        let input_marker =
+            payload.nodes.iter().find(|node| node.node_type == "groupinput").expect("input marker");
         assert_eq!(input_marker.values["ports"].as_array().unwrap().len(), 3);
     }
 
@@ -1215,8 +1172,10 @@ mod interface_tests {
         assert!(edit.outputs.is_empty());
         assert_eq!(edit.removed_inputs, vec!["shape"]);
         assert_eq!(edit.removed_outputs, vec!["shape"]);
-        let inputs: Vec<_> = edit.nodes.iter().filter(|node| node.node_type == "groupinput").collect();
-        let outputs: Vec<_> = edit.nodes.iter().filter(|node| node.node_type == "groupoutput").collect();
+        let inputs: Vec<_> =
+            edit.nodes.iter().filter(|node| node.node_type == "groupinput").collect();
+        let outputs: Vec<_> =
+            edit.nodes.iter().filter(|node| node.node_type == "groupoutput").collect();
         assert_eq!(inputs.len(), 1);
         assert_eq!(outputs.len(), 1);
         assert!(inputs[0].values["ports"].as_array().unwrap().is_empty());
@@ -1231,25 +1190,37 @@ mod migration_tests {
     use serde_json::json;
 
     fn graph_node(id: &str, node_type: &str, values: serde_json::Value) -> GraphNode {
-        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        }
     }
 
     #[test]
     fn group_payload_becomes_a_local_definition() {
-        let group = graph_node("g", "group", json!({
-            "name": "Rounded",
-            "nodes": [
-                {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
-                {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
-                {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
-            ],
-            "connections":[
-                {"from":"in","to":"box","in":"shape","out":"shape"},
-                {"from":"box","to":"out","in":"shape","out":"shape"}
-            ],
-            "inputs":[{"port":"shape","node":"in"}],
-            "outputs":[{"port":"shape","node":"out"}]
-        }));
+        let group = graph_node(
+            "g",
+            "group",
+            json!({
+                "name": "Rounded",
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections":[
+                    {"from":"in","to":"box","in":"shape","out":"shape"},
+                    {"from":"box","to":"out","in":"shape","out":"shape"}
+                ],
+                "inputs":[{"port":"shape","node":"in"}],
+                "outputs":[{"port":"shape","node":"out"}]
+            }),
+        );
         let mut document = GraphDocument::new("migration");
         document.root.nodes.push(group);
         migrate_legacy_graph_nodes(&mut document).expect("migrate");
@@ -1263,17 +1234,27 @@ mod migration_tests {
         let definition = document.definition("g").expect("local definition");
         assert_eq!(definition.name, "Rounded");
         assert_eq!(definition.interface.inputs, vec!["shape"]);
-        assert_eq!(definition.nodes.iter().find(|node| node.id == "box").unwrap().node_type, "solid");
+        assert_eq!(
+            definition.nodes.iter().find(|node| node.id == "box").unwrap().node_type,
+            "solid"
+        );
     }
 
     #[test]
     fn linked_part_becomes_an_external_graph_reference() {
         let mut document = GraphDocument::new("linked");
-        document.root.nodes.push(graph_node("base", "linkedpart", json!({"path":"base.nodecraft"})));
+        document.root.nodes.push(graph_node(
+            "base",
+            "linkedpart",
+            json!({"path":"base.nodecraft"}),
+        ));
         migrate_legacy_graph_nodes(&mut document).expect("migrate");
         assert_eq!(
             GraphReference::from_node(&document.root.nodes[0]),
-            Some(GraphReference::External { path: "base.nodecraft".into(), definition: "root".into() })
+            Some(GraphReference::External {
+                path: "base.nodecraft".into(),
+                definition: "root".into()
+            })
         );
     }
 
@@ -1335,32 +1316,39 @@ mod migration_tests {
         });
         let flat = flatten_inline_graphs(&document).expect("flatten");
         assert!(flat.nodes.iter().any(|node| node.id == "g" && node.node_type == "combine"));
-        assert!(flat.connections.iter().any(|connection| {
-            connection.from == "solid" && connection.to == "g"
-        }));
+        assert!(
+            flat.connections
+                .iter()
+                .any(|connection| { connection.from == "solid" && connection.to == "g" })
+        );
     }
 
     #[test]
     fn external_definition_flattens_through_the_store() {
-        let dir = std::env::temp_dir().join(format!(
-            "sn-external-graph-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("sn-external-graph-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("external.nodecraft");
         let mut external = GraphDocument::new("external");
-        external.root.interface = crate::GraphInterface {
-            inputs: vec!["shape".into()],
-            outputs: vec!["shape".into()],
-        };
+        external.root.interface =
+            crate::GraphInterface { inputs: vec!["shape".into()], outputs: vec!["shape".into()] };
         external.root.nodes = vec![
             graph_node("in", "groupinput", json!({"ports":["shape"]})),
             graph_node("box", "solid", json!({"primitiveType":"box"})),
             graph_node("out", "groupoutput", json!({"ports":["shape"]})),
         ];
         external.root.connections = vec![
-            crate::GraphConnection { from: "in".into(), to: "box".into(), input: "shape".into(), out: "shape".into() },
-            crate::GraphConnection { from: "box".into(), to: "out".into(), input: "shape".into(), out: "shape".into() },
+            crate::GraphConnection {
+                from: "in".into(),
+                to: "box".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            },
+            crate::GraphConnection {
+                from: "box".into(),
+                to: "out".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            },
         ];
         crate::store::save_atomic(&path, &external).expect("save external");
 
@@ -1375,25 +1363,31 @@ mod migration_tests {
 
     #[test]
     fn migrated_local_definition_flattens_to_owned_nodes() {
-        let group = graph_node("g", "group", json!({
-            "name": "Rounded",
-            "nodes": [
-                {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
-                {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
-                {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
-            ],
-            "connections":[
-                {"from":"in","to":"box","in":"shape","out":"shape"},
-                {"from":"box","to":"out","in":"shape","out":"shape"}
-            ],
-            "inputs":[{"port":"shape","node":"in"}],
-            "outputs":[{"port":"shape","node":"out"}]
-        }));
+        let group = graph_node(
+            "g",
+            "group",
+            json!({
+                "name": "Rounded",
+                "nodes": [
+                    {"id":"in","type":"groupinput","values":{"ports":["shape"]},"suppressed":false,"x":-120.0,"y":0.0},
+                    {"id":"box","type":"solid","values":{"primitiveType":"box"},"suppressed":false,"x":0.0,"y":0.0},
+                    {"id":"out","type":"groupoutput","values":{"ports":["shape"]},"suppressed":false,"x":120.0,"y":0.0}
+                ],
+                "connections":[
+                    {"from":"in","to":"box","in":"shape","out":"shape"},
+                    {"from":"box","to":"out","in":"shape","out":"shape"}
+                ],
+                "inputs":[{"port":"shape","node":"in"}],
+                "outputs":[{"port":"shape","node":"out"}]
+            }),
+        );
         let mut document = GraphDocument::new("flatten");
         document.root.nodes.push(group);
         migrate_legacy_graph_nodes(&mut document).expect("migrate");
         let flat = flatten_inline_graphs(&document).expect("flatten");
-        assert!(flat.nodes.iter().all(|node| node.node_type != "group" && node.node_type != "graph"));
+        assert!(
+            flat.nodes.iter().all(|node| node.node_type != "group" && node.node_type != "graph")
+        );
         assert!(flat.nodes.iter().any(|node| node.id == "g::box"));
     }
 

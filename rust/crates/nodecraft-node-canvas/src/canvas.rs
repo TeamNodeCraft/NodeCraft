@@ -15,8 +15,8 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use nodecraft_session::GraphDocument;
 
 use crate::gpu::{
-    circle_path, squircle_rect_path, CableVertex, GeometryBuilder, NodeCallback, NodeDraw,
-    NodeGeometry, NodeText, ShapeInstance,
+    CableVertex, GeometryBuilder, NodeCallback, NodeDraw, NodeGeometry, NodeText, ShapeInstance,
+    circle_path, squircle_rect_path,
 };
 use crate::routing::CableRouting;
 
@@ -46,7 +46,6 @@ const PANEL_DEFAULT_MAX: f32 = 520.0;
 const PANEL_MAX_FRACTION: f32 = 0.72;
 const PANEL_INSET: f32 = 12.0;
 const PANEL_RADIUS: f32 = 14.0;
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LayoutMode {
@@ -86,23 +85,56 @@ impl ConnectionKey {
 }
 
 pub enum NodeEditorAction {
-    SelectNode { id: String, additive: bool },
-    SelectCable { key: ConnectionKey, additive: bool },
-    Connect { from: String, to: String, input: String, out: String },
-    InsertNodeOnCable { node: String, connection: ConnectionKey, input: String, out: String },
-    SetViewerBreakpoint { id: String },
-    ToggleSuppressed { id: String },
-    EnterGroup { id: String },
+    SelectNode {
+        id: String,
+        additive: bool,
+    },
+    SelectCable {
+        key: ConnectionKey,
+        additive: bool,
+    },
+    Connect {
+        from: String,
+        to: String,
+        input: String,
+        out: String,
+    },
+    InsertNodeOnCable {
+        node: String,
+        connection: ConnectionKey,
+        input: String,
+        out: String,
+    },
+    SetViewerBreakpoint {
+        id: String,
+    },
+    ToggleSuppressed {
+        id: String,
+    },
+    EnterGroup {
+        id: String,
+    },
     /// Double-click entered a node for editing (inspector/gizmo target), which
     /// is independent of graph selection and the viewer breakpoint.
-    ActivateNode { id: String },
-    SetLassoSelection { nodes: HashSet<String>, live: bool },
-    MoveNodes { positions: Vec<(String, f64, f64)> },
+    ActivateNode {
+        id: String,
+    },
+    SetLassoSelection {
+        nodes: HashSet<String>,
+        live: bool,
+    },
+    MoveNodes {
+        positions: Vec<(String, f64, f64)>,
+    },
     /// The user shook the selected nodes left/right: detach the selection from
     /// cables crossing its boundary, keeping cables inside the selection.
-    ShakeSelection { nodes: HashSet<String> },
+    ShakeSelection {
+        nodes: HashSet<String>,
+    },
     SetPositions(Vec<(String, f64, f64)>),
-    CleanupLayout { mode: LayoutMode },
+    CleanupLayout {
+        mode: LayoutMode,
+    },
     Deselect,
 }
 
@@ -165,9 +197,7 @@ impl ShakeDetector {
             self.last_reversal = Some(now);
         }
         self.last_direction = direction;
-        if self.reversals >= 4
-            && self.horizontal >= 64.0
-            && self.vertical <= self.horizontal * 0.55
+        if self.reversals >= 4 && self.horizontal >= 64.0 && self.vertical <= self.horizontal * 0.55
         {
             self.fired = true;
             return true;
@@ -403,7 +433,8 @@ fn activity_strength(
     } else if fade_out.is_zero() {
         0.0
     } else {
-        (1.0 - now.duration_since(fade_start).as_secs_f32() / fade_out.as_secs_f32()).clamp(0.0, 1.0)
+        (1.0 - now.duration_since(fade_start).as_secs_f32() / fade_out.as_secs_f32())
+            .clamp(0.0, 1.0)
     }
 }
 
@@ -466,13 +497,17 @@ impl NodeEditor {
         }
         let default = (viewport.width() * PANEL_FRACTION).clamp(PANEL_MIN, PANEL_DEFAULT_MAX);
         let width = if self.width > 0.0 { self.width } else { default };
-        let max_width = ((inset_viewport.width() - self.left_dock).max(PANEL_MIN) * PANEL_MAX_FRACTION)
+        let max_width = ((inset_viewport.width() - self.left_dock).max(PANEL_MIN)
+            * PANEL_MAX_FRACTION)
             .max(PANEL_MIN);
         let width = width.clamp(PANEL_MIN, max_width);
         // Float inside the workspace with the same margin as the inspector and
         // leave room for the left-hand tool dock.
         let left = inset_viewport.min.x + self.left_dock;
-        Rect::from_min_size(Pos2::new(left, inset_viewport.min.y), Vec2::new(width, inset_viewport.height()))
+        Rect::from_min_size(
+            Pos2::new(left, inset_viewport.min.y),
+            Vec2::new(width, inset_viewport.height()),
+        )
     }
 
     /// The graph-space rectangle the viewport currently shows, below the panel
@@ -512,7 +547,12 @@ impl NodeEditor {
         }
     }
 
-    pub fn install_gpu(&mut self, render_state: &egui_wgpu::RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) {
+    pub fn install_gpu(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        msaa_samples: u32,
+        depth: wgpu::TextureFormat,
+    ) {
         // Diagnostic escape hatch for exercising the CPU fallback renderer.
         if std::env::var_os("NODECRAFT_CPU_NODES").is_some() {
             self.gpu_ready = false;
@@ -543,19 +583,12 @@ impl NodeEditor {
         let svg = colorized_icon_svg(source, colour);
         let image = egui_extras::image::load_svg_bytes_with_size(
             svg.as_bytes(),
-            egui::SizeHint::Size {
-                width: 128,
-                height: 128,
-                maintain_aspect_ratio: true,
-            },
+            egui::SizeHint::Size { width: 128, height: 128, maintain_aspect_ratio: true },
             &Default::default(),
         );
         let image = image.unwrap_or_else(|_| egui::ColorImage::example());
-        let texture = ctx.load_texture(
-            format!("node-icon-{name}"),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
+        let texture =
+            ctx.load_texture(format!("node-icon-{name}"), image, egui::TextureOptions::LINEAR);
         self.icons.insert(name.to_owned(), texture.clone());
         texture
     }
@@ -637,11 +670,8 @@ impl NodeEditor {
         positions: &HashMap<String, (f64, f64)>,
         style: CableRouting,
     ) -> Vec<(Vec<Pos2>, ConnectionKey)> {
-        let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
-            .nodes
-            .iter()
-            .map(|node| (node.id.as_str(), node))
-            .collect();
+        let nodes: HashMap<&str, &nodecraft_session::GraphNode> =
+            document.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
         let mut paths = Vec::new();
         for connection in &document.connections {
             let Some(from) = nodes.get(connection.from.as_str()).copied() else { continue };
@@ -662,17 +692,9 @@ impl NodeEditor {
             let y0 = source.max.y;
             let x1 = port_x(target, port_index(&inputs, &connection.input), inputs.len(), 1.0);
             let y1 = target.min.y;
-            let points = crate::routing::route_nodes_for(
-                style,
-                source,
-                target,
-                x0,
-                y0,
-                x1,
-                y1,
-                1.0,
-            )
-            .polyline(32);
+            let points =
+                crate::routing::route_nodes_for(style, source, target, x0, y0, x1, y1, 1.0)
+                    .polyline(32);
             paths.push((points, ConnectionKey::from_connection(connection)));
         }
         paths
@@ -692,13 +714,7 @@ impl NodeEditor {
         let (input, out) = insertion_ports(node)?;
         // Interactive drags probe from the pointer. Headless/MCP insertion has
         // no pointer, so use the centre of the dragged node instead.
-        let probe = insertion_probe(
-            ctx.pointer_latest_pos(),
-            node,
-            panel,
-            self.pan,
-            self.zoom,
-        );
+        let probe = insertion_probe(ctx.pointer_latest_pos(), node, panel, self.pan, self.zoom);
         let held = self.insert_target.as_ref().map(|target| target.connection.clone());
         // The preview shifts downstream cards, so the path actually painted this
         // frame comes from the preview document. Hit-test that path first; while
@@ -753,9 +769,10 @@ impl NodeEditor {
         let now = ctx.input(|input| input.time) as f32;
         if let Some(candidate) = hovered {
             if self.insert_preview.as_ref().is_none_or(|preview| !preview.matches(&candidate)) {
-                let previous = self.insert_preview.as_ref().map(|preview| {
-                    (preview.candidate.clone(), preview.shift)
-                });
+                let previous = self
+                    .insert_preview
+                    .as_ref()
+                    .map(|preview| (preview.candidate.clone(), preview.shift));
                 self.insert_preview = Some(InsertPreview {
                     candidate,
                     progress: 0.0,
@@ -794,7 +811,8 @@ impl NodeEditor {
             };
             let t = ((now - preview.shift_started) / 0.45).clamp(0.0, 1.0);
             let eased = t * t * (3.0 - 2.0 * t);
-            preview.shift = preview.shift_from + (preview.shift_target - preview.shift_from) * eased;
+            preview.shift =
+                preview.shift_from + (preview.shift_target - preview.shift_from) * eased;
             let previous_t = ((now - preview.previous_started) / 0.45).clamp(0.0, 1.0);
             let previous_eased = previous_t * previous_t * (3.0 - 2.0 * previous_t);
             preview.previous_shift = preview.previous_from * (1.0 - previous_eased);
@@ -873,10 +891,8 @@ impl NodeEditor {
     }
 
     pub fn activity_started(&mut self, node_id: &str) {
-        self.activity.insert(
-            node_id.to_owned(),
-            ActivityGlow { started: Instant::now(), ended: None },
-        );
+        self.activity
+            .insert(node_id.to_owned(), ActivityGlow { started: Instant::now(), ended: None });
     }
 
     pub fn activity_finished(&mut self, node_id: &str) {
@@ -946,14 +962,13 @@ impl NodeEditor {
         }
         let mut activity_glows = Vec::new();
         if !self.activity.is_empty() || !selected_nodes.is_empty() {
-            let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
-                .nodes
-                .iter()
-                .map(|node| (node.id.as_str(), node))
-                .collect();
+            let nodes: HashMap<&str, &nodecraft_session::GraphNode> =
+                document.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
             let accent = self.theme.f32(self.theme.node_activity);
             for (id, activity) in &self.activity {
-                if self.error_nodes.contains(id) { continue; }
+                if self.error_nodes.contains(id) {
+                    continue;
+                }
                 let Some(node) = nodes.get(id.as_str()) else { continue };
                 let strength = activity_strength(
                     activity.started,
@@ -982,7 +997,9 @@ impl NodeEditor {
             // Selection glow is dynamic, but only through the uniform envelope;
             // its instances are the card rect and do not change with zoom.
             for id in selected_nodes {
-                if self.error_nodes.contains(id) { continue; }
+                if self.error_nodes.contains(id) {
+                    continue;
+                }
                 if let Some(node) = nodes.get(id.as_str()) {
                     shape_glow(&mut activity_glows, graph_rect(node), accent, 2.0, 0.0, 1.0, None);
                 }
@@ -1031,7 +1048,15 @@ impl NodeEditor {
         let mut divider_active = false;
         let mut empty_canvas_clicked = false;
         let mut overlay_texts: Vec<(String, Pos2, f32, Rect, Vec<Rect>, f32)> = Vec::new();
-        let base_key = geometry_key_for(self.cable_routing, document, selected_nodes, selected_connections, &self.z_order, viewer_breakpoint, &self.theme);
+        let base_key = geometry_key_for(
+            self.cable_routing,
+            document,
+            selected_nodes,
+            selected_connections,
+            &self.z_order,
+            viewer_breakpoint,
+            &self.theme,
+        );
         let mut key = base_key;
         if !node_fades.is_empty() {
             use std::hash::{Hash, Hasher};
@@ -1069,10 +1094,23 @@ impl NodeEditor {
                 )));
                 self.geometry = None;
             } else {
-                self.geometry = Some(Arc::new(build_geometry(document, selected_nodes, &self.z_order, viewer_breakpoint, &self.theme, &node_fades)));
+                self.geometry = Some(Arc::new(build_geometry(
+                    document,
+                    selected_nodes,
+                    &self.z_order,
+                    viewer_breakpoint,
+                    &self.theme,
+                    &node_fades,
+                )));
                 self.shapes = None;
             }
-            self.cables = Some(Arc::new(build_cables_for(self.cable_routing, document, selected_nodes, selected_connections, &self.theme)));
+            self.cables = Some(Arc::new(build_cables_for(
+                self.cable_routing,
+                document,
+                selected_nodes,
+                selected_connections,
+                &self.theme,
+            )));
             self.geometry_key = Some(key);
         }
         // Always carry the cached geometry into the callback. egui may prepare a
@@ -1093,13 +1131,13 @@ impl NodeEditor {
                 CableRouting::Bezier => 48 * 6,
                 CableRouting::J => 192 * 6,
             },
-            transform: [self.zoom, panel_canvas(panel).min.x + self.pan.x, panel_canvas(panel).min.y + self.pan.y, 0.0],
-            clip: [
-                panel.min.x + 1.0,
-                panel.min.y + 1.0,
-                panel.max.x - 1.0,
-                panel.max.y - 1.0,
+            transform: [
+                self.zoom,
+                panel_canvas(panel).min.x + self.pan.x,
+                panel_canvas(panel).min.y + self.pan.y,
+                0.0,
             ],
+            clip: [panel.min.x + 1.0, panel.min.y + 1.0, panel.max.x - 1.0, panel.max.y - 1.0],
             clip_radius: PANEL_RADIUS - 1.0,
             ppp,
             // Multiplier for cable subdivision; one place to tune the visual
@@ -1113,7 +1151,6 @@ impl NodeEditor {
             activity_fade_out_ms: self.activity_fade_out.as_secs_f64() as f32 * 1000.0,
             texts: Vec::new(),
         };
-        
 
         egui::Area::new(egui::Id::new("node-editor"))
             .order(egui::Order::Foreground)
@@ -1154,7 +1191,11 @@ impl NodeEditor {
                         header_colour,
                     );
                     cursor_x += painter
-                        .layout_no_wrap("NODE EDITOR".to_owned(), header_font.clone(), header_colour)
+                        .layout_no_wrap(
+                            "NODE EDITOR".to_owned(),
+                            header_font.clone(),
+                            header_colour,
+                        )
                         .size()
                         .x;
                     if let Some(label) = self.view_label.as_deref() {
@@ -1186,12 +1227,15 @@ impl NodeEditor {
                                 header_colour,
                             );
                             cursor_x += painter
-                                .layout_no_wrap(segment.to_owned(), header_font.clone(), header_colour)
+                                .layout_no_wrap(
+                                    segment.to_owned(),
+                                    header_font.clone(),
+                                    header_colour,
+                                )
                                 .size()
                                 .x;
                         }
                     }
-    
                 }
 
                 let canvas = panel_canvas(panel);
@@ -1208,13 +1252,17 @@ impl NodeEditor {
                     && pointer.is_some_and(|pointer| panel.contains(pointer))
                     && ui.ctx().input(|input| input.pointer.primary_pressed())
                 {
-                    if let Some(port) = pointer.and_then(|pointer| {
-                        port_at(document, canvas, self.pan, self.zoom, pointer)
-                    }) {
+                    if let Some(port) = pointer
+                        .and_then(|pointer| port_at(document, canvas, self.pan, self.zoom, pointer))
+                    {
                         self.wire_drag = Some(WireDrag { current: port.position, origin: port });
                     }
                 }
-                let response = ui.interact(canvas, egui::Id::new("node-editor-canvas"), Sense::click_and_drag());
+                let response = ui.interact(
+                    canvas,
+                    egui::Id::new("node-editor-canvas"),
+                    Sense::click_and_drag(),
+                );
                 if response.dragged_by(egui::PointerButton::Middle)
                     || response.dragged_by(egui::PointerButton::Secondary)
                 {
@@ -1248,11 +1296,23 @@ impl NodeEditor {
                         let target = ui.ctx().pointer_latest_pos().and_then(|pointer| {
                             port_at(document, canvas, self.pan, self.zoom, pointer)
                         });
-                        if let Some(target) = target.filter(|target| port_compatible(&drag.origin, target)) {
+                        if let Some(target) =
+                            target.filter(|target| port_compatible(&drag.origin, target))
+                        {
                             let (from, to, input, out) = if drag.origin.is_input {
-                                (target.node_id.clone(), drag.origin.node_id.clone(), drag.origin.port.to_owned(), target.port.to_owned())
+                                (
+                                    target.node_id.clone(),
+                                    drag.origin.node_id.clone(),
+                                    drag.origin.port.to_owned(),
+                                    target.port.to_owned(),
+                                )
                             } else {
-                                (drag.origin.node_id.clone(), target.node_id.clone(), target.port.to_owned(), drag.origin.port.to_owned())
+                                (
+                                    drag.origin.node_id.clone(),
+                                    target.node_id.clone(),
+                                    target.port.to_owned(),
+                                    drag.origin.port.to_owned(),
+                                )
                             };
                             actions.push(NodeEditorAction::Connect { from, to, input, out });
                         }
@@ -1296,10 +1356,8 @@ impl NodeEditor {
                 }
                 // Navigation gestures belong to the panel, not to whatever widget is
                 // under the pointer. Keep zoom/pan working while hovering node cards.
-                let pointer_over_panel = ui
-                    .ctx()
-                    .pointer_latest_pos()
-                    .is_some_and(|pointer| panel.contains(pointer));
+                let pointer_over_panel =
+                    ui.ctx().pointer_latest_pos().is_some_and(|pointer| panel.contains(pointer));
                 if pointer_over_panel && !pointer_over_foreground {
                     let gesture = crate::gesture::TrackpadGesture::read(ui.ctx());
                     if (gesture.zoom - 1.0).abs() > f32::EPSILON {
@@ -1319,10 +1377,8 @@ impl NodeEditor {
                 // refresh the transform after this frame's gesture updates: the
                 // callback otherwise uses last frame's pan while labels use the new
                 // pan, which is the source of the relative jitter.
-                let draw_pan = Vec2::new(
-                    (self.pan.x * ppp).round() / ppp,
-                    (self.pan.y * ppp).round() / ppp,
-                );
+                let draw_pan =
+                    Vec2::new((self.pan.x * ppp).round() / ppp, (self.pan.y * ppp).round() / ppp);
                 draw.transform = [
                     self.zoom,
                     panel.min.x + draw_pan.x,
@@ -1336,9 +1392,8 @@ impl NodeEditor {
                     .nodes
                     .iter()
                     .filter(|node| {
-                        node_bounds(node, canvas, draw_pan, self.zoom).intersects(
-                            canvas.expand(VIEW_BUTTON_RADIUS * self.zoom),
-                        )
+                        node_bounds(node, canvas, draw_pan, self.zoom)
+                            .intersects(canvas.expand(VIEW_BUTTON_RADIUS * self.zoom))
                     })
                     .collect();
 
@@ -1427,15 +1482,12 @@ impl NodeEditor {
                                 return true;
                             }
                             let (suppress_center, view_center) = button_centers(rect);
-                            round_button_hit(
-                                suppress_center,
-                                pointer,
-                                BUTTON_RADIUS * self.zoom,
-                            ) || round_button_hit(
-                                view_center,
-                                pointer,
-                                VIEW_BUTTON_RADIUS * self.zoom,
-                            )
+                            round_button_hit(suppress_center, pointer, BUTTON_RADIUS * self.zoom)
+                                || round_button_hit(
+                                    view_center,
+                                    pointer,
+                                    VIEW_BUTTON_RADIUS * self.zoom,
+                                )
                         })
                         .collect(),
                     _ => Vec::new(),
@@ -1443,17 +1495,10 @@ impl NodeEditor {
                 for node in &interactive_nodes {
                     let rect = node_rect(node, canvas, self.pan, self.zoom);
                     let (suppress_center, view_center) = button_centers(rect);
-                    let power_rect = round_button_rect(
-                        suppress_center,
-                        BUTTON_RADIUS * self.zoom,
-                    )
-                    .intersect(panel);
+                    let power_rect = round_button_rect(suppress_center, BUTTON_RADIUS * self.zoom)
+                        .intersect(panel);
                     if pointer.is_some_and(|pointer| {
-                        round_button_hit(
-                            suppress_center,
-                            pointer,
-                            BUTTON_RADIUS * self.zoom,
-                        )
+                        round_button_hit(suppress_center, pointer, BUTTON_RADIUS * self.zoom)
                     }) {
                         let power = ui.interact(
                             power_rect,
@@ -1464,7 +1509,8 @@ impl NodeEditor {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if power.clicked() {
-                            actions.push(NodeEditorAction::ToggleSuppressed { id: node.id.clone() });
+                            actions
+                                .push(NodeEditorAction::ToggleSuppressed { id: node.id.clone() });
                         }
                         // The power control sits above the card. Do not register
                         // the node drag/click region underneath it, otherwise the
@@ -1505,8 +1551,14 @@ impl NodeEditor {
                         eye.on_hover_text("View output · Shift-click: next node");
                         continue;
                     }
-                    let response = ui.interact(rect, egui::Id::new(("node", &node.id)), Sense::click_and_drag());
-                    if self.wire_drag.is_none() && response.drag_started_by(egui::PointerButton::Primary) {
+                    let response = ui.interact(
+                        rect,
+                        egui::Id::new(("node", &node.id)),
+                        Sense::click_and_drag(),
+                    );
+                    if self.wire_drag.is_none()
+                        && response.drag_started_by(egui::PointerButton::Primary)
+                    {
                         self.bring_to_front(&node.id);
                         // A drag exceeds egui's click threshold, so `clicked()` never
                         // fires on release. Select an unselected node as the drag
@@ -1515,7 +1567,9 @@ impl NodeEditor {
                         if !selected_nodes.contains(node.id.as_str()) {
                             clicked = Some(node.id.clone());
                         }
-                        let ids = if selected_nodes.contains(node.id.as_str()) && selected_nodes.len() > 1 {
+                        let ids = if selected_nodes.contains(node.id.as_str())
+                            && selected_nodes.len() > 1
+                        {
                             document
                                 .nodes
                                 .iter()
@@ -1592,7 +1646,8 @@ impl NodeEditor {
                 let blockers_by_node = if self.occlusion_key == Some(occlusion_key) {
                     self.occlusion.clone().unwrap_or_default()
                 } else {
-                    let map = occlusion_map(&visible_nodes, &self.z_order, canvas, draw_pan, self.zoom);
+                    let map =
+                        occlusion_map(&visible_nodes, &self.z_order, canvas, draw_pan, self.zoom);
                     self.occlusion = Some(map.clone());
                     self.occlusion_key = Some(occlusion_key);
                     map
@@ -1604,8 +1659,8 @@ impl NodeEditor {
                         break;
                     }
                     let title = node_title(&node.node_type).to_uppercase();
-                    let text_width = (title.chars().count() as f32 * text_size * 0.62)
-                        .max(text_size * 2.0);
+                    let text_width =
+                        (title.chars().count() as f32 * text_size * 0.62).max(text_size * 2.0);
                     let text_top = rect.max.y - 24.0 * self.zoom;
                     let label_rect = Rect::from_min_size(
                         Pos2::new(rect.center().x - text_width * 0.5, text_top - text_size * 0.5),
@@ -1634,7 +1689,10 @@ impl NodeEditor {
                     }
                 }
                 if self.gpu_ready {
-                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(ctx.content_rect(), NodeCallback(draw)));
+                    ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                        ctx.content_rect(),
+                        NodeCallback(draw),
+                    ));
                 }
 
                 for (text, position, size, label_rect, blockers, fade) in &overlay_texts {
@@ -1651,17 +1709,36 @@ impl NodeEditor {
 
                 // CPU fallback if the wgpu node pipeline could not initialize.
                 if !self.gpu_ready {
-                    for index in ordered_cable_connections(document, selected_nodes, selected_connections) {
+                    for index in
+                        ordered_cable_connections(document, selected_nodes, selected_connections)
+                    {
                         let connection = &document.connections[index];
-                        let Some(from) = document.nodes.iter().find(|node| node.id == connection.from) else { continue };
-                        let Some(to) = document.nodes.iter().find(|node| node.id == connection.to) else { continue };
+                        let Some(from) =
+                            document.nodes.iter().find(|node| node.id == connection.from)
+                        else {
+                            continue;
+                        };
+                        let Some(to) = document.nodes.iter().find(|node| node.id == connection.to)
+                        else {
+                            continue;
+                        };
                         let start = node_rect(from, canvas, draw_pan, self.zoom);
                         let end = node_rect(to, canvas, draw_pan, self.zoom);
                         let outputs = node_outputs(from);
                         let inputs = node_inputs(to);
-                        let x0 = port_x(start, port_index(&outputs, &connection.out), outputs.len(), self.zoom);
+                        let x0 = port_x(
+                            start,
+                            port_index(&outputs, &connection.out),
+                            outputs.len(),
+                            self.zoom,
+                        );
                         let y0 = start.max.y;
-                        let x1 = port_x(end, port_index(&inputs, &connection.input), inputs.len(), self.zoom);
+                        let x1 = port_x(
+                            end,
+                            port_index(&inputs, &connection.input),
+                            inputs.len(),
+                            self.zoom,
+                        );
                         let y1 = end.min.y;
                         let points = crate::routing::route_nodes_for(
                             self.cable_routing,
@@ -1676,20 +1753,17 @@ impl NodeEditor {
                         .polyline(64);
                         let key = ConnectionKey::from_connection(connection);
                         let selected = selected_connections.contains(&key);
-                        let core = if selected {
-                            self.theme.cable_selected
-                        } else {
-                            self.theme.cable
-                        };
+                        let core =
+                            if selected { self.theme.cable_selected } else { self.theme.cable };
                         let outline = if selected {
                             self.theme.cable_selected_outline
                         } else {
                             self.theme.cable_outline
                         };
                         let core_width = self.theme.cable_width.clamp(1.0, 32.0);
-                        let total_width =
-                            (core_width + self.theme.cable_outline_width.clamp(0.0, 15.0))
-                                .max(core_width);
+                        let total_width = (core_width
+                            + self.theme.cable_outline_width.clamp(0.0, 15.0))
+                        .max(core_width);
                         // The fallback must use the same theme colours, alpha and
                         // widths as the GPU cable path.
                         painter.add(egui::Shape::line(
@@ -1802,10 +1876,7 @@ impl NodeEditor {
                         Pos2::new(rect.center().x, rect.center().y - 4.0 * self.zoom),
                         Vec2::splat(size),
                     );
-                    let blockers = blockers_by_node
-                        .get(&node.id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let blockers = blockers_by_node.get(&node.id).cloned().unwrap_or_default();
                     let (name, source) = icon_for(node);
                     let node_fade = self.node_fade_alpha(&node.id, now);
                     let texture = self.icon_texture(ui.ctx(), name, source, self.theme.text);
@@ -1817,14 +1888,20 @@ impl NodeEditor {
                             texture.id(),
                             icon_rect,
                             Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::from_rgba_unmultiplied(255, 255, 255, (150.0 * node_fade) as u8),
+                            Color32::from_rgba_unmultiplied(
+                                255,
+                                255,
+                                255,
+                                (150.0 * node_fade) as u8,
+                            ),
                         );
                     }
                     let (suppress_center, view_center) = button_centers(rect);
                     for (name, source, center, size) in [
                         (
                             "power",
-                            include_bytes!("../../../../vendor/fluent/power.svg") as &'static [u8],
+                            include_bytes!("../../../../vendor/fluent/power.svg")
+                                as &'static [u8],
                             suppress_center,
                             16.0 * self.zoom,
                         ),
@@ -1842,7 +1919,12 @@ impl NodeEditor {
                                 texture.id(),
                                 button_icon,
                                 Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                                Color32::from_rgba_unmultiplied(255, 255, 255, (255.0 * node_fade) as u8),
+                                Color32::from_rgba_unmultiplied(
+                                    255,
+                                    255,
+                                    255,
+                                    (255.0 * node_fade) as u8,
+                                ),
                             );
                         }
                     }
@@ -1854,7 +1936,8 @@ impl NodeEditor {
                     Pos2::new(panel.max.x - 4.0, panel.min.y + 12.0),
                     Pos2::new(panel.max.x + 4.0, panel.max.y - 12.0),
                 );
-                let resize = ui.interact(divider, egui::Id::new("node-editor-resize"), Sense::drag());
+                let resize =
+                    ui.interact(divider, egui::Id::new("node-editor-resize"), Sense::drag());
                 self.resize_dragging =
                     resize.drag_started() || resize.dragged() || resize.drag_stopped();
                 divider_active = resize.hovered()
@@ -1873,9 +1956,8 @@ impl NodeEditor {
                     // Anchor the drag to the pointer, not to per-frame deltas. If the
                     // pointer overshoots min/max, moving back must first recover that
                     // overshoot before the divider moves again.
-                    self.resize_start = resize
-                        .interact_pointer_pos()
-                        .map(|pointer| (panel.width(), pointer.x));
+                    self.resize_start =
+                        resize.interact_pointer_pos().map(|pointer| (panel.width(), pointer.x));
                 }
                 if resize.dragged() {
                     if let Some((start_width, start_pointer)) = self.resize_start {
@@ -1945,7 +2027,8 @@ impl NodeEditor {
                         let a = map(r.min);
                         let b = map(r.max);
                         let rect = Rect::from_min_max(Pos2::new(a.x, a.y), Pos2::new(b.x, b.y));
-                        let selected_here = selected_nodes.contains(document.nodes[index].id.as_str());
+                        let selected_here =
+                            selected_nodes.contains(document.nodes[index].id.as_str());
                         painter.add(crate::squircle::shape(
                             rect,
                             2.5,
@@ -1979,11 +2062,8 @@ impl NodeEditor {
                     // Keep the readout inside the minimap's top-right corner.
                     let percent = format!("{}%", zoom_percent(self.zoom));
                     let font = egui::FontId::proportional(14.0);
-                    let galley = painter.layout_no_wrap(
-                        percent,
-                        font,
-                        self.theme.color(self.theme.text),
-                    );
+                    let galley =
+                        painter.layout_no_wrap(percent, font, self.theme.color(self.theme.text));
                     let text_pos = egui::pos2(
                         mini.max.x - 9.0 - galley.size().x,
                         mini.max.y - 9.0 - galley.size().y,
@@ -1998,7 +2078,11 @@ impl NodeEditor {
                     );
                     painter.galley(text_pos, galley, self.theme.color(self.theme.text));
 
-                    let minimap = ui.interact(mini, egui::Id::new("node-editor-minimap"), Sense::click_and_drag());
+                    let minimap = ui.interact(
+                        mini,
+                        egui::Id::new("node-editor-minimap"),
+                        Sense::click_and_drag(),
+                    );
                     if minimap.clicked() {
                         chrome_clicked = true;
                     }
@@ -2014,8 +2098,8 @@ impl NodeEditor {
                         if minimap.dragged() {
                             if let Some((start_pointer, start_pan)) = self.minimap_drag {
                                 let delta = pointer - start_pointer;
-                                self.pan = start_pan
-                                    - Vec2::new(delta.x, delta.y) / scale * self.zoom;
+                                self.pan =
+                                    start_pan - Vec2::new(delta.x, delta.y) / scale * self.zoom;
                                 ui.ctx().request_repaint();
                             }
                         } else if minimap.clicked() {
@@ -2060,28 +2144,34 @@ impl NodeEditor {
                     self.animate_fit(document);
                     ui.ctx().request_repaint();
                 }
-                let fit_icon_colour = if fit.hovered() { hex_colour(self.theme.icon_hover) } else { hex_colour(self.theme.icon) };
-                let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/zoom_fit.svg"))
-                    .unwrap_or_default()
-                    .replace("#b4b4b4", &fit_icon_colour);
-                let image = egui::Image::from_bytes("bytes://nodecraft-zoom-fit.svg", svg.into_bytes())
-                    .fit_to_exact_size(Vec2::splat(fit_icon_size));
+                let fit_icon_colour = if fit.hovered() {
+                    hex_colour(self.theme.icon_hover)
+                } else {
+                    hex_colour(self.theme.icon)
+                };
+                let svg =
+                    std::str::from_utf8(include_bytes!("../../../../vendor/fluent/zoom_fit.svg"))
+                        .unwrap_or_default()
+                        .replace("#b4b4b4", &fit_icon_colour);
+                let image =
+                    egui::Image::from_bytes("bytes://nodecraft-zoom-fit.svg", svg.into_bytes())
+                        .fit_to_exact_size(Vec2::splat(fit_icon_size));
                 ui.put(fit_icon, image);
 
                 // Cleanup above fit. Left click runs the current layout mode;
                 // right click opens the Timeline/Centred/Organic mode menu.
                 let cleanup_size = 18.0;
                 let cleanup_icon = Rect::from_center_size(
-                    Pos2::new(
-                        fit_icon.center().x,
-                        fit_icon.min.y - 18.0 - cleanup_size * 0.5,
-                    ),
+                    Pos2::new(fit_icon.center().x, fit_icon.min.y - 18.0 - cleanup_size * 0.5),
                     Vec2::splat(cleanup_size),
                 );
                 let cleanup_rect = Rect::from_center_size(cleanup_icon.center(), Vec2::splat(30.0));
                 let cleanup = ui
                     .interact(cleanup_rect, egui::Id::new("node-editor-cleanup"), Sense::click())
-                    .on_hover_text(format!("Clean up layout ({}) · right-click for mode", self.layout_mode.label()));
+                    .on_hover_text(format!(
+                        "Clean up layout ({}) · right-click for mode",
+                        self.layout_mode.label()
+                    ));
                 if cleanup.hovered() || cleanup.dragged() {
                     painter.circle_filled(
                         cleanup_icon.center(),
@@ -2106,21 +2196,27 @@ impl NodeEditor {
                 if toggled_layout_menu {
                     self.layout_menu_open = !self.layout_menu_open;
                 }
-                let cleanup_icon_colour = if cleanup.hovered() { hex_colour(self.theme.icon_hover) } else { hex_colour(self.theme.icon) };
-                let svg = std::str::from_utf8(include_bytes!("../../../../vendor/fluent/broom.svg"))
-                    .unwrap_or_default()
-                    .replace("#b4b4b4", &cleanup_icon_colour);
-                let image = egui::Image::from_bytes("bytes://nodecraft-layout-cleanup.svg", svg.into_bytes())
-                    .fit_to_exact_size(Vec2::splat(cleanup_size));
+                let cleanup_icon_colour = if cleanup.hovered() {
+                    hex_colour(self.theme.icon_hover)
+                } else {
+                    hex_colour(self.theme.icon)
+                };
+                let svg =
+                    std::str::from_utf8(include_bytes!("../../../../vendor/fluent/broom.svg"))
+                        .unwrap_or_default()
+                        .replace("#b4b4b4", &cleanup_icon_colour);
+                let image = egui::Image::from_bytes(
+                    "bytes://nodecraft-layout-cleanup.svg",
+                    svg.into_bytes(),
+                )
+                .fit_to_exact_size(Vec2::splat(cleanup_size));
                 ui.put(cleanup_icon, image);
 
                 if self.layout_menu_open {
                     let menu_width = layout_menu_width(ui);
                     let menu_height = 3.0 * 26.0 + 2.0 * 2.0 + 16.0;
-                    let menu_pos = Pos2::new(
-                        cleanup_icon.min.x - menu_width - 8.0,
-                        cleanup_icon.max.y + 4.0,
-                    );
+                    let menu_pos =
+                        Pos2::new(cleanup_icon.min.x - menu_width - 8.0, cleanup_icon.max.y + 4.0);
                     let mut chosen = None;
                     let menu_response = egui::Area::new(egui::Id::new("node-layout-mode-menu"))
                         .order(egui::Order::Foreground)
@@ -2134,26 +2230,27 @@ impl NodeEditor {
                                 frame,
                                 10.0,
                                 self.theme.color(self.theme.popup),
-                                egui::Stroke::new(
-                                    1.0,
-                                    self.theme.color(self.theme.border),
-                                ),
+                                egui::Stroke::new(1.0, self.theme.color(self.theme.border)),
                             ));
-                            ui.scope_builder(egui::UiBuilder::new().max_rect(frame.shrink2(egui::vec2(8.0, 8.0))), |ui| {
-                                ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
-                                ui.set_min_width(menu_width - 16.0);
-                                for mode in LayoutMode::ALL {
-                                    let response = layout_menu_row(
-                                        ui,
-                                        &self.theme,
-                                        self.layout_mode == mode,
-                                        mode.label(),
-                                    );
-                                    if response.clicked() {
-                                        chosen = Some(mode);
+                            ui.scope_builder(
+                                egui::UiBuilder::new()
+                                    .max_rect(frame.shrink2(egui::vec2(8.0, 8.0))),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 2.0);
+                                    ui.set_min_width(menu_width - 16.0);
+                                    for mode in LayoutMode::ALL {
+                                        let response = layout_menu_row(
+                                            ui,
+                                            &self.theme,
+                                            self.layout_mode == mode,
+                                            mode.label(),
+                                        );
+                                        if response.clicked() {
+                                            chosen = Some(mode);
+                                        }
                                     }
-                                }
-                            });
+                                },
+                            );
                         });
                     if !toggled_layout_menu && menu_response.response.clicked_elsewhere() {
                         self.layout_menu_open = false;
@@ -2176,9 +2273,11 @@ impl NodeEditor {
                 }
                 if let Some(drag) = &self.wire_drag {
                     let mut end = drag.current;
-                    if let Some(target) = ui.ctx().pointer_latest_pos().and_then(|pointer| {
-                        port_at(document, canvas, self.pan, self.zoom, pointer)
-                    }) {
+                    if let Some(target) = ui
+                        .ctx()
+                        .pointer_latest_pos()
+                        .and_then(|pointer| port_at(document, canvas, self.pan, self.zoom, pointer))
+                    {
                         if port_compatible(&drag.origin, &target) {
                             end = target.position;
                         }
@@ -2187,42 +2286,94 @@ impl NodeEditor {
                         // Cables are directed output → input even when the drag
                         // started at an input port; keep the preview in that
                         // direction.
-                        dashed_curve(&painter, end, drag.origin.position, self.zoom, self.cable_routing);
+                        dashed_curve(
+                            &painter,
+                            end,
+                            drag.origin.position,
+                            self.zoom,
+                            self.cable_routing,
+                        );
                     } else {
-                        dashed_curve(&painter, drag.origin.position, end, self.zoom, self.cable_routing);
+                        dashed_curve(
+                            &painter,
+                            drag.origin.position,
+                            end,
+                            self.zoom,
+                            self.cable_routing,
+                        );
                     }
                 }
                 if let Some(preview) = &self.insert_preview {
                     if preview.progress > 0.01 {
                         let candidate = &preview.candidate;
-                        let source = document.nodes.iter().find(|node| node.id == candidate.connection.from);
-                        let target = document.nodes.iter().find(|node| node.id == candidate.connection.to);
+                        let source =
+                            document.nodes.iter().find(|node| node.id == candidate.connection.from);
+                        let target =
+                            document.nodes.iter().find(|node| node.id == candidate.connection.to);
                         let inserted = document.nodes.iter().find(|node| node.id == candidate.node);
-                        if let (Some(source), Some(target), Some(inserted)) = (source, target, inserted) {
+                        if let (Some(source), Some(target), Some(inserted)) =
+                            (source, target, inserted)
+                        {
                             let source_rect = node_rect(source, canvas, draw_pan, self.zoom);
                             let target_rect = node_rect(target, canvas, draw_pan, self.zoom);
                             let inserted_rect = node_rect(inserted, canvas, draw_pan, self.zoom);
                             let source_out = Pos2::new(
-                                port_x(source_rect, port_index(&node_outputs(source), &candidate.connection.out), node_outputs(source).len(), self.zoom),
+                                port_x(
+                                    source_rect,
+                                    port_index(&node_outputs(source), &candidate.connection.out),
+                                    node_outputs(source).len(),
+                                    self.zoom,
+                                ),
                                 source_rect.max.y,
                             );
                             let inserted_in = Pos2::new(
-                                port_x(inserted_rect, port_index(&node_inputs(inserted), &candidate.input), node_inputs(inserted).len(), self.zoom),
+                                port_x(
+                                    inserted_rect,
+                                    port_index(&node_inputs(inserted), &candidate.input),
+                                    node_inputs(inserted).len(),
+                                    self.zoom,
+                                ),
                                 inserted_rect.min.y,
                             );
                             let inserted_out = Pos2::new(
-                                port_x(inserted_rect, port_index(&node_outputs(inserted), &candidate.out), node_outputs(inserted).len(), self.zoom),
+                                port_x(
+                                    inserted_rect,
+                                    port_index(&node_outputs(inserted), &candidate.out),
+                                    node_outputs(inserted).len(),
+                                    self.zoom,
+                                ),
                                 inserted_rect.max.y,
                             );
                             let target_in = Pos2::new(
-                                port_x(target_rect, port_index(&node_inputs(target), &candidate.connection.input), node_inputs(target).len(), self.zoom),
+                                port_x(
+                                    target_rect,
+                                    port_index(&node_inputs(target), &candidate.connection.input),
+                                    node_inputs(target).len(),
+                                    self.zoom,
+                                ),
                                 target_rect.min.y,
                             );
                             let alpha = (preview.progress * 255.0) as u8;
                             let colour = Color32::from_rgba_unmultiplied(124, 156, 255, alpha);
                             let phase = ui.ctx().input(|input| input.time) as f32 * 42.0;
-                            dashed_curve_with_colour(&painter, source_out, inserted_in, self.zoom, colour, phase, self.cable_routing);
-                            dashed_curve_with_colour(&painter, inserted_out, target_in, self.zoom, colour, phase, self.cable_routing);
+                            dashed_curve_with_colour(
+                                &painter,
+                                source_out,
+                                inserted_in,
+                                self.zoom,
+                                colour,
+                                phase,
+                                self.cable_routing,
+                            );
+                            dashed_curve_with_colour(
+                                &painter,
+                                inserted_out,
+                                target_in,
+                                self.zoom,
+                                colour,
+                                phase,
+                                self.cable_routing,
+                            );
                         }
                     }
                 }
@@ -2239,7 +2390,9 @@ impl NodeEditor {
         } else if let Some(pointer) = ctx.pointer_latest_pos() {
             if panel.contains(pointer) && ctx.input(|i| i.pointer.primary_clicked()) {
                 let additive = ctx.input(|i| i.modifiers.command || i.modifiers.shift);
-                if let Some(key) = cable_hit_for(self.cable_routing, document, panel, self.pan, self.zoom, pointer) {
+                if let Some(key) =
+                    cable_hit_for(self.cable_routing, document, panel, self.pan, self.zoom, pointer)
+                {
                     actions.push(NodeEditorAction::SelectCable { key, additive });
                 } else if empty_canvas_clicked {
                     actions.push(NodeEditorAction::Deselect);
@@ -2261,9 +2414,10 @@ impl NodeEditor {
             // start a lasso.
             actions.clear();
         }
-        if ctx.pointer_latest_pos().is_some_and(|pointer| {
-            self.pointer_blockers.iter().any(|rect| rect.contains(pointer))
-        }) {
+        if ctx
+            .pointer_latest_pos()
+            .is_some_and(|pointer| self.pointer_blockers.iter().any(|rect| rect.contains(pointer)))
+        {
             actions.clear();
         }
         actions
@@ -2359,8 +2513,8 @@ impl NodeEditor {
         .clamp(0.0, 1.0);
         let eased = progress * progress * (3.0 - 2.0 * progress);
         let (target_pan, target_zoom) = fitted_view(canvas, animation.roi);
-        self.zoom = animation.start_zoom
-            * (target_zoom / animation.start_zoom.max(0.001)).powf(eased);
+        self.zoom =
+            animation.start_zoom * (target_zoom / animation.start_zoom.max(0.001)).powf(eased);
         self.pan = animation.start_pan + (target_pan - animation.start_pan) * eased;
         if progress >= 1.0 {
             self.view_animation = None;
@@ -2401,11 +2555,8 @@ fn occlusion_map(
     if nodes.len() < 2 {
         return HashMap::new();
     }
-    let ranks: HashMap<&str, usize> = z_order
-        .iter()
-        .enumerate()
-        .map(|(rank, id)| (id.as_str(), rank))
-        .collect();
+    let ranks: HashMap<&str, usize> =
+        z_order.iter().enumerate().map(|(rank, id)| (id.as_str(), rank)).collect();
     let cards: Vec<(usize, Rect)> = nodes
         .iter()
         .map(|node| {
@@ -2418,10 +2569,7 @@ fn occlusion_map(
     // A card's left/right buttons protrude outside the card. Use those expanded
     // bounds for overlap detection; otherwise a back node's icon can draw over
     // a front node's eye/power button.
-    let bounds: Vec<Rect> = nodes
-        .iter()
-        .map(|node| node_bounds(node, canvas, pan, zoom))
-        .collect();
+    let bounds: Vec<Rect> = nodes.iter().map(|node| node_bounds(node, canvas, pan, zoom)).collect();
 
     // Cards only occlude nearby cards. Hash them into screen-space cells sized
     // to the card itself, then compare each card with its local candidates.
@@ -2465,10 +2613,8 @@ fn occlusion_map(
                 let blockers = map.entry(node.id.clone()).or_default();
                 blockers.push(front);
                 let (power, eye) = button_centers(front);
-                blockers.push(Rect::from_center_size(
-                    power,
-                    Vec2::splat(BUTTON_RADIUS * 2.0 * zoom),
-                ));
+                blockers
+                    .push(Rect::from_center_size(power, Vec2::splat(BUTTON_RADIUS * 2.0 * zoom)));
                 blockers.push(Rect::from_center_size(
                     eye,
                     Vec2::splat(VIEW_BUTTON_RADIUS * 2.0 * zoom),
@@ -2597,10 +2743,7 @@ fn colorized_icon_svg(source: &[u8], theme_colour: [u8; 4]) -> String {
 
 fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]) {
     let Some(metadata) = nodecraft_node_contract::metadata(&node.node_type) else {
-        return (
-            "box",
-            include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"),
-        );
+        return ("box", include_bytes!("../../../../vendor/iconify-design/nodes/box.svg"));
     };
     let name = match metadata.icon_kind {
         nodecraft_node_contract::IconKind::Static => metadata.icon,
@@ -2647,7 +2790,9 @@ fn icon_for(node: &nodecraft_session::GraphNode) -> (&'static str, &'static [u8]
         "loft" => include_bytes!("../../../../vendor/iconify-design/nodes/loft.svg"),
         "surfaceloft" => include_bytes!("../../../../vendor/iconify-design/nodes/surfaceloft.svg"),
         "scatter" => include_bytes!("../../../../vendor/iconify-design/nodes/scatter.svg"),
-        "circular-pattern" => include_bytes!("../../../../vendor/iconify-design/nodes/circular-pattern.svg"),
+        "circular-pattern" => {
+            include_bytes!("../../../../vendor/iconify-design/nodes/circular-pattern.svg")
+        }
         "graph" => include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg"),
         "group" => include_bytes!("../../../../vendor/iconify-design/nodes/group.svg"),
         "import" => include_bytes!("../../../../vendor/iconify-design/nodes/import.svg"),
@@ -2676,24 +2821,28 @@ fn node_inputs<'a>(node: &'a nodecraft_session::GraphNode) -> Cow<'a, [&'a str]>
         return Cow::Owned(graph_marker_ports(node));
     }
     Cow::Borrowed(match node.node_type.as_str() {
-        "solid" | "primitive" => match node.values.get("primitiveType").and_then(|value| value.as_str()) {
-            Some("sphere") => &["radius"],
-            Some("cylinder") => &["radius", "height"],
-            Some("torus") => &["majorRadius", "minorRadius"],
-            Some("pyramid") => &["length", "height"],
-            Some("cone") => &["bottomRadius", "topRadius", "height"],
-            Some("partialSphere") => &["radius", "startAngle", "endAngle"],
-            Some("wedge") => &["length", "width", "height", "topLength"],
-            Some("partialTorus") => &["majorRadius", "minorRadius", "startAngle", "endAngle"],
-            _ => &["length", "width", "height"],
-        },
+        "solid" | "primitive" => {
+            match node.values.get("primitiveType").and_then(|value| value.as_str()) {
+                Some("sphere") => &["radius"],
+                Some("cylinder") => &["radius", "height"],
+                Some("torus") => &["majorRadius", "minorRadius"],
+                Some("pyramid") => &["length", "height"],
+                Some("cone") => &["bottomRadius", "topRadius", "height"],
+                Some("partialSphere") => &["radius", "startAngle", "endAngle"],
+                Some("wedge") => &["length", "width", "height", "topLength"],
+                Some("partialTorus") => &["majorRadius", "minorRadius", "startAngle", "endAngle"],
+                _ => &["length", "width", "height"],
+            }
+        }
         "sketch" | "spline" | "linkedpart" | "stepimporter" => &[],
         "extrude" => &["profile", "amount"],
         "chamfer" | "fillet" => &["shape", "length"],
         "look" => &["shape"],
         "shell" => &["shape", "thickness"],
         "translate" => &["shape", "x", "y", "z", "rx", "ry", "rz"],
-        "scatter" => &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"],
+        "scatter" => {
+            &["shape", "count", "spanX", "spanY", "seed", "distribution", "minScale", "maxScale"]
+        }
         "circularpattern" => &["shape", "count", "angle", "axis", "centerX", "centerY", "centerZ"],
         "combine" => &["shape"],
         "boolean" | "fuse" => &["a", "b"],
@@ -2716,11 +2865,7 @@ fn graph_marker_ports<'a>(node: &'a nodecraft_session::GraphNode) -> Vec<&'a str
     if let Some(ports) = node.values.get("ports").and_then(|value| value.as_array()) {
         return ports.iter().filter_map(|port| port.as_str()).collect();
     }
-    node.values
-        .get("port")
-        .and_then(|value| value.as_str())
-        .into_iter()
-        .collect()
+    node.values.get("port").and_then(|value| value.as_str()).into_iter().collect()
 }
 
 fn graph_port_names<'a>(node: &'a nodecraft_session::GraphNode, field: &str) -> Vec<&'a str> {
@@ -2744,7 +2889,16 @@ fn inlet_is_data(node: &nodecraft_session::GraphNode, port: &str) -> bool {
     }
     !matches!(
         port,
-        "shape" | "profile" | "sketch" | "sections" | "bottom" | "top" | "a" | "b" | "faces" | "edges"
+        "shape"
+            | "profile"
+            | "sketch"
+            | "sections"
+            | "bottom"
+            | "top"
+            | "a"
+            | "b"
+            | "faces"
+            | "edges"
     )
 }
 
@@ -2817,17 +2971,35 @@ fn port_at(
             continue;
         }
         for (index, port) in node_inputs(node).iter().enumerate() {
-            let position = Pos2::new(port_x(rect, index, node_inputs(node).len(), zoom), rect.min.y);
+            let position =
+                Pos2::new(port_x(rect, index, node_inputs(node).len(), zoom), rect.min.y);
             let distance = position.distance(pointer);
             if distance <= radius && best.as_ref().is_none_or(|(best, _)| distance < *best) {
-                best = Some((distance, WirePort { node_id: node.id.clone(), port: port.to_string(), is_input: true, position }));
+                best = Some((
+                    distance,
+                    WirePort {
+                        node_id: node.id.clone(),
+                        port: port.to_string(),
+                        is_input: true,
+                        position,
+                    },
+                ));
             }
         }
         for (index, port) in node_outputs(node).iter().enumerate() {
-            let position = Pos2::new(port_x(rect, index, node_outputs(node).len(), zoom), rect.max.y);
+            let position =
+                Pos2::new(port_x(rect, index, node_outputs(node).len(), zoom), rect.max.y);
             let distance = position.distance(pointer);
             if distance <= radius && best.as_ref().is_none_or(|(best, _)| distance < *best) {
-                best = Some((distance, WirePort { node_id: node.id.clone(), port: port.to_string(), is_input: false, position }));
+                best = Some((
+                    distance,
+                    WirePort {
+                        node_id: node.id.clone(),
+                        port: port.to_string(),
+                        is_input: false,
+                        position,
+                    },
+                ));
             }
         }
     }
@@ -2842,13 +3014,7 @@ fn cable_stroke(zoom: f32) -> Stroke {
     Stroke::new((3.2 * zoom).clamp(2.0, 4.5), Color32::from_rgba_unmultiplied(124, 156, 255, 230))
 }
 
-fn dashed_curve(
-    painter: &egui::Painter,
-    start: Pos2,
-    end: Pos2,
-    zoom: f32,
-    style: CableRouting,
-) {
+fn dashed_curve(painter: &egui::Painter, start: Pos2, end: Pos2, zoom: f32, style: CableRouting) {
     dashed_curve_with_colour(
         painter,
         start,
@@ -2907,9 +3073,7 @@ pub fn node_width(node: &nodecraft_session::GraphNode) -> f32 {
     }
     let title = node_title(&node.node_type).chars().count() as f32;
     let ports = node_input_count(node).max(node_outputs(node).len()) as f32;
-    NODE_MIN_WIDTH
-        .max(44.0 + ports * 24.0)
-        .max(52.0 + title * 9.5)
+    NODE_MIN_WIDTH.max(44.0 + ports * 24.0).max(52.0 + title * 9.5)
 }
 
 /// Graph-space card and clearance metrics used by layout code. Keep background,
@@ -2924,10 +3088,7 @@ pub struct NodeExtent {
 impl NodeExtent {
     #[must_use]
     pub fn card_rect(self, x: f64, y: f64) -> Rect {
-        Rect::from_min_size(
-            Pos2::new(x as f32, y as f32),
-            Vec2::new(self.width, self.height),
-        )
+        Rect::from_min_size(Pos2::new(x as f32, y as f32), Vec2::new(self.width, self.height))
     }
 
     #[must_use]
@@ -2939,11 +3100,7 @@ impl NodeExtent {
 #[must_use]
 pub fn node_extent(node: &nodecraft_session::GraphNode) -> NodeExtent {
     const CLEARANCE: f32 = 24.0;
-    NodeExtent {
-        width: node_width(node),
-        height: NODE_HEIGHT,
-        padding: CLEARANCE,
-    }
+    NodeExtent { width: node_width(node), height: NODE_HEIGHT, padding: CLEARANCE }
 }
 
 fn graph_rect(node: &nodecraft_session::GraphNode) -> Rect {
@@ -2952,7 +3109,6 @@ fn graph_rect(node: &nodecraft_session::GraphNode) -> Rect {
         Vec2::new(node_width(node), NODE_HEIGHT),
     )
 }
-
 
 fn insertion_probe(
     pointer: Option<Pos2>,
@@ -3021,11 +3177,8 @@ fn cable_hit_with_hold_for(
 ) -> Option<ConnectionKey> {
     let canvas_min = panel_canvas(panel).min;
     let map = |x: f32, y: f32| canvas_min + pan + Vec2::new(x, y) * zoom;
-    let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
-        .nodes
-        .iter()
-        .map(|node| (node.id.as_str(), node))
-        .collect();
+    let nodes: HashMap<&str, &nodecraft_session::GraphNode> =
+        document.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     let mut best = (CABLE_HIT_THRESHOLD, None);
     let mut held_distance = f32::INFINITY;
     for connection in &document.connections {
@@ -3033,24 +3186,18 @@ fn cable_hit_with_hold_for(
         let Some(to) = nodes.get(connection.to.as_str()).copied() else { continue };
         let source = map(from.x as f32, from.y as f32);
         let target = map(to.x as f32, to.y as f32);
-        let source_rect = Rect::from_min_size(source, Vec2::new(node_width(from), NODE_HEIGHT) * zoom);
-        let target_rect = Rect::from_min_size(target, Vec2::new(node_width(to), NODE_HEIGHT) * zoom);
+        let source_rect =
+            Rect::from_min_size(source, Vec2::new(node_width(from), NODE_HEIGHT) * zoom);
+        let target_rect =
+            Rect::from_min_size(target, Vec2::new(node_width(to), NODE_HEIGHT) * zoom);
         let outputs = node_outputs(from);
         let inputs = node_inputs(to);
         let x0 = port_x(source_rect, port_index(&outputs, &connection.out), outputs.len(), zoom);
         let y0 = source_rect.max.y;
         let x1 = port_x(target_rect, port_index(&inputs, &connection.input), inputs.len(), zoom);
         let y1 = target_rect.min.y;
-        let route = crate::routing::route_nodes_for(
-            style,
-            source_rect,
-            target_rect,
-            x0,
-            y0,
-            x1,
-            y1,
-            zoom,
-        );
+        let route =
+            crate::routing::route_nodes_for(style, source_rect, target_rect, x0, y0, x1, y1, zoom);
         // Broad phase: the cubic control hull always contains the curve.
         if !route.control_bounds().expand(CABLE_HIT_RELEASE).contains(pointer) {
             continue;
@@ -3081,7 +3228,6 @@ fn cable_hit_with_hold_for(
     best.1
 }
 
-
 fn document_roi(document: &GraphDocument) -> Option<Rect> {
     let mut min = Pos2::new(f32::INFINITY, f32::INFINITY);
     let mut max = Pos2::new(f32::NEG_INFINITY, f32::NEG_INFINITY);
@@ -3106,20 +3252,13 @@ const MINIMAP_RADIUS: f32 = 18.0;
 fn minimap_view_bounds(canvas: Rect, pan: Vec2, zoom: f32) -> Rect {
     Rect::from_min_max(
         Pos2::new(-pan.x / zoom, -pan.y / zoom),
-        Pos2::new(
-            (canvas.width() - pan.x) / zoom,
-            (canvas.height() - pan.y) / zoom,
-        ),
+        Pos2::new((canvas.width() - pan.x) / zoom, (canvas.height() - pan.y) / zoom),
     )
 }
 
 fn minimap_view_radius(rect: Rect) -> f32 {
     let short_side = rect.width().min(rect.height());
-    if short_side < 8.0 {
-        0.0
-    } else {
-        (short_side * 0.18).min(10.0)
-    }
+    if short_side < 8.0 { 0.0 } else { (short_side * 0.18).min(10.0) }
 }
 
 fn node_minimap_rect(panel: Rect) -> Rect {
@@ -3160,10 +3299,7 @@ fn fitted_view(canvas: Rect, roi: Rect) -> (Vec2, f32) {
 }
 
 fn panel_canvas(panel: Rect) -> Rect {
-    Rect::from_min_max(
-        Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP),
-        panel.max,
-    )
+    Rect::from_min_max(Pos2::new(panel.min.x, panel.min.y + CANVAS_TOP), panel.max)
 }
 
 #[cfg(test)]
@@ -3186,7 +3322,10 @@ fn geometry_key(
     )
 }
 
-fn hash_card_ports(node: &nodecraft_session::GraphNode, hasher: &mut std::collections::hash_map::DefaultHasher) {
+fn hash_card_ports(
+    node: &nodecraft_session::GraphNode,
+    hasher: &mut std::collections::hash_map::DefaultHasher,
+) {
     use std::hash::Hash;
     match node.node_type.as_str() {
         "group" => {
@@ -3196,9 +3335,7 @@ fn hash_card_ports(node: &nodecraft_session::GraphNode, hasher: &mut std::collec
                 };
                 field.hash(hasher);
                 for port in ports {
-                    port.get("port")
-                        .and_then(|value| value.as_str())
-                        .hash(hasher);
+                    port.get("port").and_then(|value| value.as_str()).hash(hasher);
                 }
             }
         }
@@ -3223,10 +3360,7 @@ fn hash_card_ports(node: &nodecraft_session::GraphNode, hasher: &mut std::collec
             }
         }
         "solid" | "primitive" => {
-            node.values
-                .get("primitiveType")
-                .and_then(|value| value.as_str())
-                .hash(hasher);
+            node.values.get("primitiveType").and_then(|value| value.as_str()).hash(hasher);
         }
         _ => {}
     }
@@ -3302,8 +3436,7 @@ fn glow_key_for(
             (
                 id.as_str(),
                 milliseconds_since(clock_start, glow.started).to_bits(),
-                glow.ended
-                    .map(|ended| milliseconds_since(clock_start, ended).to_bits()),
+                glow.ended.map(|ended| milliseconds_since(clock_start, ended).to_bits()),
             )
         })
         .collect();
@@ -3322,17 +3455,11 @@ fn build_geometry(
 ) -> NodeGeometry {
     let mut builder = GeometryBuilder::default();
     let rects: Vec<Rect> = document.nodes.iter().map(graph_rect).collect();
-    let ranks: HashMap<&str, usize> = z_order
-        .iter()
-        .enumerate()
-        .map(|(rank, id)| (id.as_str(), rank))
-        .collect();
+    let ranks: HashMap<&str, usize> =
+        z_order.iter().enumerate().map(|(rank, id)| (id.as_str(), rank)).collect();
     let mut draw_order: Vec<usize> = (0..document.nodes.len()).collect();
     draw_order.sort_by_key(|&index| {
-        ranks
-            .get(document.nodes[index].id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
+        ranks.get(document.nodes[index].id.as_str()).copied().unwrap_or(usize::MAX)
     });
     for index in draw_order {
         let rect = rects[index];
@@ -3344,7 +3471,10 @@ fn build_geometry(
         builder.fill_path(&card, fade_rgba(theme.f32(theme.card), fade));
         builder.stroke_path(
             &card,
-            fade_rgba(if selected_here { theme.f32(theme.accent) } else { theme.f32(theme.card_border) }, fade),
+            fade_rgba(
+                if selected_here { theme.f32(theme.accent) } else { theme.f32(theme.card_border) },
+                fade,
+            ),
             if selected_here { 3.0 } else { 2.0 },
         );
         let (suppress_center, view_center) = button_centers(rect);
@@ -3352,7 +3482,13 @@ fn build_geometry(
         builder.fill_path(&suppress, fade_rgba(theme.f32(theme.control), fade));
         builder.stroke_path(&suppress, fade_rgba(theme.f32(theme.card_border), fade), 1.0);
         let view = circle_path(view_center.x, view_center.y, VIEW_BUTTON_RADIUS);
-        builder.fill_path(&view, fade_rgba(if viewer_here { theme.f32(theme.accent) } else { theme.f32(theme.control) }, fade));
+        builder.fill_path(
+            &view,
+            fade_rgba(
+                if viewer_here { theme.f32(theme.accent) } else { theme.f32(theme.control) },
+                fade,
+            ),
+        );
         builder.stroke_path(&view, fade_rgba(theme.f32(theme.card_border), fade), 1.0);
         // Eyelet ports: fill the outer disc, stroke the accent ring, then paint
         // an opaque card-coloured inner disc over the ring's antialiased edge.
@@ -3363,11 +3499,7 @@ fn build_geometry(
             let x = port_x(rect, index, inputs.len(), 1.0);
             let input = circle_path(x, rect.min.y, 8.0);
             builder.fill_path(&input, card_colour);
-            let colour = if inlet_is_data(node, port) {
-                theme.port_input
-            } else {
-                theme.accent
-            };
+            let colour = if inlet_is_data(node, port) { theme.port_input } else { theme.accent };
             builder.stroke_path(&input, fade_rgba(theme.f32(colour), fade), 2.0);
             builder.fill_path(&circle_path(x, rect.min.y, 5.8), card_colour);
         }
@@ -3466,17 +3598,11 @@ fn build_shape_instances(
     theme: &crate::theme::CanvasTheme,
     fades: &HashMap<String, f32>,
 ) -> Vec<ShapeInstance> {
-    let ranks: HashMap<&str, usize> = z_order
-        .iter()
-        .enumerate()
-        .map(|(rank, id)| (id.as_str(), rank))
-        .collect();
+    let ranks: HashMap<&str, usize> =
+        z_order.iter().enumerate().map(|(rank, id)| (id.as_str(), rank)).collect();
     let mut draw_order: Vec<usize> = (0..document.nodes.len()).collect();
     draw_order.sort_by_key(|&index| {
-        ranks
-            .get(document.nodes[index].id.as_str())
-            .copied()
-            .unwrap_or(usize::MAX)
+        ranks.get(document.nodes[index].id.as_str()).copied().unwrap_or(usize::MAX)
     });
     let card_fill = theme.f32(theme.card);
     let card_stroke = theme.f32(theme.card_border);
@@ -3504,14 +3630,7 @@ fn build_shape_instances(
         });
 
         let (suppress_center, view_center) = button_centers(rect);
-        shape_circle(
-            &mut out,
-            suppress_center,
-            BUTTON_RADIUS * 2.0,
-            control,
-            stroke,
-            1.0,
-        );
+        shape_circle(&mut out, suppress_center, BUTTON_RADIUS * 2.0, control, stroke, 1.0);
         shape_circle(
             &mut out,
             view_center,
@@ -3525,11 +3644,7 @@ fn build_shape_instances(
         for (port_index, port) in inputs.iter().enumerate() {
             let x = port_x(rect, port_index, inputs.len(), 1.0);
             let center = Pos2::new(x, rect.min.y);
-            let ring = if inlet_is_data(node, port) {
-                theme.f32(theme.port_input)
-            } else {
-                accent
-            };
+            let ring = if inlet_is_data(node, port) { theme.f32(theme.port_input) } else { accent };
             shape_circle(&mut out, center, 16.0, fill, fade_rgba(ring, fade), 2.0);
             shape_circle(&mut out, center, 11.6, fill, fill, 0.0);
         }
@@ -3560,14 +3675,7 @@ fn selected_cable_lookup(
     (!selected_connections.is_empty()).then(|| {
         selected_connections
             .iter()
-            .map(|key| {
-                (
-                    key.from.as_str(),
-                    key.to.as_str(),
-                    key.input.as_str(),
-                    key.out.as_str(),
-                )
-            })
+            .map(|key| (key.from.as_str(), key.to.as_str(), key.input.as_str(), key.out.as_str()))
             .collect()
     })
 }
@@ -3627,11 +3735,8 @@ fn build_cables_for(
     selected_connections: &HashSet<ConnectionKey>,
     theme: &crate::theme::CanvasTheme,
 ) -> Vec<CableVertex> {
-    let nodes: HashMap<&str, &nodecraft_session::GraphNode> = document
-        .nodes
-        .iter()
-        .map(|node| (node.id.as_str(), node))
-        .collect();
+    let nodes: HashMap<&str, &nodecraft_session::GraphNode> =
+        document.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
     let highlighted = highlighted_edges(document, selected);
     let selected_cables = selected_cable_lookup(selected_connections);
     let outline = theme.f32(theme.cable_outline);
@@ -3674,19 +3779,10 @@ fn build_cables_for(
             ))
         });
         let highlighted = highlighted.contains(&index) || is_selected;
-        let core = if highlighted {
-            theme.f32(theme.cable_selected)
-        } else {
-            theme.f32(theme.cable)
-        };
+        let core =
+            if highlighted { theme.f32(theme.cable_selected) } else { theme.f32(theme.cable) };
         let outline = if highlighted { selected_outline } else { outline };
-        cables.push(CableVertex::new(
-            &routing,
-            core,
-            outline,
-            total_width,
-            core_ratio,
-        ));
+        cables.push(CableVertex::new(&routing, core, outline, total_width, core_ratio));
     }
     cables
 }
@@ -3759,12 +3855,10 @@ const AUTOSCROLL_MAX: f32 = 14.0;
 fn drag_autoscroll(canvas: Rect, pointer: Pos2) -> Vec2 {
     let ramp = |low: f32, high: f32, position: f32| {
         if position < low + AUTOSCROLL_EDGE {
-            -(((low + AUTOSCROLL_EDGE) - position) / AUTOSCROLL_EDGE)
-                .clamp(0.0, 1.0)
+            -(((low + AUTOSCROLL_EDGE) - position) / AUTOSCROLL_EDGE).clamp(0.0, 1.0)
                 * AUTOSCROLL_MAX
         } else if position > high - AUTOSCROLL_EDGE {
-            ((position - (high - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE)
-                .clamp(0.0, 1.0)
+            ((position - (high - AUTOSCROLL_EDGE)) / AUTOSCROLL_EDGE).clamp(0.0, 1.0)
                 * AUTOSCROLL_MAX
         } else {
             0.0
@@ -3811,23 +3905,14 @@ fn layout_menu_row(
     selected: bool,
     label: &str,
 ) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 26.0),
-        egui::Sense::click(),
-    );
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), egui::Sense::click());
     if response.hovered() || response.clicked() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let fill = if response.hovered() {
-        theme.color(theme.accent)
-    } else {
-        egui::Color32::TRANSPARENT
-    };
-    let text = if response.hovered() {
-        egui::Color32::WHITE
-    } else {
-        theme.color(theme.text)
-    };
+    let fill =
+        if response.hovered() { theme.color(theme.accent) } else { egui::Color32::TRANSPARENT };
+    let text = if response.hovered() { egui::Color32::WHITE } else { theme.color(theme.text) };
     ui.painter().rect_filled(rect, egui::CornerRadius::same(5), fill);
     if selected {
         ui.painter().text(
@@ -3853,7 +3938,8 @@ mod tests {
     use super::*;
 
     fn node_at(x: f64, y: f64) -> nodecraft_session::GraphNode {
-        nodecraft_session::GraphNode { expressions: Default::default(),
+        nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -3887,9 +3973,7 @@ mod tests {
             to_rect.min.y,
             1.0,
         );
-        let map = |point: Pos2| {
-            panel_canvas(panel).min + pan + point.to_vec2() * zoom
-        };
+        let map = |point: Pos2| panel_canvas(panel).min + pan + point.to_vec2() * zoom;
         let (point, derivative) = route.sample(0.5);
         let normal = Vec2::new(-derivative.y, derivative.x).normalized();
         (map(point), ConnectionKey::from_connection(connection), normal)
@@ -3916,7 +4000,8 @@ mod tests {
     fn highlighted_edges_follow_the_chain_without_rescanning() {
         let mut document = GraphDocument::new("highlight-chain");
         for (id, x) in [("a", 0.0), ("b", 200.0), ("c", 400.0), ("d", 600.0)] {
-            document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+            document.nodes.push(nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: id.into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3942,7 +4027,8 @@ mod tests {
     fn selected_and_directly_connected_cables_sort_last() {
         let mut document = GraphDocument::new("cable-layering");
         for (id, x) in [("a", 0.0), ("b", 200.0), ("c", 400.0), ("d", 600.0)] {
-            document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+            document.nodes.push(nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: id.into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -3970,19 +4056,18 @@ mod tests {
         );
 
         selected.clear();
-        let selected_cable = HashSet::from([ConnectionKey::from_connection(&document.connections[2])]);
+        let selected_cable =
+            HashSet::from([ConnectionKey::from_connection(&document.connections[2])]);
         let ordered = ordered_cable_connections(&document, &selected, &selected_cable);
-        assert_eq!(
-            ordered.last().map(|&index| document.connections[index].to.as_str()),
-            Some("d")
-        );
+        assert_eq!(ordered.last().map(|&index| document.connections[index].to.as_str()), Some("d"));
     }
 
     #[test]
     fn cable_instances_are_built_from_connection_endpoints() {
         let mut document = GraphDocument::new("cables");
         document.nodes = vec![
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -3990,7 +4075,8 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -4015,11 +4101,7 @@ mod tests {
         let count = cables[0].params[2] as usize;
         let point = |index: usize| -> [f32; 2] {
             let packed = cables[0].points[index / 2];
-            if index % 2 == 0 {
-                [packed[0], packed[1]]
-            } else {
-                [packed[2], packed[3]]
-            }
+            if index % 2 == 0 { [packed[0], packed[1]] } else { [packed[2], packed[3]] }
         };
         let start = point(0);
         let end = point(count * 3);
@@ -4031,7 +4113,8 @@ mod tests {
     #[test]
     fn upward_cable_instances_carry_the_wrap_and_clear_the_cards() {
         let mut document = GraphDocument::new("cable-wrap");
-        let bottom = nodecraft_session::GraphNode { expressions: Default::default(),
+        let bottom = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "bottom".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -4039,7 +4122,8 @@ mod tests {
             x: 0.0,
             y: 300.0,
         };
-        let top = nodecraft_session::GraphNode { expressions: Default::default(),
+        let top = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "top".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4070,21 +4154,16 @@ mod tests {
         let inputs = node_inputs(&document.nodes[1]);
         let x0 = port_x(from, port_index(&outputs, "shape"), outputs.len(), 1.0);
         let x1 = port_x(to, port_index(&inputs, "shape"), inputs.len(), 1.0);
-        let expected =
-            crate::routing::route_nodes(from, to, x0, from.max.y, x1, to.min.y, 1.0);
+        let expected = crate::routing::route_nodes(from, to, x0, from.max.y, x1, to.min.y, 1.0);
         assert_eq!(cable.params[2], expected.count as f32);
         let point = |index: usize| -> [f32; 2] {
             let packed = cable.points[index / 2];
-            if index % 2 == 0 {
-                [packed[0], packed[1]]
-            } else {
-                [packed[2], packed[3]]
-            }
+            if index % 2 == 0 { [packed[0], packed[1]] } else { [packed[2], packed[3]] }
         };
         // Ports leave and enter vertically.
         assert!((point(1)[0] - point(0)[0]).abs() < 1.0e-3);
         assert!((point(24)[0] - point(23)[0]).abs() < 1.0e-3);
-        
+
         // Ports leave and enter close to vertical regardless of the chosen shape.
         let start = point(0);
         let second = point(1);
@@ -4094,7 +4173,8 @@ mod tests {
     #[test]
     fn cable_routing_style_changes_built_cables() {
         let mut document = GraphDocument::new("routing-style");
-        let bottom = nodecraft_session::GraphNode { expressions: Default::default(),
+        let bottom = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "bottom".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -4102,7 +4182,8 @@ mod tests {
             x: 0.0,
             y: 300.0,
         };
-        let top = nodecraft_session::GraphNode { expressions: Default::default(),
+        let top = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "top".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4118,13 +4199,8 @@ mod tests {
             out: "shape".into(),
         }];
         let theme = crate::theme::CanvasTheme::default();
-        let j = build_cables_for(
-            CableRouting::J,
-            &document,
-            &HashSet::new(),
-            &HashSet::new(),
-            &theme,
-        );
+        let j =
+            build_cables_for(CableRouting::J, &document, &HashSet::new(), &HashSet::new(), &theme);
         let bezier = build_cables_for(
             CableRouting::Bezier,
             &document,
@@ -4140,7 +4216,8 @@ mod tests {
     fn cable_width_and_outline_width_come_from_theme() {
         let mut document = GraphDocument::new("cable-width");
         document.nodes = vec![
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -4148,7 +4225,8 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -4175,7 +4253,8 @@ mod tests {
     fn cable_alpha_comes_from_theme() {
         let mut document = GraphDocument::new("cable-alpha");
         document.nodes = vec![
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "a".into(),
                 node_type: "primitive".into(),
                 values: Default::default(),
@@ -4183,7 +4262,8 @@ mod tests {
                 x: 20.0,
                 y: 30.0,
             },
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -4228,7 +4308,8 @@ mod tests {
             let mut document = GraphDocument::new("baseline-frame");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+                document.nodes.push(nodecraft_session::GraphNode {
+                    expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4290,10 +4371,7 @@ mod tests {
                 });
                 total += start.elapsed().as_secs_f64() * 1000.0;
             }
-            println!(
-                "frame nodes={n:>6} avg_cpu_ms={:>8.2}",
-                total / f64::from(frames)
-            );
+            println!("frame nodes={n:>6} avg_cpu_ms={:>8.2}", total / f64::from(frames));
         }
     }
 
@@ -4305,7 +4383,8 @@ mod tests {
             let mut document = GraphDocument::new("hit-baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+                document.nodes.push(nodecraft_session::GraphNode {
+                    expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4331,11 +4410,8 @@ mod tests {
                 let _ = cable_hit(&document, panel, Vec2::ZERO, 1.0, pointer);
             }
             let hit_ms = start.elapsed().as_secs_f64() * 1000.0 / samples as f64;
-            let node_lookup: HashMap<&str, &nodecraft_session::GraphNode> = document
-                .nodes
-                .iter()
-                .map(|node| (node.id.as_str(), node))
-                .collect();
+            let node_lookup: HashMap<&str, &nodecraft_session::GraphNode> =
+                document.nodes.iter().map(|node| (node.id.as_str(), node)).collect();
             let start = Instant::now();
             for _ in 0..samples {
                 for connection in &document.connections {
@@ -4376,7 +4452,8 @@ mod tests {
             let mut document = GraphDocument::new("activity-baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+                document.nodes.push(nodecraft_session::GraphNode {
+                    expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4402,26 +4479,58 @@ mod tests {
         let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(1440.0, 900.0));
         for _ in 0..2 {
             let mut output = context.run_ui(input.clone(), |ui| {
-                editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+                editor.show(
+                    ui.ctx(),
+                    viewport,
+                    &document,
+                    &selected,
+                    &selected_connections,
+                    None,
+                    None,
+                );
             });
             output.textures_delta.clear();
         }
         let start = Instant::now();
         let mut output = context.run_ui(input.clone(), |ui| {
-            editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+            editor.show(
+                ui.ctx(),
+                viewport,
+                &document,
+                &selected,
+                &selected_connections,
+                None,
+                None,
+            );
         });
         output.textures_delta.clear();
         let with_activity = start.elapsed().as_secs_f64() * 1000.0;
         editor.clear_activity();
         for _ in 0..2 {
             let mut output = context.run_ui(input.clone(), |ui| {
-                editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+                editor.show(
+                    ui.ctx(),
+                    viewport,
+                    &document,
+                    &selected,
+                    &selected_connections,
+                    None,
+                    None,
+                );
             });
             output.textures_delta.clear();
         }
         let start = Instant::now();
         let mut output = context.run_ui(input.clone(), |ui| {
-            editor.show(ui.ctx(), viewport, &document, &selected, &selected_connections, None, None);
+            editor.show(
+                ui.ctx(),
+                viewport,
+                &document,
+                &selected,
+                &selected_connections,
+                None,
+                None,
+            );
         });
         output.textures_delta.clear();
         println!(
@@ -4433,7 +4542,8 @@ mod tests {
     #[test]
     fn cable_geometry_key_includes_port_names() {
         let mut document = GraphDocument::new("key-ports");
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4441,7 +4551,8 @@ mod tests {
             x: 0.0,
             y: 0.0,
         });
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -4485,24 +4596,10 @@ mod tests {
         let connections = HashSet::new();
         let z_order = Vec::new();
         let theme = crate::theme::CanvasTheme::default();
-        let first = geometry_key(
-            &document,
-            &selected,
-            &connections,
-            &z_order,
-            None,
-            &theme,
-        );
+        let first = geometry_key(&document, &selected, &connections, &z_order, None, &theme);
         let mut changed = theme;
         changed.card = [1, 2, 3, 4];
-        let second = geometry_key(
-            &document,
-            &selected,
-            &connections,
-            &z_order,
-            None,
-            &changed,
-        );
+        let second = geometry_key(&document, &selected, &connections, &z_order, None, &changed);
         assert_ne!(first, second);
     }
 
@@ -4515,7 +4612,8 @@ mod tests {
             let mut document = GraphDocument::new("baseline");
             let columns = (n as f64).sqrt().ceil() as usize;
             for index in 0..n {
-                document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+                document.nodes.push(nodecraft_session::GraphNode {
+                    expressions: Default::default(),
                     id: format!("n{index}"),
                     node_type: "translate".into(),
                     values: Default::default(),
@@ -4553,11 +4651,19 @@ mod tests {
             let key_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let geometry = build_geometry(&document, &selected, &z_order, None, &theme, &HashMap::new());
+            let geometry =
+                build_geometry(&document, &selected, &z_order, None, &theme, &HashMap::new());
             let geometry_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
-            let shapes = build_shape_instances(&document, &selected, &z_order, None, &theme, &HashMap::new());
+            let shapes = build_shape_instances(
+                &document,
+                &selected,
+                &z_order,
+                None,
+                &theme,
+                &HashMap::new(),
+            );
             let shapes_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             let start = Instant::now();
@@ -4677,15 +4783,7 @@ mod tests {
     fn glow_activity_bytes_carry_timestamps_not_per_frame_intensity() {
         let rect = Rect::from_min_size(Pos2::new(40.0, 60.0), Vec2::new(220.0, 104.0));
         let mut glows = Vec::new();
-        shape_glow(
-            &mut glows,
-            rect,
-            [0.2, 0.4, 0.9, 1.0],
-            3.0,
-            1.0,
-            1.0,
-            Some((125.0, -1.0)),
-        );
+        shape_glow(&mut glows, rect, [0.2, 0.4, 0.9, 1.0], 3.0, 1.0, 1.0, Some((125.0, -1.0)));
         let glow = &glows[0];
         assert_eq!(glow.stroke[0], 125.0, "start timestamp");
         assert_eq!(glow.stroke[1], -1.0, "still-running sentinel");
@@ -4714,7 +4812,8 @@ mod tests {
         let mut document = GraphDocument::new("lasso");
         document.nodes = vec![
             node_at(0.0, 0.0),
-            nodecraft_session::GraphNode { expressions: Default::default(),
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
                 id: "b".into(),
                 node_type: "translate".into(),
                 values: Default::default(),
@@ -4974,7 +5073,10 @@ mod tests {
         let mut node = node_at(0.0, 0.0);
         node.node_type = "graph".into();
         assert_eq!(icon_for(&node).0, "graph");
-        assert_eq!(icon_for(&node).1, include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg"));
+        assert_eq!(
+            icon_for(&node).1,
+            include_bytes!("../../../../vendor/iconify-design/nodes/share-network.svg")
+        );
     }
 
     #[test]
@@ -5113,10 +5215,7 @@ mod tests {
         selected_after.insert("n".to_string());
         frame(&mut editor, &selected_after);
         let selected_key = editor.last_glow_key.expect("selection glow key");
-        assert_ne!(
-            selected_key, idle,
-            "selection must produce new glow instance bytes"
-        );
+        assert_ne!(selected_key, idle, "selection must produce new glow instance bytes");
 
         editor.set_warning_nodes(HashSet::from(["n".to_string()]));
         frame(&mut editor, &selected_after);
@@ -5130,7 +5229,8 @@ mod tests {
     #[test]
     fn suppression_invalidates_cached_shape_instances() {
         use nodecraft_session::{GraphDocument, GraphInterface};
-        let mut node = nodecraft_session::GraphNode { expressions: Default::default(),
+        let mut node = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -5176,10 +5276,8 @@ mod tests {
     fn panel_screen_rect_tracks_the_last_viewport() {
         let mut editor = NodeEditor::default();
         assert!(editor.panel_screen_rect().is_none());
-        editor.last_viewport = Some(Rect::from_min_size(
-            Pos2::new(0.0, 50.0),
-            Vec2::new(1200.0, 800.0),
-        ));
+        editor.last_viewport =
+            Some(Rect::from_min_size(Pos2::new(0.0, 50.0), Vec2::new(1200.0, 800.0)));
         let panel = editor.panel_screen_rect().expect("panel rect");
         assert!(panel.width() > 0.0);
         assert!(panel.min.y >= 50.0);
@@ -5188,7 +5286,8 @@ mod tests {
 
     #[test]
     fn cable_hit_reconstructs_the_retained_gpu_wire_path() {
-        let from = nodecraft_session::GraphNode { expressions: Default::default(),
+        let from = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -5196,7 +5295,8 @@ mod tests {
             x: 10.0,
             y: 20.0,
         };
-        let to = nodecraft_session::GraphNode { expressions: Default::default(),
+        let to = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -5232,17 +5332,14 @@ mod tests {
             to_rect.min.y,
             1.0,
         );
-        let map = |point: Pos2| {
-            panel_canvas(panel).min
-                + pan
-                + point.to_vec2() * zoom
-        };
+        let map = |point: Pos2| panel_canvas(panel).min + pan + point.to_vec2() * zoom;
         let cursor = map(world.sample(0.5).0);
         assert_eq!(
             cable_hit(&document, panel, pan, zoom, cursor),
             Some(ConnectionKey::from_connection(&connection))
         );
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "c".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -5250,7 +5347,8 @@ mod tests {
             x: 900.0,
             y: 100.0,
         });
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "d".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -5279,7 +5377,8 @@ mod tests {
 
     #[test]
     fn insertion_target_holds_through_small_path_moves() {
-        let from = nodecraft_session::GraphNode { expressions: Default::default(),
+        let from = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "a".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -5287,7 +5386,8 @@ mod tests {
             x: 10.0,
             y: 20.0,
         };
-        let to = nodecraft_session::GraphNode { expressions: Default::default(),
+        let to = nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "b".into(),
             node_type: "translate".into(),
             values: Default::default(),
@@ -5315,17 +5415,11 @@ mod tests {
             Some(key.clone())
         );
         let outside = cursor + normal * 40.0;
-        assert_eq!(
-            cable_hit_with_hold(&document, panel, pan, zoom, outside, Some(&key)),
-            None
-        );
+        assert_eq!(cable_hit_with_hold(&document, panel, pan, zoom, outside, Some(&key)), None);
         // Moving the target node moves the cubic. The retained target follows it.
         document.nodes[1].x += 80.0;
         let (moved, _, _) = cable_midpoint(&document, panel, pan, zoom);
-        assert_eq!(
-            cable_hit_with_hold(&document, panel, pan, zoom, moved, Some(&key)),
-            Some(key)
-        );
+        assert_eq!(cable_hit_with_hold(&document, panel, pan, zoom, moved, Some(&key)), Some(key));
     }
 
     #[test]
@@ -5340,15 +5434,9 @@ mod tests {
             + Vec2::new(100.0, 200.0) * zoom
             + Vec2::new(node_width(&node), NODE_HEIGHT) * zoom * 0.5;
         assert_eq!(centre, expected);
-        assert_eq!(
-            insertion_probe(None, &node, panel, pan, zoom),
-            expected
-        );
+        assert_eq!(insertion_probe(None, &node, panel, pan, zoom), expected);
         let outside = Pos2::new(1.0, 2.0);
-        assert_eq!(
-            insertion_probe(Some(outside), &node, panel, pan, zoom),
-            outside
-        );
+        assert_eq!(insertion_probe(Some(outside), &node, panel, pan, zoom), outside);
     }
 
     #[test]
@@ -5363,7 +5451,8 @@ mod tests {
     fn newly_added_nodes_start_a_fade_in() {
         let mut editor = NodeEditor::default();
         let mut document = GraphDocument::new("fade");
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "a".into(),
             node_type: "primitive".into(),
             values: Default::default(),
@@ -5373,7 +5462,8 @@ mod tests {
         });
         editor.update_node_fades(&document);
         assert!(editor.node_fades.is_empty(), "initial nodes do not animate");
-        document.nodes.push(nodecraft_session::GraphNode { expressions: Default::default(),
+        document.nodes.push(nodecraft_session::GraphNode {
+            expressions: Default::default(),
             id: "b".into(),
             node_type: "chamfer".into(),
             values: Default::default(),
@@ -5421,9 +5511,8 @@ mod tests {
         assert_eq!(inputs.len(), 7);
         let width = node_width(&translate);
         let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(width, NODE_HEIGHT));
-        let xs: Vec<f32> = (0..inputs.len())
-            .map(|index| port_x(rect, index, inputs.len(), 1.0))
-            .collect();
+        let xs: Vec<f32> =
+            (0..inputs.len()).map(|index| port_x(rect, index, inputs.len(), 1.0)).collect();
         assert!(xs.windows(2).all(|pair| pair[1] > pair[0]));
         assert!(xs.first().is_some_and(|x| *x > rect.min.x));
         assert!(xs.last().is_some_and(|x| *x < rect.max.x));
@@ -5479,7 +5568,12 @@ mod tests {
             ("wedge", serde_json::json!({}), "wedge", "Wedge"),
             ("boolean", serde_json::json!({}), "union", "Boolean"),
             ("boolean", serde_json::json!({"mode": "subtract"}), "subtract", "Boolean"),
-            ("boolean", serde_json::json!({"mode": "subtract-reverse"}), "subtract-reverse", "Boolean"),
+            (
+                "boolean",
+                serde_json::json!({"mode": "subtract-reverse"}),
+                "subtract-reverse",
+                "Boolean",
+            ),
             ("boolean", serde_json::json!({"mode": "intersect"}), "intersection", "Boolean"),
             ("fuse", serde_json::json!({"op": "intersect"}), "intersection", "Boolean"),
         ];
@@ -5506,5 +5600,4 @@ mod tests {
             }
         }
     }
-
 }

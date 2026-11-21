@@ -99,13 +99,12 @@ pub(super) fn parse_node_clipboard(text: &str) -> Result<NodeClipboard, String> 
     Err("expected node object, node array, or { nodes: [...] }".to_owned())
 }
 
-pub(super) fn clipboard_payload(document: &GraphDocument, selected: &HashSet<&str>) -> Option<NodeClipboard> {
-    let nodes: Vec<GraphNode> = document
-        .nodes
-        .iter()
-        .filter(|node| selected.contains(node.id.as_str()))
-        .cloned()
-        .collect();
+pub(super) fn clipboard_payload(
+    document: &GraphDocument,
+    selected: &HashSet<&str>,
+) -> Option<NodeClipboard> {
+    let nodes: Vec<GraphNode> =
+        document.nodes.iter().filter(|node| selected.contains(node.id.as_str())).cloned().collect();
     if nodes.is_empty() {
         return None;
     }
@@ -115,9 +114,7 @@ pub(super) fn clipboard_payload(document: &GraphDocument, selected: &HashSet<&st
     let connections: Vec<GraphConnection> = document
         .connections
         .iter()
-        .filter(|link| {
-            selected.contains(link.from.as_str()) && selected.contains(link.to.as_str())
-        })
+        .filter(|link| selected.contains(link.from.as_str()) && selected.contains(link.to.as_str()))
         .cloned()
         .collect();
     let mut definitions = Vec::new();
@@ -144,11 +141,7 @@ pub(super) fn clipboard_payload(document: &GraphDocument, selected: &HashSet<&st
         }
         definitions.push(definition);
     }
-    Some(NodeClipboard {
-        nodes,
-        connections,
-        definitions,
-    })
+    Some(NodeClipboard { nodes, connections, definitions })
 }
 
 fn unique_definition_name(base: &str, names: &std::collections::BTreeSet<String>) -> String {
@@ -165,20 +158,13 @@ fn unique_definition_name(base: &str, names: &std::collections::BTreeSet<String>
     }
 }
 
-fn stub_graph_definition(
-    id: &str,
-    node: &GraphNode,
-) -> nodecraft_session::GraphDefinition {
+fn stub_graph_definition(id: &str, node: &GraphNode) -> nodecraft_session::GraphDefinition {
     let ports = |key: &str| -> Vec<String> {
         node.values
             .get(key)
             .and_then(serde_json::Value::as_array)
             .map(|ports| {
-                ports
-                    .iter()
-                    .filter_map(serde_json::Value::as_str)
-                    .map(str::to_owned)
-                    .collect()
+                ports.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect()
             })
             .unwrap_or_default()
     };
@@ -212,27 +198,19 @@ fn stub_graph_definition(
         .collect();
     nodecraft_session::GraphDefinition {
         id: id.to_owned(),
-        name: node
-            .values
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or(id)
-            .to_owned(),
+        name: node.values.get("name").and_then(serde_json::Value::as_str).unwrap_or(id).to_owned(),
         kind: "graph".into(),
-        interface: nodecraft_session::GraphInterface {
-            inputs,
-            outputs,
-        },
+        interface: nodecraft_session::GraphInterface { inputs, outputs },
         nodes,
         connections,
     }
 }
 
-fn order_definitions(definitions: Vec<nodecraft_session::GraphDefinition>) -> Vec<nodecraft_session::GraphDefinition> {
-    let mut by_id: std::collections::HashMap<String, nodecraft_session::GraphDefinition> = definitions
-        .into_iter()
-        .map(|definition| (definition.id.clone(), definition))
-        .collect();
+fn order_definitions(
+    definitions: Vec<nodecraft_session::GraphDefinition>,
+) -> Vec<nodecraft_session::GraphDefinition> {
+    let mut by_id: std::collections::HashMap<String, nodecraft_session::GraphDefinition> =
+        definitions.into_iter().map(|definition| (definition.id.clone(), definition)).collect();
     fn visit(
         id: &str,
         by_id: &mut std::collections::HashMap<String, nodecraft_session::GraphDefinition>,
@@ -269,11 +247,7 @@ pub(super) fn paste_plan(
     payload: NodeClipboard,
     origin: Option<egui::Pos2>,
 ) -> (Vec<Command>, HashSet<String>, Option<String>) {
-    let NodeClipboard {
-        nodes,
-        connections,
-        definitions,
-    } = payload;
+    let NodeClipboard { nodes, connections, definitions } = payload;
     let min_x = nodes.iter().map(|node| node.x).fold(f64::INFINITY, f64::min);
     let min_y = nodes.iter().map(|node| node.y).fold(f64::INFINITY, f64::min);
     let (origin_x, origin_y) = origin
@@ -318,11 +292,8 @@ pub(super) fn paste_plan(
         .map(|definition| definition.id.clone())
         .chain(std::iter::once(document.root.id.clone()))
         .collect();
-    let mut used_definition_names: BTreeSet<String> = document
-        .definitions
-        .iter()
-        .map(|definition| definition.name.clone())
-        .collect();
+    let mut used_definition_names: BTreeSet<String> =
+        document.definitions.iter().map(|definition| definition.name.clone()).collect();
     let mut definition_ids = std::collections::HashMap::new();
     let mut definition_names = std::collections::HashMap::new();
     for definition in &definitions {
@@ -334,15 +305,11 @@ pub(super) fn paste_plan(
         definition_ids.insert(definition.id.clone(), id);
     }
     for definition in &mut definitions {
-        let new_id = definition_ids
-            .get(&definition.id)
-            .cloned()
-            .unwrap_or_else(|| definition.id.clone());
+        let new_id =
+            definition_ids.get(&definition.id).cloned().unwrap_or_else(|| definition.id.clone());
         definition.id = new_id.clone();
-        definition.name = definition_names
-            .get(&new_id)
-            .cloned()
-            .unwrap_or_else(|| definition.name.clone());
+        definition.name =
+            definition_names.get(&new_id).cloned().unwrap_or_else(|| definition.name.clone());
         for node in &mut definition.nodes {
             if let Some(nodecraft_session::groups::GraphReference::Local(id)) =
                 nodecraft_session::groups::GraphReference::from_node(node)
@@ -357,10 +324,8 @@ pub(super) fn paste_plan(
     }
 
     let definitions = order_definitions(definitions);
-    let mut commands: Vec<Command> = definitions
-        .into_iter()
-        .map(|definition| Command::AddDefinition { definition })
-        .collect();
+    let mut commands: Vec<Command> =
+        definitions.into_iter().map(|definition| Command::AddDefinition { definition }).collect();
     for node in &nodes {
         let id = ids.get(&node.id).cloned().unwrap_or_else(|| node.id.clone());
         let mut node = node.clone();
@@ -385,29 +350,20 @@ pub(super) fn paste_plan(
     }
     for link in connections {
         let to = ids.get(&link.to).cloned().unwrap_or_else(|| link.to.clone());
-        let from = ids
-            .get(&link.from)
-            .cloned()
-            .unwrap_or_else(|| link.from.clone());
-        let from_exists = ids.contains_key(&link.from)
-            || document.nodes.iter().any(|node| node.id == from);
+        let from = ids.get(&link.from).cloned().unwrap_or_else(|| link.from.clone());
+        let from_exists =
+            ids.contains_key(&link.from) || document.nodes.iter().any(|node| node.id == from);
         let to_exists =
             ids.contains_key(&link.to) || document.nodes.iter().any(|node| node.id == to);
         if !from_exists || !to_exists {
             continue;
         }
-        commands.push(Command::Connect {
-            from,
-            to,
-            input: link.input,
-            out: link.out,
-        });
+        commands.push(Command::Connect { from, to, input: link.input, out: link.out });
     }
     let selected: HashSet<String> = ids.values().cloned().collect();
     let pasted_last = nodes.last().and_then(|node| ids.get(&node.id)).cloned();
     (commands, selected, pasted_last)
 }
-
 
 /// Resolve a tab drag to a final insertion index and the active index after it.
 /// `to` is an insertion slot in the original ordering, so dragging right removes
@@ -454,9 +410,9 @@ pub(super) fn is_nodecraft_path(path: &Path) -> bool {
 }
 
 pub(super) fn is_step_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp"))
+    path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("step") || extension.eq_ignore_ascii_case("stp")
+    })
 }
 
 pub(super) fn unique_node_id(base: &str, used: &mut HashSet<String>) -> String {
@@ -475,13 +431,8 @@ pub(super) fn unique_node_id(base: &str, used: &mut HashSet<String>) -> String {
     }
 }
 
-
 pub(super) fn node_positions(document: &GraphDocument) -> HashMap<String, (f64, f64)> {
-    document
-        .nodes
-        .iter()
-        .map(|node| (node.id.clone(), (node.x, node.y)))
-        .collect()
+    document.nodes.iter().map(|node| (node.id.clone(), (node.x, node.y))).collect()
 }
 
 pub(super) fn moved_positions(
@@ -515,14 +466,11 @@ pub(super) fn downstream_nodes(document: &GraphDocument, start: &str) -> HashSet
     result
 }
 
-
-
 pub(super) fn target_closure(document: &GraphDocument, target: &str) -> HashSet<String> {
     // Large boolean chains are thousands of nodes deep. Building the reverse
     // adjacency once keeps closure discovery linear instead of rescanning every
     // connection for every visited node.
-    let mut inputs: std::collections::HashMap<&str, Vec<&str>> =
-        std::collections::HashMap::new();
+    let mut inputs: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for link in &document.connections {
         inputs.entry(link.to.as_str()).or_default().push(link.from.as_str());
     }
@@ -550,11 +498,8 @@ pub(super) fn initial_viewer_target(document: &GraphDocument) -> Option<String> 
     {
         return Some(output.clone());
     }
-    let consumers: HashSet<&str> = document
-        .connections
-        .iter()
-        .map(|link| link.from.as_str())
-        .collect();
+    let consumers: HashSet<&str> =
+        document.connections.iter().map(|link| link.from.as_str()).collect();
     document
         .nodes
         .iter()
@@ -563,7 +508,6 @@ pub(super) fn initial_viewer_target(document: &GraphDocument) -> Option<String> 
         .or_else(|| document.nodes.last())
         .map(|node| node.id.clone())
 }
-
 
 pub(super) fn normalize_document_path(mut path: PathBuf) -> PathBuf {
     if path.extension().is_none() {

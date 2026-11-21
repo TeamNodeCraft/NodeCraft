@@ -81,10 +81,7 @@ impl Plane {
     /// Flip the normal so the body (given by `interior`) stays on the negative side.
     fn orient_towards(self, interior: [f64; 3]) -> Self {
         if self.distance(interior) > 0.0 {
-            Self {
-                point: self.point,
-                normal: scale(self.normal, -1.0),
-            }
+            Self { point: self.point, normal: scale(self.normal, -1.0) }
         } else {
             self
         }
@@ -142,12 +139,7 @@ pub fn apply_edge_treatment(
                 &triangles,
                 plane,
                 weld_epsilon,
-                &format!(
-                    "blend:{}:{}:{}",
-                    treatment.mode.as_str(),
-                    selection.ordinal,
-                    index
-                ),
+                &format!("blend:{}:{}:{}", treatment.mode.as_str(), selection.ordinal, index),
             )?;
         }
     }
@@ -205,17 +197,10 @@ fn mesh_triangles(mesh: &Mesh) -> Result<Vec<Tri>, BlendError> {
                     "display mesh triangle {index} references missing vertex {vertex}"
                 ))
             })?;
-            points[corner] = [
-                f64::from(source[0]),
-                f64::from(source[1]),
-                f64::from(source[2]),
-            ];
+            points[corner] = [f64::from(source[0]), f64::from(source[1]), f64::from(source[2])];
         }
-        let group = mesh
-            .face_groups
-            .get(index)
-            .cloned()
-            .unwrap_or_else(|| format!("face:?{index}"));
+        let group =
+            mesh.face_groups.get(index).cloned().unwrap_or_else(|| format!("face:?{index}"));
         triangles.push(Tri { points, group });
     }
     Ok(triangles)
@@ -250,10 +235,7 @@ fn planar_solid_mesh(
     brep: &solidcore::topology::Brep,
     interior: [f64; 3],
 ) -> Result<Mesh, BlendError> {
-    let mut mesh = Mesh {
-        lightweight: true,
-        ..Mesh::default()
-    };
+    let mut mesh = Mesh { lightweight: true, ..Mesh::default() };
     for (face_index, (face_id, _face)) in brep.faces().iter().enumerate() {
         let context = format!("face {face_index}");
         let normal = planar_face_normal(kernel, brep, face_id, &context, interior)?;
@@ -269,11 +251,8 @@ fn planar_solid_mesh(
                     .edge(edge_id)
                     .map_err(|error| BlendError::Kernel(format!("{context} edge: {error}")))?;
                 let forward = loops.orientations[use_index] == OrientType::Same;
-                let parameter = if forward {
-                    edge.interval.evaluate(0.0)
-                } else {
-                    edge.interval.evaluate(1.0)
-                };
+                let parameter =
+                    if forward { edge.interval.evaluate(0.0) } else { edge.interval.evaluate(1.0) };
                 let evaluated = evaluate_curve(kernel, edge.curve.as_ref(), parameter)
                     .map_err(|error| BlendError::Kernel(format!("{context} curve: {error}")))?;
                 let point = [evaluated[0].x, evaluated[0].y, evaluated[0].z];
@@ -311,18 +290,14 @@ fn planar_solid_mesh(
         }
     }
     if mesh.faces.is_empty() {
-        return Err(BlendError::Kernel(
-            "the B-rep produced no planar display triangles".into(),
-        ));
+        return Err(BlendError::Kernel("the B-rep produced no planar display triangles".into()));
     }
     Ok(mesh)
 }
 
 fn push_mesh_vertex(mesh: &mut Mesh, point: [f64; 3], normal: [f64; 3]) {
-    mesh.vertices
-        .push([point[0] as f32, point[1] as f32, point[2] as f32]);
-    mesh.normals
-        .push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
+    mesh.vertices.push([point[0] as f32, point[1] as f32, point[2] as f32]);
+    mesh.normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
 }
 
 fn push_mesh_triangle(mesh: &mut Mesh, a: u32, b: u32, c: u32, normal: [f64; 3], group: &str) {
@@ -348,14 +323,7 @@ fn push_mesh_triangle(mesh: &mut Mesh, a: u32, b: u32, c: u32, normal: [f64; 3],
 fn face_normal_order(a: [f64; 3], b: [f64; 3]) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     let key = |normal: [f64; 3]| {
-        [
-            normal[2].abs(),
-            normal[0].abs(),
-            normal[1].abs(),
-            normal[2],
-            normal[0],
-            normal[1],
-        ]
+        [normal[2].abs(), normal[0].abs(), normal[1].abs(), normal[2], normal[0], normal[1]]
     };
     let (a, b) = (key(a), key(b));
     for (left, right) in a.iter().zip(b.iter()) {
@@ -395,10 +363,8 @@ fn edge_frame(
     let mut faces_with_normals = Vec::with_capacity(2);
     for face in &distinct {
         let context = format!("edge {} face", selection.ordinal);
-        faces_with_normals.push((
-            *face,
-            planar_face_normal(kernel, brep, *face, &context, interior)?,
-        ));
+        faces_with_normals
+            .push((*face, planar_face_normal(kernel, brep, *face, &context, interior)?));
     }
     // A two-distance or distance-angle chamfer needs a consistent reference face.
     // B-rep face enumeration is arbitrary, so order the adjacent faces by their
@@ -450,11 +416,7 @@ fn edge_frame(
             ),
         ));
     }
-    Ok(EdgeFrame {
-        direction,
-        away_a,
-        away_b,
-    })
+    Ok(EdgeFrame { direction, away_a, away_b })
 }
 
 /// Outward unit normal of a planar face, with planarity verified on the exact surface.
@@ -483,9 +445,8 @@ fn planar_face_normal(
             format!("{context} has a non-finite or empty UV domain"),
         ));
     }
-    let face = brep
-        .face(face_id)
-        .map_err(|error| BlendError::Kernel(format!("{context}: {error}")))?;
+    let face =
+        brep.face(face_id).map_err(|error| BlendError::Kernel(format!("{context}: {error}")))?;
     let flip = match face.faceuse {
         Some(faceuse) => {
             brep.faceuse(faceuse)
@@ -552,11 +513,7 @@ fn in_face_direction(
             format!("edge {ordinal} cross-section is not a right angle (dot = {sign:.6})"),
         ));
     }
-    Ok(if sign < 0.0 {
-        candidate
-    } else {
-        scale(candidate, -1.0)
-    })
+    Ok(if sign < 0.0 { candidate } else { scale(candidate, -1.0) })
 }
 
 /// The cutting planes for one treatment.
@@ -582,17 +539,11 @@ fn treatment_planes(
                         ),
                     )
                 })?;
-            Ok(vec![Plane {
-                point: point_a,
-                normal,
-            }])
+            Ok(vec![Plane { point: point_a, normal }])
         }
         EdgeMode::Fillet => {
             let radius = treatment.length;
-            let centre = add(
-                selection.start,
-                scale(add(frame.away_a, frame.away_b), radius),
-            );
+            let centre = add(selection.start, scale(add(frame.away_a, frame.away_b), radius));
             // The fillet arc runs from the tangent point on face A to the tangent point
             // on face B; both are tangent to the adjacent faces, so skip the endpoints.
             let basis_a = scale(frame.away_b, -1.0);
@@ -657,10 +608,7 @@ fn clip_triangles(
                     let t = current_distance / denominator;
                     let point = lerp(triangle.points[corner], triangle.points[next], t);
                     push_unique(&mut polygon, point, weld_epsilon);
-                    if !crossings
-                        .iter()
-                        .any(|existing| near(*existing, point, weld_epsilon))
-                    {
+                    if !crossings.iter().any(|existing| near(*existing, point, weld_epsilon)) {
                         crossings.push(point);
                     }
                 }
@@ -756,11 +704,7 @@ fn cap_opening(
                     ),
                 ));
             }
-            let next = if neighbours[0] == previous {
-                neighbours[1]
-            } else {
-                neighbours[0]
-            };
+            let next = if neighbours[0] == previous { neighbours[1] } else { neighbours[0] };
             previous = current;
             current = next;
             if current == start {
@@ -805,10 +749,7 @@ fn cap_opening(
                     "the cut cross-section is not convex; only convex bodies are supported",
                 ));
             }
-            caps.push(Tri {
-                points: facet,
-                group: group.to_string(),
-            });
+            caps.push(Tri { points: facet, group: group.to_string() });
         }
         return Ok(caps);
     }
@@ -823,23 +764,14 @@ fn cap_planar_loops(
     group: &str,
 ) -> Result<Vec<Tri>, BlendError> {
     let normal = plane.normal;
-    let helper = if normal[0].abs() < 0.9 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [0.0, 1.0, 0.0]
-    };
+    let helper = if normal[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] };
     let u = normalize(cross(normal, helper))
         .ok_or_else(|| BlendError::unsupported("edge treatment", "degenerate cut plane"))?;
     let v = cross(normal, u);
     let project = |point: [f64; 3]| [dot(point, u), dot(point, v)];
     let loop_2d: Vec<Vec<[f64; 2]>> = loops
         .iter()
-        .map(|indices| {
-            indices
-                .iter()
-                .map(|index| project(points[*index]))
-                .collect()
-        })
+        .map(|indices| indices.iter().map(|index| project(points[*index])).collect())
         .collect();
     let area = |loop2d: &[[f64; 2]]| {
         let mut sum = 0.0;
@@ -880,10 +812,8 @@ fn cap_planar_loops(
             continue;
         }
         let mut outer = loops[root].clone();
-        if dot(
-            newell_normal(&outer.iter().map(|index| points[*index]).collect::<Vec<_>>()),
-            normal,
-        ) < 0.0
+        if dot(newell_normal(&outer.iter().map(|index| points[*index]).collect::<Vec<_>>()), normal)
+            < 0.0
         {
             outer.reverse();
         }
@@ -922,10 +852,7 @@ fn cap_planar_loops(
             if dot(facet_normal, normal) < 0.0 {
                 facet.swap(1, 2);
             }
-            caps.push(Tri {
-                points: facet,
-                group: group.to_string(),
-            });
+            caps.push(Tri { points: facet, group: group.to_string() });
         }
     }
     Ok(caps)
@@ -965,10 +892,7 @@ fn fan_triangulate(polygon: &[[f64; 3]], group: &str, out: &mut Vec<Tri>) {
         if length(area) <= 0.0 || !length(area).is_finite() {
             continue;
         }
-        out.push(Tri {
-            points,
-            group: group.to_string(),
-        });
+        out.push(Tri { points, group: group.to_string() });
     }
 }
 
@@ -997,9 +921,7 @@ pub fn chamfer_brep_exact_with_kernel_warned(
     use solidcore::primitive::api_primitives as api;
     let treatment = EdgeTreatment::from_node_values(values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    treatment
-        .validate()
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if treatment.mode != EdgeMode::Chamfer {
         return Err("exact chamfer requires chamfer mode".into());
     }
@@ -1053,7 +975,6 @@ pub fn chamfer_brep_exact_with_kernel_warned(
     }
 }
 
-
 /// Chamfer without returning warnings.
 pub fn chamfer_brep_exact_with_kernel(
     kernel: &mut Kernel,
@@ -1080,25 +1001,14 @@ fn brep_vertex_bounds(brep: &solidcore::topology::Brep) -> Result<([f64; 3], [f6
             .vertex(*id)
             .map_err(|error| nodecraft_solidcore::error::user_message(error))?
             .point;
-        min = [
-            min[0].min(point.x),
-            min[1].min(point.y),
-            min[2].min(point.z),
-        ];
-        max = [
-            max[0].max(point.x),
-            max[1].max(point.y),
-            max[2].max(point.z),
-        ];
+        min = [min[0].min(point.x), min[1].min(point.y), min[2].min(point.z)];
+        max = [max[0].max(point.x), max[1].max(point.y), max[2].max(point.z)];
     }
     Ok((min, max))
 }
 
 fn triangles_to_mesh(triangles: &[Tri], center: [f64; 3]) -> Result<Mesh, BlendError> {
-    let mut mesh = Mesh {
-        lightweight: true,
-        ..Mesh::default()
-    };
+    let mut mesh = Mesh { lightweight: true, ..Mesh::default() };
     for triangle in triangles {
         let normal = cross(
             sub(triangle.points[1], triangle.points[0]),
@@ -1114,16 +1024,13 @@ fn triangles_to_mesh(triangles: &[Tri], center: [f64; 3]) -> Result<Mesh, BlendE
                 (point[1] - center[1]) as f32,
                 (point[2] - center[2]) as f32,
             ]);
-            mesh.normals
-                .push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
+            mesh.normals.push([normal[0] as f32, normal[1] as f32, normal[2] as f32]);
         }
         mesh.faces.push([base, base + 1, base + 2]);
         mesh.face_groups.push(triangle.group.clone());
     }
     if mesh.faces.is_empty() {
-        return Err(BlendError::Kernel(
-            "edge treatment produced no triangles".into(),
-        ));
+        return Err(BlendError::Kernel("edge treatment produced no triangles".into()));
     }
     add_preview_feature_edges(&mut mesh, triangles, center);
     Ok(mesh)
@@ -1162,10 +1069,9 @@ fn add_preview_feature_edges(mesh: &mut Mesh, triangles: &[Tri], center: [f64; 3
             } else {
                 ([kb[0], kb[1], kb[2], ka[0], ka[1], ka[2]], b, a)
             };
-            let segment = segments.entry(key).or_insert_with(|| Segment {
-                points: [first, second],
-                groups: Vec::new(),
-            });
+            let segment = segments
+                .entry(key)
+                .or_insert_with(|| Segment { points: [first, second], groups: Vec::new() });
             if !segment.groups.contains(&triangle.group) {
                 segment.groups.push(triangle.group.clone());
             }
@@ -1246,11 +1152,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 }
 
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
+    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 
 fn length(a: [f64; 3]) -> f64 {
@@ -1278,7 +1180,7 @@ fn lerp(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives as api;
 
@@ -1305,10 +1207,8 @@ mod tests {
             .expect("box");
         let interior = brep_center(&kernel, &brep).expect("center");
         let selections = crate::edge::edge_selections(&kernel, &brep).expect("edges");
-        let top: Vec<_> = selections
-            .into_iter()
-            .filter(|selection| selection.midpoint[2] > 4.9)
-            .collect();
+        let top: Vec<_> =
+            selections.into_iter().filter(|selection| selection.midpoint[2] > 4.9).collect();
         assert!(!top.is_empty());
         for selection in top {
             let frame = edge_frame(&kernel, &brep, &selection, interior).expect("frame");

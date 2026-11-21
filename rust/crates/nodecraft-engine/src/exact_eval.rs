@@ -3,14 +3,20 @@
 use super::*;
 
 impl<'req, 'prog> Eval<'req, 'prog> {
-    pub(crate) fn cached_primitive_brep_arc(&mut self, node: &Node) -> Result<Arc<nodecraft_solidcore::solidcore::topology::Brep>, String> {
+    pub(crate) fn cached_primitive_brep_arc(
+        &mut self,
+        node: &Node,
+    ) -> Result<Arc<nodecraft_solidcore::solidcore::topology::Brep>, String> {
         if let Some(brep) = self.breps.get(&node.id) {
             return Ok(brep.clone());
         }
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (node.id.clone(), node_key);
         let cache_is_fresh = node_cache_is_fresh(node);
-        if !self.bypass_cache && cache_is_fresh && let Some(brep) = self.cache.brep(&cache_key) {
+        if !self.bypass_cache
+            && cache_is_fresh
+            && let Some(brep) = self.cache.brep(&cache_key)
+        {
             self.cache.note_brep_hit();
             self.cache_hits += 1;
             self.brep_cache_hits += 1;
@@ -30,7 +36,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         Ok(brep)
     }
 
-    pub(crate) fn cached_primitive_brep(&mut self, node: &Node) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
+    pub(crate) fn cached_primitive_brep(
+        &mut self,
+        node: &Node,
+    ) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
         let brep = self.cached_primitive_brep_arc(node)?;
         snapshot_brep(&brep)
     }
@@ -62,10 +71,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 .entry(link.to.as_str())
                 .or_default()
                 .push((link.input.as_str(), link.from.as_str()));
-            children
-                .entry(link.from.as_str())
-                .or_default()
-                .push(link.to.as_str());
+            children.entry(link.from.as_str()).or_default().push(link.to.as_str());
         }
         let mut warmable = std::collections::BTreeSet::new();
         let mut queue: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
@@ -76,9 +82,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         ) -> bool {
             inputs.get(node.id.as_str()).is_some_and(|inputs| {
                 let connected = |input: &str| {
-                    inputs.iter().any(|(candidate, from)| {
-                        *candidate == input && warmable.contains(*from)
-                    })
+                    inputs
+                        .iter()
+                        .any(|(candidate, from)| *candidate == input && warmable.contains(*from))
                 };
                 match node.node_type.as_str() {
                     "fillet" | "chamfer" | "shell" => connected("shape"),
@@ -116,14 +122,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             // Warm dirty leaves too: they are exactly the work the next serial
             // pass would otherwise do alone. Only skip nodes whose result is
             // both fresh and already cached.
-            if !warmable.contains(&node.id) { continue; }
+            if !warmable.contains(&node.id) {
+                continue;
+            }
             // Heavy feature nodes are evaluated by the exact Part path, which
             // uses the batched Boolean implementation and avoids duplicate
             // ops-layer validation. Only warm work that is independent and cheap.
-            if matches!(node.node_type.as_str(), "boolean" | "fuse" | "fillet" | "chamfer" | "shell" | "extrude") {
+            if matches!(
+                node.node_type.as_str(),
+                "boolean" | "fuse" | "fillet" | "chamfer" | "shell" | "extrude"
+            ) {
                 continue;
             }
-            let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
+            let node_key =
+                node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
             let cache_key = (node.id.clone(), node_key);
             let fresh = node_cache_is_fresh(node);
             if self.breps.contains_key(&node.id)
@@ -136,14 +148,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             match node.node_type.as_str() {
                 "solid" | "primitive" => {
                     let node_for_job = node.clone();
-                    tasks.push(ScheduledTask::leaf(
-                        id,
-                        fnv_seed(&node.id),
-                        move |kernel| {
-                            crate::nodes::primitive_brep_with_kernel(kernel, &node_for_job)
-                                .map(std::sync::Arc::new)
-                        },
-                    ));
+                    tasks.push(ScheduledTask::leaf(id, fnv_seed(&node.id), move |kernel| {
+                        crate::nodes::primitive_brep_with_kernel(kernel, &node_for_job)
+                            .map(std::sync::Arc::new)
+                    }));
                 }
                 // A STEP import is one file with any number of bodies, so it has
                 // no single `Arc<Brep>` leaf value. The Part pass is the one
@@ -151,7 +159,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 _ => {}
             }
         }
-        if tasks.is_empty() { return; }
+        if tasks.is_empty() {
+            return;
+        }
         let pool = crate::kernel_pool::shared_pool();
         let max_in_flight = profile.recommended_exact_in_flight(pool.workers());
         let Ok(results) = crate::scheduler::run_levels_with_limit(
@@ -159,7 +169,9 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             tasks,
             crate::kernel_pool::current_revision_token(),
             max_in_flight,
-        ) else { return; };
+        ) else {
+            return;
+        };
         for (id, result) in results {
             let Ok(brep) = result else { continue };
             self.breps.insert(id.clone(), brep.clone());
@@ -192,9 +204,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             } else if let Some(sketch) = self.sketches.get(&source) {
                 Some(NodeOutput::Sketch(sketch.clone()))
             } else {
-                self.objects.get(&source).cloned().map(|mesh| {
-                    NodeOutput::Mesh(std::sync::Arc::new(mesh))
-                })
+                self.objects
+                    .get(&source)
+                    .cloned()
+                    .map(|mesh| NodeOutput::Mesh(std::sync::Arc::new(mesh)))
             };
             if let Some(value) = value {
                 inputs.insert(port, value);
@@ -204,8 +217,12 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     }
 
     pub(crate) fn emit_progress(&mut self, node_id: &str, phase: ProgressPhase) {
-        if !self.request.progress { return; }
-        let Some(callback) = self.progress.as_mut() else { return; };
+        if !self.request.progress {
+            return;
+        }
+        let Some(callback) = self.progress.as_mut() else {
+            return;
+        };
         callback(ProgressEvent {
             request_id: self.request.request_id,
             tab_id: self.request.tab_id.clone(),
@@ -240,7 +257,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         let node_key = node.cache.as_ref().and_then(|cache| cache.key.clone()).unwrap_or_default();
         let cache_key = (start.to_owned(), node_key);
         let cache_is_fresh = node_cache_is_fresh(&node);
-        if !self.bypass_cache && cache_is_fresh && let Some(part) = self.cache.part(&cache_key) {
+        if !self.bypass_cache
+            && cache_is_fresh
+            && let Some(part) = self.cache.part(&cache_key)
+        {
             self.cache.note_part_hit();
             self.cache_hits += 1;
             self.part_cache_hits += 1;
@@ -275,7 +295,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             match node.node_type.as_str() {
                 "groupinput" => Ok(Part::empty()),
                 "groupoutput" => {
-                    let link = self.index.first_incoming(&node.id, "shape").ok_or("Group output has no connected input")?;
+                    let link = self
+                        .index
+                        .first_incoming(&node.id, "shape")
+                        .ok_or("Group output has no connected input")?;
                     self.evaluate_part(&link.from).map(|part| part.as_ref().clone())
                 }
                 other => Err(format!("exact Part evaluation does not support {other:?}")),
@@ -322,7 +345,6 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             unreachable!()
         }
     }
-
 }
 
 /// Whether `id` is a Union node this evaluation may fold into its parent: an unrequested
@@ -365,7 +387,9 @@ fn union_leaves(index: &RequestIndex<'_>, start: &str, parent: &str) -> Option<V
 
 /// Every Union node folded into a Union above it, so the exact loop does not evaluate it
 /// separately before the top of its run has had the chance to fuse it.
-pub(crate) fn union_run_intermediates(index: &RequestIndex<'_>) -> std::collections::HashSet<String> {
+pub(crate) fn union_run_intermediates(
+    index: &RequestIndex<'_>,
+) -> std::collections::HashSet<String> {
     let mut folded = std::collections::HashSet::new();
     for node in index.nodes() {
         if node.suppressed
@@ -377,7 +401,10 @@ pub(crate) fn union_run_intermediates(index: &RequestIndex<'_>) -> std::collecti
         {
             continue;
         }
-        if !matches!(crate::boolean_mode(&node.values), Ok((nodecraft_bool::BooleanOp::Union, false))) {
+        if !matches!(
+            crate::boolean_mode(&node.values),
+            Ok((nodecraft_bool::BooleanOp::Union, false))
+        ) {
             continue;
         }
         let mut readers = index.outgoing(&node.id);
@@ -391,7 +418,10 @@ pub(crate) fn union_run_intermediates(index: &RequestIndex<'_>) -> std::collecti
         };
         if parent.suppressed
             || !matches!(parent.node_type.as_str(), "boolean" | "fuse")
-            || !matches!(crate::boolean_mode(&parent.values), Ok((nodecraft_bool::BooleanOp::Union, false)))
+            || !matches!(
+                crate::boolean_mode(&parent.values),
+                Ok((nodecraft_bool::BooleanOp::Union, false))
+            )
         {
             continue;
         }
@@ -399,9 +429,9 @@ pub(crate) fn union_run_intermediates(index: &RequestIndex<'_>) -> std::collecti
         // operand is a pass-through and folding changes what it means.
         let has_a = index.first_incoming(&parent_id, "a").is_some();
         let has_b = index.first_incoming(&parent_id, "b").is_some();
-        let on_operand = index.outgoing(&node.id).any(|link| {
-            link.to == parent_id && (link.input == "a" || link.input == "b")
-        });
+        let on_operand = index
+            .outgoing(&node.id)
+            .any(|link| link.to == parent_id && (link.input == "a" || link.input == "b"));
         if has_a && has_b && on_operand {
             folded.insert(node.id.clone());
         }
@@ -413,7 +443,12 @@ pub(crate) fn union_run_intermediates(index: &RequestIndex<'_>) -> std::collecti
 /// `union_all`, or `None` when there is nothing to fuse (fewer than three leaves, or a leaf is
 /// itself the parent's only operand). Requested intermediates stay computable: they are in
 /// `request.targets` and are never folded away.
-pub(crate) fn fused_union_leaves(index: &RequestIndex<'_>, parent: &str, a: &str, b: &str) -> Option<Vec<String>> {
+pub(crate) fn fused_union_leaves(
+    index: &RequestIndex<'_>,
+    parent: &str,
+    a: &str,
+    b: &str,
+) -> Option<Vec<String>> {
     let mut leaves = Vec::new();
     leaves.extend(union_leaves(index, a, parent).unwrap_or_else(|| vec![a.to_owned()]));
     leaves.extend(union_leaves(index, b, parent).unwrap_or_else(|| vec![b.to_owned()]));

@@ -39,7 +39,6 @@ impl<'a> HoverMap<'a> {
         }
     }
 
-
     pub fn over_viewport(&self) -> bool {
         self.hover() == Hover::Viewport
     }

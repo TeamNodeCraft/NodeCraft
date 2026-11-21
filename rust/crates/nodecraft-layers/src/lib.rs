@@ -14,8 +14,8 @@
 //! record-first migration.
 
 use nodecraft_protocol::Mesh;
-use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
 use solidcore::kernel::Kernel;
+use solidcore::query::brep::{BoundingBoxOptions, calculate_bounding_box};
 use solidcore::topology::Brep as KernelBrep;
 use solidcore::topology::FaceId;
 use solidcore_record::Vec3;
@@ -68,11 +68,7 @@ fn check_body(body: &solidcore_ops::Body) -> Result<(), String> {
     let report = body
         .check(solidcore_ops::CheckLevel::Geometry)
         .map_err(|error| format!("solidcore check: {error}"))?;
-    if report.is_valid() {
-        Ok(())
-    } else {
-        Err(format!("result failed solidcore check: {report}"))
-    }
+    if report.is_valid() { Ok(()) } else { Err(format!("result failed solidcore check: {report}")) }
 }
 
 /// Configure the process-wide `solidcore-ops` session with the same upstream
@@ -184,11 +180,8 @@ pub struct TessLevel {
 /// Build display LOD levels directly from a protocol mesh.
 #[must_use]
 pub fn simplify_mesh(mesh: &Mesh, targets: &[usize]) -> Vec<TessLevel> {
-    let positions: Vec<Vec3> = mesh
-        .vertices
-        .iter()
-        .map(|p| Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64))
-        .collect();
+    let positions: Vec<Vec3> =
+        mesh.vertices.iter().map(|p| Vec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).collect();
     solidcore_tess::simplify::levels(&positions, &mesh.faces, targets)
         .into_iter()
         .map(|level| TessLevel {
@@ -261,21 +254,13 @@ pub fn tessellate_record(
         .map_err(|error| format!("tessellation plan: {error}"))?;
     let plan = std::sync::Arc::new(plan);
     let (tess, refused) = plan.evaluate();
-    let mut unmeshed_faces: Vec<(usize, String)> = stats
-        .unmeshed
-        .iter()
-        .map(|face| (face.face, face.reason.clone()))
-        .collect();
+    let mut unmeshed_faces: Vec<(usize, String)> =
+        stats.unmeshed.iter().map(|face| (face.face, face.reason.clone())).collect();
     unmeshed_faces.extend(refused.iter().map(|face| (face.face, face.reason.clone())));
     let edge_polylines: Vec<Vec<[f32; 3]>> = tess
         .edges
         .iter()
-        .map(|polyline| {
-            polyline
-                .iter()
-                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                .collect()
-        })
+        .map(|polyline| polyline.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect())
         .collect();
     let edge_classes: Vec<PlanEdgeClass> = (0..plan.edges.len())
         .map(|index| {
@@ -313,10 +298,8 @@ pub fn tessellate_record(
     }
     let mut plan_edge_ids = vec![None; plan.edges.len()];
     for edge in &mesh.brep_edges {
-        if let Some(index) = edge
-            .id
-            .strip_prefix("edge:")
-            .and_then(|index| index.parse::<usize>().ok())
+        if let Some(index) =
+            edge.id.strip_prefix("edge:").and_then(|index| index.parse::<usize>().ok())
         {
             if let Some(slot) = plan_edge_ids.get_mut(index) {
                 *slot = Some(edge.id.clone());
@@ -377,22 +360,10 @@ fn protocol_mesh(
     // source of truth; a later crease-split would average them back toward a
     // pole's axis.
     mesh.exact_normals = true;
-    mesh.vertices = tess
-        .positions
-        .iter()
-        .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-        .collect();
-    mesh.normals = tess
-        .normals
-        .iter()
-        .map(|n| [n.x as f32, n.y as f32, n.z as f32])
-        .collect();
+    mesh.vertices = tess.positions.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+    mesh.normals = tess.normals.iter().map(|n| [n.x as f32, n.y as f32, n.z as f32]).collect();
     mesh.faces = tess.triangles.clone();
-    mesh.face_groups = tess
-        .tri_face
-        .iter()
-        .map(|face| format!("face:{face}"))
-        .collect();
+    mesh.face_groups = tess.tri_face.iter().map(|face| format!("face:{face}")).collect();
     let vertex_key = |v: [f32; 3]| [v[0].to_bits(), v[1].to_bits(), v[2].to_bits()];
     let mut vertex_at = std::collections::HashMap::new();
     for (index, vertex) in mesh.vertices.iter().enumerate() {
@@ -401,10 +372,9 @@ fn protocol_mesh(
     for (edge_index, polyline) in edge_polylines.iter().enumerate() {
         let mut segments = Vec::with_capacity(polyline.len().saturating_sub(1));
         for pair in polyline.windows(2) {
-            let (Some(a), Some(b)) = (
-                vertex_at.get(&vertex_key(pair[0])),
-                vertex_at.get(&vertex_key(pair[1])),
-            ) else {
+            let (Some(a), Some(b)) =
+                (vertex_at.get(&vertex_key(pair[0])), vertex_at.get(&vertex_key(pair[1])))
+            else {
                 continue;
             };
             segments.push([*a, *b]);
@@ -459,22 +429,31 @@ fn kernel_body_edit(
         .map_err(|error| format!("record to ops body: {error}"))?;
     edit(&body, &order)?;
     check_body(&body)?;
-    let (record, _order) = body
-        .to_record()
-        .map_err(|error| format!("ops body to record: {error}"))?;
+    let (record, _order) =
+        body.to_record().map_err(|error| format!("ops body to record: {error}"))?;
     solidcore_convert::brep::to_kernel(kernel, &record, true)
         .map(|(brep, _)| brep)
         .map_err(|error| format!("record to kernel: {error}"))
 }
 
 /// Resolve canonical record face indices to kernel `FaceId`s.
-pub fn record_face_ids(kernel: &mut Kernel, brep: &mut KernelBrep, indices: &[usize]) -> Result<Vec<FaceId>, String> {
+pub fn record_face_ids(
+    kernel: &mut Kernel,
+    brep: &mut KernelBrep,
+    indices: &[usize],
+) -> Result<Vec<FaceId>, String> {
     let order = solidcore_convert::brep::to_record(kernel, brep)
         .map_err(|error| format!("kernel to record: {error}"))?
         .1;
     indices
         .iter()
-        .map(|index| order.faces.get(*index).copied().ok_or_else(|| format!("record face {index} is out of range")))
+        .map(|index| {
+            order
+                .faces
+                .get(*index)
+                .copied()
+                .ok_or_else(|| format!("record face {index} is out of range"))
+        })
         .collect()
 }
 
@@ -514,9 +493,7 @@ pub fn shell_kernel(
     thickness: f64,
 ) -> Result<KernelBrep, String> {
     let open = record_face_indices(
-        &solidcore_convert::brep::to_record(kernel, brep)
-            .map_err(|error| error.to_string())?
-            .1,
+        &solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1,
         open,
     )?;
     kernel_body_edit(kernel, brep, |body, order| {
@@ -533,9 +510,7 @@ pub fn offset_faces_kernel(
     distance: f64,
 ) -> Result<KernelBrep, String> {
     let faces = record_face_indices(
-        &solidcore_convert::brep::to_record(kernel, brep)
-            .map_err(|error| error.to_string())?
-            .1,
+        &solidcore_convert::brep::to_record(kernel, brep).map_err(|error| error.to_string())?.1,
         faces,
     )?;
     kernel_body_edit(kernel, brep, |body, order| {
@@ -594,9 +569,8 @@ pub fn union_breps_ops(
     }
     let mut records = Vec::with_capacity(breps.len());
     for brep in breps {
-        let mut copy = brep
-            .clone_standing_for_self()
-            .map_err(|error| format!("union copy: {error}"))?;
+        let mut copy =
+            brep.clone_standing_for_self().map_err(|error| format!("union copy: {error}"))?;
         let (record, _) = solidcore_convert::brep::to_record(kernel, &mut copy)
             .map_err(|error| format!("kernel to record: {error}"))?;
         records.push(record);
@@ -616,12 +590,10 @@ pub fn boolean_breps_ops(
     b: &KernelBrep,
     op: solidcore_ops::BooleanOp,
 ) -> Result<Option<KernelBrep>, String> {
-    let mut a_copy = a
-        .clone_standing_for_self()
-        .map_err(|error| format!("boolean copy A: {error}"))?;
-    let mut b_copy = b
-        .clone_standing_for_self()
-        .map_err(|error| format!("boolean copy B: {error}"))?;
+    let mut a_copy =
+        a.clone_standing_for_self().map_err(|error| format!("boolean copy A: {error}"))?;
+    let mut b_copy =
+        b.clone_standing_for_self().map_err(|error| format!("boolean copy B: {error}"))?;
     let (a_record, _) = solidcore_convert::brep::to_record(kernel, &mut a_copy)
         .map_err(|error| format!("kernel A to record: {error}"))?;
     let (b_record, _) = solidcore_convert::brep::to_record(kernel, &mut b_copy)
@@ -636,15 +608,13 @@ pub fn boolean_breps_ops(
 
 /// Exact volume of a kernel B-rep through the upstream ops body.
 pub fn kernel_volume(kernel: &mut Kernel, brep: &KernelBrep) -> Result<f64, String> {
-    let mut brep = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("volume copy: {error}"))?;
+    let mut brep =
+        brep.clone_standing_for_self().map_err(|error| format!("volume copy: {error}"))?;
     let (record, _) = solidcore_convert::brep::to_record(kernel, &mut brep)
         .map_err(|error| format!("kernel to record: {error}"))?;
     let (body, _) = solidcore_ops::Body::from_record(&record, true)
         .map_err(|error| format!("record to ops body: {error}"))?;
-    body.volume(1.0e-6)
-        .map_err(|error| format!("ops volume: {error}"))
+    body.volume(1.0e-6).map_err(|error| format!("ops volume: {error}"))
 }
 
 /// Convert an ops body to a kernel Brep through its record.
@@ -652,9 +622,8 @@ pub fn body_to_kernel(
     kernel: &mut Kernel,
     body: &solidcore_ops::Body,
 ) -> Result<KernelBrep, String> {
-    let (record, _order) = body
-        .to_record()
-        .map_err(|error| format!("ops body to record: {error}"))?;
+    let (record, _order) =
+        body.to_record().map_err(|error| format!("ops body to record: {error}"))?;
     solidcore_convert::brep::to_kernel(kernel, &record, true)
         .map(|(brep, _)| brep)
         .map_err(|error| format!("record to kernel: {error}"))
@@ -668,12 +637,7 @@ pub fn tessellate_kernel(
     tolerance: f64,
 ) -> Result<TessDisplay, String> {
     let size = kernel_body_size(kernel, brep)?;
-    tessellate_kernel_with(
-        kernel,
-        brep,
-        MeshTolerance::display(tolerance.max(1.0e-5)),
-        size,
-    )
+    tessellate_kernel_with(kernel, brep, MeshTolerance::display(tolerance.max(1.0e-5)), size)
 }
 
 /// Tessellate a kernel B-rep at `solidcore_tess::preview` density (a provisional
@@ -695,10 +659,7 @@ pub fn tessellate_kernel_preview(
         5..=6 => Some(20.0_f64.to_radians()),
         _ => Some(15.0_f64.to_radians()),
     };
-    let display = MeshTolerance {
-        chord: preview.chord.max(1.0e-5),
-        angle,
-    };
+    let display = MeshTolerance { chord: preview.chord.max(1.0e-5), angle };
     tessellate_kernel_with(kernel, brep, display, size)
 }
 
@@ -710,11 +671,7 @@ fn kernel_body_size(kernel: &mut Kernel, brep: &KernelBrep) -> Result<f64, Strin
     let extent = calculate_bounding_box(
         kernel,
         brep,
-        BoundingBoxOptions {
-            approx: true,
-            tight: false,
-            expand_by_zone_tol_3d: true,
-        },
+        BoundingBoxOptions { approx: true, tight: false, expand_by_zone_tol_3d: true },
     )
     .map_err(|error| format!("kernel bounding box: {error}"))?;
     let mut diagonal = 0.0;
@@ -799,10 +756,7 @@ pub fn plan_edge_classes_from_brep_edges(
     }
     let mut classes = vec![PlanEdgeClass::NORMAL; plan.edges.len()];
     for edge in edges {
-        let index = by_id
-            .get(edge.id.as_str())
-            .copied()
-            .or_else(|| edge_index(&edge.id));
+        let index = by_id.get(edge.id.as_str()).copied().or_else(|| edge_index(&edge.id));
         if let Some(index) = index {
             if let Some(slot) = classes.get_mut(index) {
                 *slot = PlanEdgeClass::from_bits(edge.class);
@@ -835,9 +789,8 @@ pub fn plan_kernel(
             MeshTolerance { chord: preview.chord.max(1.0e-5), angle }
         }
     };
-    let mut copy = brep
-        .clone_standing_for_self()
-        .map_err(|error| format!("display copy: {error}"))?;
+    let mut copy =
+        brep.clone_standing_for_self().map_err(|error| format!("display copy: {error}"))?;
     let (record, order) = solidcore_convert::brep::to_record(kernel, &mut copy)
         .map_err(|error| format!("kernel to record: {error}"))?;
     let (plan, planned) = solidcore_tess::plan(&record, &display, size)
@@ -855,7 +808,11 @@ pub fn plan_kernel(
         capped_edges: planned.edges_capped.len(),
         kept_strict_edges: planned.kept_strict.len(),
         averaged_poles: planned.averaged_poles.len(),
-        unmeshed_faces: planned.unmeshed.iter().map(|face| (face.face, face.reason.clone())).collect(),
+        unmeshed_faces: planned
+            .unmeshed
+            .iter()
+            .map(|face| (face.face, face.reason.clone()))
+            .collect(),
         ..TessStats::default()
     };
     for face in &planned.lenient {
@@ -865,11 +822,8 @@ pub fn plan_kernel(
         stats.diagnostics.push(format!("face {} unmeshed: {}", face.face, face.reason));
     }
     let edge_list = copy.edge_list();
-    let edge_ordinals: std::collections::HashMap<_, _> = edge_list
-        .iter()
-        .enumerate()
-        .map(|(ordinal, edge)| (edge.clone(), ordinal))
-        .collect();
+    let edge_ordinals: std::collections::HashMap<_, _> =
+        edge_list.iter().enumerate().map(|(ordinal, edge)| (edge.clone(), ordinal)).collect();
     let mut plan_edge_ids = vec![None; plan.edges.len()];
     for (index, kernel_edge) in order.edges.iter().enumerate() {
         let Some(&ordinal) = edge_ordinals.get(kernel_edge) else { continue };
@@ -880,7 +834,9 @@ pub fn plan_kernel(
     let edge_polylines = plan
         .edges
         .iter()
-        .map(|polyline| polyline.iter().map(|point| [point.x as f32, point.y as f32, point.z as f32]).collect())
+        .map(|polyline| {
+            polyline.iter().map(|point| [point.x as f32, point.y as f32, point.z as f32]).collect()
+        })
         .collect();
     let edge_classes = kernel_edge_classes(kernel, &mut copy, &order, plan.edges.len(), &[], &[]);
     Ok(TessPlanData { plan, plan_edge_ids, edge_polylines, edge_classes, stats })
@@ -910,17 +866,12 @@ fn tessellate_kernel_with(
     // shorter display list against it; zipping shifted every id after the first
     // skipped edge, so saved ids named the wrong BRep edge.
     let edge_list = brep.edge_list();
-    let edge_ordinals: std::collections::HashMap<_, _> = edge_list
-        .iter()
-        .enumerate()
-        .map(|(ordinal, edge)| (edge.clone(), ordinal))
-        .collect();
+    let edge_ordinals: std::collections::HashMap<_, _> =
+        edge_list.iter().enumerate().map(|(ordinal, edge)| (edge.clone(), ordinal)).collect();
     let mut plan_edge_ids = vec![None; display.plan.edges.len()];
     for display_edge in &mut display.mesh.brep_edges {
-        let Some(record_index) = display_edge
-            .id
-            .strip_prefix("edge:")
-            .and_then(|index| index.parse::<usize>().ok())
+        let Some(record_index) =
+            display_edge.id.strip_prefix("edge:").and_then(|index| index.parse::<usize>().ok())
         else {
             continue;
         };
@@ -942,7 +893,10 @@ fn tessellate_kernel_with(
 /// comes from the original [`TessDisplay::plan_edge_ids`] so edge selections
 /// keep their kernel ids after a plan-cache hit.
 #[must_use]
-pub fn evaluate_plan(plan: &std::sync::Arc<solidcore_tess::TessPlan>, edge_ids: &[Option<String>]) -> TessDisplay {
+pub fn evaluate_plan(
+    plan: &std::sync::Arc<solidcore_tess::TessPlan>,
+    edge_ids: &[Option<String>],
+) -> TessDisplay {
     evaluate_plan_with_classes(plan, edge_ids, &[])
 }
 
@@ -959,12 +913,7 @@ pub fn evaluate_plan_with_classes(
     let edge_polylines: Vec<Vec<[f32; 3]>> = tess
         .edges
         .iter()
-        .map(|polyline| {
-            polyline
-                .iter()
-                .map(|p| [p.x as f32, p.y as f32, p.z as f32])
-                .collect()
-        })
+        .map(|polyline| polyline.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect())
         .collect();
     let classes: Vec<PlanEdgeClass> = (0..plan.edges.len())
         .map(|index| edge_classes.get(index).copied().unwrap_or_default())
@@ -1052,10 +1001,7 @@ mod tests {
                     da.total_cmp(&db)
                 })
                 .expect("nearest");
-            let ordinal = edges
-                .iter()
-                .position(|edge| *edge == *nearest)
-                .expect("ordinal");
+            let ordinal = edges.iter().position(|edge| *edge == *nearest).expect("ordinal");
             assert_eq!(display_edge.id, format!("edge:{ordinal}"));
         }
     }
@@ -1072,10 +1018,11 @@ mod tests {
         let mut kernel = nodecraft_kernel_profile::kernel();
         let mut cone = api::create_cone(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 0.0, 40.0)
             .expect("cone");
-        let mut cylinder = api::create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 40.0)
-            .expect("cylinder");
-        let mut sphere = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
-            .expect("sphere");
+        let mut cylinder =
+            api::create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -20.0), 20.0, 40.0)
+                .expect("cylinder");
+        let mut sphere =
+            api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0).expect("sphere");
         let mut boxed =
             api::create_box(&mut kernel, Point3::new(-5.0, -5.0, -5.0), 10.0, 10.0, 10.0)
                 .expect("box");
@@ -1101,11 +1048,7 @@ mod tests {
             if name == "box" {
                 assert!(seams.is_empty(), "a box has no seam of a smooth surface: {seams:?}");
             } else {
-                assert_eq!(
-                    seams.len(),
-                    1,
-                    "{name}: exactly one wall seam, got {seams:?}",
-                );
+                assert_eq!(seams.len(), 1, "{name}: exactly one wall seam, got {seams:?}",);
             }
             for (index, class) in display.edge_classes.iter().enumerate() {
                 if class.is_seam() {

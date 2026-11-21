@@ -182,10 +182,8 @@ pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
     // A merged mesh can keep the exact normals only when every contributing
     // body supplied them. Empty meshes (sketch only, no geometry) do not
     // change the shading source.
-    let exact_normals = !meshes.is_empty()
-        && meshes
-            .iter()
-            .all(|mesh| mesh.exact_normals || mesh.faces.is_empty());
+    let exact_normals =
+        !meshes.is_empty() && meshes.iter().all(|mesh| mesh.exact_normals || mesh.faces.is_empty());
     let mut merged = Mesh::default();
     merged.exact_normals = exact_normals;
     for (index, mesh) in meshes.drain(..).enumerate() {
@@ -199,30 +197,24 @@ pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
                 .into_iter()
                 .map(|face| [face[0] + offset, face[1] + offset, face[2] + offset]),
         );
-        merged.face_groups.extend(
-            mesh.face_groups
-                .into_iter()
-                .map(|group| format!("{prefix}{group}")),
-        );
+        merged
+            .face_groups
+            .extend(mesh.face_groups.into_iter().map(|group| format!("{prefix}{group}")));
         if has_colors {
             if mesh.face_colors.is_empty() {
-                merged
-                    .face_colors
-                    .extend(std::iter::repeat_n([0.0; 3], face_count));
+                merged.face_colors.extend(std::iter::repeat_n([0.0; 3], face_count));
             } else {
                 merged.face_colors.extend(mesh.face_colors);
             }
         }
-        merged
-            .brep_edges
-            .extend(mesh.brep_edges.into_iter().map(|mut edge| {
-                edge.id = format!("{prefix}{}", edge.id);
-                for segment in &mut edge.segments {
-                    segment[0] += offset;
-                    segment[1] += offset;
-                }
-                edge
-            }));
+        merged.brep_edges.extend(mesh.brep_edges.into_iter().map(|mut edge| {
+            edge.id = format!("{prefix}{}", edge.id);
+            for segment in &mut edge.segments {
+                segment[0] += offset;
+                segment[1] += offset;
+            }
+            edge
+        }));
         merged.lightweight = true;
     }
     merged
@@ -232,21 +224,14 @@ pub fn merge_meshes(mut meshes: Vec<Mesh>) -> Mesh {
 /// decode that produced no bodies.
 fn read_model(path: &str) -> Result<StepModel, String> {
     let model = read_step_model(path).map_err(|error| {
-        if error.starts_with(path) {
-            error
-        } else {
-            format!("{path}: {error}")
-        }
+        if error.starts_with(path) { error } else { format!("{path}: {error}") }
     })?;
     if model.bodies.is_empty() {
         let refused = model
             .failures
             .first()
             .map(|failure| {
-                format!(
-                    " ({} region {}: {})",
-                    failure.id, failure.region, failure.message
-                )
+                format!(" ({} region {}: {})", failure.id, failure.region, failure.message)
             })
             .or_else(|| model.warnings.first().cloned())
             .unwrap_or_default();
@@ -271,9 +256,7 @@ pub fn import_step(path: &str) -> Result<StepImport, String> {
 /// or decode the file again.
 fn mesh_step_model(path: &str, model: &StepModel) -> Result<StepImport, String> {
     let requested = crate::display_tolerance();
-    let large = std::fs::metadata(path)
-        .map(|metadata| metadata.len() >= 400_000)
-        .unwrap_or(false);
+    let large = std::fs::metadata(path).map(|metadata| metadata.len() >= 400_000).unwrap_or(false);
     let mut budget = if requested <= 0.18 {
         110_000
     } else if requested <= 0.45 {
@@ -352,9 +335,7 @@ fn import_bodies(path: &str, model: &StepModel) -> Result<StepImport, String> {
     let mut warnings = failure_warnings(&model.failures);
     warnings.extend(model.warnings.iter().cloned());
     warnings.extend(model.bodies.iter().flat_map(|body| {
-        body.notes
-            .iter()
-            .map(move |note| format!("body {:?}: {note}", body.name))
+        body.notes.iter().map(move |note| format!("body {:?}: {note}", body.name))
     }));
     if healed_bodies > 0 {
         warnings.push(format!(
@@ -362,11 +343,7 @@ fn import_bodies(path: &str, model: &StepModel) -> Result<StepImport, String> {
         ));
     }
     let mut diagnostics = StepDiagnostics {
-        kind: if model.instances > 1 {
-            "assembly".into()
-        } else {
-            "solidcore-brep".into()
-        },
+        kind: if model.instances > 1 { "assembly".into() } else { "solidcore-brep".into() },
         bodies: model.bodies.len(),
         breps: model.bodies.len(),
         brep_faces,
@@ -408,9 +385,7 @@ fn failure_warnings(failures: &[CadFailure]) -> Vec<String> {
 
 fn mesh_has_invalid_coordinates(mesh: &Mesh) -> bool {
     mesh.vertices.iter().any(|vertex| {
-        vertex
-            .iter()
-            .any(|coordinate| !coordinate.is_finite() || coordinate.abs() > 1_000_000.0)
+        vertex.iter().any(|coordinate| !coordinate.is_finite() || coordinate.abs() > 1_000_000.0)
     })
 }
 
@@ -452,11 +427,8 @@ fn body_display_mesh(body: &CadBody) -> Result<(Mesh, bool), String> {
     } else {
         FAR_FACTOR
     };
-    let effective = if extent > 0.0 {
-        requested.min(extent * factor).max(1.0e-9)
-    } else {
-        requested
-    };
+    let effective =
+        if extent > 0.0 { requested.min(extent * factor).max(1.0e-9) } else { requested };
     crate::set_display_tolerance(Some(effective));
     // Keep the upstream tessellation at a viewport-meaningful sag.
     const MIN_TESSELLATION_SAG: f64 = 0.05;
@@ -586,17 +558,10 @@ fn transform_mesh(mesh: &mut Mesh, rows: &[[f64; 4]; 4]) {
             + transformed[2] * transformed[2])
             .sqrt();
         if length > 1e-12 {
-            transformed = [
-                transformed[0] / length,
-                transformed[1] / length,
-                transformed[2] / length,
-            ];
+            transformed =
+                [transformed[0] / length, transformed[1] / length, transformed[2] / length];
         }
-        *normal = [
-            transformed[0] as f32,
-            transformed[1] as f32,
-            transformed[2] as f32,
-        ];
+        *normal = [transformed[0] as f32, transformed[1] as f32, transformed[2] as f32];
     }
     if mirrored {
         for face in &mut mesh.faces {
@@ -632,9 +597,7 @@ fn breps_from_model(path: &str, model: &StepModel) -> Result<StepBrepImport, Str
     let mut warnings = failure_warnings(&model.failures);
     warnings.extend(model.warnings.iter().cloned());
     warnings.extend(model.bodies.iter().flat_map(|body| {
-        body.notes
-            .iter()
-            .map(move |note| format!("body {:?}: {note}", body.name))
+        body.notes.iter().map(move |note| format!("body {:?}: {note}", body.name))
     }));
     let mut bodies = Vec::with_capacity(model.bodies.len());
     for body in &model.bodies {
@@ -659,33 +622,22 @@ fn breps_from_model(path: &str, model: &StepModel) -> Result<StepBrepImport, Str
             Ok(brep)
         })();
         match converted {
-            Ok(brep) => bodies.push(StepBrepBody {
-                name: body.name.clone(),
-                color: body.color,
-                brep,
-            }),
+            Ok(brep) => {
+                bodies.push(StepBrepBody { name: body.name.clone(), color: body.color, brep })
+            }
             Err(error) => warnings.push(format!("{path}: body {:?}: {error}", body.name)),
         }
     }
     if bodies.is_empty() {
-        let refused = warnings
-            .first()
-            .map(|warning| format!(" ({warning})"))
-            .unwrap_or_default();
-        return Err(format!(
-            "{path}: cadmpeg found no convertible B-rep bodies{refused}"
-        ));
+        let refused = warnings.first().map(|warning| format!(" ({warning})")).unwrap_or_default();
+        return Err(format!("{path}: cadmpeg found no convertible B-rep bodies{refused}"));
     }
     Ok(StepBrepImport { bodies, warnings })
 }
 
 /// A map from CADIR body id to the read record, for tests and diagnostics.
 pub fn records_by_id(path: &str) -> Result<BTreeMap<String, CadBody>, String> {
-    Ok(read_step_model(path)?
-        .bodies
-        .into_iter()
-        .map(|body| (body.id.clone(), body))
-        .collect())
+    Ok(read_step_model(path)?.bodies.into_iter().map(|body| (body.id.clone(), body)).collect())
 }
 
 #[cfg(test)]
@@ -698,16 +650,12 @@ mod tests {
     fn temp_path(tag: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let serial = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "nodecraft-mesh-cad-{}-{serial}-{tag}.step",
-            std::process::id()
-        ))
+        std::env::temp_dir()
+            .join(format!("nodecraft-mesh-cad-{}-{serial}-{tag}.step", std::process::id()))
     }
 
     fn repository(relative: &str) -> Option<PathBuf> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../..")
-            .join(relative);
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..").join(relative);
         path.is_file().then_some(path)
     }
 
@@ -726,11 +674,7 @@ mod tests {
     fn mesh_volume_area(mesh: &Mesh) -> (f64, f64) {
         let point = |index: u32| -> [f64; 3] {
             let vertex = mesh.vertices[index as usize];
-            [
-                f64::from(vertex[0]),
-                f64::from(vertex[1]),
-                f64::from(vertex[2]),
-            ]
+            [f64::from(vertex[0]), f64::from(vertex[1]), f64::from(vertex[2])]
         };
         let mut volume = 0.0;
         let mut area = 0.0;
@@ -814,15 +758,8 @@ mod tests {
         assert_eq!(import.display.diagnostics.brep_faces, 6);
         assert!(!import.display.mesh.faces.is_empty());
         assert_eq!(import.breps.bodies.len(), 1);
-        assert_eq!(
-            import.breps.bodies[0].name,
-            import.display.diagnostics.body_names[0]
-        );
-        assert!(
-            import.breps.warnings.is_empty(),
-            "{:?}",
-            import.breps.warnings
-        );
+        assert_eq!(import.breps.bodies[0].name, import.display.diagnostics.body_names[0]);
+        assert!(import.breps.warnings.is_empty(), "{:?}", import.breps.warnings);
     }
 
     #[test]
@@ -851,25 +788,14 @@ mod tests {
             return;
         };
         let import = import_step(path.to_str().unwrap()).expect("cubcylso import");
-        assert_eq!(
-            import.diagnostics.kind, "assembly",
-            "{:?}",
-            import.diagnostics.warnings
-        );
+        assert_eq!(import.diagnostics.kind, "assembly", "{:?}", import.diagnostics.warnings);
         assert_eq!(import.diagnostics.bodies, 2, "{:?}", import.diagnostics);
         // CADIR stores the occurrence transform in the STEP relationship's direction.
         // cubcylso's `ITEM_DEFINED_TRANSFORMATION(#315, #211)` is parent-to-child, so the
         // DETAIL is read at x = -200 where SMLib placed it at +200. This is cadmpeg's
         // occurrence-direction convention, recorded in the import comparison report.
         let (min, max) = mesh_bounds(&import.mesh);
-        assert_bbox(
-            min,
-            max,
-            [-225.0, -40.0, -50.0],
-            [50.0, 40.0, 50.0],
-            1e-6,
-            "cubcylso",
-        );
+        assert_bbox(min, max, [-225.0, -40.0, -50.0], [50.0, 40.0, 50.0], 1e-6, "cubcylso");
     }
 
     #[test]

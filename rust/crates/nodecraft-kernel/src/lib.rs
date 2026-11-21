@@ -16,10 +16,7 @@ pub trait Kernel {
 pub struct ProceduralKernel;
 
 fn number(values: &serde_json::Value, key: &str, default: f64) -> f64 {
-    values
-        .get(key)
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(default)
+    values.get(key).and_then(serde_json::Value::as_f64).unwrap_or(default)
 }
 
 fn box_mesh(length: f64, width: f64, height: f64) -> Mesh {
@@ -132,11 +129,8 @@ impl Kernel for ProceduralKernel {
     }
 
     fn translate(&mut self, mesh: &Mesh, values: &serde_json::Value) -> Result<Mesh, String> {
-        let (x, y, z) = (
-            number(values, "x", 0.0),
-            number(values, "y", 0.0),
-            number(values, "z", 0.0),
-        );
+        let (x, y, z) =
+            (number(values, "x", 0.0), number(values, "y", 0.0), number(values, "z", 0.0));
         let (rx, ry, rz) = (
             number(values, "rx", 0.0).to_radians(),
             number(values, "ry", 0.0).to_radians(),
@@ -207,11 +201,17 @@ mod tests {
     }
     #[test]
     fn transform_rotates_then_translates() {
-        let mesh = ProceduralKernel.primitive("box", &serde_json::json!({"length": 10, "width": 4, "height": 20})).unwrap();
-        let rotated = ProceduralKernel.translate(&mesh, &serde_json::json!({"x": 100, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 90})).unwrap();
+        let mesh = ProceduralKernel
+            .primitive("box", &serde_json::json!({"length": 10, "width": 4, "height": 20}))
+            .unwrap();
+        let rotated = ProceduralKernel
+            .translate(
+                &mesh,
+                &serde_json::json!({"x": 100, "y": 0, "z": 0, "rx": 0, "ry": 0, "rz": 90}),
+            )
+            .unwrap();
         let (min, max) = bounds(&rotated).unwrap();
         assert!((min[0] - 98.0).abs() < 1e-4 && (max[0] - 102.0).abs() < 1e-4, "{min:?} {max:?}");
         assert!((min[1] + 5.0).abs() < 1e-4 && (max[1] - 5.0).abs() < 1e-4, "{min:?} {max:?}");
     }
-
 }

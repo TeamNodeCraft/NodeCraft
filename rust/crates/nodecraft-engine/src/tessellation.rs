@@ -5,13 +5,13 @@
 //! only turns an immutable B-rep into a local display mesh plus instance
 //! placement.
 
-use crate::display::{MeshAsset, MeshInstance, MeshRequest, MeshRevision, MeshKey};
+use crate::display::{MeshAsset, MeshInstance, MeshKey, MeshRequest, MeshRevision};
 use nodecraft_solidcore::solidcore::kernel::Kernel;
+use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::collections::VecDeque;
 
 pub struct MeshResult {
     pub key: MeshKey,
@@ -117,12 +117,11 @@ impl TessellationPool {
                                     tolerance,
                                 ),
                             };
-                            tessellated
-                                .map(|display| {
-                                    let stats = display.stats.clone();
-                                    let edge_ids = display.plan_edge_ids.clone();
-                                    (display.plan, display.mesh, stats, edge_ids)
-                                })
+                            tessellated.map(|display| {
+                                let stats = display.stats.clone();
+                                let edge_ids = display.plan_edge_ids.clone();
+                                (display.plan, display.mesh, stats, edge_ids)
+                            })
                         }));
                         let asset = match outcome {
                             Ok(Ok((plan, mesh, stats, edge_ids))) => {

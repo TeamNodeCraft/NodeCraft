@@ -33,7 +33,7 @@
 
 #![forbid(unsafe_code)]
 
-
+use nodecraft_protocol::Mesh;
 use solidcore::boolean::api_brep as boolean_api;
 use solidcore::error::SolidError;
 use solidcore::geom::a_object::BooleanOperation;
@@ -45,7 +45,6 @@ use solidcore::primitive::api_primitives as api;
 #[cfg(test)]
 use solidcore::topology::topology::NotifyRecords;
 use solidcore::topology::{Brep, FaceId};
-use nodecraft_protocol::Mesh;
 
 /// Prefix of every error caused by a solidcore dependency that is not ported yet.
 ///
@@ -118,14 +117,8 @@ pub fn is_unported_error(message: &str) -> bool {
 /// constructor dependency).
 pub fn box_brep_at(origin: [f64; 3], length: f64, width: f64, height: f64) -> Result<Brep, String> {
     with_wrapper_kernel(|kernel| {
-        api::create_box(
-            kernel,
-            Point3::new(origin[0], origin[1], origin[2]),
-            length,
-            width,
-            height,
-        )
-        .map_err(|error| map_error("solidcore create_box", &error))
+        api::create_box(kernel, Point3::new(origin[0], origin[1], origin[2]), length, width, height)
+            .map_err(|error| map_error("solidcore create_box", &error))
     })
 }
 
@@ -135,9 +128,7 @@ thread_local! {
     static WRAPPER_KERNEL: std::cell::RefCell<Option<Kernel>> = const { std::cell::RefCell::new(None) };
 }
 
-fn with_wrapper_kernel<T>(
-    f: impl FnOnce(&mut Kernel) -> Result<T, String>,
-) -> Result<T, String> {
+fn with_wrapper_kernel<T>(f: impl FnOnce(&mut Kernel) -> Result<T, String>) -> Result<T, String> {
     WRAPPER_KERNEL.with(|cell| {
         let mut slot = cell.borrow_mut();
         let kernel = slot.get_or_insert_with(nodecraft_kernel_profile::kernel);
@@ -154,7 +145,6 @@ fn with_wrapper_kernel<T>(
 pub fn box_brep(length: f64, width: f64, height: f64) -> Result<Brep, String> {
     box_brep_at([0.0, 0.0, 0.0], length, width, height)
 }
-
 
 /// The face ids of `brep` in solidcore's owning-list order.
 ///
@@ -269,9 +259,8 @@ pub fn display_mesh(brep: &Brep) -> Result<Mesh, String> {
         return Err("display tessellation produced no triangles".into());
     }
     with_wrapper_kernel(|kernel| {
-        let mut copy = brep
-            .clone_standing_for_self()
-            .map_err(|error| format!("display copy: {error}"))?;
+        let mut copy =
+            brep.clone_standing_for_self().map_err(|error| format!("display copy: {error}"))?;
         let mut mesh = nodecraft_layers::tessellate_kernel(kernel, &mut copy, 0.05)
             .map_err(|error| format!("solidcore-tess display mesh: {error}"))?
             .mesh;
@@ -295,7 +284,6 @@ pub fn boolean_mesh(op: BooleanOp, a: Brep, b: Brep) -> Result<Mesh, String> {
     let brep = with_wrapper_kernel(|kernel| boolean_with_kernel(kernel, op, a, b))?;
     display_mesh(&brep)
 }
-
 
 #[cfg(test)]
 mod test_identity {
@@ -354,8 +342,8 @@ mod test_identity {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::test_identity::original_key_of;
+    use super::*;
 
     const BOUNDS_TOL: f32 = 1.0e-4;
 
@@ -418,10 +406,7 @@ mod tests {
     fn boolean_op_maps_to_the_solidcore_operation() {
         assert_eq!(BooleanOp::Union.to_solidcore(), BooleanOperation::Union);
         assert_eq!(BooleanOp::Difference.to_solidcore(), BooleanOperation::Difference);
-        assert_eq!(
-            BooleanOp::Intersection.to_solidcore(),
-            BooleanOperation::Intersection
-        );
+        assert_eq!(BooleanOp::Intersection.to_solidcore(), BooleanOperation::Intersection);
         assert_eq!(BooleanOp::Union.to_string(), "union");
         assert_eq!(BooleanOp::Difference.to_string(), "difference");
         assert_eq!(BooleanOp::Intersection.to_string(), "intersection");
@@ -465,9 +450,7 @@ mod tests {
         assert_eq!(volume(&union).expect("union volume"), 2000.0);
         let mesh = display_mesh(&union).expect("union display mesh");
         assert_bounds(&mesh, [0.0, 0.0, 0.0], [30.0, 10.0, 10.0]);
-        assert!(
-            solidcore::query::api_queries::brep_is_manifold_solid(&union).expect("manifold")
-        );
+        assert!(solidcore::query::api_queries::brep_is_manifold_solid(&union).expect("manifold"));
 
         let (a, b) = disjoint_boxes();
         let difference = boolean_breps(BooleanOp::Difference, a, b).expect("disjoint difference");
@@ -487,8 +470,10 @@ mod tests {
             boolean_breps(BooleanOp::Intersection, a, b).expect("disjoint intersection call");
         assert_eq!(volume(&intersection).expect("intersection volume"), 0.0);
         assert_eq!(intersection.shells().len(), 0);
-        assert!(!solidcore::query::api_queries::brep_is_manifold_solid(&intersection)
-            .expect("manifold query"));
+        assert!(
+            !solidcore::query::api_queries::brep_is_manifold_solid(&intersection)
+                .expect("manifold query")
+        );
         assert!(display_mesh(&intersection).is_err());
     }
 
@@ -507,7 +492,8 @@ mod tests {
         assert_eq!(volume(&union).expect("union volume"), 1000.0);
 
         let (a, b) = nested();
-        let difference = boolean_breps(BooleanOp::Difference, a, b).expect("nested difference call");
+        let difference =
+            boolean_breps(BooleanOp::Difference, a, b).expect("nested difference call");
         assert_eq!(volume(&difference).expect("difference volume"), 936.0);
 
         let (a, b) = nested();
@@ -548,7 +534,10 @@ mod tests {
             let a = box_brep_at([0.0, 0.0, 0.0], 10.0, 10.0, 10.0).expect("box A");
             let b = box_brep_at([10.0, 0.0, 0.0], 10.0, 10.0, 10.0).expect("box B");
             let result = boolean_breps(op, a, b).expect("touching boolean");
-            assert!((volume(&result).expect("touching volume") - expected_volume).abs() < 1e-6, "{op}");
+            assert!(
+                (volume(&result).expect("touching volume") - expected_volume).abs() < 1e-6,
+                "{op}"
+            );
         }
     }
 
@@ -563,14 +552,7 @@ mod tests {
         let mut other = Some(box_brep(10.0, 10.0, 10.0).expect("box B"));
         let mut driver = DependencyMerge::default();
         driver
-            .construct(
-                &mut kernel,
-                &mut primary,
-                &mut other,
-                0.0,
-                0.0,
-                None,
-            )
+            .construct(&mut kernel, &mut primary, &mut other, 0.0, 0.0, None)
             .expect("SmMerge construction is ported");
         let mut manifold = true;
         let mut lamina_edges = 0u64;
@@ -648,4 +630,3 @@ mod tests {
         assert!(error.contains("create_box"), "{error}");
     }
 }
-

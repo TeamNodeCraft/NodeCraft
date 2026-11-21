@@ -88,13 +88,19 @@ pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
                 .to_owned(),
         ),
 
-        OpsError::TooLarge { size, kind, at, why } => {
+        OpsError::TooLarge { size, kind, at, face, why } => {
             let mut message = format!(
                 "The blend is too large for this geometry: the largest {} that fits is {}{}.",
                 kind.word(),
                 length(size),
                 near(at)
             );
+            if let Some(face) = face {
+                message.push_str(&format!(
+                    " The face that limits it is at {}.",
+                    format_point(face)
+                ));
+            }
             if let Some(why) = why {
                 message.push_str(&format!(" It fails because {}.", why.words()));
             }
@@ -115,10 +121,17 @@ pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
             "This operation is not supported yet: {what}. Try a different edge, face or size."
         )),
 
-        OpsError::CornerUnsupported => SessionError::Invalid(
-            "Blend corner not supported yet for edges that meet this way. Blend fewer edges at once, or use a different corner treatment."
-                .to_owned(),
-        ),
+        OpsError::CornerUnsupported { why, at } => {
+            let mut message = format!(
+                "Blend corner not supported yet for edges that meet this way{}.",
+                at_point(at)
+            );
+            if let Some(why) = why {
+                message.push_str(&format!(" The kernel says: {why}."));
+            }
+            message.push_str(" Blend fewer edges at once, or use a different corner treatment.");
+            SessionError::Invalid(message)
+        }
 
         OpsError::CornerRefused { corner } => SessionError::Invalid(format!(
             "The kernel does not set back corner {corner}: it sets a corner back only where every edge meeting it is blended, all convex or all concave. Blend every edge meeting the corner, or blend fewer edges at once."
@@ -568,7 +581,7 @@ fn profile_refusal(refusal: ProfileRefusal) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{map_error, OpKind};
+    use super::{OpKind, map_error};
     use crate::SessionError;
     use solidcore::error::ErrorKind;
     use solidcore::error::offset::LoopCrossing;
@@ -576,7 +589,9 @@ mod tests {
     use solidcore::primitive::api_primitives::create_plane;
     use solidcore::prism::profile::ProfileRefusal;
     use solidcore_ops::sweep::{CornerRefusal, PathCheck};
-    use solidcore_ops::{Body, Error as OpsError, FitKind, OffsetRefusal, RoomReason, Unblendable, Unsoundness};
+    use solidcore_ops::{
+        Body, Error as OpsError, FitKind, OffsetRefusal, RoomReason, Unblendable, Unsoundness,
+    };
 
     /// No message shows a value the way `Debug` would: none has `Some(`, a bare `None`, or the
     /// opening of a struct dump (`{ `). A user reads sentences, so each ends like one.
@@ -600,9 +615,11 @@ mod tests {
     #[test]
     fn every_constructible_ops_error_maps_to_a_readable_sentence() {
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let sheet = create_plane(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("a sheet");
+        let sheet =
+            create_plane(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("a sheet");
         let sheet_body = Body::from_brep(&mut kernel, sheet).expect("a sheet body");
-        let (checked, _) = solidcore_ops::session::with_kernel(&mut kernel, || sheet_body.check_solid());
+        let (checked, _) =
+            solidcore_ops::session::with_kernel(&mut kernel, || sheet_body.check_solid());
         let not_solid = checked.expect_err("a sheet is not a closed solid");
         assert!(matches!(not_solid, OpsError::NotSolidBecause { .. }));
 
@@ -619,23 +636,49 @@ mod tests {
                 size: 6.828,
                 kind: FitKind::Radius,
                 at: Some([1.0, 2.0, 3.0]),
+                face: Some([4.0, 5.0, 6.0]),
                 why: Some(RoomReason::BallDoesNotFit),
             },
-            OpsError::TooLarge { size: 2.0, kind: FitKind::Distance, at: None, why: None },
+            OpsError::TooLarge {
+                size: 2.0,
+                kind: FitKind::Distance,
+                at: None,
+                face: None,
+                why: None,
+            },
             OpsError::TooLarge {
                 size: 0.5,
                 kind: FitKind::Scale,
                 at: Some([0.0, 0.0, 0.0]),
+                face: None,
                 why: Some(RoomReason::BandsOverlap),
             },
-            OpsError::TooLarge { size: 3.0, kind: FitKind::Chord, at: None, why: Some(RoomReason::CutsThePart) },
+            OpsError::TooLarge {
+                size: 3.0,
+                kind: FitKind::Chord,
+                at: None,
+                face: None,
+                why: Some(RoomReason::CutsThePart),
+            },
             OpsError::WallFolds { largest: Some(1.25) },
             OpsError::WallFolds { largest: None },
             OpsError::Unsupported("a variable radius that is zero inside its edge"),
-            OpsError::CornerUnsupported,
+            OpsError::CornerUnsupported {
+                why: Some("the corner is a saddle".to_owned()),
+                at: Some([1.0, 2.0, 3.0]),
+            },
+            OpsError::CornerUnsupported { why: None, at: None },
             OpsError::CornerRefused { corner: 3 },
-            OpsError::TurnRefused { room: true, why: "the wall turns away".to_owned(), at: Some([1.0, 2.0, 3.0]) },
-            OpsError::TurnRefused { room: false, why: "the corner is a saddle".to_owned(), at: None },
+            OpsError::TurnRefused {
+                room: true,
+                why: "the wall turns away".to_owned(),
+                at: Some([1.0, 2.0, 3.0]),
+            },
+            OpsError::TurnRefused {
+                room: false,
+                why: "the corner is a saddle".to_owned(),
+                at: None,
+            },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], fit: Some(2.5) },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0]], fit: None },
             OpsError::RoundsCross { at: Vec::new(), fit: None },
@@ -653,7 +696,10 @@ mod tests {
             OpsError::UnsureRegion { region: 7 },
             OpsError::DraftCornerRefused { why: CornerRefusal::Apart, at: Some([0.0, 0.0, 0.0]) },
             OpsError::DraftCornerRefused { why: CornerRefusal::NotExact, at: None },
-            OpsError::DraftCornerRefused { why: CornerRefusal::WallCloses, at: Some([2.0, 1.0, 0.0]) },
+            OpsError::DraftCornerRefused {
+                why: CornerRefusal::WallCloses,
+                at: Some([2.0, 1.0, 0.0]),
+            },
             OpsError::PathUndecided { piece: 2, check: PathCheck::Gap },
             OpsError::PathUndecided { piece: 3, check: PathCheck::Length },
             OpsError::PathUndecided { piece: 4, check: PathCheck::Forward },
@@ -685,12 +731,25 @@ mod tests {
             OpsError::EdgeNotBlendable { edge: 2, reason: Unblendable::Tangent },
             OpsError::EdgeNotBlendable { edge: 3, reason: Unblendable::Ambiguous },
             OpsError::ContinuesInto { edge: 2, continues_into: 5 },
-            OpsError::RoundTooSmall { edge: 1, turn: std::f64::consts::FRAC_PI_2, tolerance: 1.0e-5, smallest: 0.2 },
-            OpsError::SetbackTooShort { vertex: Some(3), least: 2.5, at: Some([1.0, 0.0, 0.0]), builds: true },
+            OpsError::RoundTooSmall {
+                edge: 1,
+                turn: std::f64::consts::FRAC_PI_2,
+                tolerance: 1.0e-5,
+                smallest: 0.2,
+            },
+            OpsError::SetbackTooShort {
+                vertex: Some(3),
+                least: 2.5,
+                at: Some([1.0, 0.0, 0.0]),
+                builds: true,
+            },
             OpsError::SetbackTooShort { vertex: None, least: 1.0, at: None, builds: false },
             OpsError::SetbackTooLong { vertex: 3, largest: 4.0 },
             OpsError::ChamferAngleTooLarge { edge: 1, angle: 1.2, largest: 0.9 },
-            OpsError::OffsetRefused { face: Some(2), why: OffsetRefusal::NotCertified { distance: 1.5 } },
+            OpsError::OffsetRefused {
+                face: Some(2),
+                why: OffsetRefusal::NotCertified { distance: 1.5 },
+            },
             OpsError::OffsetRefused {
                 face: None,
                 why: OffsetRefusal::Collapses { distance: 2.0, radius: 1.0 },
@@ -703,7 +762,10 @@ mod tests {
                 face: None,
                 why: OffsetRefusal::DistanceUnresolved { distance: 1.0e-9, resolution: 1.0e-5 },
             },
-            OpsError::OffsetRefused { face: Some(4), why: OffsetRefusal::ToleranceUnresolved { tolerance: 1.0e-9 } },
+            OpsError::OffsetRefused {
+                face: Some(4),
+                why: OffsetRefusal::ToleranceUnresolved { tolerance: 1.0e-9 },
+            },
             OpsError::OffsetRefused { face: None, why: OffsetRefusal::SeamOpened },
             OpsError::OffsetRefused { face: Some(1), why: OffsetRefusal::ExactCurveUncut },
             OpsError::OffsetRefused { face: None, why: OffsetRefusal::FacesApart },
@@ -726,7 +788,11 @@ mod tests {
                 status: 1001,
                 phrase: "the blend's section meets no face".to_owned(),
             },
-            OpsError::BlendFailed { class: ErrorKind::StageFailed, status: 1001, phrase: String::new() },
+            OpsError::BlendFailed {
+                class: ErrorKind::StageFailed,
+                status: 1001,
+                phrase: String::new(),
+            },
             OpsError::BlendNotCertified { halvings: 3, stations: 9 },
             OpsError::SeamMismatch {
                 edge: 2,
@@ -737,6 +803,36 @@ mod tests {
         for error in errors {
             assert_readable(OpKind::Body, error);
         }
+
+        // The kernel now names the face that limits a too-large blend, and the vertex and
+        // reason of a corner it does not build: both are worded, not dropped.
+        let limited = map_error(
+            OpKind::Body,
+            OpsError::TooLarge {
+                size: 6.828,
+                kind: FitKind::Radius,
+                at: Some([1.0, 2.0, 3.0]),
+                face: Some([4.0, 5.0, 6.0]),
+                why: Some(RoomReason::BallDoesNotFit),
+            },
+        )
+        .to_string();
+        assert!(
+            limited.contains("The face that limits it is at (4.00, 5.00, 6.00) mm."),
+            "the limiting face is not written out: {limited}"
+        );
+        let corner = map_error(
+            OpKind::Body,
+            OpsError::CornerUnsupported {
+                why: Some("the corner is a saddle".to_owned()),
+                at: Some([1.0, 2.0, 3.0]),
+            },
+        )
+        .to_string();
+        assert!(
+            corner.contains("The kernel says: the corner is a saddle."),
+            "the corner's reason is not written out: {corner}"
+        );
 
         assert_eq!(map_error(OpKind::Body, OpsError::Cancelled), SessionError::Cancelled);
         assert_readable(OpKind::Body, not_solid);
@@ -756,7 +852,10 @@ mod tests {
             OpsError::WallFolds { largest: None },
             OpsError::Status(1001),
             OpsError::Status(1007),
-            OpsError::OffsetRefused { face: Some(23), why: OffsetRefusal::NotCertified { distance: 1.5 } },
+            OpsError::OffsetRefused {
+                face: Some(23),
+                why: OffsetRefusal::NotCertified { distance: 1.5 },
+            },
             OpsError::OffsetRefused { face: None, why: OffsetRefusal::SeamOpened },
             OpsError::NotSolid,
             OpsError::Argument,
@@ -770,12 +869,16 @@ mod tests {
                 "the shell message names neither the shell nor its wall: {message}"
             );
             for forbidden in ["blend", "edges", "0.00", "kernel status", "offset is refused"] {
-                assert!(!message.contains(forbidden), "the shell message shows {forbidden}: {message}");
+                assert!(
+                    !message.contains(forbidden),
+                    "the shell message shows {forbidden}: {message}"
+                );
             }
             assert!(message.ends_with('.'), "not a full sentence: {message}");
         }
 
-        let measured = map_error(OpKind::Shell, OpsError::WallFolds { largest: Some(1.25) }).to_string();
+        let measured =
+            map_error(OpKind::Shell, OpsError::WallFolds { largest: Some(1.25) }).to_string();
         assert!(measured.contains("1.25 mm"), "the wall bound is not written out: {measured}");
     }
 }

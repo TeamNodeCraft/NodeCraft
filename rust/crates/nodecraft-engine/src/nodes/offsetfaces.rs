@@ -30,10 +30,8 @@ impl BuiltinNode for OffsetFaces {
         }
         let distance = crate::contract_number("offsetfaces", node.values, "distance");
         let solids = source.realized_bodies()?;
-        let body_faces: Vec<usize> = solids
-            .iter()
-            .map(|solid| solid.brep().faces().ids().count())
-            .collect();
+        let body_faces: Vec<usize> =
+            solids.iter().map(|solid| solid.brep().faces().ids().count()).collect();
         let openings = resolve_face_references(&references, &body_faces)?;
         let mut bodies = Vec::with_capacity(solids.len());
         for (body, faces) in solids.into_iter().zip(openings) {
@@ -49,7 +47,8 @@ impl BuiltinNode for OffsetFaces {
                 });
                 continue;
             }
-            let result = ctx.execute_warned(ExactNodeTask::OffsetFaces { body, faces, distance })?;
+            let result =
+                ctx.execute_warned(ExactNodeTask::OffsetFaces { body, faces, distance })?;
             let crate::node_task::TaskResult { output, warnings } = result;
             ctx.warn(warnings);
             let offset = output
@@ -77,9 +76,7 @@ impl BuiltinNode for OffsetFaces {
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
         // Offset Faces is a shape modifier: suppressing it passes the shape
         // through instead of turning it into a generator.
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -251,28 +248,15 @@ mod tests {
     #[test]
     fn malformed_face_references_are_errors_not_silent_passes() {
         for (case, faces, expected) in [
-            (
-                "malformed body",
-                serde_json::json!([{"id": "body:x:face:1"}]),
-                "body:x:face:1",
-            ),
-            (
-                "faces is not a list",
-                serde_json::json!({"id": "face:0"}),
-                "list",
-            ),
+            ("malformed body", serde_json::json!([{"id": "body:x:face:1"}]), "body:x:face:1"),
+            ("faces is not a list", serde_json::json!({"id": "face:0"}), "list"),
         ] {
             let output = crate::evaluate_exact(
                 single_box_request(faces, false),
                 crate::EngineCache::new(),
                 None,
             );
-            let error = output
-                .response
-                .node_errors
-                .get("offset")
-                .cloned()
-                .unwrap_or_default();
+            let error = output.response.node_errors.get("offset").cloned().unwrap_or_default();
             assert!(!error.is_empty(), "{case}: no node error");
             assert!(error.contains(expected), "{case}: {error}");
         }

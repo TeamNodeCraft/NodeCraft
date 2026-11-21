@@ -6,7 +6,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,14 +19,24 @@ pub enum Command {
     EnsureVisible,
     SelectNode(String),
     EditNode(String),
-    SetValue { node: String, field: String, value: serde_json::Value },
-    BeginSelection { node: String, field: String },
+    SetValue {
+        node: String,
+        field: String,
+        value: serde_json::Value,
+    },
+    BeginSelection {
+        node: String,
+        field: String,
+    },
     ViewNode(String),
     /// Flip the node's suppression flag through the same edit + evaluate path
     /// as the node editor's toggle.
     ToggleSuppressed(String),
     Home,
-    Orbit { dx: f64, dy: f64 },
+    Orbit {
+        dx: f64,
+        dy: f64,
+    },
     Zoom(f64),
     Triangles(bool),
     Translucent(bool),
@@ -59,10 +69,7 @@ impl Request {
 
     /// Withdraw an unanswered request. Returns true if it was still pending.
     pub fn withdraw(&self) -> bool {
-        self.reply
-            .lock()
-            .map(|mut reply| reply.take().is_some())
-            .unwrap_or(false)
+        self.reply.lock().map(|mut reply| reply.take().is_some()).unwrap_or(false)
     }
 }
 
@@ -70,9 +77,7 @@ impl Request {
 /// `NODECRAFT_CONTROL_PORT` so a probe app never competes with an already
 /// running NodeCraft for the default port.
 fn control_port_from(value: Option<String>) -> u16 {
-    value
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(DEFAULT_CONTROL_PORT)
+    value.and_then(|value| value.parse().ok()).unwrap_or(DEFAULT_CONTROL_PORT)
 }
 
 fn control_port() -> u16 {
@@ -138,11 +143,7 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         }
     }
     let body = String::from_utf8_lossy(&buffer[header_end..]).to_string();
-    let Some(path) = header
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-    else {
+    let Some(path) = header.lines().next().and_then(|line| line.split_whitespace().nth(1)) else {
         let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"bad request\"}");
         return;
     };
@@ -150,14 +151,30 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         "/replace-project" => match serde_json::from_str(&body) {
             Ok(value) => Command::ReplaceProject(value),
             Err(error) => {
-                let _ = respond(&mut stream, 400, &format!("{{\"ok\":false,\"error\":{}}}", serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"invalid project\"".into())));
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    &format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        serde_json::to_string(&error.to_string())
+                            .unwrap_or_else(|_| "\"invalid project\"".into())
+                    ),
+                );
                 return;
             }
         },
         "/project" => match serde_json::from_str(&body) {
             Ok(value) => Command::Project(value),
             Err(error) => {
-                let _ = respond(&mut stream, 400, &format!("{{\"ok\":false,\"error\":{}}}", serde_json::to_string(&error.to_string()).unwrap_or_else(|_| "\"invalid project\"".into())));
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    &format!(
+                        "{{\"ok\":false,\"error\":{}}}",
+                        serde_json::to_string(&error.to_string())
+                            .unwrap_or_else(|_| "\"invalid project\"".into())
+                    ),
+                );
                 return;
             }
         },
@@ -167,7 +184,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(path) => Command::OpenStep(path),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}",
+                );
                 return;
             }
         },
@@ -177,7 +198,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(id) => Command::SelectNode(id),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}",
+                );
                 return;
             }
         },
@@ -187,7 +212,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(id) => Command::EditNode(id),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}",
+                );
                 return;
             }
         },
@@ -200,7 +229,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         }) {
             Some(command) => command,
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {node, field, value}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {node, field, value}\"}",
+                );
                 return;
             }
         },
@@ -210,7 +243,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(id) => Command::ViewNode(id),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}",
+                );
                 return;
             }
         },
@@ -220,34 +257,70 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(id) => Command::ToggleSuppressed(id),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"id\\\": ...}\"}",
+                );
                 return;
             }
         },
         "/home" => Command::Home,
-        "/orbit" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
-            Some((value.get("dx")?.as_f64()?, value.get("dy")?.as_f64()?))
-        }) {
+        "/orbit" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| Some((value.get("dx")?.as_f64()?, value.get("dy")?.as_f64()?)))
+        {
             Some((dx, dy)) => Command::Orbit { dx, dy },
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"dx\\\": ..., \\\"dy\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"dx\\\": ..., \\\"dy\\\": ...}\"}",
+                );
                 return;
             }
         },
-        "/zoom" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("factor").and_then(serde_json::Value::as_f64)) {
+        "/zoom" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("factor").and_then(serde_json::Value::as_f64))
+        {
             Some(factor) => Command::Zoom(factor),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\"factor\": 1.0}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\"factor\": 1.0}\"}",
+                );
                 return;
             }
         },
-        "/triangles" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool)) {
+        "/triangles" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool))
+        {
             Some(enabled) => Command::Triangles(enabled),
-            None => { let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}"); return; }
+            None => {
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}",
+                );
+                return;
+            }
         },
-        "/translucent" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool)) {
+        "/translucent" => match serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value.get("enabled").and_then(serde_json::Value::as_bool))
+        {
             Some(enabled) => Command::Translucent(enabled),
-            None => { let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}"); return; }
+            None => {
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"enabled\\\": true|false}\"}",
+                );
+                return;
+            }
         },
         "/capture" => match serde_json::from_str::<serde_json::Value>(&body)
             .ok()
@@ -255,21 +328,31 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(path) => Command::Capture(path),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"path\\\": ...}\"}",
+                );
                 return;
             }
         },
-        "/begin-selection" => match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
-            let node = value.get("node")?.as_str()?.to_owned();
-            let field = value.get("field")?.as_str()?.to_owned();
-            Some((node, field))
-        }) {
-            Some((node, field)) => Command::BeginSelection { node, field },
-            None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"node\\\": ..., \\\"field\\\": ...}\"}");
-                return;
+        "/begin-selection" => {
+            match serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| {
+                let node = value.get("node")?.as_str()?.to_owned();
+                let field = value.get("field")?.as_str()?.to_owned();
+                Some((node, field))
+            }) {
+                Some((node, field)) => Command::BeginSelection { node, field },
+                None => {
+                    let _ = respond(
+                        &mut stream,
+                        400,
+                        "{\"ok\":false,\"error\":\"expected {\\\"node\\\": ..., \\\"field\\\": ...}\"}",
+                    );
+                    return;
+                }
             }
-        },
+        }
         "/fit-graph" => Command::FitGraph,
         "/zoom-out" => Command::ZoomOut,
         "/ensure-visible" => Command::EnsureVisible,
@@ -279,7 +362,11 @@ fn handle(mut stream: TcpStream, tx: Sender<Request>, ctx: egui::Context) {
         {
             Some(index) => Command::ActivateTab(index as usize),
             None => {
-                let _ = respond(&mut stream, 400, "{\"ok\":false,\"error\":\"expected {\\\"index\\\": ...}\"}");
+                let _ = respond(
+                    &mut stream,
+                    400,
+                    "{\"ok\":false,\"error\":\"expected {\\\"index\\\": ...}\"}",
+                );
                 return;
             }
         },
@@ -318,13 +405,7 @@ mod tests {
 
     fn pending() -> (Request, Receiver<String>) {
         let (tx, rx) = channel::<String>();
-        (
-            Request {
-                command: Command::State,
-                reply: Arc::new(Mutex::new(Some(tx))),
-            },
-            rx,
-        )
+        (Request { command: Command::State, reply: Arc::new(Mutex::new(Some(tx))) }, rx)
     }
 
     #[test]

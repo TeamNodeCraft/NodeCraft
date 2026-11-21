@@ -4,8 +4,8 @@
 //! (MIT OR Apache-2.0).
 
 use egui::{Color32, Pos2, Rect, Shape, Stroke, vec2};
-use solidcraft_geom::Ring;
 use solidcore_record::Vec3;
+use solidcraft_geom::Ring;
 use solidcraft_geom::prelude::*;
 use solidcraft_viewport::Camera;
 
@@ -374,7 +374,8 @@ fn ring_grip(proj: &Proj, t: &Triad, ring: usize) -> Option<f64> {
     let (e1, e2) = ring_basis(&t.axes, ring.min(2));
     (0..72).map(|k| f64::from(k) * 5.0).find(|a| {
         let th = a.to_radians();
-        proj.to_screen(t.center + (e1 * th.cos() + e2 * th.sin()) * (RING * l)).is_some_and(|p| hit(&sh, p) == Some(Handle::Ring(ring.min(2))))
+        proj.to_screen(t.center + (e1 * th.cos() + e2 * th.sin()) * (RING * l))
+            .is_some_and(|p| hit(&sh, p) == Some(Handle::Ring(ring.min(2))))
     })
 }
 
@@ -440,7 +441,9 @@ fn shapes(proj: &Proj, t: &Triad, l: f64) -> Option<Shapes> {
     let mut s = Shapes { arrows: Vec::new(), planes: Vec::new(), rings: Vec::new(), ball };
     if t.translate {
         for (i, d) in t.axes.iter().enumerate() {
-            if let (Some(a), Some(b)) = (proj.to_screen(c + *d * (0.18 * l)), proj.to_screen(c + *d * l)) {
+            if let (Some(a), Some(b)) =
+                (proj.to_screen(c + *d * (0.18 * l)), proj.to_screen(c + *d * l))
+            {
                 s.arrows.push((i, a, b));
             }
         }
@@ -482,7 +485,8 @@ fn hit(s: &Shapes, p: Pos2) -> Option<Handle> {
     }
     // From some views two rings lie almost on top of each other: the nearest
     // takes the press.
-    let near = |pts: &Vec<Pos2>| pts.windows(2).map(|w| seg_dist(p, w[0], w[1])).fold(f32::MAX, f32::min);
+    let near =
+        |pts: &Vec<Pos2>| pts.windows(2).map(|w| seg_dist(p, w[0], w[1])).fold(f32::MAX, f32::min);
     s.rings
         .iter()
         .map(|(i, pts)| (*i, near(pts)))
@@ -591,7 +595,12 @@ fn euler_xyz(m: &[[f64; 3]; 3]) -> [f64; 3] {
 /// triad shows. A local-space ring is right-multiplied: the triad's axes
 /// already include the node's turn, so the ring shows where its own local axis
 /// has ended up.
-fn turned_angles(start: [f64; 3], axis: usize, angle: f64, local_axes: bool) -> ([f64; 3], [bool; 3]) {
+fn turned_angles(
+    start: [f64; 3],
+    axis: usize,
+    angle: f64,
+    local_axes: bool,
+) -> ([f64; 3], [bool; 3]) {
     let i = axis.min(2);
     let start_rad = start.map(f64::to_radians);
     // Rx is the rightmost angle in the node's product, so a local X ring can
@@ -614,11 +623,7 @@ fn turned_angles(start: [f64; 3], axis: usize, angle: f64, local_axes: bool) -> 
     // equivalent XYZ angles our node evaluates.
     let turn = rotation(DIRS[i], angle);
     let start_matrix = turn_of(start_rad, ANGLE_ORDER);
-    let matrix = if local_axes {
-        mul(&start_matrix, &turn)
-    } else {
-        mul(&turn, &start_matrix)
-    };
+    let matrix = if local_axes { mul(&start_matrix, &turn) } else { mul(&turn, &start_matrix) };
     let next = euler_xyz(&matrix).map(|a| within_turn(a).to_degrees());
     let mut changed = [false; 3];
     for (index, changed) in changed.iter_mut().enumerate() {
@@ -628,7 +633,14 @@ fn turned_angles(start: [f64; 3], axis: usize, angle: f64, local_axes: bool) -> 
 }
 
 /// Draw the triad and run a drag on it. `step` is the distance snap step.
-fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui::Id, t: &Triad, step: f64) -> Frame {
+fn solid_show(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    proj: &Proj,
+    id: egui::Id,
+    t: &Triad,
+    step: f64,
+) -> Frame {
     let palette = crate::theme::get();
     let accent = palette.color(palette.accent);
     let axis_colours = [
@@ -646,16 +658,27 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let primary_down = ui.input(|i| i.pointer.primary_down());
     let primary_pressed = ui.input(|i| i.pointer.primary_pressed());
-    let hovered = if state.is_none() { pointer.filter(|_| ui.rect_contains_pointer(proj.rect)).and_then(|p| hit(&sh, p)) } else { None };
+    let hovered = if state.is_none() {
+        pointer.filter(|_| ui.rect_contains_pointer(proj.rect)).and_then(|p| hit(&sh, p))
+    } else {
+        None
+    };
     let active = state.map(|s| s.handle).or(hovered);
     let hot = |h: Handle| active == Some(h);
     let col = |h: Handle, i: usize| if hot(h) { accent } else { axis_colours[i.min(2)] };
     for (i, pts) in &sh.rings {
-        painter.add(Shape::line(pts.clone(), Stroke::new(if hot(Handle::Ring(*i)) { 3.0 } else { 1.8 }, col(Handle::Ring(*i), *i))));
+        painter.add(Shape::line(
+            pts.clone(),
+            Stroke::new(if hot(Handle::Ring(*i)) { 3.0 } else { 1.8 }, col(Handle::Ring(*i), *i)),
+        ));
     }
     for (i, q) in &sh.planes {
         let c = col(Handle::Plane(*i), *i);
-        painter.extend(projected_polygon(q, c.gamma_multiply(if hot(Handle::Plane(*i)) { 0.7 } else { 0.35 }), Stroke::new(1.0, c)));
+        painter.extend(projected_polygon(
+            q,
+            c.gamma_multiply(if hot(Handle::Plane(*i)) { 0.7 } else { 0.35 }),
+            Stroke::new(1.0, c),
+        ));
     }
     for (i, a, b) in &sh.arrows {
         arrow(painter, *a, *b, col(Handle::Axis(*i), *i), hot(Handle::Axis(*i)));
@@ -668,11 +691,17 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     let pressed = || {
         let at = ui.input(|i| {
             i.events.iter().find_map(|e| match e {
-                egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: true, pos, .. } => Some(*pos),
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    pos,
+                    ..
+                } => Some(*pos),
                 _ => None,
             })
         })?;
-        let owned = ui.clip_rect().intersect(proj.rect).contains(at) && ui.ctx().layer_id_at(at) == Some(ui.layer_id());
+        let owned = ui.clip_rect().intersect(proj.rect).contains(at)
+            && ui.ctx().layer_id_at(at) == Some(ui.layer_id());
         owned.then(|| hit(&sh, at)).flatten()
     };
     let pressed_handle = pressed();
@@ -766,7 +795,12 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
     let p = if done {
         ui.input(|i| {
             i.events.iter().find_map(|e| match e {
-                egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, pos, .. } => Some(*pos),
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    pos,
+                    ..
+                } => Some(*pos),
                 _ => None,
             })
         })
@@ -804,8 +838,14 @@ fn solid_show(ui: &mut egui::Ui, painter: &egui::Painter, proj: &Proj, id: egui:
                 Change::Rotate { axis: i, angle: snap(st.turned, ROTATE_SNAP_STEP, free) }
             }
             h => {
-                let d = on_plane(proj, p, st.center, plane_normal(&st.axes, h)).map(|q| q - st.grab).unwrap_or(Vec3::ZERO);
-                Change::Translate(Vec3::new(snap(d.x, step, free), snap(d.y, step, free), snap(d.z, step, free)))
+                let d = on_plane(proj, p, st.center, plane_normal(&st.axes, h))
+                    .map(|q| q - st.grab)
+                    .unwrap_or(Vec3::ZERO);
+                Change::Translate(Vec3::new(
+                    snap(d.x, step, free),
+                    snap(d.y, step, free),
+                    snap(d.z, step, free),
+                ))
             }
         }
     };
@@ -828,9 +868,12 @@ fn arrow(painter: &egui::Painter, a: Pos2, b: Pos2, col: Color32, hot: bool) {
     let n = vec2(-u.y, u.x);
     painter.line_segment([a, b], Stroke::new(if hot { 3.0 } else { 2.0 }, col));
     let head = 12.0f32.min(len * 0.5);
-    painter.add(Shape::convex_polygon(vec![b + u * 2.0, b - u * head + n * head * 0.4, b - u * head - n * head * 0.4], col, Stroke::NONE));
+    painter.add(Shape::convex_polygon(
+        vec![b + u * 2.0, b - u * head + n * head * 0.4, b - u * head - n * head * 0.4],
+        col,
+        Stroke::NONE,
+    ));
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -957,9 +1000,8 @@ mod tests {
         let triad = test_triad();
         let l = arrow_length(&proj);
         for (axis, field) in [(0, "x"), (1, "y"), (2, "z")] {
-            let at = proj
-                .to_screen(Vec3::ZERO + DIRS[axis] * (0.7 * l))
-                .expect("arrow point projects");
+            let at =
+                proj.to_screen(Vec3::ZERO + DIRS[axis] * (0.7 * l)).expect("arrow point projects");
 
             // Press and release in one frame (input queued during a busy
             // frame arrives together).
@@ -980,7 +1022,8 @@ mod tests {
             let mut ctx = egui::Context::default();
             let mut gizmo = test_gizmo();
             let mut state = GizmoState::default();
-            let press = frame(&ctx, vec![pointer_at(at), button_at(at, true)], &mut gizmo, &mut state);
+            let press =
+                frame(&ctx, vec![pointer_at(at), button_at(at, true)], &mut gizmo, &mut state);
             assert!(!press.started && !press.dragging, "a press alone is not a drag on {field}");
             let release = frame(&ctx, vec![button_at(at, false)], &mut gizmo, &mut state);
             assert_eq!(release.focus.as_deref(), Some(field), "click on {field}");
@@ -991,9 +1034,7 @@ mod tests {
             let mut ctx = egui::Context::default();
             let mut gizmo = test_gizmo();
             let mut state = GizmoState::default();
-            let away = proj
-                .to_screen(Vec3::new(20.0, 20.0, 20.0))
-                .expect("away point projects");
+            let away = proj.to_screen(Vec3::new(20.0, 20.0, 20.0)).expect("away point projects");
             let update = frame(
                 &ctx,
                 vec![pointer_at(at), button_at(at, true), button_at(at, false), pointer_at(away)],
@@ -1059,28 +1100,11 @@ mod tests {
         let proj = test_proj();
         let gizmo = test_gizmo();
         let l = arrow_length(&proj);
-        let handle = proj
-            .to_screen(Vec3::X * (0.7 * l))
-            .expect("arrow point projects");
-        assert!(contains_pointer(
-            &gizmo,
-            &proj.camera,
-            proj.rect,
-            proj.shift,
-            proj.radius,
-            handle
-        ));
-        let empty = proj
-            .to_screen(Vec3::new(-0.4 * l, -0.4 * l, 0.0))
-            .expect("empty point projects");
-        assert!(!contains_pointer(
-            &gizmo,
-            &proj.camera,
-            proj.rect,
-            proj.shift,
-            proj.radius,
-            empty
-        ));
+        let handle = proj.to_screen(Vec3::X * (0.7 * l)).expect("arrow point projects");
+        assert!(contains_pointer(&gizmo, &proj.camera, proj.rect, proj.shift, proj.radius, handle));
+        let empty =
+            proj.to_screen(Vec3::new(-0.4 * l, -0.4 * l, 0.0)).expect("empty point projects");
+        assert!(!contains_pointer(&gizmo, &proj.camera, proj.rect, proj.shift, proj.radius, empty));
     }
 
     /// Two rings can lie almost on top of each other on screen: the nearer
@@ -1125,10 +1149,7 @@ mod tests {
         }
         // The default order is the Translate node's: Rz * Ry * Rx.
         let (rx, ry, rz) = (0.3, -0.7, 1.1);
-        let zyx = mul(
-            &mul(&rotation(DIRS[2], rz), &rotation(DIRS[1], ry)),
-            &rotation(DIRS[0], rx),
-        );
+        let zyx = mul(&mul(&rotation(DIRS[2], rz), &rotation(DIRS[1], ry)), &rotation(DIRS[0], rx));
         assert!(on(&turn_of([rx, ry, rz], ANGLE_ORDER), &zyx));
     }
 
@@ -1146,10 +1167,8 @@ mod tests {
             ([20.0, 40.0, 60.0], 2),
         ] {
             let (next, _) = turned_angles(start, axis, 0.4, true);
-            let want = mul(
-                &turn_of(start.map(f64::to_radians), ANGLE_ORDER),
-                &rotation(DIRS[axis], 0.4),
-            );
+            let want =
+                mul(&turn_of(start.map(f64::to_radians), ANGLE_ORDER), &rotation(DIRS[axis], 0.4));
             assert!(
                 on(&turn_of(next.map(f64::to_radians), ANGLE_ORDER), &want),
                 "{start:?} local ring {axis} -> {next:?}"
@@ -1191,7 +1210,14 @@ mod tests {
     #[test]
     fn a_dragged_angle_stays_within_one_turn() {
         let tau = std::f64::consts::TAU;
-        for (a, want) in [(tau, 0.0), (-tau, 0.0), (tau + 0.3, 0.3), (-tau - 0.3, -0.3), (1.0, 1.0), (-1.0, -1.0)] {
+        for (a, want) in [
+            (tau, 0.0),
+            (-tau, 0.0),
+            (tau + 0.3, 0.3),
+            (-tau - 0.3, -0.3),
+            (1.0, 1.0),
+            (-1.0, -1.0),
+        ] {
             assert!((within_turn(a) - want).abs() < 1e-12, "{a} -> {}", within_turn(a));
         }
         let (next, _) = turned_angles([0.0, 0.0, 0.0], 2, tau, false);
@@ -1225,7 +1251,8 @@ mod tests {
         let mut ctx = egui::Context::default();
         let mut gizmo = test_gizmo();
         let mut state = GizmoState::default();
-        let press = frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
+        let press =
+            frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
         assert!(!press.started);
         let drag = frame(&ctx, vec![pointer_at(dragged)], &mut gizmo, &mut state);
         assert!(drag.started && drag.dragging && drag.changes.is_empty());
@@ -1251,7 +1278,10 @@ mod tests {
         let mut ctx = egui::Context::default();
         let mut gizmo = test_gizmo();
         let mut state = GizmoState::default();
-        assert!(!frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state).started);
+        assert!(
+            !frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state)
+                .started
+        );
         assert!(frame(&ctx, vec![pointer_at(end)], &mut gizmo, &mut state).started);
         let cancel = frame(&ctx, vec![egui::Event::PointerGone], &mut gizmo, &mut state);
         assert!(cancel.ended, "the preview is retired");
@@ -1263,12 +1293,7 @@ mod tests {
         );
         // The button is still down when the pointer comes back, as after
         // dragging outside the window.
-        let back = frame(
-            &ctx,
-            vec![pointer_at(end), button_at(end, true)],
-            &mut gizmo,
-            &mut state,
-        );
+        let back = frame(&ctx, vec![pointer_at(end), button_at(end, true)], &mut gizmo, &mut state);
         assert!(back.changes.is_empty(), "no stale grab point writes on return");
         assert!(!back.dragging && !back.ended);
     }
@@ -1283,7 +1308,8 @@ mod tests {
         let mut ctx = egui::Context::default();
         let mut gizmo = test_gizmo();
         let mut state = GizmoState::default();
-        let press = frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
+        let press =
+            frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
         assert!(!press.started);
         let moved = frame(&ctx, vec![pointer_at(end)], &mut gizmo, &mut state);
         assert!(moved.started && moved.changes.is_empty(), "the first drag frame only starts");
@@ -1309,7 +1335,8 @@ mod tests {
         let mut ctx = egui::Context::default();
         let mut gizmo = test_gizmo();
         let mut state = GizmoState::default();
-        let press = frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
+        let press =
+            frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
         assert!(!press.started);
         let moved = frame(&ctx, vec![pointer_at(end)], &mut gizmo, &mut state);
         assert!(moved.started && moved.changes.is_empty());
@@ -1339,13 +1366,19 @@ mod tests {
         let mut ctx = egui::Context::default();
         let mut gizmo = test_gizmo();
         let mut state = GizmoState::default();
-        let press = frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
+        let press =
+            frame(&ctx, vec![pointer_at(start), button_at(start, true)], &mut gizmo, &mut state);
         assert!(!press.started);
         let moved = frame(&ctx, vec![pointer_at(end)], &mut gizmo, &mut state);
         assert!(moved.started && moved.changes.is_empty());
         let update = frame(&ctx, vec![button_at(end, false)], &mut gizmo, &mut state);
         assert_eq!(update.focus, None);
-        assert_eq!(update.changes.len(), 1, "a free ring writes its own field: {:?}", update.changes);
+        assert_eq!(
+            update.changes.len(),
+            1,
+            "a free ring writes its own field: {:?}",
+            update.changes
+        );
         close(value(&update, "rz"), 30.0);
     }
 }

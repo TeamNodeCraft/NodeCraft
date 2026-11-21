@@ -9,8 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 
-
-use egui_wgpu::{wgpu, CallbackTrait, RenderState};
+use egui_wgpu::{CallbackTrait, RenderState, wgpu};
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Family, FontSystem, Metrics, Resolution, Shaping,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
@@ -78,12 +77,7 @@ impl CableVertex {
                 *value = flat[index * 4 + lane];
             }
         }
-        Self {
-            points,
-            core,
-            outline,
-            params: [width, core_ratio, routing.count as f32, 0.0],
-        }
+        Self { points, core, outline, params: [width, core_ratio, routing.count as f32, 0.0] }
     }
 }
 
@@ -440,7 +434,6 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
-
 const SHAPE_SHADER: &str = r#"
 struct Globals {
   screen_scale: vec4<f32>,
@@ -683,7 +676,6 @@ fn load_font_system() -> FontSystem {
 }
 
 pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) -> bool {
-
     let uniform = rs.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("node-lyon-globals"),
         size: std::mem::size_of::<GlobalsUniform>() as u64,
@@ -742,7 +734,11 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(depth_state(depth)),
-        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     });
@@ -785,7 +781,11 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(depth_state(depth)),
-        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     });
@@ -836,7 +836,11 @@ pub fn install(rs: &RenderState, msaa_samples: u32, depth: wgpu::TextureFormat) 
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: Some(depth_state(depth)),
-        multisample: wgpu::MultisampleState { count: msaa_samples, mask: !0, alpha_to_coverage_enabled: false },
+        multisample: wgpu::MultisampleState {
+            count: msaa_samples,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
         multiview_mask: None,
         cache: None,
     });
@@ -964,27 +968,35 @@ impl NodeCallback {
                         if renderer.vertex_buffer.is_none()
                             || renderer.vertex_capacity < vertex_bytes.len() as u64
                         {
-                            let capacity = (vertex_bytes.len() as u64).next_power_of_two().max(4096);
-                            renderer.vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("node-lyon-vertices"),
-                                size: capacity,
-                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }));
+                            let capacity =
+                                (vertex_bytes.len() as u64).next_power_of_two().max(4096);
+                            renderer.vertex_buffer =
+                                Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("node-lyon-vertices"),
+                                    size: capacity,
+                                    usage: wgpu::BufferUsages::VERTEX
+                                        | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                }));
                             renderer.vertex_capacity = capacity;
                         }
-                        queue.write_buffer(renderer.vertex_buffer.as_ref().unwrap(), 0, vertex_bytes);
+                        queue.write_buffer(
+                            renderer.vertex_buffer.as_ref().unwrap(),
+                            0,
+                            vertex_bytes,
+                        );
 
                         if renderer.index_buffer.is_none()
                             || renderer.index_capacity < index_bytes.len() as u64
                         {
                             let capacity = (index_bytes.len() as u64).next_power_of_two().max(4096);
-                            renderer.index_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("node-lyon-indices"),
-                                size: capacity,
-                                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }));
+                            renderer.index_buffer =
+                                Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("node-lyon-indices"),
+                                    size: capacity,
+                                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                }));
                             renderer.index_capacity = capacity;
                         }
                         queue.write_buffer(renderer.index_buffer.as_ref().unwrap(), 0, index_bytes);
@@ -1003,12 +1015,13 @@ impl NodeCallback {
                         || renderer.glow_capacity < glow_bytes.len() as u64
                     {
                         let capacity = (glow_bytes.len() as u64).next_power_of_two().max(4096);
-                        renderer.glow_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("node-activity-glows"),
-                            size: capacity,
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                            mapped_at_creation: false,
-                        }));
+                        renderer.glow_buffer =
+                            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                label: Some("node-activity-glows"),
+                                size: capacity,
+                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                                mapped_at_creation: false,
+                            }));
                         renderer.glow_capacity = capacity;
                     }
                     queue.write_buffer(renderer.glow_buffer.as_ref().unwrap(), 0, glow_bytes);
@@ -1028,12 +1041,14 @@ impl NodeCallback {
                             || renderer.cable_capacity < bytes.len() as u64
                         {
                             let capacity = (bytes.len() as u64).next_power_of_two().max(4096);
-                            renderer.cable_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("node-cable-instances"),
-                                size: capacity,
-                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }));
+                            renderer.cable_buffer =
+                                Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("node-cable-instances"),
+                                    size: capacity,
+                                    usage: wgpu::BufferUsages::VERTEX
+                                        | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                }));
                             renderer.cable_capacity = capacity;
                         }
                         queue.write_buffer(renderer.cable_buffer.as_ref().unwrap(), 0, bytes);
@@ -1053,12 +1068,14 @@ impl NodeCallback {
                             || renderer.shape_capacity < bytes.len() as u64
                         {
                             let capacity = (bytes.len() as u64).next_power_of_two().max(4096);
-                            renderer.shape_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("node-shape-instances"),
-                                size: capacity,
-                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                                mapped_at_creation: false,
-                            }));
+                            renderer.shape_buffer =
+                                Some(device.create_buffer(&wgpu::BufferDescriptor {
+                                    label: Some("node-shape-instances"),
+                                    size: capacity,
+                                    usage: wgpu::BufferUsages::VERTEX
+                                        | wgpu::BufferUsages::COPY_DST,
+                                    mapped_at_creation: false,
+                                }));
                             renderer.shape_capacity = capacity;
                         }
                         queue.write_buffer(renderer.shape_buffer.as_ref().unwrap(), 0, bytes);
@@ -1081,13 +1098,7 @@ impl NodeCallback {
                 },
             );
             let GlyphonState {
-                font_system,
-                swash_cache,
-                viewport,
-                atlas,
-                renderer,
-                buffers,
-                ..
+                font_system, swash_cache, viewport, atlas, renderer, buffers, ..
             } = &mut *glyphon;
             if buffers.len() > 4096 {
                 buffers.clear();
@@ -1096,10 +1107,7 @@ impl NodeCallback {
                 let size = ((text.size * draw.ppp) * 4.0).round() / 4.0;
                 let key = (text.text.clone(), size.to_bits());
                 if !buffers.contains_key(&key) {
-                    let mut buffer = TextBuffer::new(
-                        font_system,
-                        Metrics::new(size, size * 1.25),
-                    );
+                    let mut buffer = TextBuffer::new(font_system, Metrics::new(size, size * 1.25));
                     buffer.set_size(None, None);
                     buffer.set_text(
                         &text.text,
@@ -1118,10 +1126,7 @@ impl NodeCallback {
                     let size = ((text.size * draw.ppp) * 4.0).round() / 4.0;
                     let key = (text.text.clone(), size.to_bits());
                     let buffer = buffers.get(&key)?;
-                    let width = buffer
-                        .layout_runs()
-                        .map(|run| run.line_w)
-                        .fold(0.0_f32, f32::max);
+                    let width = buffer.layout_runs().map(|run| run.line_w).fold(0.0_f32, f32::max);
                     Some(TextArea {
                         buffer,
                         left: (text.center_x * draw.ppp - width * 0.5).round(),
@@ -1138,15 +1143,8 @@ impl NodeCallback {
                     })
                 })
                 .collect();
-            let _ = renderer.prepare(
-                device,
-                queue,
-                font_system,
-                atlas,
-                viewport,
-                areas,
-                swash_cache,
-            );
+            let _ =
+                renderer.prepare(device, queue, font_system, atlas, viewport, areas, swash_cache);
         }
         Vec::new()
     }
@@ -1296,7 +1294,6 @@ pub fn squircle_rect_path(x: f32, y: f32, w: f32, h: f32, radius: f32) -> Path {
     builder.build()
 }
 
-
 pub fn circle_path(cx: f32, cy: f32, radius: f32) -> Path {
     let mut builder = Path::builder();
     builder.add_circle(point(cx, cy), radius, Winding::Positive);
@@ -1331,11 +1328,8 @@ mod tests {
 
     #[test]
     fn wgsl_shaders_parse_and_validate() {
-        for (name, source) in [
-            ("solid", SHADER),
-            ("cable", CABLE_SHADER),
-            ("shape", SHAPE_SHADER),
-        ] {
+        for (name, source) in [("solid", SHADER), ("cable", CABLE_SHADER), ("shape", SHAPE_SHADER)]
+        {
             let module = wgpu::naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name} shader failed to parse: {error}"));
             let mut validator = wgpu::naga::valid::Validator::new(
@@ -1367,11 +1361,8 @@ mod tests {
             6 * 16,
             "GlobalsUniform must stay six tightly packed vec4s"
         );
-        for (name, source) in [
-            ("solid", SHADER),
-            ("cable", CABLE_SHADER),
-            ("shape", SHAPE_SHADER),
-        ] {
+        for (name, source) in [("solid", SHADER), ("cable", CABLE_SHADER), ("shape", SHAPE_SHADER)]
+        {
             let module = wgpu::naga::front::wgsl::parse_str(source)
                 .unwrap_or_else(|error| panic!("{name} shader failed to parse: {error}"));
             let global = module
@@ -1391,15 +1382,8 @@ mod tests {
             );
             assert_eq!(members.len(), expected.len(), "{name} Globals field count");
             for (member, (field, rust_offset)) in members.iter().zip(expected) {
-                assert_eq!(
-                    member.name.as_deref(),
-                    Some(field),
-                    "{name} Globals field order"
-                );
-                assert_eq!(
-                    member.offset as usize, rust_offset,
-                    "{name} Globals.{field} offset"
-                );
+                assert_eq!(member.name.as_deref(), Some(field), "{name} Globals field order");
+                assert_eq!(member.offset as usize, rust_offset, "{name} Globals.{field} offset");
             }
         }
     }

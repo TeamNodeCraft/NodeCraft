@@ -1,7 +1,7 @@
-From 03cb087e13b89e6df45b7c635edd2f7c925d5c1b Mon Sep 17 00:00:00 2001
+From 21d14caf439576962c845a8fa4676eabee23651e Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:05:16 +1030
-Subject: [PATCH 1/7] ops: lend a kernel and build bodies from B-reps
+Subject: [PATCH 1/8] ops: lend a kernel and build bodies from B-reps
 
 Add session::with_kernel, borrowed-mode rules, Body::from_brep/into_brep, Order::of and a seam test.
 ---
@@ -32,7 +32,7 @@ index 390b6c522..d6c9219ad 100644
  /// vertices. In [`to_record`]'s order several record edges may name one kernel edge where solids
  /// touch along it; [`to_kernel`] builds one kernel edge per record edge.
 diff --git a/solidcore/crates/solidcore-ops/Cargo.toml b/solidcore/crates/solidcore-ops/Cargo.toml
-index 44168da8c..fadd504d8 100644
+index 09e4a7bfe..f09a38aec 100644
 --- a/solidcore/crates/solidcore-ops/Cargo.toml
 +++ b/solidcore/crates/solidcore-ops/Cargo.toml
 @@ -47,6 +47,7 @@ path = "tests/round_between_crossing_cylinders.rs"
@@ -68,7 +68,7 @@ index 4e6d558d9..78c4648aa 100644
      #[must_use]
      pub(crate) fn new(b: Brep) -> Body {
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 294224823..bf116c3b3 100644
+index 5fe86f8d0..3f5907ca6 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -47,6 +47,7 @@
@@ -87,9 +87,9 @@ index 294224823..bf116c3b3 100644
 +
 +scoped_tls::scoped_thread_local!(static BORROWED: std::cell::RefCell<Option<Kernel>>);
  
- /// A failed call, as the failure callback sees it.
- #[derive(Debug)]
-@@ -325,6 +329,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+ /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
+ /// `docs/failure-codes-and-reproduction.md` 3.2): read it by its fields, never build it.
+@@ -369,6 +373,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
      (value, mine)
  }
  
@@ -112,7 +112,7 @@ index 294224823..bf116c3b3 100644
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
  /// such a panic recovered.)
  #[must_use]
-@@ -427,6 +447,51 @@ pub(crate) fn run_taking<T: Answer>(
+@@ -491,6 +511,51 @@ pub(crate) fn run_taking<T: Answer>(
      run_with(call, inputs, true, f)
  }
  
@@ -164,7 +164,7 @@ index 294224823..bf116c3b3 100644
  fn run_with<T: Answer>(
      call: &'static str,
      inputs: Inputs<'_>,
-@@ -444,6 +509,13 @@ fn run_with<T: Answer>(
+@@ -508,6 +573,13 @@ fn run_with<T: Answer>(
      if in_call() || IN_HOOK.with(Cell::get) {
          return Err(Error::Reentered);
      }
@@ -179,10 +179,10 @@ index 294224823..bf116c3b3 100644
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index bc4e0271c..75cbdbcde 100644
+index 3c6bee467..c6f3cb02a 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2342,6 +2342,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -2505,6 +2505,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -210,15 +210,15 @@ index bc4e0271c..75cbdbcde 100644
 +    assert!(!kernel_needs_reset());
  }
  
- /// The kernel rig's fix set (SolidCraft's preset, `solidcraft_fixes.rs`), as the rig runs its
+ /// The L of legs 40 and width 20, `height` high, less what lies above the plane through
 -- 
 2.54.0 (Apple Git-157)
 
 
-From 164b2d67542c714915d732bb9a6527181c26bd63 Mon Sep 17 00:00:00 2001
+From 0132cad21c2a90ed07013d5df9ccb66f3fcd0115 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:25:30 +1030
-Subject: [PATCH 2/7] ops: fix borrowed-kernel reset, cancel, panic and hook
+Subject: [PATCH 2/8] ops: fix borrowed-kernel reset, cancel, panic and hook
  rules
 
 Per-thread needs-reset flag, restore the saved cancel token, catch/restore the kernel around with_kernel, refuse hook reentry, get-or-create trims and list-order Order::of.
@@ -231,7 +231,7 @@ Per-thread needs-reset flag, restore the saved cancel token, catch/restore the k
  5 files changed, 49 insertions(+), 19 deletions(-)
 
 diff --git a/solidcore/Cargo.lock b/solidcore/Cargo.lock
-index 3d7cd8273..a8b30ae38 100644
+index 2127093cc..10cc67134 100644
 --- a/solidcore/Cargo.lock
 +++ b/solidcore/Cargo.lock
 @@ -349,6 +349,12 @@ dependencies = [
@@ -247,7 +247,7 @@ index 3d7cd8273..a8b30ae38 100644
  [[package]]
  name = "serde"
  version = "1.0.229"
-@@ -470,6 +476,7 @@ name = "solidcore-ops"
+@@ -471,6 +477,7 @@ name = "solidcore-ops"
  version = "0.1.0"
  dependencies = [
   "flate2",
@@ -298,7 +298,7 @@ index 78c4648aa..b24420a04 100644
          Ok(Body::new(brep))
      }
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index bf116c3b3..ac1398280 100644
+index 3f5907ca6..ac208dcdc 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -47,7 +47,6 @@
@@ -320,9 +320,9 @@ index bf116c3b3..ac1398280 100644
 +    static NEEDS_RESET: Cell<bool> = const { Cell::new(false) };
 +}
  
- /// A failed call, as the failure callback sees it.
- #[derive(Debug)]
-@@ -330,19 +330,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+ /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
+ /// `docs/failure-codes-and-reproduction.md` 3.2): read it by its fields, never build it.
+@@ -374,19 +374,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
  }
  
  /// Run `f` with every ops call on this thread using `kernel` instead of the process kernel.
@@ -354,7 +354,7 @@ index bf116c3b3..ac1398280 100644
  }
  
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
-@@ -462,8 +468,9 @@ fn run_borrowed<T: Answer>(
+@@ -526,8 +532,9 @@ fn run_borrowed<T: Answer>(
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
          return Err(Error::Cancelled);
      }
@@ -365,7 +365,7 @@ index bf116c3b3..ac1398280 100644
          k.cancel = Some(token.either(&previous));
      }
      set_current(Some(call));
-@@ -475,19 +482,21 @@ fn run_borrowed<T: Answer>(
+@@ -539,19 +546,21 @@ fn run_borrowed<T: Answer>(
      let caught = catch_unwind(AssertUnwindSafe(|| f(k)));
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
@@ -392,10 +392,10 @@ index bf116c3b3..ac1398280 100644
      r
  }
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 75cbdbcde..227704ebf 100644
+index c6f3cb02a..26fa78af2 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2359,9 +2359,10 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -2522,9 +2522,10 @@ fn borrowed_kernel_matches_the_global_path() {
      kernel.fixes = UpstreamFixes::all();
      let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
      let edge = top_front(&borrowed);
@@ -412,10 +412,10 @@ index 75cbdbcde..227704ebf 100644
 2.54.0 (Apple Git-157)
 
 
-From 3d533ed2ed8d30068bbca53ce1001ac3ab85bfb7 Mon Sep 17 00:00:00 2001
+From 107edc17a8cf2ecc039c9a3361d186f1ab438e72 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 20:07:23 +1030
-Subject: [PATCH 3/7] ops: keep a lent kernel's own cancel token
+Subject: [PATCH 3/8] ops: keep a lent kernel's own cancel token
 
 Combine the kernel token with any cancel::within token and test a cancelled lent kernel without within.
 ---
@@ -424,10 +424,10 @@ Combine the kernel token with any cancel::within token and test a cancelled lent
  2 files changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index ac1398280..12885483f 100644
+index ac208dcdc..dd069ada3 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -469,10 +469,11 @@ fn run_borrowed<T: Answer>(
+@@ -533,10 +533,11 @@ fn run_borrowed<T: Answer>(
          return Err(Error::Cancelled);
      }
      let saved_cancel = k.cancel.take();
@@ -444,10 +444,10 @@ index ac1398280..12885483f 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 227704ebf..0099afa82 100644
+index 26fa78af2..febc0c7a3 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -3676,6 +3676,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
+@@ -4403,6 +4403,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
      assert!((removed - 127.1).abs() < 1.0, "removed {removed}");
  }
  
@@ -478,20 +478,20 @@ index 227704ebf..0099afa82 100644
 2.54.0 (Apple Git-157)
 
 
-From c1284c0585d2481c15de3d7a2773f9f184d4330e Mon Sep 17 00:00:00 2001
+From 07913329be73796159f95259593715dd8e47abc5 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Fri, 13 Nov 2026 21:04:31 +1030
-Subject: [PATCH 4/7] test: close the carried-faces test after the seam rebase
+Subject: [PATCH 4/8] test: close the carried-faces test after the seam rebase
 
 ---
  solidcore/crates/solidcore-ops/tests/blend.rs | 1 +
  1 file changed, 1 insertion(+)
 
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 0099afa82..27bba4fa9 100644
+index febc0c7a3..9186611e9 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2342,6 +2342,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -2505,6 +2505,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -503,10 +503,10 @@ index 0099afa82..27bba4fa9 100644
 2.54.0 (Apple Git-157)
 
 
-From 41f59486d4700dd42e26b9c8e40589e995479ccc Mon Sep 17 00:00:00 2001
+From 4f4299ccfab14794ab076d817ce65f68fe5ebe74 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:47:39 +1030
-Subject: [PATCH 5/7] ops: keep a proof across a copy, and defer it to the node
+Subject: [PATCH 5/8] ops: keep a proof across a copy, and defer it to the node
 
 Body::to_brep_on / copy_held_on keep the proof on a deep copy (the same B-rep in the same
 order), Body::prove_on takes the node-end proof, and session::Validation::EachNode leaves the
@@ -653,10 +653,10 @@ index b24420a04..e399a9c22 100644
      }
      Ok(Ok((b, outward)))
 diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
-index 8880292d7..b4b7b83ae 100644
+index 374473136..9d1eff76f 100644
 --- a/solidcore/crates/solidcore-ops/src/lib.rs
 +++ b/solidcore/crates/solidcore-ops/src/lib.rs
-@@ -94,6 +94,7 @@ pub use blend::{
+@@ -105,6 +105,7 @@ pub use blend::{
  pub use body::{
      make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, Contract, TurnedOver,
  };
@@ -665,7 +665,7 @@ index 8880292d7..b4b7b83ae 100644
  pub use check::{CheckLevel, CheckReport};
  pub use contact::Gap;
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 12885483f..ab32e06f0 100644
+index dd069ada3..344e50069 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
 @@ -69,6 +69,46 @@ static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
@@ -714,8 +714,8 @@ index 12885483f..ab32e06f0 100644
 +    VALIDATION.with(Cell::get)
  }
  
- /// A failed call, as the failure callback sees it.
-@@ -480,7 +520,28 @@ fn run_borrowed<T: Answer>(
+ /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
+@@ -544,7 +584,28 @@ fn run_borrowed<T: Answer>(
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
      let snapshot = (before && hook.is_some()).then(|| written(k, inputs));
      STOPPED.with(|d| d.set(None));
@@ -745,7 +745,7 @@ index 12885483f..ab32e06f0 100644
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
          Ok(_) if stopped => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Cancelled) }
-@@ -779,7 +840,7 @@ pub(crate) fn measure_body<T: Answer>(
+@@ -862,7 +923,7 @@ pub(crate) fn measure_body<T: Answer>(
      })
  }
  
@@ -819,10 +819,10 @@ index 45343de54..919f21bf1 100644
 2.54.0 (Apple Git-157)
 
 
-From 107191cfc5b9db5af888effc76fe4dc89e7bb5ae Mon Sep 17 00:00:00 2001
+From e931366b1accc439cee41991fdacfa1450a263b5 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:58:33 +1030
-Subject: [PATCH 6/7] ops: EachNode keeps the closedness test and defers only
+Subject: [PATCH 6/8] ops: EachNode keeps the closedness test and defers only
  the proof
 
 An operand with no standing proof counts as a solid exactly when is_manifold_solid says it is
@@ -930,10 +930,10 @@ index 919f21bf1..8a1b9508d 100644
 2.54.0 (Apple Git-157)
 
 
-From c245f3f57850af202549ede0204fe433370e6e99 Mon Sep 17 00:00:00 2001
+From c29f4927343e41baff811e0174a9ff6478ad007a Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 15:40:36 +1030
-Subject: [PATCH 7/7] ops: fit the borrowed-kernel path to the per-call session
+Subject: [PATCH 7/8] ops: fit the borrowed-kernel path to the per-call session
 
 The rebased session keeps each call's kernel in the pool and the call's name
 in a thread local, so the borrowed path sets CURRENT directly and clears it
@@ -1051,10 +1051,10 @@ index fba5ec7f7..144e12ef9 100644
      }
  }
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index ab32e06f0..774e08679 100644
+index 344e50069..bcf483d1e 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -502,7 +502,10 @@ fn run_borrowed<T: Answer>(
+@@ -566,7 +566,10 @@ fn run_borrowed<T: Answer>(
  ) -> Result<T> {
      struct Depth;
      impl Drop for Depth {
@@ -1066,7 +1066,7 @@ index ab32e06f0..774e08679 100644
      }
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
-@@ -514,7 +517,7 @@ fn run_borrowed<T: Answer>(
+@@ -578,7 +581,7 @@ fn run_borrowed<T: Answer>(
          (Some(t), None) => Some(t.clone()),
          (None, s) => s.cloned(),
      };
@@ -1075,7 +1075,7 @@ index ab32e06f0..774e08679 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
-@@ -542,20 +545,42 @@ fn run_borrowed<T: Answer>(
+@@ -606,20 +609,42 @@ fn run_borrowed<T: Answer>(
              }
          });
      }
@@ -1126,10 +1126,10 @@ index ab32e06f0..774e08679 100644
          let _ = catch_unwind(AssertUnwindSafe(|| hook(&failure)));
          IN_HOOK.with(|flag| flag.set(false));
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 27bba4fa9..249c9bbf5 100644
+index 9186611e9..eefdfe601 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2351,17 +2351,34 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -2514,17 +2514,34 @@ fn borrowed_kernel_matches_the_global_path() {
      all_fixes();
      let mut global = block();
      let edge = top_front(&global);
@@ -1167,7 +1167,7 @@ index 27bba4fa9..249c9bbf5 100644
      });
      result.expect("borrowed blend");
      assert!(rel(volume(&borrowed), global_volume) < 1.0e-9);
-@@ -3689,10 +3706,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
+@@ -4416,10 +4433,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
      let source = block();
      let brep = source.into_brep();
      let order = Order::of(&brep);
@@ -1297,6 +1297,110 @@ index 8a1b9508d..fd2477edc 100644
 +        .expect("a sheet");
      assert_eq!(step.counts().unwrap(), node.counts().unwrap());
  }
+-- 
+2.54.0 (Apple Git-157)
+
+
+From 27896531a6dbcfc41f567bb2eea351a4124cff16 Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 19:53:14 +1030
+Subject: [PATCH 8/8] ops: borrow the per-call failure code
+
+The per-call session now types every failure as a FailureCode and hands it
+to Failure { code }. The borrowed-kernel path reports the same code and
+detail, and a cancel or panic still marks the lent kernel for reset
+instead of replacing the kernel it was handed.
+---
+ solidcore/crates/solidcore-ops/src/session.rs | 53 +++++++++++++------
+ 1 file changed, 38 insertions(+), 15 deletions(-)
+
+diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
+index bcf483d1e..fceba31fc 100644
+--- a/solidcore/crates/solidcore-ops/src/session.rs
++++ b/solidcore/crates/solidcore-ops/src/session.rs
+@@ -587,6 +587,8 @@ fn run_borrowed<T: Answer>(
+     let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
+     let snapshot = (before && hook.is_some()).then(|| written(k, inputs));
+     STOPPED.with(|d| d.set(None));
++    // a kernel error an earlier call typed is not this call's
++    NOTED.with(|n| n.set(None));
+     // Profiles are collected for the borrowed kernel as for the process kernel: the profile is
+     // the call's own, taken while this thread holds the lent kernel.
+     #[cfg(feature = "profile")]
+@@ -612,37 +614,58 @@ fn run_borrowed<T: Answer>(
+     let stopped = STOPPED
+         .with(Cell::take)
+         .unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
+-    let r = match caught {
+-        Ok(_) if stopped => {
+-            NEEDS_RESET.with(|flag| flag.set(true));
+-            Err(Error::Cancelled)
+-        }
+-        Ok(Ok(v)) => Ok(v),
+-        Ok(Err(e)) => Err(status(e)),
+-        Err(p) => {
+-            NEEDS_RESET.with(|flag| flag.set(true));
+-            Err(Error::Internal(format!("{call}: {}", message(p.as_ref()))))
++    let noted = NOTED.with(Cell::take);
++    let mut kernel_code = None;
++    let (r, fit) = match caught {
++        Ok(_) if stopped => (Err(Error::Cancelled), false),
++        Ok(Ok(v)) => (Ok(v), true),
++        Ok(Err(e)) => {
++            DETAIL.with(|d| d.replace(Some(e.to_string())));
++            kernel_code = Some(FailureCode::of_kernel(call, &e));
++            (Err(status(e)), true)
+         }
++        Err(p) => (
++            Err(Error::Internal(format!("{call}: {}", message(p.as_ref())))),
++            false,
++        ),
+     };
++    // A cancel or a panic may have left the lent kernel half-updated: its owner rebuilds it
++    // (the borrowed path cannot replace the kernel it was handed).
++    if !fit {
++        NEEDS_RESET.with(|flag| flag.set(true));
++    }
+     k.cancel = saved_cancel;
+-    let why = match &r {
++    let failed = match &r {
+         Err(Error::Cancelled) => None,
+         Ok(v) => v.refusal(),
+-        Err(e) => Some(e.to_string()),
++        Err(e) => Some(e.clone()),
+     };
+-    let report = why.and_then(|why| {
++    let why = failed.map(|e| {
++        let code = kernel_code.unwrap_or_else(|| match noted {
++            Some((kind, operation, typed)) if typed == e.name() => FailureCode {
++                call,
++                kind,
++                operation,
++            },
++            _ => FailureCode::of_ops(call, &e),
++        });
++        CODE.with(|c| c.set(Some(code)));
++        (e.to_string(), code)
++    });
++    let report = why.and_then(|(why, code)| {
+         let hook = hook?;
+         let inputs = match snapshot {
+             Some(taken) => taken,
+             None => written(k, inputs),
+         };
+-        Some((hook, why, inputs))
++        Some((hook, why, code, inputs))
+     });
+     drop(depth);
+-    if let Some((hook, why, inputs)) = report {
++    if let Some((hook, why, code, inputs)) = report {
+         let failure = Failure {
+             call,
+             why: &why,
++            code,
+             inputs,
+         };
+         IN_HOOK.with(|flag| flag.set(true));
 -- 
 2.54.0 (Apple Git-157)
 

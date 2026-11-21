@@ -5,7 +5,10 @@ use super::*;
 /// Display-only tessellation through the upstream layer seam. Exact geometry
 /// never passes through this function.
 #[cfg(test)]
-fn display_quality(tolerance: f64, preview_detail: Option<u8>) -> nodecraft_display::DisplayQuality {
+fn display_quality(
+    tolerance: f64,
+    preview_detail: Option<u8>,
+) -> nodecraft_display::DisplayQuality {
     match preview_detail {
         Some(detail) => nodecraft_display::DisplayQuality::Preview(detail),
         None => nodecraft_display::DisplayQuality::Full(tolerance),
@@ -13,7 +16,9 @@ fn display_quality(tolerance: f64, preview_detail: Option<u8>) -> nodecraft_disp
 }
 
 #[cfg(test)]
-pub(crate) fn display_mesh_for_brep(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> Result<Mesh, String> {
+pub(crate) fn display_mesh_for_brep(
+    brep: &nodecraft_solidcore::solidcore::topology::Brep,
+) -> Result<Mesh, String> {
     let mut kernel = nodecraft_solidcore::kernel::kernel();
     let mut brep = copy_brep(brep)?;
     nodecraft_layers::tessellate_kernel(&mut kernel, &mut brep, 0.05).map(|display| display.mesh)
@@ -52,7 +57,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             None => format!("q{mesh_quality:.6}"),
         };
         let cache_key = (format!("{node_id}@{quality_key}"), node_key);
-        if !self.bypass_cache && cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+        if !self.bypass_cache
+            && cache_is_fresh
+            && let Some(error) = self.cache.failure(&cache_key)
+        {
             self.cache_hits += 1;
             self.cache.note_failure_hit();
             self.errors.insert(node_id.into(), error);
@@ -152,10 +160,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         match part {
             Ok(_) => {
                 self.order.push(node_id.into());
-                self.brep_timings.insert(
-                    node_id.into(),
-                    started.elapsed().as_secs_f64() * 1000.0,
-                );
+                self.brep_timings.insert(node_id.into(), started.elapsed().as_secs_f64() * 1000.0);
             }
             Err(error) => {
                 self.errors.insert(node_id.into(), error);
@@ -172,7 +177,11 @@ impl<'req, 'prog> Eval<'req, 'prog> {
     }
 
     #[cfg(test)]
-    pub(crate) fn part_mesh_asset(&mut self, node_id: &str, part: &Part) -> Result<crate::display::MeshAsset, String> {
+    pub(crate) fn part_mesh_asset(
+        &mut self,
+        node_id: &str,
+        part: &Part,
+    ) -> Result<crate::display::MeshAsset, String> {
         if part.bodies.is_empty() && part.sketches.is_empty() {
             return Err("Part has no geometry to display".into());
         }
@@ -184,11 +193,18 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         asset.instances.reserve(part.bodies.len() + part.sketches.len());
         if !part.bodies.is_empty() {
             let tolerance = nodecraft_mesh::display_tolerance();
-            let content_hash = self.index.node(node_id)
+            let content_hash = self
+                .index
+                .node(node_id)
                 .and_then(|node| node.cache.as_ref()?.key.clone())
                 .unwrap_or_default();
             let preview_detail = self.request.preview_detail;
-            let key = crate::display::MeshKey::new(node_id, content_hash.clone(), tolerance, preview_detail);
+            let key = crate::display::MeshKey::new(
+                node_id,
+                content_hash.clone(),
+                tolerance,
+                preview_detail,
+            );
             // The plan cache key is the body's provenance (its producing node's
             // content seed), not the target's cache key: two boolean nodes that
             // differ only by mode (e.g. subtract vs subtract-reverse) have no
@@ -209,7 +225,8 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 let placement = body.placement.clone();
                 let body_key = plan_key(index);
                 if !self.bypass_cache
-                    && let Some(cached) = self.display_plans.get(body_key, display_quality(tolerance, preview_detail))
+                    && let Some(cached) =
+                        self.display_plans.get(body_key, display_quality(tolerance, preview_detail))
                 {
                     let display = nodecraft_layers::evaluate_plan_with_classes(
                         &cached.plan,
@@ -218,13 +235,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     );
                     let mut mesh = display.mesh;
                     apply_brep_face_colors(body.body.brep(), &mut mesh);
-                    outputs.insert(index, crate::display::MeshInstance {
-                        mesh: std::sync::Arc::new(mesh),
-                        plan: Some(cached.plan),
-                        plan_edge_ids: cached.edge_ids,
-                        stats: Some(cached.stats),
-                        placement: placement.clone(),
-                    });
+                    outputs.insert(
+                        index,
+                        crate::display::MeshInstance {
+                            mesh: std::sync::Arc::new(mesh),
+                            plan: Some(cached.plan),
+                            plan_edge_ids: cached.edge_ids,
+                            stats: Some(cached.stats),
+                            placement: placement.clone(),
+                        },
+                    );
                 } else {
                     pending.push((index, body.body.shared(), placement));
                 }
@@ -252,7 +272,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     }
                     while running.len() < limit {
                         let Some((index, body, placement)) = pending.next() else { break };
-                        let revision = crate::display::MeshRevision::new(self.request.request_id, token.clone());
+                        let revision = crate::display::MeshRevision::new(
+                            self.request.request_id,
+                            token.clone(),
+                        );
                         let request = crate::display::MeshRequest {
                             key: key.clone(),
                             revision: self.request.request_id,
@@ -261,10 +284,18 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                                 placement: placement.clone(),
                             },
                         };
-                        running.push_back((index, body, placement, tessellation.submit(request, revision)));
+                        running.push_back((
+                            index,
+                            body,
+                            placement,
+                            tessellation.submit(request, revision),
+                        ));
                     }
-                    let Some((index, body, placement, receiver)) = running.pop_front() else { break };
-                    let result = receiver.recv().map_err(|_| "tessellation worker stopped".to_owned())?;
+                    let Some((index, body, placement, receiver)) = running.pop_front() else {
+                        break;
+                    };
+                    let result =
+                        receiver.recv().map_err(|_| "tessellation worker stopped".to_owned())?;
                     if result.revision != self.request.request_id {
                         continue;
                     }
@@ -290,13 +321,16 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                     );
                     let mut mesh = (*instance.mesh).clone();
                     apply_brep_face_colors(body.as_ref(), &mut mesh);
-                    outputs.insert(index, crate::display::MeshInstance {
-                        mesh: std::sync::Arc::new(mesh),
-                        plan,
-                        plan_edge_ids: instance.plan_edge_ids.clone(),
-                        stats,
-                        placement: placement.clone(),
-                    });
+                    outputs.insert(
+                        index,
+                        crate::display::MeshInstance {
+                            mesh: std::sync::Arc::new(mesh),
+                            plan,
+                            plan_edge_ids: instance.plan_edge_ids.clone(),
+                            stats,
+                            placement: placement.clone(),
+                        },
+                    );
                 }
             }
             asset.instances.extend(outputs.into_values());
@@ -349,8 +383,8 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             // Keep the pass-through mesh addressable by the suppressed node's
             // own id; display payloads, picking and validation all look it up
             // by that id.
-            let mesh = suppression_source(&node, &self.index)
-                .and_then(|source| self.evaluate(&source));
+            let mesh =
+                suppression_source(&node, &self.index).and_then(|source| self.evaluate(&source));
             if let Some(mesh) = &mesh {
                 self.objects.insert(node_id.into(), mesh.clone());
             }
@@ -369,7 +403,10 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         // A dirty node must be recomputed even if its old cache key is still present
         // (for example after "re-evaluate graph" / render all).
         let cache_is_fresh = node_cache_is_fresh(&node);
-        if !self.bypass_cache && cache_is_fresh && let Some(error) = self.cache.failure(&cache_key) {
+        if !self.bypass_cache
+            && cache_is_fresh
+            && let Some(error) = self.cache.failure(&cache_key)
+        {
             self.cache_hits += 1;
             self.cache.note_failure_hit();
             self.errors.insert(node_id.into(), error);
@@ -406,13 +443,20 @@ impl<'req, 'prog> Eval<'req, 'prog> {
             return Some(mesh);
         }
         // Evaluate inputs first so progress starts in upstream-to-downstream order.
-        let input_sources: Vec<String> = self.index.incoming(node_id).map(|link| link.from.clone()).collect();
-        for source in input_sources { self.evaluate(&source); }
+        let input_sources: Vec<String> =
+            self.index.incoming(node_id).map(|link| link.from.clone()).collect();
+        for source in input_sources {
+            self.evaluate(&source);
+        }
         self.emit_progress(node_id, ProgressPhase::Start);
         // Do not spend time computing a node whose input already failed.
-        let failed_input = self.index.incoming(node_id)
+        let failed_input = self
+            .index
+            .incoming(node_id)
             .filter(|link| !self.bypassed.contains(&link.from))
-            .find_map(|link| self.errors.get(&link.from).map(|error| (link.from.clone(), error.clone())));
+            .find_map(|link| {
+                self.errors.get(&link.from).map(|error| (link.from.clone(), error.clone()))
+            });
         if let Some((source, error)) = failed_input {
             self.errors.insert(node_id.into(), format!("Input {source} failed: {error}"));
             self.emit_progress(node_id, ProgressPhase::Complete);
@@ -428,61 +472,62 @@ impl<'req, 'prog> Eval<'req, 'prog> {
                 .and_then(|part| self.part_display_mesh(node_id, &part))
                 .map_err(|error| format!("{} display mesh: {error}", node.node_type))
         } else {
-        match node.node_type.as_str() {
-            "box" | "cylinder" => {
-                // Mesh-only primitive graphs must not build an unused exact BRep.
-                // Boolean/chamfer/exporter ancestors still need the eager build so
-                // their operand cache and progress ordering stay stable.
-                if self.needs_brep.contains(&node.id) {
-                    let _ = self.cached_primitive_brep(&node);
-                }
-                let kind = node
-                    .values
-                    .get("primitiveType")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&node.node_type);
-                match kind {
-                    // Closed primitives have exact B-reps, so their display
-                    // mesh goes through the same upstream tessellator as every
-                    // evaluated Part. Wedge and partial primitives still need
-                    // the local mesh path until exact closed B-reps exist.
-                    "box" | "cylinder" | "cone" | "sphere" | "torus" | "pyramid"
-                    | "sphereNoPole" | "partialSphere" | "partialTorus" | "wedge" => self
-                        .cached_primitive_brep(&node)
-                        .and_then(|brep| display_mesh_for_brep(&brep)),
-                    _ => Err(format!("unsupported primitive kind {kind:?}")),
-                }
-            }
-            "groupinput" => Ok(Mesh::default()),
-            "groupoutput" => source(&self.index, node_id)
-                .and_then(|link| self.evaluate(&link.from))
-                .ok_or_else(|| "Group output has no connected input.".into()),
-            "time" => {
-                // Time is a scalar source consumed by the app; it produces no geometry.
-                Ok(Mesh::default())
-            }
-            "sceneTransform" => {
-                // Scene transforms are applied by the viewer from node values. The
-                // engine only supplies the unchanged source mesh so the viewer can keep
-                // animating without re-tessellating.
-                let Some(link) = source(&self.index, node_id) else {
-                    self.errors.insert(node_id.into(), "Scene Transform has no shape input.".into());
-                    self.visiting.pop();
-                    return None;
-                };
-                match self.evaluate(&link.from) {
-                    Some(mut mesh) => {
-                        // Scene animation is display-only; keep the render path
-                        // lightweight and do not carry selectable B-rep edge data.
-                        mesh.lightweight = true;
-                        mesh.brep_edges.clear();
-                        Ok(mesh)
+            match node.node_type.as_str() {
+                "box" | "cylinder" => {
+                    // Mesh-only primitive graphs must not build an unused exact BRep.
+                    // Boolean/chamfer/exporter ancestors still need the eager build so
+                    // their operand cache and progress ordering stay stable.
+                    if self.needs_brep.contains(&node.id) {
+                        let _ = self.cached_primitive_brep(&node);
                     }
-                    None => Err("Scene Transform input was not evaluated.".into()),
+                    let kind = node
+                        .values
+                        .get("primitiveType")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or(&node.node_type);
+                    match kind {
+                        // Closed primitives have exact B-reps, so their display
+                        // mesh goes through the same upstream tessellator as every
+                        // evaluated Part. Wedge and partial primitives still need
+                        // the local mesh path until exact closed B-reps exist.
+                        "box" | "cylinder" | "cone" | "sphere" | "torus" | "pyramid"
+                        | "sphereNoPole" | "partialSphere" | "partialTorus" | "wedge" => self
+                            .cached_primitive_brep(&node)
+                            .and_then(|brep| display_mesh_for_brep(&brep)),
+                        _ => Err(format!("unsupported primitive kind {kind:?}")),
+                    }
                 }
+                "groupinput" => Ok(Mesh::default()),
+                "groupoutput" => source(&self.index, node_id)
+                    .and_then(|link| self.evaluate(&link.from))
+                    .ok_or_else(|| "Group output has no connected input.".into()),
+                "time" => {
+                    // Time is a scalar source consumed by the app; it produces no geometry.
+                    Ok(Mesh::default())
+                }
+                "sceneTransform" => {
+                    // Scene transforms are applied by the viewer from node values. The
+                    // engine only supplies the unchanged source mesh so the viewer can keep
+                    // animating without re-tessellating.
+                    let Some(link) = source(&self.index, node_id) else {
+                        self.errors
+                            .insert(node_id.into(), "Scene Transform has no shape input.".into());
+                        self.visiting.pop();
+                        return None;
+                    };
+                    match self.evaluate(&link.from) {
+                        Some(mut mesh) => {
+                            // Scene animation is display-only; keep the render path
+                            // lightweight and do not carry selectable B-rep edge data.
+                            mesh.lightweight = true;
+                            mesh.brep_edges.clear();
+                            Ok(mesh)
+                        }
+                        None => Err("Scene Transform input was not evaluated.".into()),
+                    }
+                }
+                other => Err(format!("Rust experiment does not implement node type {other:?} yet")),
             }
-            other => Err(format!("Rust experiment does not implement node type {other:?} yet")),
-        }
         };
         self.visiting.pop();
         self.emit_progress(node_id, ProgressPhase::Complete);

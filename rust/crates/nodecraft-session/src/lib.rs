@@ -30,17 +30,23 @@ thread_local! {
 
 /// Number of completed node-hash passes in this process.
 #[must_use]
-pub fn node_hash_pass_count() -> u64 { NODE_HASH_PASSES.load(Ordering::Relaxed) }
+pub fn node_hash_pass_count() -> u64 {
+    NODE_HASH_PASSES.load(Ordering::Relaxed)
+}
 
 /// Reset the process-wide node-hash pass counter.
-pub fn reset_node_hash_pass_count() { NODE_HASH_PASSES.store(0, Ordering::Relaxed); }
+pub fn reset_node_hash_pass_count() {
+    NODE_HASH_PASSES.store(0, Ordering::Relaxed);
+}
 
 /// Number of completed node-hash passes on the current thread.
 ///
 /// Use this (with [`reset_thread_node_hash_pass_count`]) in a test that needs
 /// an exact count while other tests hash on other threads.
 #[must_use]
-pub fn thread_node_hash_pass_count() -> u64 { THREAD_NODE_HASH_PASSES.with(Cell::get) }
+pub fn thread_node_hash_pass_count() -> u64 {
+    THREAD_NODE_HASH_PASSES.with(Cell::get)
+}
 
 /// Reset the current thread's node-hash pass counter.
 pub fn reset_thread_node_hash_pass_count() {
@@ -203,7 +209,9 @@ impl std::ops::DerefMut for GraphDocument {
     }
 }
 
-fn default_schema_version() -> u32 { 1 }
+fn default_schema_version() -> u32 {
+    1
+}
 
 impl GraphDocument {
     #[must_use]
@@ -331,10 +339,13 @@ impl GraphDocument {
             *indegree.entry(connection.to.as_str()).or_default() += 1;
             children.entry(connection.from.as_str()).or_default().push(connection.to.as_str());
         }
-        let mut ready: BTreeSet<&str> = indegree.iter().filter(|(_, degree)| **degree == 0).map(|(id, _)| *id).collect();
+        let mut ready: BTreeSet<&str> =
+            indegree.iter().filter(|(_, degree)| **degree == 0).map(|(id, _)| *id).collect();
         let mut hashes: BTreeMap<String, ContentHash> = BTreeMap::new();
         while let Some(id) = ready.pop_first() {
-            let Some(node) = nodes.get(id) else { continue; };
+            let Some(node) = nodes.get(id) else {
+                continue;
+            };
             let mut h = Hash128::new();
             h.write(b"nodecraft-node-v1");
             h.write_framed(node.id.as_bytes());
@@ -358,17 +369,27 @@ impl GraphDocument {
                 canonical_json(&node.values, &mut h);
             }
             let mut links = inputs.get(id).cloned().unwrap_or_default();
-            links.sort_by(|a, b| (a.input.as_str(), a.from.as_str(), a.out.as_str()).cmp(&(b.input.as_str(), b.from.as_str(), b.out.as_str())));
+            links.sort_by(|a, b| {
+                (a.input.as_str(), a.from.as_str(), a.out.as_str()).cmp(&(
+                    b.input.as_str(),
+                    b.from.as_str(),
+                    b.out.as_str(),
+                ))
+            });
             for link in links {
                 h.write_framed(link.input.as_bytes());
                 h.write_framed(link.out.as_bytes());
-                if let Some(upstream) = hashes.get(&link.from) { h.write(&upstream.0.to_le_bytes()); }
+                if let Some(upstream) = hashes.get(&link.from) {
+                    h.write(&upstream.0.to_le_bytes());
+                }
             }
             hashes.insert(id.to_string(), h.finish());
             for child in children.get(id).cloned().unwrap_or_default() {
                 let entry = indegree.get_mut(child).expect("child indegree");
                 *entry -= 1;
-                if *entry == 0 { ready.insert(child); }
+                if *entry == 0 {
+                    ready.insert(child);
+                }
             }
         }
         if hashes.len() != nodes.len() {
@@ -412,18 +433,20 @@ impl GraphDocument {
                 "Graph definition cycle through {id}."
             )));
         }
-        let definition = self.definition(id).ok_or_else(|| {
-            SessionError::InvalidInput(format!("Missing graph definition {id}."))
-        })?;
+        let definition = self
+            .definition(id)
+            .ok_or_else(|| SessionError::InvalidInput(format!("Missing graph definition {id}.")))?;
         stack.push(id.to_owned());
         out.write(b"definition-v1");
         out.write_framed(definition.id.as_bytes());
         out.write_framed(definition.kind.as_bytes());
         for port in &definition.interface.inputs {
-            out.write(b"in:"); out.write_framed(port.as_bytes());
+            out.write(b"in:");
+            out.write_framed(port.as_bytes());
         }
         for port in &definition.interface.outputs {
-            out.write(b"out:"); out.write_framed(port.as_bytes());
+            out.write(b"out:");
+            out.write_framed(port.as_bytes());
         }
         let mut nodes: Vec<&GraphNode> = definition.nodes.iter().collect();
         nodes.sort_by(|a, b| a.id.cmp(&b.id));
@@ -438,8 +461,12 @@ impl GraphDocument {
         }
         let mut connections: Vec<&GraphConnection> = definition.connections.iter().collect();
         connections.sort_by(|a, b| {
-            (a.from.as_str(), a.to.as_str(), a.input.as_str(), a.out.as_str())
-                .cmp(&(b.from.as_str(), b.to.as_str(), b.input.as_str(), b.out.as_str()))
+            (a.from.as_str(), a.to.as_str(), a.input.as_str(), a.out.as_str()).cmp(&(
+                b.from.as_str(),
+                b.to.as_str(),
+                b.input.as_str(),
+                b.out.as_str(),
+            ))
         });
         for connection in connections {
             out.write_framed(connection.from.as_bytes());
@@ -490,20 +517,65 @@ impl std::error::Error for SessionError {}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "camelCase")]
 pub enum Command {
-    SetValue { node: String, field: String, value: Value },
-    RemoveValue { node: String, field: String },
-    SetExpressions { node: String, values: BTreeMap<String, String> },
-    SetNodeType { node: String, #[serde(rename = "nodeType")] node_type: String },
-    AddDefinition { definition: GraphDefinition },
-    RemoveDefinition { id: String },
-    SetDefinition { definition: GraphDefinition },
-    SetRootDefinition { definition: GraphDefinition },
-    SetPosition { node: String, x: f64, y: f64 },
-    SetSuppressed { node: String, suppressed: bool },
-    Connect { from: String, to: String, #[serde(default)] input: String, #[serde(default)] out: String },
-    Disconnect { from: String, to: String, #[serde(default)] input: String },
-    AddNode { node: GraphNode },
-    RemoveNode { id: String },
+    SetValue {
+        node: String,
+        field: String,
+        value: Value,
+    },
+    RemoveValue {
+        node: String,
+        field: String,
+    },
+    SetExpressions {
+        node: String,
+        values: BTreeMap<String, String>,
+    },
+    SetNodeType {
+        node: String,
+        #[serde(rename = "nodeType")]
+        node_type: String,
+    },
+    AddDefinition {
+        definition: GraphDefinition,
+    },
+    RemoveDefinition {
+        id: String,
+    },
+    SetDefinition {
+        definition: GraphDefinition,
+    },
+    SetRootDefinition {
+        definition: GraphDefinition,
+    },
+    SetPosition {
+        node: String,
+        x: f64,
+        y: f64,
+    },
+    SetSuppressed {
+        node: String,
+        suppressed: bool,
+    },
+    Connect {
+        from: String,
+        to: String,
+        #[serde(default)]
+        input: String,
+        #[serde(default)]
+        out: String,
+    },
+    Disconnect {
+        from: String,
+        to: String,
+        #[serde(default)]
+        input: String,
+    },
+    AddNode {
+        node: GraphNode,
+    },
+    RemoveNode {
+        id: String,
+    },
 }
 
 /// Result of an edit or history movement.
@@ -556,10 +628,7 @@ impl Session {
     pub fn new(mut document: GraphDocument) -> Self {
         defaults::canonicalize_document(&mut document);
         let children = build_children(&document);
-        let hashes = document
-            .node_hashes_with_sources(&BTreeMap::new())
-            .ok()
-            .map(Arc::new);
+        let hashes = document.node_hashes_with_sources(&BTreeMap::new()).ok().map(Arc::new);
         Self {
             present: document,
             children,
@@ -574,7 +643,9 @@ impl Session {
     }
 
     #[must_use]
-    pub fn document(&self) -> &GraphDocument { &self.present }
+    pub fn document(&self) -> &GraphDocument {
+        &self.present
+    }
 
     /// Content hashes for the current revision, computed once when that
     /// revision was created. Reading this is an `Arc` clone, not a hash pass.
@@ -585,9 +656,7 @@ impl Session {
         // The revision could not be hashed (cycle/missing node). Recompute so
         // the caller gets the real error; failed revisions are not on the hot
         // path and this never caches a partial result.
-        self.present
-            .node_hashes_with_sources(&self.hashed_sources)
-            .map(Arc::new)
+        self.present.node_hashes_with_sources(&self.hashed_sources).map(Arc::new)
     }
 
     /// The cached map, only when it was computed with exactly `sources`.
@@ -599,10 +668,7 @@ impl Session {
         &self,
         sources: &BTreeMap<String, String>,
     ) -> Option<Arc<BTreeMap<String, ContentHash>>> {
-        self.hashes
-            .as_ref()
-            .filter(|_| sources == &self.hashed_sources)
-            .cloned()
+        self.hashes.as_ref().filter(|_| sources == &self.hashed_sources).cloned()
     }
 
     /// Content hashes for the current document under `sources`.
@@ -618,9 +684,7 @@ impl Session {
         if let Some(hashes) = self.hashes_for_sources(sources) {
             return Ok(hashes);
         }
-        self.present
-            .node_hashes_with_sources(sources)
-            .map(Arc::new)
+        self.present.node_hashes_with_sources(sources).map(Arc::new)
     }
 
     /// Tell the session which importer-source hashes the next revision must
@@ -633,11 +697,15 @@ impl Session {
 
     /// Runtime source hashes that the next revision will fold in.
     #[must_use]
-    pub fn source_hashes(&self) -> &BTreeMap<String, String> { &self.source_hashes }
+    pub fn source_hashes(&self) -> &BTreeMap<String, String> {
+        &self.source_hashes
+    }
 
     /// Source hashes the current revision cache was computed with.
     #[must_use]
-    pub fn hashed_sources(&self) -> &BTreeMap<String, String> { &self.hashed_sources }
+    pub fn hashed_sources(&self) -> &BTreeMap<String, String> {
+        &self.hashed_sources
+    }
 
     /// Add one ingested source record. Records are content-addressed: a record
     /// with the same hash already present is a no-op. Assets are not part of a
@@ -658,11 +726,17 @@ impl Session {
     }
 
     #[must_use]
-    pub fn revision(&self) -> u64 { self.revision }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     #[must_use]
-    pub fn has_undo(&self) -> bool { !self.undo.is_empty() }
+    pub fn has_undo(&self) -> bool {
+        !self.undo.is_empty()
+    }
     #[must_use]
-    pub fn has_redo(&self) -> bool { !self.redo.is_empty() }
+    pub fn has_redo(&self) -> bool {
+        !self.redo.is_empty()
+    }
 
     /// Apply a transaction atomically. History stores forward and inverse command
     /// lists, not graph snapshots.
@@ -697,7 +771,11 @@ impl Session {
         let structural = commands.iter().any(Command::is_structural);
         for command in commands {
             match apply_one_command(&mut self.present, command, &mut effects) {
-                Ok(group) => { if !group.is_empty() { inverse_groups.push(group); } }
+                Ok(group) => {
+                    if !group.is_empty() {
+                        inverse_groups.push(group);
+                    }
+                }
                 Err(error) => {
                     rollback_groups(&mut self.present, &inverse_groups);
                     self.children = build_children(&self.present);
@@ -743,8 +821,17 @@ impl Session {
             entry.coalesced_at = now;
             cumulative_dirty = entry.dirty_nodes.clone();
         } else {
-            self.undo.push(HistoryEntry { scope: scope.to_owned(), forward: commands.to_vec(), inverse_groups, dirty_nodes: dirty_nodes.clone(), coalesce_key: key, coalesced_at: now });
-            if self.undo.len() > self.undo_limit { self.undo.remove(0); }
+            self.undo.push(HistoryEntry {
+                scope: scope.to_owned(),
+                forward: commands.to_vec(),
+                inverse_groups,
+                dirty_nodes: dirty_nodes.clone(),
+                coalesce_key: key,
+                coalesced_at: now,
+            });
+            if self.undo.len() > self.undo_limit {
+                self.undo.remove(0);
+            }
         }
         self.redo.clear();
         self.hashed_sources.clone_from(&self.source_hashes);
@@ -777,13 +864,9 @@ impl Session {
         scope: &str,
         commands: &[Command],
     ) -> Result<Change, SessionError> {
-        let definition = self
-            .present
-            .definition(definition_id)
-            .cloned()
-            .ok_or_else(|| {
-                SessionError::InvalidInput(format!("Missing graph definition {definition_id}."))
-            })?;
+        let definition = self.present.definition(definition_id).cloned().ok_or_else(|| {
+            SessionError::InvalidInput(format!("Missing graph definition {definition_id}."))
+        })?;
         let original_definitions = self.present.definitions.clone();
         // A view may have been built without the parent definition table (for
         // example a stale projection). If a batch tries to add a definition id
@@ -795,10 +878,8 @@ impl Session {
             .map(|definition| definition.id.clone())
             .chain(std::iter::once(self.present.root.id.clone()))
             .collect();
-        let mut used_names: BTreeSet<String> = original_definitions
-            .iter()
-            .map(|definition| definition.name.clone())
-            .collect();
+        let mut used_names: BTreeSet<String> =
+            original_definitions.iter().map(|definition| definition.name.clone()).collect();
         let mut remap = BTreeMap::new();
         for command in &mut commands {
             let Command::AddDefinition { definition } = command else {
@@ -868,31 +949,25 @@ impl Session {
             .map(|definition| (definition.id.as_str(), definition))
             .collect();
         let body_definitions = body.document().definitions.clone();
-        let body_ids: BTreeSet<&str> = body_definitions
-            .iter()
-            .map(|definition| definition.id.as_str())
-            .collect();
+        let body_ids: BTreeSet<&str> =
+            body_definitions.iter().map(|definition| definition.id.as_str()).collect();
         for definition in &body_definitions {
             if definition.id == definition_id {
                 continue;
             }
             match original_by_id.get(definition.id.as_str()) {
                 Some(original) if *original != definition => {
-                    parent_commands.push(Command::SetDefinition {
-                        definition: definition.clone(),
-                    });
+                    parent_commands.push(Command::SetDefinition { definition: definition.clone() });
                 }
-                None => parent_commands.push(Command::AddDefinition {
-                    definition: definition.clone(),
-                }),
+                None => {
+                    parent_commands.push(Command::AddDefinition { definition: definition.clone() })
+                }
                 _ => {}
             }
         }
         for definition in &original_definitions {
             if !body_ids.contains(definition.id.as_str()) {
-                parent_commands.push(Command::RemoveDefinition {
-                    id: definition.id.clone(),
-                });
+                parent_commands.push(Command::RemoveDefinition { id: definition.id.clone() });
             }
         }
         self.apply_commands_scoped(&parent_commands, scope, None, Duration::ZERO)
@@ -908,7 +983,11 @@ impl Session {
         let structural = commands.iter().any(Command::is_structural);
         for command in commands {
             match apply_one_command(&mut self.present, command, &mut effects) {
-                Ok(group) => { if !group.is_empty() { applied_groups.push(group); } }
+                Ok(group) => {
+                    if !group.is_empty() {
+                        applied_groups.push(group);
+                    }
+                }
                 Err(error) => {
                     rollback_groups(&mut self.present, &applied_groups);
                     self.children = build_children(&self.present);
@@ -941,7 +1020,9 @@ impl Session {
     }
 
     pub fn undo(&mut self) -> Result<Option<Change>, SessionError> {
-        let Some(entry) = self.undo.pop() else { return Ok(None); };
+        let Some(entry) = self.undo.pop() else {
+            return Ok(None);
+        };
         let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let structural = entry.forward.iter().any(Command::is_structural);
@@ -950,7 +1031,9 @@ impl Session {
                 apply_one_command(&mut self.present, command, &mut effects)?;
             }
         }
-        if structural { self.children = build_children(&self.present); }
+        if structural {
+            self.children = build_children(&self.present);
+        }
         let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
         let dirty_nodes = identity_dirty_nodes(
             previous_hashes.as_deref(),
@@ -1015,20 +1098,14 @@ impl Session {
     }
 
     /// Undo only when the next entry is an edit of this definition body.
-    pub fn undo_definition(
-        &mut self,
-        definition_id: &str,
-    ) -> Result<Option<Change>, SessionError> {
+    pub fn undo_definition(&mut self, definition_id: &str) -> Result<Option<Change>, SessionError> {
         if !self.has_definition_undo(definition_id) {
             return Ok(None);
         }
         self.undo()
     }
 
-    pub fn redo_definition(
-        &mut self,
-        definition_id: &str,
-    ) -> Result<Option<Change>, SessionError> {
+    pub fn redo_definition(&mut self, definition_id: &str) -> Result<Option<Change>, SessionError> {
         if !self.has_definition_redo(definition_id) {
             return Ok(None);
         }
@@ -1036,14 +1113,18 @@ impl Session {
     }
 
     pub fn redo(&mut self) -> Result<Option<Change>, SessionError> {
-        let Some(entry) = self.redo.pop() else { return Ok(None); };
+        let Some(entry) = self.redo.pop() else {
+            return Ok(None);
+        };
         let previous_hashes = self.hashes.clone();
         let mut effects = ApplyEffects::default();
         let structural = entry.forward.iter().any(Command::is_structural);
         for command in &entry.forward {
             apply_one_command(&mut self.present, command, &mut effects)?;
         }
-        if structural { self.children = build_children(&self.present); }
+        if structural {
+            self.children = build_children(&self.present);
+        }
         let current_hashes = self.present.node_hashes_with_sources(&self.source_hashes);
         let dirty_nodes = identity_dirty_nodes(
             previous_hashes.as_deref(),
@@ -1057,11 +1138,17 @@ impl Session {
         self.revision += 1;
         Ok(Some(Change { revision: self.revision, dirty_nodes, changed: true }))
     }
-
 }
 
-fn find_node_mut<'a>(document: &'a mut GraphDocument, id: &str) -> Result<&'a mut GraphNode, SessionError> {
-    document.nodes.iter_mut().find(|node| node.id == id).ok_or_else(|| SessionError::MissingNode(id.to_string()))
+fn find_node_mut<'a>(
+    document: &'a mut GraphDocument,
+    id: &str,
+) -> Result<&'a mut GraphNode, SessionError> {
+    document
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == id)
+        .ok_or_else(|| SessionError::MissingNode(id.to_string()))
 }
 
 impl Command {
@@ -1080,17 +1167,31 @@ impl Command {
     }
 }
 
-fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &mut ApplyEffects) -> Result<Vec<Command>, SessionError> {
+fn apply_one_command(
+    document: &mut GraphDocument,
+    command: &Command,
+    effects: &mut ApplyEffects,
+) -> Result<Vec<Command>, SessionError> {
     let mut inverse = Vec::new();
     match command {
         Command::SetValue { node, field, value } => {
             let target = find_node_mut(document, node)?;
-            if !target.values.is_object() { target.values = serde_json::json!({}); }
+            if !target.values.is_object() {
+                target.values = serde_json::json!({});
+            }
             let previous = target.values.get(field).cloned();
-            if previous.as_ref() == Some(value) { return Ok(inverse); }
+            if previous.as_ref() == Some(value) {
+                return Ok(inverse);
+            }
             match previous {
-                Some(previous) => inverse.push(Command::SetValue { node: node.clone(), field: field.clone(), value: previous }),
-                None => inverse.push(Command::RemoveValue { node: node.clone(), field: field.clone() }),
+                Some(previous) => inverse.push(Command::SetValue {
+                    node: node.clone(),
+                    field: field.clone(),
+                    value: previous,
+                }),
+                None => {
+                    inverse.push(Command::RemoveValue { node: node.clone(), field: field.clone() })
+                }
             }
             target.values[field] = value.clone();
             effects.seeds.insert(node.clone());
@@ -1099,16 +1200,27 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
         Command::RemoveValue { node, field } => {
             let target = find_node_mut(document, node)?;
             if let Some(previous) = target.values.get(field).cloned() {
-                inverse.push(Command::SetValue { node: node.clone(), field: field.clone(), value: previous });
-                if let Some(map) = target.values.as_object_mut() { map.remove(field); }
+                inverse.push(Command::SetValue {
+                    node: node.clone(),
+                    field: field.clone(),
+                    value: previous,
+                });
+                if let Some(map) = target.values.as_object_mut() {
+                    map.remove(field);
+                }
                 effects.seeds.insert(node.clone());
                 effects.changed = true;
             }
         }
         Command::SetExpressions { node, values } => {
             let target = find_node_mut(document, node)?;
-            if &target.expressions == values { return Ok(inverse); }
-            inverse.push(Command::SetExpressions { node: node.clone(), values: target.expressions.clone() });
+            if &target.expressions == values {
+                return Ok(inverse);
+            }
+            inverse.push(Command::SetExpressions {
+                node: node.clone(),
+                values: target.expressions.clone(),
+            });
             target.expressions = values.clone();
             // Expressions are presentation/source metadata, not geometry
             // content: do not seed a geometry invalidation for this command.
@@ -1116,15 +1228,27 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
         }
         Command::SetNodeType { node, node_type } => {
             let target = find_node_mut(document, node)?;
-            if &target.node_type == node_type { return Ok(inverse); }
-            inverse.push(Command::SetNodeType { node: node.clone(), node_type: target.node_type.clone() });
+            if &target.node_type == node_type {
+                return Ok(inverse);
+            }
+            inverse.push(Command::SetNodeType {
+                node: node.clone(),
+                node_type: target.node_type.clone(),
+            });
             if !target.expressions.is_empty() {
-                inverse.push(Command::SetExpressions { node: node.clone(), values: target.expressions.clone() });
+                inverse.push(Command::SetExpressions {
+                    node: node.clone(),
+                    values: target.expressions.clone(),
+                });
                 target.expressions.clear();
             }
             if let Some(values) = target.values.as_object() {
                 for (field, value) in values {
-                    inverse.push(Command::SetValue { node: node.clone(), field: field.clone(), value: value.clone() });
+                    inverse.push(Command::SetValue {
+                        node: node.clone(),
+                        field: field.clone(),
+                        value: value.clone(),
+                    });
                 }
             }
             target.node_type = node_type.clone();
@@ -1135,86 +1259,128 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
         }
         Command::SetPosition { node, x, y } => {
             let target = find_node_mut(document, node)?;
-            if target.x == *x && target.y == *y { return Ok(inverse); }
+            if target.x == *x && target.y == *y {
+                return Ok(inverse);
+            }
             inverse.push(Command::SetPosition { node: node.clone(), x: target.x, y: target.y });
-            target.x = *x; target.y = *y;
+            target.x = *x;
+            target.y = *y;
             effects.changed = true;
         }
         Command::SetSuppressed { node, suppressed } => {
             let target = find_node_mut(document, node)?;
-            if target.suppressed == *suppressed { return Ok(inverse); }
-            inverse.push(Command::SetSuppressed { node: node.clone(), suppressed: target.suppressed });
+            if target.suppressed == *suppressed {
+                return Ok(inverse);
+            }
+            inverse
+                .push(Command::SetSuppressed { node: node.clone(), suppressed: target.suppressed });
             target.suppressed = *suppressed;
             effects.seeds.insert(node.clone());
             effects.changed = true;
         }
         Command::Connect { from, to, input, out } => {
-            if !document.nodes.iter().any(|node| &node.id == from) { return Err(SessionError::MissingNode(from.clone())); }
-            if !document.nodes.iter().any(|node| &node.id == to) { return Err(SessionError::MissingNode(to.clone())); }
+            if !document.nodes.iter().any(|node| &node.id == from) {
+                return Err(SessionError::MissingNode(from.clone()));
+            }
+            if !document.nodes.iter().any(|node| &node.id == to) {
+                return Err(SessionError::MissingNode(to.clone()));
+            }
             let input = if input.is_empty() { "shape".to_string() } else { input.clone() };
             let out = if out.is_empty() { "shape".to_string() } else { out.clone() };
             // A Combine is a collection: its single Shape port accepts every connected
             // Part. Every other input keeps the usual one-cable-per-port behaviour.
-            let collects_many = document
-                .nodes
-                .iter()
-                .find(|node| &node.id == to)
-                .is_some_and(|node| {
+            let collects_many =
+                document.nodes.iter().find(|node| &node.id == to).is_some_and(|node| {
                     node.node_type == "combine"
                         || (node.node_type == "surfaceloft" && input == "sections")
                 });
             if collects_many {
-                if document.connections.iter().any(|link| &link.from == from && &link.to == to && link.input == input && link.out == out) {
+                if document.connections.iter().any(|link| {
+                    &link.from == from && &link.to == to && link.input == input && link.out == out
+                }) {
                     return Ok(inverse);
                 }
-                inverse.push(Command::Disconnect { from: from.clone(), to: to.clone(), input: input.clone() });
-                document.connections.push(GraphConnection { from: from.clone(), to: to.clone(), input, out });
-            } else if let Some(existing) = document.connections.iter_mut().find(|link| &link.to == to && link.input == input) {
-                if &existing.from == from && existing.out == out { return Ok(inverse); }
-                inverse.push(Command::Connect { from: existing.from.clone(), to: to.clone(), input: input.clone(), out: existing.out.clone() });
-                existing.from = from.clone(); existing.out = out;
+                inverse.push(Command::Disconnect {
+                    from: from.clone(),
+                    to: to.clone(),
+                    input: input.clone(),
+                });
+                document.connections.push(GraphConnection {
+                    from: from.clone(),
+                    to: to.clone(),
+                    input,
+                    out,
+                });
+            } else if let Some(existing) =
+                document.connections.iter_mut().find(|link| &link.to == to && link.input == input)
+            {
+                if &existing.from == from && existing.out == out {
+                    return Ok(inverse);
+                }
+                inverse.push(Command::Connect {
+                    from: existing.from.clone(),
+                    to: to.clone(),
+                    input: input.clone(),
+                    out: existing.out.clone(),
+                });
+                existing.from = from.clone();
+                existing.out = out;
             } else {
-                inverse.push(Command::Disconnect { from: from.clone(), to: to.clone(), input: input.clone() });
-                document.connections.push(GraphConnection { from: from.clone(), to: to.clone(), input, out });
+                inverse.push(Command::Disconnect {
+                    from: from.clone(),
+                    to: to.clone(),
+                    input: input.clone(),
+                });
+                document.connections.push(GraphConnection {
+                    from: from.clone(),
+                    to: to.clone(),
+                    input,
+                    out,
+                });
             }
             effects.seeds.insert(to.clone());
             effects.changed = true;
         }
         Command::Disconnect { from, to, input } => {
             let input = if input.is_empty() { "shape".to_string() } else { input.clone() };
-            let removed: Vec<GraphConnection> = document.connections.iter().filter(|link| &link.from == from && &link.to == to && link.input == input).cloned().collect();
-            if removed.is_empty() { return Ok(inverse); }
-            document.connections.retain(|link| !(&link.from == from && &link.to == to && link.input == input));
-            for link in removed { inverse.push(Command::Connect { from: link.from, to: link.to, input: link.input, out: link.out }); }
+            let removed: Vec<GraphConnection> = document
+                .connections
+                .iter()
+                .filter(|link| &link.from == from && &link.to == to && link.input == input)
+                .cloned()
+                .collect();
+            if removed.is_empty() {
+                return Ok(inverse);
+            }
+            document
+                .connections
+                .retain(|link| !(&link.from == from && &link.to == to && link.input == input));
+            for link in removed {
+                inverse.push(Command::Connect {
+                    from: link.from,
+                    to: link.to,
+                    input: link.input,
+                    out: link.out,
+                });
+            }
             effects.seeds.insert(to.clone());
             effects.changed = true;
         }
         Command::AddDefinition { definition } => {
-            if document
-                .definitions
-                .iter()
-                .any(|candidate| candidate.id == definition.id)
-            {
+            if document.definitions.iter().any(|candidate| candidate.id == definition.id) {
                 return Err(SessionError::InvalidInput(format!(
                     "Duplicate graph definition {}.",
                     definition.id
                 )));
             }
-            inverse.push(Command::RemoveDefinition {
-                id: definition.id.clone(),
-            });
+            inverse.push(Command::RemoveDefinition { id: definition.id.clone() });
             document.definitions.push(definition.clone());
             effects.changed = true;
         }
         Command::RemoveDefinition { id } => {
-            let Some(index) = document
-                .definitions
-                .iter()
-                .position(|candidate| &candidate.id == id)
+            let Some(index) = document.definitions.iter().position(|candidate| &candidate.id == id)
             else {
-                return Err(SessionError::InvalidInput(format!(
-                    "Missing graph definition {id}."
-                )));
+                return Err(SessionError::InvalidInput(format!("Missing graph definition {id}.")));
             };
             let definition = document.definitions.remove(index);
             inverse.push(Command::AddDefinition { definition });
@@ -1227,10 +1393,8 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
             effects.changed = true;
         }
         Command::SetDefinition { definition } => {
-            let Some(index) = document
-                .definitions
-                .iter()
-                .position(|candidate| candidate.id == definition.id)
+            let Some(index) =
+                document.definitions.iter().position(|candidate| candidate.id == definition.id)
             else {
                 return Err(SessionError::InvalidInput(format!(
                     "Missing graph definition {}.",
@@ -1245,7 +1409,9 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
         Command::AddNode { node } => {
             let mut node = node.clone();
             defaults::canonicalize_node(&mut node);
-            if document.nodes.iter().any(|item| item.id == node.id) { return Err(SessionError::DuplicateNode(node.id.clone())); }
+            if document.nodes.iter().any(|item| item.id == node.id) {
+                return Err(SessionError::DuplicateNode(node.id.clone()));
+            }
             let node_id = node.id.clone();
             inverse.push(Command::RemoveNode { id: node_id.clone() });
             document.nodes.push(node);
@@ -1253,20 +1419,36 @@ fn apply_one_command(document: &mut GraphDocument, command: &Command, effects: &
             effects.changed = true;
         }
         Command::RemoveNode { id } => {
-            let Some(index) = document.nodes.iter().position(|node| &node.id == id) else { return Err(SessionError::MissingNode(id.clone())); };
+            let Some(index) = document.nodes.iter().position(|node| &node.id == id) else {
+                return Err(SessionError::MissingNode(id.clone()));
+            };
             if groups::is_graph_interface_node(&document.nodes[index]) {
                 return Err(SessionError::InvalidInput(
                     "Graph Input/Output nodes cannot be deleted.".into(),
                 ));
             }
-            let incident: Vec<GraphConnection> = document.connections.iter().filter(|link| &link.from == id || &link.to == id).cloned().collect();
+            let incident: Vec<GraphConnection> = document
+                .connections
+                .iter()
+                .filter(|link| &link.from == id || &link.to == id)
+                .cloned()
+                .collect();
             for link in &incident {
-                if &link.to != id { effects.seeds.insert(link.to.clone()); }
+                if &link.to != id {
+                    effects.seeds.insert(link.to.clone());
+                }
             }
             let node = document.nodes.remove(index);
             document.connections.retain(|link| &link.from != id && &link.to != id);
             inverse.push(Command::AddNode { node });
-            for link in incident { inverse.push(Command::Connect { from: link.from, to: link.to, input: link.input, out: link.out }); }
+            for link in incident {
+                inverse.push(Command::Connect {
+                    from: link.from,
+                    to: link.to,
+                    input: link.input,
+                    out: link.out,
+                });
+            }
             effects.changed = true;
         }
     }
@@ -1324,28 +1506,41 @@ fn identity_dirty_nodes(
     }
 }
 
-fn dirty_nodes_from_seeds(children: &BTreeMap<String, Vec<String>>, seeds: &BTreeSet<String>) -> Vec<String> {
-    if seeds.is_empty() { return Vec::new(); }
+fn dirty_nodes_from_seeds(
+    children: &BTreeMap<String, Vec<String>>,
+    seeds: &BTreeSet<String>,
+) -> Vec<String> {
+    if seeds.is_empty() {
+        return Vec::new();
+    }
     let mut dirty: BTreeSet<String> = seeds.clone();
     let mut queue: Vec<&str> = seeds.iter().map(String::as_str).collect();
     while let Some(current) = queue.pop() {
         if let Some(consumers) = children.get(current) {
             for consumer in consumers {
-                if dirty.insert(consumer.clone()) { queue.push(consumer); }
+                if dirty.insert(consumer.clone()) {
+                    queue.push(consumer);
+                }
             }
         }
     }
     dirty.into_iter().collect()
 }
 
-
-struct Hash128 { a: u64, b: u64 }
+struct Hash128 {
+    a: u64,
+    b: u64,
+}
 impl Hash128 {
-    fn new() -> Self { Self { a: 0xcbf29ce484222325, b: 0x84222325cbf29ce4 } }
+    fn new() -> Self {
+        Self { a: 0xcbf29ce484222325, b: 0x84222325cbf29ce4 }
+    }
     fn write(&mut self, bytes: &[u8]) {
         for byte in bytes {
-            self.a ^= u64::from(*byte); self.a = self.a.wrapping_mul(0x100000001b3);
-            self.b ^= u64::from(*byte); self.b = self.b.wrapping_mul(0x100000001b3).rotate_left(7);
+            self.a ^= u64::from(*byte);
+            self.a = self.a.wrapping_mul(0x100000001b3);
+            self.b ^= u64::from(*byte);
+            self.b = self.b.wrapping_mul(0x100000001b3).rotate_left(7);
         }
     }
     /// Write one variable-length field as an 8-byte little-endian length
@@ -1361,21 +1556,38 @@ impl Hash128 {
         self.write(&(bytes.len() as u64).to_le_bytes());
         self.write(bytes);
     }
-    fn finish(self) -> ContentHash { ContentHash((u128::from(self.a) << 64) | u128::from(self.b)) }
+    fn finish(self) -> ContentHash {
+        ContentHash((u128::from(self.a) << 64) | u128::from(self.b))
+    }
 }
 
 fn canonical_json(value: &Value, out: &mut Hash128) {
     match value {
         Value::Null => out.write(b"n"),
         Value::Bool(v) => out.write(if *v { b"t" } else { b"f" }),
-        Value::Number(v) => { out.write(b"#"); out.write_framed(v.to_string().as_bytes()); }
-        Value::String(v) => { out.write(b"s"); out.write_framed(v.as_bytes()); }
-        Value::Array(values) => { out.write(b"["); for value in values { canonical_json(value, out); } out.write(b"]"); }
+        Value::Number(v) => {
+            out.write(b"#");
+            out.write_framed(v.to_string().as_bytes());
+        }
+        Value::String(v) => {
+            out.write(b"s");
+            out.write_framed(v.as_bytes());
+        }
+        Value::Array(values) => {
+            out.write(b"[");
+            for value in values {
+                canonical_json(value, out);
+            }
+            out.write(b"]");
+        }
         Value::Object(map) => {
             out.write(b"{");
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort_unstable();
-            for key in keys { out.write_framed(key.as_bytes()); canonical_json(&map[key], out); }
+            for key in keys {
+                out.write_framed(key.as_bytes());
+                canonical_json(&map[key], out);
+            }
             out.write(b"}");
         }
     }
@@ -1386,7 +1598,15 @@ mod tests {
     use super::*;
 
     fn node(id: &str, node_type: &str, values: Value, x: f64) -> GraphNode {
-        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values, suppressed: false, x, y: 0.0 }
+        GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values,
+            suppressed: false,
+            x,
+            y: 0.0,
+        }
     }
 
     fn document() -> GraphDocument {
@@ -1398,14 +1618,29 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                node("a", "primitive", serde_json::json!({"primitiveType": "box", "length": 10}), 0.0),
-                node("b", "translate", serde_json::json!({"x": 5}), 200.0),
-                node("c", "boolean", serde_json::json!({"mode": "union"}), 400.0),
-            ],
+                    node(
+                        "a",
+                        "primitive",
+                        serde_json::json!({"primitiveType": "box", "length": 10}),
+                        0.0,
+                    ),
+                    node("b", "translate", serde_json::json!({"x": 5}), 200.0),
+                    node("c", "boolean", serde_json::json!({"mode": "union"}), 400.0),
+                ],
                 connections: vec![
-                GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() },
-                GraphConnection { from: "b".into(), to: "c".into(), input: "a".into(), out: "shape".into() },
-            ],
+                    GraphConnection {
+                        from: "a".into(),
+                        to: "b".into(),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    },
+                    GraphConnection {
+                        from: "b".into(),
+                        to: "c".into(),
+                        input: "a".into(),
+                        out: "shape".into(),
+                    },
+                ],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -1416,7 +1651,9 @@ mod tests {
     #[test]
     fn layout_only_edits_do_not_dirty_nodes() {
         let mut session = Session::new(document());
-        let change = session.apply_commands(&[Command::SetPosition { node: "b".into(), x: 900.0, y: 0.0 }]).expect("apply");
+        let change = session
+            .apply_commands(&[Command::SetPosition { node: "b".into(), x: 900.0, y: 0.0 }])
+            .expect("apply");
         assert!(change.changed);
         assert!(change.dirty_nodes.is_empty());
     }
@@ -1424,7 +1661,13 @@ mod tests {
     #[test]
     fn value_edits_dirty_node_and_downstream_only() {
         let mut session = Session::new(document());
-        let change = session.apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: serde_json::json!(12) }]).expect("apply");
+        let change = session
+            .apply_commands(&[Command::SetValue {
+                node: "b".into(),
+                field: "x".into(),
+                value: serde_json::json!(12),
+            }])
+            .expect("apply");
         assert_eq!(change.dirty_nodes, vec!["b", "c"]);
     }
 
@@ -1433,7 +1676,13 @@ mod tests {
         let mut graph = document();
         graph.nodes.push(node("d", "primitive", serde_json::json!({"primitiveType": "box"}), 0.0));
         let mut session = Session::new(graph);
-        let change = session.apply_commands(&[Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(20) }]).expect("apply");
+        let change = session
+            .apply_commands(&[Command::SetValue {
+                node: "a".into(),
+                field: "length".into(),
+                value: serde_json::json!(20),
+            }])
+            .expect("apply");
         assert_eq!(change.dirty_nodes, vec!["a", "b", "c"]);
         assert!(!change.dirty_nodes.contains(&"d".to_string()));
     }
@@ -1441,7 +1690,14 @@ mod tests {
     #[test]
     fn connection_changes_dirty_the_reconnected_consumer() {
         let mut session = Session::new(document());
-        let change = session.apply_commands(&[Command::Connect { from: "a".into(), to: "c".into(), input: "a".into(), out: "shape".into() }]).expect("apply");
+        let change = session
+            .apply_commands(&[Command::Connect {
+                from: "a".into(),
+                to: "c".into(),
+                input: "a".into(),
+                out: "shape".into(),
+            }])
+            .expect("apply");
         assert_eq!(change.dirty_nodes, vec!["c"]);
     }
 
@@ -1450,9 +1706,24 @@ mod tests {
         let mut graph = document();
         graph.nodes.push(node("part", "combine", serde_json::json!({}), 0.0));
         let mut session = Session::new(graph);
-        session.apply_commands(&[Command::Connect { from: "a".into(), to: "part".into(), input: "shape".into(), out: "shape".into() }]).expect("first part");
-        session.apply_commands(&[Command::Connect { from: "b".into(), to: "part".into(), input: "shape".into(), out: "shape".into() }]).expect("second part");
-        let links: Vec<_> = session.document().connections.iter().filter(|link| link.to == "part").collect();
+        session
+            .apply_commands(&[Command::Connect {
+                from: "a".into(),
+                to: "part".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            }])
+            .expect("first part");
+        session
+            .apply_commands(&[Command::Connect {
+                from: "b".into(),
+                to: "part".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            }])
+            .expect("second part");
+        let links: Vec<_> =
+            session.document().connections.iter().filter(|link| link.to == "part").collect();
         assert_eq!(links.len(), 2, "{links:?}");
     }
 
@@ -1469,16 +1740,24 @@ mod tests {
     #[test]
     fn value_key_order_is_canonical() {
         let mut left = document();
-        left.nodes[0].values = serde_json::json!({"primitiveType": "box", "length": 10, "width": 5});
+        left.nodes[0].values =
+            serde_json::json!({"primitiveType": "box", "length": 10, "width": 5});
         let mut right = document();
-        right.nodes[0].values = serde_json::json!({"width": 5, "length": 10, "primitiveType": "box"});
+        right.nodes[0].values =
+            serde_json::json!({"width": 5, "length": 10, "primitiveType": "box"});
         assert_eq!(left.node_hashes().expect("hashes"), right.node_hashes().expect("hashes"));
     }
 
     #[test]
     fn undo_restores_hashes_and_reports_changed_subgraph() {
         let mut session = Session::new(document());
-        session.apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: serde_json::json!(12) }]).expect("edit");
+        session
+            .apply_commands(&[Command::SetValue {
+                node: "b".into(),
+                field: "x".into(),
+                value: serde_json::json!(12),
+            }])
+            .expect("edit");
         let undo = session.undo().expect("undo").expect("change");
         assert_eq!(undo.dirty_nodes, vec!["b", "c"]);
         let redo = session.redo().expect("redo").expect("change");
@@ -1488,7 +1767,12 @@ mod tests {
     #[test]
     fn cycles_are_rejected() {
         let mut graph = document();
-        graph.connections.push(GraphConnection { from: "c".into(), to: "a".into(), input: "shape".into(), out: "shape".into() });
+        graph.connections.push(GraphConnection {
+            from: "c".into(),
+            to: "a".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
         assert_eq!(graph.node_hashes(), Err(SessionError::Cycle));
     }
 
@@ -1498,10 +1782,19 @@ mod tests {
         // A pre-existing cycle makes `node_hashes` unavailable both before and
         // after a non-structural edit, so the dirty set must fall back to the
         // seed closure instead of failing the transaction.
-        graph.connections.push(GraphConnection { from: "c".into(), to: "a".into(), input: "shape".into(), out: "shape".into() });
+        graph.connections.push(GraphConnection {
+            from: "c".into(),
+            to: "a".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
         let mut session = Session::new(graph);
         let change = session
-            .apply_commands(&[Command::SetValue { node: "b".into(), field: "x".into(), value: serde_json::json!(12) }])
+            .apply_commands(&[Command::SetValue {
+                node: "b".into(),
+                field: "x".into(),
+                value: serde_json::json!(12),
+            }])
             .expect("edit on a malformed document");
         assert!(change.changed);
         assert_eq!(change.dirty_nodes, vec!["a", "b", "c"]);
@@ -1514,7 +1807,15 @@ mod transaction_tests {
     use serde_json::json;
 
     fn node(id: &str) -> GraphNode {
-        GraphNode { expressions: Default::default(), id: id.into(), node_type: "primitive".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: "primitive".into(),
+            values: json!({"primitiveType":"box"}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        }
     }
 
     fn document() -> GraphDocument {
@@ -1540,7 +1841,12 @@ mod transaction_tests {
         let before = session.document().clone();
         let result = session.apply_commands(&[
             Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) },
-            Command::Connect { from: "missing".into(), to: "c".into(), input: "b".into(), out: "shape".into() },
+            Command::Connect {
+                from: "missing".into(),
+                to: "c".into(),
+                input: "b".into(),
+                out: "shape".into(),
+            },
         ]);
         assert!(result.is_err());
         assert_eq!(session.document(), &before);
@@ -1551,7 +1857,8 @@ mod transaction_tests {
     #[test]
     fn graph_document_round_trips_root_and_definitions() {
         let mut document = GraphDocument::new("definitions");
-        document.nodes.push(GraphNode { expressions: Default::default(),
+        document.nodes.push(GraphNode {
+            expressions: Default::default(),
             id: "root_box".into(),
             node_type: "primitive".into(),
             values: serde_json::json!({"primitiveType": "box"}),
@@ -1564,7 +1871,8 @@ mod transaction_tests {
             name: "Feature".into(),
             kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
                 id: "feature_box".into(),
                 node_type: "primitive".into(),
                 values: serde_json::json!({"primitiveType": "box"}),
@@ -1618,22 +1926,49 @@ mod transaction_tests {
     fn definition_commands_remap_colliding_nested_definition_ids() {
         let mut document = GraphDocument::new("nested-collision");
         document.definitions.push(crate::GraphDefinition {
-            id: "graph_definition2".into(), name: "Graph 2".into(), kind: "graph".into(),
-            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+            id: "graph_definition2".into(),
+            name: "Graph 2".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
         });
         document.definitions.push(crate::GraphDefinition {
-            id: "outer".into(), name: "Outer".into(), kind: "graph".into(),
-            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+            id: "outer".into(),
+            name: "Outer".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
         });
         let mut session = Session::new(document);
         let colliding = crate::GraphDefinition {
-            id: "graph_definition2".into(), name: "Graph 2".into(), kind: "graph".into(),
-            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+            id: "graph_definition2".into(),
+            name: "Graph 2".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
         };
-        session.apply_definition_commands("outer", &[
-            Command::AddDefinition { definition: colliding },
-            Command::AddNode { node: GraphNode { expressions: Default::default(), id: "nested".into(), node_type: "graph".into(), values: serde_json::json!({"definition":"graph_definition2"}), suppressed: false, x: 0.0, y: 0.0 } },
-        ]).expect("nested collision");
+        session
+            .apply_definition_commands(
+                "outer",
+                &[
+                    Command::AddDefinition { definition: colliding },
+                    Command::AddNode {
+                        node: GraphNode {
+                            expressions: Default::default(),
+                            id: "nested".into(),
+                            node_type: "graph".into(),
+                            values: serde_json::json!({"definition":"graph_definition2"}),
+                            suppressed: false,
+                            x: 0.0,
+                            y: 0.0,
+                        },
+                    },
+                ],
+            )
+            .expect("nested collision");
         let nested = &session.document().definition("outer").unwrap().nodes[0];
         let id = nested.values["definition"].as_str().unwrap();
         assert_ne!(id, "graph_definition2");
@@ -1645,23 +1980,49 @@ mod transaction_tests {
     fn definition_commands_can_create_nested_definitions() {
         let mut document = GraphDocument::new("nested-create");
         document.definitions.push(crate::GraphDefinition {
-            id: "outer".into(), name: "Outer".into(), kind: "graph".into(),
-            interface: GraphInterface::default(), nodes: Vec::new(), connections: Vec::new(),
+            id: "outer".into(),
+            name: "Outer".into(),
+            kind: "graph".into(),
+            interface: GraphInterface::default(),
+            nodes: Vec::new(),
+            connections: Vec::new(),
         });
         let mut session = Session::new(document);
         let inner = crate::GraphDefinition {
-            id: "inner".into(), name: "Inner".into(), kind: "graph".into(),
+            id: "inner".into(),
+            name: "Inner".into(),
+            kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: serde_json::json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 }],
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
+                id: "box".into(),
+                node_type: "solid".into(),
+                values: serde_json::json!({"primitiveType":"box"}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
             connections: Vec::new(),
         };
-        session.apply_definition_commands(
-            "outer",
-            &[
-                Command::AddDefinition { definition: inner },
-                Command::AddNode { node: GraphNode { expressions: Default::default(), id: "nested".into(), node_type: "graph".into(), values: serde_json::json!({"definition":"inner"}), suppressed: false, x: 0.0, y: 0.0 } },
-            ],
-        ).expect("nested create");
+        session
+            .apply_definition_commands(
+                "outer",
+                &[
+                    Command::AddDefinition { definition: inner },
+                    Command::AddNode {
+                        node: GraphNode {
+                            expressions: Default::default(),
+                            id: "nested".into(),
+                            node_type: "graph".into(),
+                            values: serde_json::json!({"definition":"inner"}),
+                            suppressed: false,
+                            x: 0.0,
+                            y: 0.0,
+                        },
+                    },
+                ],
+            )
+            .expect("nested create");
         assert!(session.document().definition("inner").is_some());
         assert_eq!(session.document().definition("outer").unwrap().nodes[0].node_type, "graph");
         session.undo().expect("undo").expect("change");
@@ -1677,7 +2038,8 @@ mod transaction_tests {
             name: "Feature".into(),
             kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
                 id: "box".into(),
                 node_type: "solid".into(),
                 values: serde_json::json!({"primitiveType":"box"}),
@@ -1698,15 +2060,24 @@ mod transaction_tests {
                 }],
             )
             .expect("definition edit");
-        assert_eq!(session.document().definition("feature").unwrap().nodes[0].values["length"], 20.0);
+        assert_eq!(
+            session.document().definition("feature").unwrap().nodes[0].values["length"],
+            20.0
+        );
         session.undo().expect("undo").expect("change");
-        assert!(session.document().definition("feature").unwrap().nodes[0].values.get("length").is_none());
+        assert!(
+            session.document().definition("feature").unwrap().nodes[0]
+                .values
+                .get("length")
+                .is_none()
+        );
     }
 
     #[test]
     fn definition_undo_does_not_consume_root_history() {
         let mut document = GraphDocument::new("definition-history");
-        document.root.nodes.push(GraphNode { expressions: Default::default(),
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
             id: "root-node".into(),
             node_type: "solid".into(),
             values: serde_json::json!({"primitiveType":"box"}),
@@ -1719,7 +2090,8 @@ mod transaction_tests {
             name: "Feature".into(),
             kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
                 id: "box".into(),
                 node_type: "solid".into(),
                 values: serde_json::json!({"primitiveType":"box"}),
@@ -1749,7 +2121,12 @@ mod transaction_tests {
             .expect("definition edit");
         assert!(!session.has_root_undo(), "definition edit blocks root undo first");
         session.undo_definition("feature").expect("undo def").expect("change");
-        assert!(session.document().definition("feature").unwrap().nodes[0].values.get("length").is_none());
+        assert!(
+            session.document().definition("feature").unwrap().nodes[0]
+                .values
+                .get("length")
+                .is_none()
+        );
         assert_eq!(session.document().nodes[0].values["length"], 5.0);
         assert!(session.has_root_undo(), "root undo becomes available after the graph edit");
         assert!(session.undo_definition("feature").expect("no-op").is_none());
@@ -1768,9 +2145,7 @@ mod transaction_tests {
             nodes: Vec::new(),
             connections: Vec::new(),
         };
-        session
-            .apply_commands(&[Command::AddDefinition { definition }])
-            .expect("add definition");
+        session.apply_commands(&[Command::AddDefinition { definition }]).expect("add definition");
         assert!(session.document().definition("feature").is_some());
         session.undo().expect("undo").expect("change");
         assert!(session.document().definition("feature").is_none());
@@ -1785,21 +2160,49 @@ mod transaction_tests {
     #[test]
     fn scoped_history_keeps_tab_edits_separate() {
         let mut document = GraphDocument::new("scoped-tabs");
-        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "a".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
-        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "b".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "a".into(),
+            node_type: "solid".into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "b".into(),
+            node_type: "solid".into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
         let mut session = Session::new(document);
-        session.apply_commands_scoped(
-            &[Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(1.0) }],
-            "view:1",
-            None,
-            Duration::ZERO,
-        ).unwrap();
-        session.apply_commands_scoped(
-            &[Command::SetValue { node: "b".into(), field: "length".into(), value: serde_json::json!(2.0) }],
-            "view:2",
-            None,
-            Duration::ZERO,
-        ).unwrap();
+        session
+            .apply_commands_scoped(
+                &[Command::SetValue {
+                    node: "a".into(),
+                    field: "length".into(),
+                    value: serde_json::json!(1.0),
+                }],
+                "view:1",
+                None,
+                Duration::ZERO,
+            )
+            .unwrap();
+        session
+            .apply_commands_scoped(
+                &[Command::SetValue {
+                    node: "b".into(),
+                    field: "length".into(),
+                    value: serde_json::json!(2.0),
+                }],
+                "view:2",
+                None,
+                Duration::ZERO,
+            )
+            .unwrap();
         assert!(session.undo_scope("view:1").unwrap().is_none(), "another tab's edit is on top");
         assert!(session.undo_scope("view:2").unwrap().is_some());
         assert!(session.undo_scope("view:1").unwrap().is_some());
@@ -1809,26 +2212,67 @@ mod transaction_tests {
     #[test]
     fn interleaved_root_and_definition_history_is_scoped() {
         let mut document = GraphDocument::new("interleaved");
-        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "root".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "root".into(),
+            node_type: "solid".into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
         document.definitions.push(crate::GraphDefinition {
-            id: "feature".into(), name: "Feature".into(), kind: "graph".into(),
+            id: "feature".into(),
+            name: "Feature".into(),
+            kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }],
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
+                id: "box".into(),
+                node_type: "solid".into(),
+                values: serde_json::json!({}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            }],
             connections: Vec::new(),
         });
         let mut session = Session::new(document);
-        session.apply_commands_scoped(
-            &[Command::SetValue { node: "root".into(), field: "rootEdit".into(), value: serde_json::json!(1) }],
-            "view:1", None, Duration::ZERO,
-        ).unwrap();
-        session.apply_definition_commands_scoped(
-            "feature", "definition:feature:view:2",
-            &[Command::SetValue { node: "box".into(), field: "defEdit".into(), value: serde_json::json!(2) }],
-        ).unwrap();
-        session.apply_commands_scoped(
-            &[Command::SetValue { node: "root".into(), field: "rootEdit2".into(), value: serde_json::json!(3) }],
-            "view:1", None, Duration::ZERO,
-        ).unwrap();
+        session
+            .apply_commands_scoped(
+                &[Command::SetValue {
+                    node: "root".into(),
+                    field: "rootEdit".into(),
+                    value: serde_json::json!(1),
+                }],
+                "view:1",
+                None,
+                Duration::ZERO,
+            )
+            .unwrap();
+        session
+            .apply_definition_commands_scoped(
+                "feature",
+                "definition:feature:view:2",
+                &[Command::SetValue {
+                    node: "box".into(),
+                    field: "defEdit".into(),
+                    value: serde_json::json!(2),
+                }],
+            )
+            .unwrap();
+        session
+            .apply_commands_scoped(
+                &[Command::SetValue {
+                    node: "root".into(),
+                    field: "rootEdit2".into(),
+                    value: serde_json::json!(3),
+                }],
+                "view:1",
+                None,
+                Duration::ZERO,
+            )
+            .unwrap();
         assert!(session.undo_scope("view:1").unwrap().is_some());
         assert!(session.undo_scope("view:1").unwrap().is_none(), "definition edit is on top");
         assert!(session.undo_scope("definition:feature:view:2").unwrap().is_some());
@@ -1838,12 +2282,32 @@ mod transaction_tests {
     #[test]
     fn coalescing_does_not_cross_view_scopes() {
         let mut document = GraphDocument::new("scope-coalesce");
-        document.root.nodes.push(GraphNode { expressions: Default::default(), id: "a".into(), node_type: "solid".into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 });
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
+            id: "a".into(),
+            node_type: "solid".into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        });
         let mut session = Session::new(document);
-        let command = Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(1.0) };
-        session.apply_commands_scoped(&[command], "view:1", Some("edit"), Duration::from_secs(1)).unwrap();
-        let command = Command::SetValue { node: "a".into(), field: "length".into(), value: serde_json::json!(2.0) };
-        session.apply_commands_scoped(&[command], "view:2", Some("edit"), Duration::from_secs(1)).unwrap();
+        let command = Command::SetValue {
+            node: "a".into(),
+            field: "length".into(),
+            value: serde_json::json!(1.0),
+        };
+        session
+            .apply_commands_scoped(&[command], "view:1", Some("edit"), Duration::from_secs(1))
+            .unwrap();
+        let command = Command::SetValue {
+            node: "a".into(),
+            field: "length".into(),
+            value: serde_json::json!(2.0),
+        };
+        session
+            .apply_commands_scoped(&[command], "view:2", Some("edit"), Duration::from_secs(1))
+            .unwrap();
         assert!(session.undo_scope("view:2").unwrap().is_some());
         assert_eq!(session.document().nodes[0].values["length"], 1.0);
         assert!(session.undo_scope("view:1").unwrap().is_some());
@@ -1852,7 +2316,8 @@ mod transaction_tests {
     #[test]
     fn set_definition_updates_hash_and_undoes() {
         let mut document = GraphDocument::new("definition-command");
-        document.root.nodes.push(GraphNode { expressions: Default::default(),
+        document.root.nodes.push(GraphNode {
+            expressions: Default::default(),
             id: "g".into(),
             node_type: "graph".into(),
             values: serde_json::json!({"definition":"feature"}),
@@ -1865,7 +2330,8 @@ mod transaction_tests {
             name: "Feature".into(),
             kind: "graph".into(),
             interface: GraphInterface::default(),
-            nodes: vec![GraphNode { expressions: Default::default(),
+            nodes: vec![GraphNode {
+                expressions: Default::default(),
                 id: "box".into(),
                 node_type: "solid".into(),
                 values: serde_json::json!({"primitiveType":"box"}),
@@ -1915,7 +2381,8 @@ mod transaction_tests {
         document.definitions[0].name = "Renamed".into();
         let renamed = document.node_hashes().expect("renamed hashes")["g"];
         assert_eq!(moved, renamed, "definition names must not dirty geometry");
-        document.definitions[0].nodes[0].values = serde_json::json!({"primitiveType": "box", "length": 20.0});
+        document.definitions[0].nodes[0].values =
+            serde_json::json!({"primitiveType": "box", "length": 20.0});
         let changed = document.node_hashes().expect("changed hashes")["g"];
         assert_ne!(renamed, changed);
     }
@@ -1923,9 +2390,15 @@ mod transaction_tests {
     #[test]
     fn removing_a_node_dirties_its_consumers() {
         let mut graph = document();
-        graph.connections.push(GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() });
+        graph.connections.push(GraphConnection {
+            from: "a".into(),
+            to: "b".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        });
         let mut session = Session::new(graph);
-        let change = session.apply_commands(&[Command::RemoveNode { id: "a".into() }]).expect("remove");
+        let change =
+            session.apply_commands(&[Command::RemoveNode { id: "a".into() }]).expect("remove");
         assert_eq!(change.dirty_nodes, vec!["b"]);
         let undo = session.undo().expect("undo").expect("entry");
         assert_eq!(undo.dirty_nodes, vec!["a", "b"]);
@@ -1939,7 +2412,8 @@ mod transaction_tests {
             ("b", "sketch", json!({})),
             ("c", "surfaceloft", json!({"sections": []})),
         ] {
-            graph.nodes.push(GraphNode { expressions: Default::default(),
+            graph.nodes.push(GraphNode {
+                expressions: Default::default(),
                 id: id.into(),
                 node_type: node_type.into(),
                 values,
@@ -1971,9 +2445,14 @@ mod transaction_tests {
     #[test]
     fn inverse_commands_restore_removed_node_and_connections() {
         let mut session = Session::new(document());
-        session.apply_commands(&[
-            Command::Connect { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() },
-        ]).expect("connect");
+        session
+            .apply_commands(&[Command::Connect {
+                from: "a".into(),
+                to: "b".into(),
+                input: "shape".into(),
+                out: "shape".into(),
+            }])
+            .expect("connect");
         session.apply_commands(&[Command::RemoveNode { id: "a".into() }]).expect("remove");
         assert_eq!(session.document().nodes.len(), 1);
         session.undo().expect("undo").expect("entry");
@@ -1985,10 +2464,12 @@ mod transaction_tests {
     #[test]
     fn inverse_commands_restore_values_and_positions() {
         let mut session = Session::new(document());
-        session.apply_commands(&[
-            Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) },
-            Command::SetPosition { node: "a".into(), x: 50.0, y: 10.0 },
-        ]).expect("edit");
+        session
+            .apply_commands(&[
+                Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) },
+                Command::SetPosition { node: "a".into(), x: 50.0, y: 10.0 },
+            ])
+            .expect("edit");
         session.undo().expect("undo").expect("entry");
         assert!(session.document().nodes[0].values.get("length").is_none());
         assert_eq!(session.document().nodes[0].x, 0.0);
@@ -1998,18 +2479,45 @@ mod transaction_tests {
     fn coalesced_typing_stream_undoes_as_one_transaction() {
         let mut session = Session::new(document());
         let window = Duration::from_secs(5);
-        session.apply_commands_coalesced(&[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(10) }], Some("value:a:length"), window).expect("first");
-        session.apply_commands_coalesced(&[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) }], Some("value:a:length"), window).expect("second");
-        session.apply_commands_coalesced(&[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(30) }], Some("value:a:length"), window).expect("third");
+        session
+            .apply_commands_coalesced(
+                &[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(10) }],
+                Some("value:a:length"),
+                window,
+            )
+            .expect("first");
+        session
+            .apply_commands_coalesced(
+                &[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) }],
+                Some("value:a:length"),
+                window,
+            )
+            .expect("second");
+        session
+            .apply_commands_coalesced(
+                &[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(30) }],
+                Some("value:a:length"),
+                window,
+            )
+            .expect("third");
         session.undo().expect("undo").expect("entry");
-        assert!(session.document().nodes[0].values.get("length").is_none(), "one undo should restore the pre-typing value");
+        assert!(
+            session.document().nodes[0].values.get("length").is_none(),
+            "one undo should restore the pre-typing value"
+        );
         assert!(session.undo().expect("undo").is_none());
     }
 
     #[test]
     fn redo_replays_the_forward_transaction() {
         let mut session = Session::new(document());
-        session.apply_commands(&[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) }]).expect("edit");
+        session
+            .apply_commands(&[Command::SetValue {
+                node: "a".into(),
+                field: "length".into(),
+                value: json!(20),
+            }])
+            .expect("edit");
         session.undo().expect("undo");
         session.redo().expect("redo").expect("entry");
         assert_eq!(session.document().nodes[0].values["length"], 20);
@@ -2017,15 +2525,30 @@ mod transaction_tests {
     #[test]
     fn derived_updates_do_not_add_undo_entries() {
         let mut session = Session::new(document());
-        session.apply_commands(&[Command::SetValue { node: "a".into(), field: "length".into(), value: json!(20) }]).expect("user");
+        session
+            .apply_commands(&[Command::SetValue {
+                node: "a".into(),
+                field: "length".into(),
+                value: json!(20),
+            }])
+            .expect("user");
         assert!(session.has_undo());
-        let change = session.apply_derived_commands(&[Command::SetValue { node: "a".into(), field: "faces".into(), value: json!([{"id":"face:0"}]) }]).expect("derived");
+        let change = session
+            .apply_derived_commands(&[Command::SetValue {
+                node: "a".into(),
+                field: "faces".into(),
+                value: json!([{"id":"face:0"}]),
+            }])
+            .expect("derived");
         assert!(change.changed);
         assert_eq!(change.dirty_nodes, vec!["a"]);
         assert!(session.has_undo());
         session.undo().expect("undo").expect("entry");
         assert!(session.document().nodes[0].values.get("length").is_none());
-        assert!(session.document().nodes[0].values.get("faces").is_some(), "derived field survives user undo");
+        assert!(
+            session.document().nodes[0].values.get("faces").is_some(),
+            "derived field survives user undo"
+        );
     }
 
     #[test]
@@ -2037,14 +2560,15 @@ mod transaction_tests {
                 id: "root".into(),
                 name: "Root".into(),
                 kind: "graph".into(),
-                nodes: vec![GraphNode { expressions: Default::default(),
-                id: "f".into(),
-                node_type: "chamfer".into(),
-                values: json!({"mode": "fillet", "length": 3}),
-                suppressed: false,
-                x: 0.0,
-                y: 0.0,
-            }],
+                nodes: vec![GraphNode {
+                    expressions: Default::default(),
+                    id: "f".into(),
+                    node_type: "chamfer".into(),
+                    values: json!({"mode": "fillet", "length": 3}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                }],
                 connections: Vec::new(),
                 interface: GraphInterface::default(),
             },
@@ -2068,12 +2592,52 @@ mod transaction_tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "c".into(), node_type: "chamfer".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "d".into(), node_type: "exporter".into(), values: json!({"fileName": "part.step"}), suppressed: false, x: 0.0, y: 0.0 },
-                GraphNode { expressions: Default::default(), id: "e".into(), node_type: "spline".into(), values: json!({}), suppressed: false, x: 0.0, y: 0.0 },
-            ],
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "a".into(),
+                        node_type: "primitive".into(),
+                        values: json!({}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "b".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x": 5.0}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "c".into(),
+                        node_type: "chamfer".into(),
+                        values: json!({}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "d".into(),
+                        node_type: "exporter".into(),
+                        values: json!({"fileName": "part.step"}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "e".into(),
+                        node_type: "spline".into(),
+                        values: json!({}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                ],
                 connections: Vec::new(),
                 interface: GraphInterface::default(),
             },
@@ -2090,7 +2654,6 @@ mod transaction_tests {
         assert_eq!(graph.nodes[4].values["control"], false);
         assert_eq!(graph.nodes[4].values["points"].as_array().unwrap().len(), 4);
     }
-
 }
 
 #[cfg(test)]
@@ -2098,11 +2661,24 @@ mod reconnect_tests {
     use super::*;
 
     fn node(id: &str, node_type: &str) -> GraphNode {
-        GraphNode { expressions: Default::default(), id: id.into(), node_type: node_type.into(), values: serde_json::json!({}), suppressed: false, x: 0.0, y: 0.0 }
+        GraphNode {
+            expressions: Default::default(),
+            id: id.into(),
+            node_type: node_type.into(),
+            values: serde_json::json!({}),
+            suppressed: false,
+            x: 0.0,
+            y: 0.0,
+        }
     }
 
     fn connect(from: &str, to: &str) -> Command {
-        Command::Connect { from: from.into(), to: to.into(), input: "shape".into(), out: "shape".into() }
+        Command::Connect {
+            from: from.into(),
+            to: to.into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }
     }
 
     #[test]
@@ -2112,7 +2688,13 @@ mod reconnect_tests {
         let mut session = Session::new(document);
         let first = session.apply_commands(&[connect("p", "t")]).unwrap();
         assert!(first.dirty_nodes.contains(&"t".to_string()));
-        session.apply_commands(&[Command::Disconnect { from: "p".into(), to: "t".into(), input: "shape".into() }]).unwrap();
+        session
+            .apply_commands(&[Command::Disconnect {
+                from: "p".into(),
+                to: "t".into(),
+                input: "shape".into(),
+            }])
+            .unwrap();
         let reconnect = session.apply_commands(&[connect("p", "t")]).unwrap();
         assert!(reconnect.changed);
         assert!(reconnect.dirty_nodes.contains(&"t".to_string()), "{:?}", reconnect.dirty_nodes);
@@ -2121,7 +2703,8 @@ mod reconnect_tests {
     #[test]
     fn replacing_an_existing_input_reports_dirty_target() {
         let mut document = GraphDocument::new("replace");
-        document.nodes = vec![node("p1", "primitive"), node("p2", "primitive"), node("t", "translate")];
+        document.nodes =
+            vec![node("p1", "primitive"), node("p2", "primitive"), node("t", "translate")];
         let mut session = Session::new(document);
         session.apply_commands(&[connect("p1", "t")]).unwrap();
         let replaced = session.apply_commands(&[connect("p2", "t")]).unwrap();

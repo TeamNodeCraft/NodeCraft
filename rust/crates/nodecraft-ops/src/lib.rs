@@ -10,7 +10,9 @@ use solidcore::topology::{Brep, EdgeId, FaceId};
 use solidcore_ops::blend::{Blend, BlendOptions, ChamferSecond, Corners, Turn};
 use solidcore_ops::{Body, Contract, Order};
 
-pub use solidcore_ops::blend::{BlendOptions as Options, ChamferCorner, ChamferSecond as Second, Turn as CornerTurn};
+pub use solidcore_ops::blend::{
+    BlendOptions as Options, ChamferCorner, ChamferSecond as Second, Turn as CornerTurn,
+};
 pub use solidcore_ops::cancel;
 pub use solidcore_ops::{BooleanOp, CheckLevel, CheckReport};
 
@@ -53,7 +55,7 @@ pub fn validation() -> Validation {
     VALIDATION.with(std::cell::Cell::get)
 }
 
-use error_map::{map_error, OpKind};
+use error_map::{OpKind, map_error};
 thread_local! {
     static NEEDS_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -72,7 +74,12 @@ pub fn install_failure_dump(dir: std::path::PathBuf) {
         let n = NEXT.fetch_add(1, Ordering::Relaxed);
         let base = dir.join(format!("call-{n:03}"));
         let fixes = nodecraft_kernel_profile::fix_names().join(",");
-        let mut meta = format!("call: {}\nwhy: {}\nfixes: {fixes}\ninputs: {}\n", failure.call, failure.why, failure.inputs.len());
+        let mut meta = format!(
+            "call: {}\nwhy: {}\nfixes: {fixes}\ninputs: {}\n",
+            failure.call,
+            failure.why,
+            failure.inputs.len()
+        );
         for (name, bytes) in &failure.inputs {
             match bytes {
                 Ok(bytes) => {
@@ -170,28 +177,41 @@ impl<'k> OpsSession<'k> {
         let indices = edges
             .iter()
             .map(|edge| {
-                input_edges
-                    .iter()
-                    .position(|candidate| candidate == edge)
-                    .ok_or_else(|| SessionError::Invalid("selected edge is not on the body".to_owned()))
+                input_edges.iter().position(|candidate| candidate == edge).ok_or_else(|| {
+                    SessionError::Invalid("selected edge is not on the body".to_owned())
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
+        let copy = brep_copy(self.kernel, brep)
+            .map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Blend, error))?;
+        let body =
+            Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Blend, error))?;
         self.kernel.blend_face_log = Some(Default::default());
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (
                 Blend::Round,
-                BlendOptions { turn, chamfer_corner: ChamferCorner::Mitre, contract: Contract::Proved },
+                BlendOptions {
+                    turn,
+                    chamfer_corner: ChamferCorner::Mitre,
+                    contract: Contract::Proved,
+                },
             ),
             OpsBlend::Curvature => (
                 Blend::Curvature,
-                BlendOptions { turn: Turn::Mitre, chamfer_corner: ChamferCorner::Mitre, contract: Contract::Proved },
+                BlendOptions {
+                    turn: Turn::Mitre,
+                    chamfer_corner: ChamferCorner::Mitre,
+                    contract: Contract::Proved,
+                },
             ),
             OpsBlend::Chamfer(corner) => (
                 Blend::Chamfer,
-                BlendOptions { turn: Turn::Mitre, chamfer_corner: corner, contract: Contract::Proved },
+                BlendOptions {
+                    turn: Turn::Mitre,
+                    chamfer_corner: corner,
+                    contract: Contract::Proved,
+                },
             ),
             OpsBlend::ChamferSides { second, up, flip } => {
                 let mut along = Vec::with_capacity(indices.len());
@@ -223,7 +243,8 @@ impl<'k> OpsSession<'k> {
                 });
                 self.note_reset(reset);
                 let _ = result.map_err(|error| map_error(OpKind::Blend, error))?;
-                let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
+                let volume =
+                    body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
                 let mut brep = body.into_brep();
                 let made_faces = self.mark_made(&mut brep)?;
                 return Ok(OpsResult { brep, warnings: Vec::new(), made_faces, volume });
@@ -262,7 +283,12 @@ impl<'k> OpsSession<'k> {
     /// A `Cut`/`Intersect` whose tool is apart from the body (their exact boxes, grown by the
     /// tolerances, do not meet) takes no intersection work: the cut is the body itself and the
     /// intersection is empty. The boxes are the kernel's exact boxes, never the display mesh's.
-    pub fn boolean_outcome(&mut self, a: &SolidBody, b: &SolidBody, op: BooleanOp) -> Result<Option<SolidBody>, SessionError> {
+    pub fn boolean_outcome(
+        &mut self,
+        a: &SolidBody,
+        b: &SolidBody,
+        op: BooleanOp,
+    ) -> Result<Option<SolidBody>, SessionError> {
         if matches!(op, BooleanOp::Subtract | BooleanOp::Intersect) && self.apart(a, b)? {
             return Ok(match op {
                 BooleanOp::Subtract => Some(a.clone()),
@@ -271,7 +297,9 @@ impl<'k> OpsSession<'k> {
         }
         let ab = a.ops_copy(self.kernel)?;
         let bb = b.ops_copy(self.kernel)?;
-        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::boolean::boolean(ab, bb, op));
+        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
+            solidcore_ops::boolean::boolean(ab, bb, op)
+        });
         self.note_reset(reset);
         match result.map_err(|error| map_error(OpKind::Boolean, error))? {
             Some(body) => SolidBody::from_ops(body).map(Some),
@@ -280,8 +308,14 @@ impl<'k> OpsSession<'k> {
     }
 
     /// Boolean two solid bodies; an empty result is an error.
-    pub fn boolean(&mut self, a: &SolidBody, b: &SolidBody, op: BooleanOp) -> Result<SolidBody, SessionError> {
-        self.boolean_outcome(a, b, op)?.ok_or_else(|| SessionError::Invalid("boolean produced nothing".to_owned()))
+    pub fn boolean(
+        &mut self,
+        a: &SolidBody,
+        b: &SolidBody,
+        op: BooleanOp,
+    ) -> Result<SolidBody, SessionError> {
+        self.boolean_outcome(a, b, op)?
+            .ok_or_else(|| SessionError::Invalid("boolean produced nothing".to_owned()))
     }
 
     /// N-ary list Boolean through SolidCore's `boolean_lists`: one merge instead of a
@@ -331,7 +365,9 @@ impl<'k> OpsSession<'k> {
         for body in bodies {
             kernels.push(body.ops_copy(self.kernel)?);
         }
-        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::boolean::union_all(kernels));
+        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
+            solidcore_ops::boolean::union_all(kernels)
+        });
         self.note_reset(reset);
         let body = result.map_err(|error| map_error(OpKind::Boolean, error))?;
         SolidBody::from_ops(body)
@@ -391,7 +427,11 @@ impl<'k> OpsSession<'k> {
     ///
     /// # Errors
     /// The proof's refusal; those of [`Self::check`].
-    pub fn check_body(&mut self, body: &SolidBody, level: CheckLevel) -> Result<CheckReport, SessionError> {
+    pub fn check_body(
+        &mut self,
+        body: &SolidBody,
+        level: CheckLevel,
+    ) -> Result<CheckReport, SessionError> {
         body.prove(self.kernel)?;
         self.check(body.brep(), level)
     }
@@ -402,9 +442,12 @@ impl<'k> OpsSession<'k> {
     /// individual failure numbers. A body that fails the check is still `Ok`, with the
     /// failures in the report; `Err` means the check could not run.
     pub fn check(&mut self, brep: &Brep, level: CheckLevel) -> Result<CheckReport, SessionError> {
-        let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
-        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Check, error))?;
-        let (report, reset) = solidcore_ops::session::with_kernel(self.kernel, || body.check(level));
+        let copy = brep_copy(self.kernel, brep)
+            .map_err(|error| SessionError::Kernel(error.to_string()))?;
+        let body =
+            Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Check, error))?;
+        let (report, reset) =
+            solidcore_ops::session::with_kernel(self.kernel, || body.check(level));
         self.note_reset(reset);
         report.map_err(|error| map_error(OpKind::Check, error))
     }
@@ -418,7 +461,12 @@ impl<'k> OpsSession<'k> {
     ///
     /// # Errors
     /// The proof's refusal; those of [`Self::shell`].
-    pub fn shell_body(&mut self, body: &SolidBody, open: &[FaceId], signed_thickness: f64) -> Result<OpsResult, SessionError> {
+    pub fn shell_body(
+        &mut self,
+        body: &SolidBody,
+        open: &[FaceId],
+        signed_thickness: f64,
+    ) -> Result<OpsResult, SessionError> {
         body.prove(self.kernel)?;
         self.shell(body.brep(), open, signed_thickness)
     }
@@ -432,20 +480,31 @@ impl<'k> OpsSession<'k> {
         thickness: f64,
     ) -> Result<OpsResult, SessionError> {
         let faces = brep.face_list().to_vec();
-        let open = open
-            .iter()
-            .map(|face| faces.iter().position(|candidate| candidate == face).ok_or_else(|| SessionError::Invalid("open face is not on the body".to_owned())))
-            .collect::<Result<Vec<_>, _>>()?;
-        let copy = brep_copy(self.kernel, brep).map_err(|error| SessionError::Kernel(error.to_string()))?;
+        let open =
+            open.iter()
+                .map(|face| {
+                    faces.iter().position(|candidate| candidate == face).ok_or_else(|| {
+                        SessionError::Invalid("open face is not on the body".to_owned())
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        let copy = brep_copy(self.kernel, brep)
+            .map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Shell, error))?;
+        let body =
+            Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Shell, error))?;
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
             solidcore_ops::shell(&body, &order, &open, thickness)
         });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Shell, error))?;
         let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Shell, error))?;
-        Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new(), volume })
+        Ok(OpsResult {
+            brep: body.into_brep(),
+            warnings: Vec::new(),
+            made_faces: Vec::new(),
+            volume,
+        })
     }
 
     /// Offset a solid's faces by `distance` along their outward normals.
@@ -455,7 +514,12 @@ impl<'k> OpsSession<'k> {
     ///
     /// # Errors
     /// The proof's refusal; those of [`Self::offset_faces`].
-    pub fn offset_faces_body(&mut self, body: &SolidBody, faces: &[FaceId], distance: f64) -> Result<OpsResult, SessionError> {
+    pub fn offset_faces_body(
+        &mut self,
+        body: &SolidBody,
+        faces: &[FaceId],
+        distance: f64,
+    ) -> Result<OpsResult, SessionError> {
         body.prove(self.kernel)?;
         self.offset_faces(body.brep(), faces, distance)
     }
@@ -470,16 +534,28 @@ impl<'k> OpsSession<'k> {
         let faces_on_body = brep.face_list().to_vec();
         let indices = faces
             .iter()
-            .map(|face| faces_on_body.iter().position(|c| c == face).ok_or_else(|| SessionError::Invalid("offset face is not on the body".to_owned())))
+            .map(|face| {
+                faces_on_body.iter().position(|c| c == face).ok_or_else(|| {
+                    SessionError::Invalid("offset face is not on the body".to_owned())
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let copy = brep_copy(self.kernel, brep).map_err(|e| SessionError::Kernel(e.to_string()))?;
         let order = Order::of(&copy);
-        let body = Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Offset, error))?;
-        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || solidcore_ops::offset_faces(&body, &order, &indices, distance));
+        let body =
+            Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Offset, error))?;
+        let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
+            solidcore_ops::offset_faces(&body, &order, &indices, distance)
+        });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Offset, error))?;
         let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Offset, error))?;
-        Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new(), volume })
+        Ok(OpsResult {
+            brep: body.into_brep(),
+            warnings: Vec::new(),
+            made_faces: Vec::new(),
+            volume,
+        })
     }
 
     /// Two-distance / distance-angle chamfer.
@@ -504,12 +580,12 @@ impl<'k> OpsSession<'k> {
             .unwrap_or_default();
         let ids = made.iter().map(|face| face.face).collect();
         if !made.is_empty() {
-            mark_blend_faces(brep, &made).map_err(|error| SessionError::Kernel(error.to_string()))?;
+            mark_blend_faces(brep, &made)
+                .map_err(|error| SessionError::Kernel(error.to_string()))?;
         }
         Ok(ids)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -546,19 +622,24 @@ mod tests {
             let domain = solidcore::topology::face::p2::uv_domain(brep, *face).expect("uv domain");
             let u = domain.u_interval();
             let v = domain.v_interval();
-            let uv = solidcore::math::Point2::new((u.min() + u.max()) * 0.5, (v.min() + v.max()) * 0.5);
+            let uv =
+                solidcore::math::Point2::new((u.min() + u.max()) * 0.5, (v.min() + v.max()) * 0.5);
             let mut normal = surface_normal(kernel, surface, uv).expect("face normal").value;
-            if record
-                .faceuse
-                .is_some_and(|faceuse| brep.faceuse(faceuse).expect("face use").orientation == OrientType::Opposite)
-            {
+            if record.faceuse.is_some_and(|faceuse| {
+                brep.faceuse(faceuse).expect("face use").orientation == OrientType::Opposite
+            }) {
                 normal = Vec3::new(-normal.x, -normal.y, -normal.z);
             }
             if normal.dot(dir) > 0.999 {
                 matching.push(*face);
             }
         }
-        assert_eq!(matching.len(), 1, "expected exactly one face facing {dir:?}, found {}", matching.len());
+        assert_eq!(
+            matching.len(),
+            1,
+            "expected exactly one face facing {dir:?}, found {}",
+            matching.len()
+        );
         matching[0]
     }
 
@@ -615,7 +696,9 @@ mod tests {
             .brep
             .faces()
             .iter()
-            .filter(|(face, _)| result.brep.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some())
+            .filter(|(face, _)| {
+                result.brep.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some()
+            })
             .count();
         assert_eq!(coloured, 6);
     }
@@ -671,17 +754,12 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         kernel.cancel = Some(token);
-        let result = OpsSession::new(&mut kernel).blend(
-            &brep,
-            &[edge],
-            1.0,
-            OpsBlend::Round(Turn::Mitre),
-        );
+        let result =
+            OpsSession::new(&mut kernel).blend(&brep, &[edge], 1.0, OpsBlend::Round(Turn::Mitre));
         // A token already cancelled refuses before the kernel is touched, so no
         // reset is requested; the pool rebuild path covers a mid-call cancel.
         assert!(matches!(result, Err(SessionError::Cancelled)), "{result:?}");
     }
-
 
     #[test]
     fn chained_round_makes_two_faces_and_no_warnings() {
@@ -707,7 +785,14 @@ mod tests {
         let brep = box_brep(&mut kernel);
         let edge = brep.edge_list()[0];
         let plain = OpsSession::new(&mut kernel)
-            .chamfer_sides(&brep, &[edge], 1.0, ChamferSecond::Distance(2.0), [0.0, 0.0, 1.0], false)
+            .chamfer_sides(
+                &brep,
+                &[edge],
+                1.0,
+                ChamferSecond::Distance(2.0),
+                [0.0, 0.0, 1.0],
+                false,
+            )
             .expect("plain");
         let flipped = OpsSession::new(&mut kernel)
             .chamfer_sides(&brep, &[edge], 1.0, ChamferSecond::Distance(2.0), [0.0, 0.0, 1.0], true)
@@ -721,7 +806,6 @@ mod tests {
             format!("{surface:?}")
         };
         assert_ne!(normal(&plain), normal(&flipped));
-
     }
 
     #[test]
@@ -737,7 +821,10 @@ mod tests {
     fn g2_three_edge_corner_builds_and_marks() {
         let mut kernel = nodecraft_kernel_profile::kernel();
         let brep = box_brep(&mut kernel);
-        let mut groups: Vec<([solidcore::topology::VertexId; 2], Vec<solidcore::topology::EdgeId>)> = Vec::new();
+        let mut groups: Vec<(
+            [solidcore::topology::VertexId; 2],
+            Vec<solidcore::topology::EdgeId>,
+        )> = Vec::new();
         for edge in brep.edge_list() {
             let vertices = brep.edge(*edge).expect("edge").vertices;
             groups.push((vertices, vec![*edge]));
@@ -770,9 +857,19 @@ mod tests {
         let round = OpsSession::new(&mut kernel)
             .blend(&brep, &edges, 1.0, OpsBlend::Round(Turn::Mitre))
             .expect("round");
-        assert!(chamfer.volume < g2.volume && chamfer.volume < round.volume,
-            "chamfer {} < G2 {}, round {}", chamfer.volume, g2.volume, round.volume);
-        assert!((g2.volume - round.volume).abs() < 0.5, "G2 {} vs round {}", g2.volume, round.volume);
+        assert!(
+            chamfer.volume < g2.volume && chamfer.volume < round.volume,
+            "chamfer {} < G2 {}, round {}",
+            chamfer.volume,
+            g2.volume,
+            round.volume
+        );
+        assert!(
+            (g2.volume - round.volume).abs() < 0.5,
+            "G2 {} vs round {}",
+            g2.volume,
+            round.volume
+        );
     }
 
     #[test]
@@ -800,7 +897,8 @@ mod tests {
             let one = *one;
             std::thread::spawn(move || {
                 let mut kernel = nodecraft_kernel_profile::kernel();
-                let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0).expect("cylinder");
+                let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0)
+                    .expect("cylinder");
                 let all: Vec<_> = brep
                     .edge_list()
                     .iter()
@@ -825,7 +923,9 @@ mod tests {
         }
     }
 
-    fn edges_count(brep: &Brep) -> usize { brep.edge_list().len() }
+    fn edges_count(brep: &Brep) -> usize {
+        brep.edge_list().len()
+    }
 
     #[test]
     #[ignore = "diagnosis: hangs"]
@@ -833,11 +933,19 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_cylinder;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0).expect("cylinder");
-        let edges: Vec<_> = brep.edge_list().iter().copied().filter(|edge| {
-            let v = brep.edge(*edge).expect("edge").vertices;
-            (brep.vertex(v[0]).expect("v").point.z - brep.vertex(v[1]).expect("v").point.z).abs() < 1.0e-9
-        }).collect();
+        let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0)
+            .expect("cylinder");
+        let edges: Vec<_> = brep
+            .edge_list()
+            .iter()
+            .copied()
+            .filter(|edge| {
+                let v = brep.edge(*edge).expect("edge").vertices;
+                (brep.vertex(v[0]).expect("v").point.z - brep.vertex(v[1]).expect("v").point.z)
+                    .abs()
+                    < 1.0e-9
+            })
+            .collect();
         eprintln!("blending {} edges", edges.len());
         let result = OpsSession::new(&mut kernel).blend(&brep, &edges, 15.0, OpsBlend::Curvature);
         eprintln!("result {result:?}");
@@ -849,11 +957,19 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_cylinder;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0).expect("cylinder");
-        let edges: Vec<_> = brep.edge_list().iter().copied().filter(|edge| {
-            let v = brep.edge(*edge).expect("edge").vertices;
-            (brep.vertex(v[0]).expect("v").point.z - brep.vertex(v[1]).expect("v").point.z).abs() < 1.0e-9
-        }).collect();
+        let brep = create_cylinder(&mut kernel, Point3::new(0.0, 0.0, -40.0), 20.0, 80.0)
+            .expect("cylinder");
+        let edges: Vec<_> = brep
+            .edge_list()
+            .iter()
+            .copied()
+            .filter(|edge| {
+                let v = brep.edge(*edge).expect("edge").vertices;
+                (brep.vertex(v[0]).expect("v").point.z - brep.vertex(v[1]).expect("v").point.z)
+                    .abs()
+                    < 1.0e-9
+            })
+            .collect();
         let token = solidcore::kernel::CancelToken::new();
         kernel.cancel = Some(token.clone());
         let canceller = std::thread::spawn(move || {
@@ -887,7 +1003,8 @@ mod tests {
         match result {
             Ok(result) => {
                 let mut brep = result.brep;
-                let failure = solidcore::topology::brep::outward_solid_failure(&mut kernel, &mut brep);
+                let failure =
+                    solidcore::topology::brep::outward_solid_failure(&mut kernel, &mut brep);
                 (true, elapsed, format!("{failure:?}"))
             }
             Err(error) => (false, elapsed, error.to_string()),
@@ -908,10 +1025,19 @@ mod tests {
         let mut slowest = (0.0f64, 0u64);
         for seed in seeds {
             let (ok, ms, _detail) = seed_blend(seed);
-            if ok { passed += 1; } else { failed += 1; }
-            if ms > slowest.0 { slowest = (ms, seed); }
+            if ok {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+            if ms > slowest.0 {
+                slowest = (ms, seed);
+            }
         }
-        eprintln!("seed sweep: {passed} passed, {failed} failed; slowest {:.1} ms at {:#018x}", slowest.0, slowest.1);
+        eprintln!(
+            "seed sweep: {passed} passed, {failed} failed; slowest {:.1} ms at {:#018x}",
+            slowest.0, slowest.1
+        );
     }
 
     #[test]
@@ -920,14 +1046,20 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let _large = create_box(&mut kernel, Point3::new(-1000.0, -1000.0, -1000.0), 2000.0, 2000.0, 2000.0)
-            .expect("large box");
-        let before = (kernel.context.stored_model_size_estimate(), kernel.context.this_zone_tol_3d());
+        let _large =
+            create_box(&mut kernel, Point3::new(-1000.0, -1000.0, -1000.0), 2000.0, 2000.0, 2000.0)
+                .expect("large box");
+        let before =
+            (kernel.context.stored_model_size_estimate(), kernel.context.this_zone_tol_3d());
         let brep = box_brep(&mut kernel);
         let edge = brep.edge_list()[0];
         let started = std::time::Instant::now();
         let dirty = OpsSession::new(&mut kernel).blend(&brep, &[edge], 8.0, OpsBlend::Curvature);
-        eprintln!("carried context {before:?} -> {:?} in {:.1} ms", dirty.as_ref().map(|r| r.volume), started.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "carried context {before:?} -> {:?} in {:.1} ms",
+            dirty.as_ref().map(|r| r.volume),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         let mut fresh = nodecraft_kernel_profile::kernel();
         let brep = box_brep(&mut fresh);
         let edge = brep.edge_list()[0];
@@ -944,10 +1076,12 @@ mod tests {
             ("fillet-copy1", fnv_seed("fillet-copy1")),
         ] {
             let (ok, ms, detail) = seed_blend(seed);
-            eprintln!("{name} {seed:#018x} {} {ms:.1} ms {detail}", if ok { "PASS" } else { "FAIL" });
+            eprintln!(
+                "{name} {seed:#018x} {} {ms:.1} ms {detail}",
+                if ok { "PASS" } else { "FAIL" }
+            );
         }
     }
-
 
     #[test]
     // Also needs a developer dump at /tmp/ops-dump; run with `--ignored --release`.
@@ -962,17 +1096,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         install_failure_dump(dir.clone());
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let loaded = solidcore_ops::Body::from_smb(std::fs::read("/tmp/ops-dump/call-000-brep.smb").expect("alex dump"), false).expect("read");
+        let loaded = solidcore_ops::Body::from_smb(
+            std::fs::read("/tmp/ops-dump/call-000-brep.smb").expect("alex dump"),
+            false,
+        )
+        .expect("read");
         let mut brep = loaded.into_brep();
         let face = brep.face_list()[0];
-        brep.add_attribute(solidcore::EntityRef::Face(face), Attribute::color(100, Vec3::new(1.0, 0.0, 0.0), Behavior::Copy)).expect("colour");
+        brep.add_attribute(
+            solidcore::EntityRef::Face(face),
+            Attribute::color(100, Vec3::new(1.0, 0.0, 0.0), Behavior::Copy),
+        )
+        .expect("colour");
         let order = Order::of(&brep);
         let body = Body::from_brep(&mut kernel, brep).expect("body");
         let before = body.volume(1.0e-8).expect("volume");
         let result = solidcore_ops::shell(&body, &order, &[], 8.0);
         assert!(result.is_err(), "thick shell should refuse");
-        let smb = std::fs::read_dir(&dir).expect("dir").filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "smb")).expect("dump smb");
-        let read = solidcore_ops::Body::from_smb(std::fs::read(&smb).expect("bytes"), false).expect("replay read");
+        let smb = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|x| x == "smb"))
+            .expect("dump smb");
+        let read = solidcore_ops::Body::from_smb(std::fs::read(&smb).expect("bytes"), false)
+            .expect("replay read");
         assert!((read.volume(1.0e-8).expect("volume") - before).abs() < 1.0e-6);
         assert!(read.check(CheckLevel::All).expect("check").is_valid());
         let _ = std::fs::remove_dir_all(&dir);
@@ -992,8 +1140,19 @@ mod tests {
             .unwrap_or_else(|| nodecraft_kernel_profile::fix_names().join(","));
         let fixes: Vec<&str> = fixes.split(',').filter(|s| !s.is_empty()).collect();
         solidcore_ops::session::set_fixes(fixes).expect("fixes");
-        let smb = std::fs::read_dir(&dir).expect("dir").filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("call-000-") && p.extension().is_some_and(|x| x == "smb"))).expect("dump smb");
-        let body = solidcore_ops::Body::from_smb(std::fs::read(&smb).expect("bytes"), false).expect("read");
+        let smb = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name().is_some_and(|n| {
+                    n.to_string_lossy().starts_with("call-000-")
+                        && p.extension().is_some_and(|x| x == "smb")
+                })
+            })
+            .expect("dump smb");
+        let body = solidcore_ops::Body::from_smb(std::fs::read(&smb).expect("bytes"), false)
+            .expect("read");
         eprintln!("volume {:?}", body.volume(1.0e-8));
         eprintln!("check {:?}", body.check(CheckLevel::All));
     }
@@ -1006,7 +1165,8 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_box(&mut kernel, Point3::new(-10.0,-10.0,-10.0), 20.0,20.0,20.0).expect("box");
+        let brep = create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+            .expect("box");
         let result = OpsSession::new(&mut kernel).shell(&brep, &[], 1.0).expect("shell");
         assert!((result.volume - 2648.0).abs() < 1.0e-6, "{}", result.volume);
         let inward = OpsSession::new(&mut kernel).shell(&brep, &[], -1.0).expect("inward shell");
@@ -1016,41 +1176,74 @@ mod tests {
         assert!((opened.volume - 1844.0).abs() < 1.0e-6, "{}", opened.volume);
         let work = |threads: usize| {
             let started = std::time::Instant::now();
-            let handles: Vec<_> = (0..threads).map(|_| std::thread::spawn(move || {
-                let mut kernel = nodecraft_kernel_profile::kernel();
-                for _ in 0..16 / threads {
-                    let brep = create_box(&mut kernel, Point3::new(-10.0,-10.0,-10.0), 20.0,20.0,20.0).expect("box");
-                    OpsSession::new(&mut kernel).shell(&brep, &[], 1.0).expect("shell");
-                }
-            })).collect();
-            for h in handles { h.join().expect("thread"); }
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    std::thread::spawn(move || {
+                        let mut kernel = nodecraft_kernel_profile::kernel();
+                        for _ in 0..16 / threads {
+                            let brep = create_box(
+                                &mut kernel,
+                                Point3::new(-10.0, -10.0, -10.0),
+                                20.0,
+                                20.0,
+                                20.0,
+                            )
+                            .expect("box");
+                            OpsSession::new(&mut kernel).shell(&brep, &[], 1.0).expect("shell");
+                        }
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("thread");
+            }
             started.elapsed().as_secs_f64()
         };
         let serial = work(1);
         let parallel = work(4);
-        eprintln!("shells serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}", serial/parallel);
-        assert!(serial/parallel > 2.0);
+        eprintln!(
+            "shells serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}",
+            serial / parallel
+        );
+        assert!(serial / parallel > 2.0);
     }
 
     #[test]
     fn shell_record_path_and_session_path_match() {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
-        let brep = create_box(&mut nodecraft_kernel_profile::kernel(), Point3::new(0.0, 0.0, 0.0), 20.0, 30.0, 40.0).expect("box");
+        let brep = create_box(
+            &mut nodecraft_kernel_profile::kernel(),
+            Point3::new(0.0, 0.0, 0.0),
+            20.0,
+            30.0,
+            40.0,
+        )
+        .expect("box");
         let pick_kernel = nodecraft_kernel_profile::kernel();
         let top = face_facing(&pick_kernel, &brep, [0.0, 0.0, 1.0]);
         let bottom = face_facing(&pick_kernel, &brep, [0.0, 0.0, -1.0]);
         let mut old_kernel = nodecraft_kernel_profile::kernel();
         let mut old_brep = brep.clone_standing_for_self().expect("copy");
-        let order = solidcore_convert::brep::to_record(&mut old_kernel, &mut old_brep).expect("record").1;
+        let order =
+            solidcore_convert::brep::to_record(&mut old_kernel, &mut old_brep).expect("record").1;
         let open: Vec<usize> = [top, bottom]
             .iter()
-            .map(|face| order.faces.iter().position(|candidate| candidate == face).expect("record face"))
+            .map(|face| {
+                order.faces.iter().position(|candidate| candidate == face).expect("record face")
+            })
             .collect();
         let mut new_kernel = nodecraft_kernel_profile::kernel();
-        let new_faces = nodecraft_layers::record_face_ids(&mut new_kernel, &mut brep.clone_standing_for_self().expect("copy"), &open).expect("ids");
-        let old = nodecraft_layers::shell_record_faces(&mut old_kernel, &mut old_brep, &open, -1.0).expect("old shell");
-        let new = OpsSession::new(&mut new_kernel).shell(&brep, &new_faces, -1.0).expect("new shell");
+        let new_faces = nodecraft_layers::record_face_ids(
+            &mut new_kernel,
+            &mut brep.clone_standing_for_self().expect("copy"),
+            &open,
+        )
+        .expect("ids");
+        let old = nodecraft_layers::shell_record_faces(&mut old_kernel, &mut old_brep, &open, -1.0)
+            .expect("old shell");
+        let new =
+            OpsSession::new(&mut new_kernel).shell(&brep, &new_faces, -1.0).expect("new shell");
         let old_body = solidcore_ops::Body::from_brep(&mut old_kernel, old).expect("old body");
         let old_volume = old_body.volume(1e-8).expect("volume");
         assert!((old_volume - 3840.0).abs() < 1e-6, "{old_volume}");
@@ -1058,10 +1251,16 @@ mod tests {
         assert!((old_volume - new.volume).abs() < 1e-6);
         let old_faces = old_body.copy().expect("copy").into_brep().face_list().len();
         assert_eq!(old_faces, new.brep.face_list().len());
-        let open_top = OpsSession::new(&mut new_kernel).shell(&brep, &[top], -1.0).expect("open top");
+        let open_top =
+            OpsSession::new(&mut new_kernel).shell(&brep, &[top], -1.0).expect("open top");
         assert!((open_top.volume - 4344.0).abs() < 1e-6, "{}", open_top.volume);
         assert_eq!(new.brep.face_list().len(), 10);
-        eprintln!("shell conformance volume {} faces {} open-top {}", new.volume, new.brep.face_list().len(), open_top.volume);
+        eprintln!(
+            "shell conformance volume {} faces {} open-top {}",
+            new.volume,
+            new.brep.face_list().len(),
+            open_top.volume
+        );
     }
     #[test]
     fn offset_record_and_session_paths_match() {
@@ -1071,28 +1270,54 @@ mod tests {
             let mut old_kernel = nodecraft_kernel_profile::kernel();
             let mut old_brep = brep.clone_standing_for_self().expect("copy");
             let mut scratch = brep.clone_standing_for_self().expect("copy");
-            let order = solidcore_convert::brep::to_record(&mut old_kernel, &mut scratch).expect("record").1;
-            let indices: Vec<usize> = faces.iter().map(|face| order.faces.iter().position(|c| c == face).expect("face")).collect();
-            let old = nodecraft_layers::offset_faces_record_faces(&mut old_kernel, &mut old_brep, &indices, -2.0).expect("old offset");
+            let order = solidcore_convert::brep::to_record(&mut old_kernel, &mut scratch)
+                .expect("record")
+                .1;
+            let indices: Vec<usize> = faces
+                .iter()
+                .map(|face| order.faces.iter().position(|c| c == face).expect("face"))
+                .collect();
+            let old = nodecraft_layers::offset_faces_record_faces(
+                &mut old_kernel,
+                &mut old_brep,
+                &indices,
+                -2.0,
+            )
+            .expect("old offset");
             let mut kernel = nodecraft_kernel_profile::kernel();
-            let new = OpsSession::new(&mut kernel).offset_faces(&brep, faces, -2.0).expect("new offset");
+            let new =
+                OpsSession::new(&mut kernel).offset_faces(&brep, faces, -2.0).expect("new offset");
             let old_body = solidcore_ops::Body::from_brep(&mut old_kernel, old).expect("body");
             let old_v = old_body.volume(1e-8).expect("volume");
             assert!((old_v - new.volume).abs() < 1e-6, "{old_v} vs {}", new.volume);
             assert!((new.volume - expected).abs() < 1e-6, "{} vs {expected}", new.volume);
-            eprintln!("offset conformance volume {} faces {} expected {expected}", new.volume, new.brep.face_list().len());
+            eprintln!(
+                "offset conformance volume {} faces {} expected {expected}",
+                new.volume,
+                new.brep.face_list().len()
+            );
         };
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,30.0,40.0).expect("box");
+        let brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 30.0, 40.0).expect("box");
         let top = face_facing(&kernel, &brep, [0.0, 0.0, 1.0]);
         let bottom = face_facing(&kernel, &brep, [0.0, 0.0, -1.0]);
         run(brep.clone_standing_for_self().expect("copy"), &[top], 22800.0);
         run(brep, &[top, bottom], 21600.0);
 
         let mut union_kernel = nodecraft_kernel_profile::kernel();
-        let a = create_box(&mut union_kernel, Point3::new(0.0,0.0,0.0), 20.0,30.0,40.0).expect("a");
-        let b = create_box(&mut union_kernel, Point3::new(20.0,0.0,0.0), 10.0,30.0,40.0).expect("b");
-        let union = nodecraft_layers::boolean_breps_ops(&mut union_kernel, &a, &b, nodecraft_layers::BooleanOp::Union).expect("union").expect("solid");
+        let a =
+            create_box(&mut union_kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 30.0, 40.0).expect("a");
+        let b = create_box(&mut union_kernel, Point3::new(20.0, 0.0, 0.0), 10.0, 30.0, 40.0)
+            .expect("b");
+        let union = nodecraft_layers::boolean_breps_ops(
+            &mut union_kernel,
+            &a,
+            &b,
+            nodecraft_layers::BooleanOp::Union,
+        )
+        .expect("union")
+        .expect("solid");
         let far = face_facing(&union_kernel, &union, [1.0, 0.0, 0.0]);
         run(union, &[far], 33600.0);
     }
@@ -1104,13 +1329,25 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let mut brep = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("box");
+        let mut brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box");
         let faces: Vec<_> = brep.faces().ids().collect();
         for face in &faces {
-            brep.add_attribute(solidcore::EntityRef::Face(*face), Attribute::color(100, Vec3::new(1.0,0.0,0.0), Behavior::Copy)).expect("colour");
+            brep.add_attribute(
+                solidcore::EntityRef::Face(*face),
+                Attribute::color(100, Vec3::new(1.0, 0.0, 0.0), Behavior::Copy),
+            )
+            .expect("colour");
         }
         let result = OpsSession::new(&mut kernel).shell(&brep, &[], 1.0).expect("shell");
-        let coloured = result.brep.faces().iter().filter(|(face, _)| result.brep.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some()).count();
+        let coloured = result
+            .brep
+            .faces()
+            .iter()
+            .filter(|(face, _)| {
+                result.brep.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some()
+            })
+            .count();
         assert_eq!(coloured, 12, "{coloured}");
     }
 
@@ -1120,22 +1357,43 @@ mod tests {
         use solidcore::primitive::api_primitives::create_box;
         use solidcore_ops::BooleanOp;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let a = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("a"));
-        let b = SolidBody::new(create_box(&mut kernel, Point3::new(10.0,0.0,0.0), 20.0,20.0,20.0).expect("b"));
-        let union = OpsSession::new(&mut kernel).boolean(&a,&b,BooleanOp::Union).expect("union");
-        let subtract = OpsSession::new(&mut kernel).boolean(&a,&b,BooleanOp::Subtract).expect("subtract");
-        let intersect = OpsSession::new(&mut kernel).boolean(&a,&b,BooleanOp::Intersect).expect("intersect");
+        let a = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("a"),
+        );
+        let b = SolidBody::new(
+            create_box(&mut kernel, Point3::new(10.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("b"),
+        );
+        let union = OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Union).expect("union");
+        let subtract =
+            OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Subtract).expect("subtract");
+        let intersect =
+            OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Intersect).expect("intersect");
         let union_volume = union.volume(&mut kernel).expect("union volume");
         let subtract_volume = subtract.volume(&mut kernel).expect("subtract volume");
         let intersect_volume = intersect.volume(&mut kernel).expect("intersect volume");
-        assert!((union_volume-12000.0).abs()<1e-6);
-        assert!((subtract_volume-4000.0).abs()<1e-6);
-        assert!((intersect_volume-4000.0).abs()<1e-6);
-        let boxes: Vec<_> = (0..4).map(|i| SolidBody::new(create_box(&mut kernel, Point3::new(i as f64*30.0,0.0,0.0), 20.0,20.0,20.0).expect("box"))).collect();
+        assert!((union_volume - 12000.0).abs() < 1e-6);
+        assert!((subtract_volume - 4000.0).abs() < 1e-6);
+        assert!((intersect_volume - 4000.0).abs() < 1e-6);
+        let boxes: Vec<_> = (0..4)
+            .map(|i| {
+                SolidBody::new(
+                    create_box(
+                        &mut kernel,
+                        Point3::new(i as f64 * 30.0, 0.0, 0.0),
+                        20.0,
+                        20.0,
+                        20.0,
+                    )
+                    .expect("box"),
+                )
+            })
+            .collect();
         let all = OpsSession::new(&mut kernel).union_all(&boxes).expect("union_all");
         let all_volume = all.volume(&mut kernel).expect("union_all volume");
-        assert!((all_volume-32000.0).abs()<1e-6);
-        eprintln!("boolean volumes union {union_volume} sub {subtract_volume} int {intersect_volume} all {all_volume}");
+        assert!((all_volume - 32000.0).abs() < 1e-6);
+        eprintln!(
+            "boolean volumes union {union_volume} sub {subtract_volume} int {intersect_volume} all {all_volume}"
+        );
     }
 
     /// Empty is ops' answer (`None`), not a measured volume: a cut that removes the body and an
@@ -1145,8 +1403,12 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let cube = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("cube"));
-        let far = SolidBody::new(create_box(&mut kernel, Point3::new(100.0,0.0,0.0), 20.0,20.0,20.0).expect("far"));
+        let cube = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("cube"),
+        );
+        let far = SolidBody::new(
+            create_box(&mut kernel, Point3::new(100.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("far"),
+        );
         // Identical bodies: the cut leaves nothing (ops reports Error::Empty, mapped to None).
         let own = OpsSession::new(&mut kernel)
             .boolean_outcome(&cube, &cube, BooleanOp::Subtract)
@@ -1166,16 +1428,31 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let cube = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("cube"));
-        let far = SolidBody::new(create_box(&mut kernel, Point3::new(100.0,0.0,0.0), 20.0,20.0,20.0).expect("far"));
-        let cut = OpsSession::new(&mut kernel).boolean_outcome(&cube, &far, BooleanOp::Subtract).expect("cut").expect("the body itself");
+        let cube = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("cube"),
+        );
+        let far = SolidBody::new(
+            create_box(&mut kernel, Point3::new(100.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("far"),
+        );
+        let cut = OpsSession::new(&mut kernel)
+            .boolean_outcome(&cube, &far, BooleanOp::Subtract)
+            .expect("cut")
+            .expect("the body itself");
         assert_eq!(cut.brep().face_list().len(), cube.brep().face_list().len());
         assert_eq!(cut.volume(&mut kernel).expect("volume"), 8000.0);
         // The body itself is returned, not a proved copy of the tool's geometry: the same
         // shared record.
-        assert!(std::sync::Arc::ptr_eq(&cut.shared(), &cube.shared()), "the cut is the body itself");
-        let overlapping = SolidBody::new(create_box(&mut kernel, Point3::new(10.0,0.0,0.0), 20.0,20.0,20.0).expect("overlapping"));
-        let real = OpsSession::new(&mut kernel).boolean(&cube, &overlapping, BooleanOp::Subtract).expect("real cut");
+        assert!(
+            std::sync::Arc::ptr_eq(&cut.shared(), &cube.shared()),
+            "the cut is the body itself"
+        );
+        let overlapping = SolidBody::new(
+            create_box(&mut kernel, Point3::new(10.0, 0.0, 0.0), 20.0, 20.0, 20.0)
+                .expect("overlapping"),
+        );
+        let real = OpsSession::new(&mut kernel)
+            .boolean(&cube, &overlapping, BooleanOp::Subtract)
+            .expect("real cut");
         assert!((real.volume(&mut kernel).expect("volume") - 4000.0).abs() < 1e-6);
     }
 
@@ -1184,18 +1461,41 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let cube = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("cube"));
-        let bar = SolidBody::new(create_box(&mut kernel, Point3::new(-5.0,5.0,5.0), 30.0,10.0,10.0).expect("bar"));
-        let sub_body = OpsSession::new(&mut kernel).boolean(&cube,&bar,nodecraft_layers::BooleanOp::Subtract).expect("sub");
+        let cube = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("cube"),
+        );
+        let bar = SolidBody::new(
+            create_box(&mut kernel, Point3::new(-5.0, 5.0, 5.0), 30.0, 10.0, 10.0).expect("bar"),
+        );
+        let sub_body = OpsSession::new(&mut kernel)
+            .boolean(&cube, &bar, nodecraft_layers::BooleanOp::Subtract)
+            .expect("sub");
         let sub = sub_body.volume(&mut kernel).expect("sub volume");
-        assert!((sub-6000.0).abs()<1e-6, "{sub}");
-        let far = SolidBody::new(create_box(&mut kernel, Point3::new(100.0,0.0,0.0), 20.0,20.0,20.0).expect("far"));
-        let empty = OpsSession::new(&mut kernel).boolean_outcome(&cube,&far,nodecraft_layers::BooleanOp::Intersect).expect("outcome");
+        assert!((sub - 6000.0).abs() < 1e-6, "{sub}");
+        let far = SolidBody::new(
+            create_box(&mut kernel, Point3::new(100.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("far"),
+        );
+        let empty = OpsSession::new(&mut kernel)
+            .boolean_outcome(&cube, &far, nodecraft_layers::BooleanOp::Intersect)
+            .expect("outcome");
         assert!(empty.is_none(), "disjoint subtract must be empty, not an error");
-        let boxes: Vec<_> = (0..4).map(|i| SolidBody::new(create_box(&mut kernel, Point3::new(i as f64*15.0,0.0,0.0), 20.0,20.0,20.0).expect("box"))).collect();
+        let boxes: Vec<_> = (0..4)
+            .map(|i| {
+                SolidBody::new(
+                    create_box(
+                        &mut kernel,
+                        Point3::new(i as f64 * 15.0, 0.0, 0.0),
+                        20.0,
+                        20.0,
+                        20.0,
+                    )
+                    .expect("box"),
+                )
+            })
+            .collect();
         let all = OpsSession::new(&mut kernel).union_all(&boxes).expect("union_all");
         let all_volume = all.volume(&mut kernel).expect("union_all volume");
-        assert!((all_volume-26000.0).abs()<1e-6, "{all_volume}");
+        assert!((all_volume - 26000.0).abs() < 1e-6, "{all_volume}");
         eprintln!("step2 sub {sub} union_all {all_volume} empty {}", empty.is_none());
     }
 
@@ -1206,30 +1506,60 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let mut a = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("a");
+        let mut a =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("a");
         let negative_x = face_facing(&kernel, &a, [-1.0, 0.0, 0.0]);
-        a.add_attribute(solidcore::EntityRef::Face(negative_x), Attribute::color(100, Vec3::new(1.0,0.0,0.0), Behavior::Copy)).expect("colour");
-        let b = create_box(&mut kernel, Point3::new(10.0,0.0,0.0), 20.0,20.0,20.0).expect("b");
+        a.add_attribute(
+            solidcore::EntityRef::Face(negative_x),
+            Attribute::color(100, Vec3::new(1.0, 0.0, 0.0), Behavior::Copy),
+        )
+        .expect("colour");
+        let b = create_box(&mut kernel, Point3::new(10.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("b");
         let a_body = SolidBody::new(a.clone_standing_for_self().expect("copy a"));
         let b_body = SolidBody::new(b.clone_standing_for_self().expect("copy b"));
-        for (op, expected) in [(nodecraft_layers::BooleanOp::Union, 12000.0), (nodecraft_layers::BooleanOp::Subtract, 4000.0), (nodecraft_layers::BooleanOp::Intersect, 4000.0)] {
+        for (op, expected) in [
+            (nodecraft_layers::BooleanOp::Union, 12000.0),
+            (nodecraft_layers::BooleanOp::Subtract, 4000.0),
+            (nodecraft_layers::BooleanOp::Intersect, 4000.0),
+        ] {
             let mut old_kernel = nodecraft_kernel_profile::kernel();
-            let old = nodecraft_layers::boolean_breps_ops(&mut old_kernel, &a, &b, op).expect("old").expect("solid");
+            let old = nodecraft_layers::boolean_breps_ops(&mut old_kernel, &a, &b, op)
+                .expect("old")
+                .expect("solid");
             let old_body = solidcore_ops::Body::from_brep(&mut old_kernel, old).expect("body");
             let mut new_kernel = nodecraft_kernel_profile::kernel();
-            let new = OpsSession::new(&mut new_kernel).boolean_outcome(&a_body, &b_body, op).expect("new").expect("solid");
+            let new = OpsSession::new(&mut new_kernel)
+                .boolean_outcome(&a_body, &b_body, op)
+                .expect("new")
+                .expect("solid");
             let new_volume = new.volume(&mut new_kernel).expect("volume");
             assert!((old_body.volume(1e-8).expect("v") - new_volume).abs() < 1e-6);
             assert!((new_volume - expected).abs() < 1e-6);
-            assert_eq!(old_body.copy().expect("copy").into_brep().face_list().len(), new.brep().face_list().len(), "{op:?}: old and new face counts differ");
+            assert_eq!(
+                old_body.copy().expect("copy").into_brep().face_list().len(),
+                new.brep().face_list().len(),
+                "{op:?}: old and new face counts differ"
+            );
             assert_eq!(new.brep().face_list().len(), 6);
-            eprintln!("boolean conformance {op:?} volume {new_volume} faces {}", new.brep().face_list().len());
+            eprintln!(
+                "boolean conformance {op:?} volume {new_volume} faces {}",
+                new.brep().face_list().len()
+            );
         }
-        let union = OpsSession::new(&mut kernel).boolean_outcome(&a_body,&b_body,nodecraft_layers::BooleanOp::Union).expect("union").expect("solid");
+        let union = OpsSession::new(&mut kernel)
+            .boolean_outcome(&a_body, &b_body, nodecraft_layers::BooleanOp::Union)
+            .expect("union")
+            .expect("solid");
         let minus_x = face_facing(&kernel, union.brep(), [-1.0, 0.0, 0.0]);
         let plus_x = face_facing(&kernel, union.brep(), [1.0, 0.0, 0.0]);
-        assert!(union.brep().find_attribute(solidcore::EntityRef::Face(minus_x), 100).is_some(), "-x face keeps its colour");
-        assert!(union.brep().find_attribute(solidcore::EntityRef::Face(plus_x), 100).is_none(), "+x face stays uncoloured");
+        assert!(
+            union.brep().find_attribute(solidcore::EntityRef::Face(minus_x), 100).is_some(),
+            "-x face keeps its colour"
+        );
+        assert!(
+            union.brep().find_attribute(solidcore::EntityRef::Face(plus_x), 100).is_none(),
+            "+x face stays uncoloured"
+        );
     }
 
     #[test]
@@ -1237,15 +1567,18 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 10.0, 6.0, 4.0).expect("box");
-        let new = OpsSession::new(&mut kernel).check(&brep, CheckLevel::Geometry).expect("session check");
+        let brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 6.0, 4.0).expect("box");
+        let new =
+            OpsSession::new(&mut kernel).check(&brep, CheckLevel::Geometry).expect("session check");
         assert!(new.is_valid(), "{new}");
         assert_eq!(new.to_string(), "valid");
         // The layer check this replaces converted through a record first; the lent
         // kernel must give the same report without the round-trip.
         let mut old_kernel = nodecraft_kernel_profile::kernel();
         let mut copy = brep.clone_standing_for_self().expect("copy");
-        let (record, _) = solidcore_convert::brep::to_record(&mut old_kernel, &mut copy).expect("record");
+        let (record, _) =
+            solidcore_convert::brep::to_record(&mut old_kernel, &mut copy).expect("record");
         let (body, _) = solidcore_ops::Body::from_record(&record, true).expect("body");
         let old = body.check(solidcore_ops::CheckLevel::Geometry).expect("record-path check");
         assert_eq!(old, new);
@@ -1268,14 +1601,18 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::{create_box, create_plane};
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let sheet = SolidBody::new(create_plane(&mut kernel, Point3::new(0.0,0.0,0.0), 10.0, 10.0).expect("sheet"));
+        let sheet = SolidBody::new(
+            create_plane(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet"),
+        );
         let copy = sheet.ops_copy(&mut kernel).expect("from_brep takes a sheet");
         assert_eq!(copy.counts().expect("counts")[0], 1);
         assert!(sheet.prove(&mut kernel).is_err(), "a sheet is not a solid");
 
-        let box_brep = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0, 20.0, 20.0).expect("box");
+        let box_brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box");
         let mut copy = box_brep.clone_standing_for_self().expect("copy");
-        let (mut record, _) = solidcore_convert::brep::to_record(&mut kernel, &mut copy).expect("record");
+        let (mut record, _) =
+            solidcore_convert::brep::to_record(&mut kernel, &mut copy).expect("record");
         record.faces.clear();
         let wires: Vec<u32> = (0..record.edges.len() as u32).collect();
         record.shells = vec![solidcore_record::brep::Shell::Wire { edges: wires }];
@@ -1309,7 +1646,18 @@ mod tests {
         use solidcore_ops::session;
         let boxes = |kernel: &mut solidcore::kernel::Kernel| -> Vec<SolidBody> {
             (0..4)
-                .map(|i| SolidBody::new(create_box(kernel, Point3::new(i as f64 * 25.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box")))
+                .map(|i| {
+                    SolidBody::new(
+                        create_box(
+                            kernel,
+                            Point3::new(i as f64 * 25.0, 0.0, 0.0),
+                            20.0,
+                            20.0,
+                            20.0,
+                        )
+                        .expect("box"),
+                    )
+                })
                 .collect()
         };
         let mut kernel = nodecraft_kernel_profile::kernel();
@@ -1317,11 +1665,17 @@ mod tests {
         let (carried, calls) = session::profiled(|| {
             let mut acc = parts[0].clone();
             for part in &parts[1..] {
-                acc = OpsSession::new(&mut kernel).boolean(&acc, part, BooleanOp::Union).expect("union");
+                acc = OpsSession::new(&mut kernel)
+                    .boolean(&acc, part, BooleanOp::Union)
+                    .expect("union");
             }
             acc
         });
-        assert_eq!(proof_decisions(&calls), 7, "3 new primitives + 3 results; the accumulated body is never re-proved");
+        assert_eq!(
+            proof_decisions(&calls),
+            7,
+            "3 new primitives + 3 results; the accumulated body is never re-proved"
+        );
         let mut fresh_kernel = nodecraft_kernel_profile::kernel();
         let parts = boxes(&mut fresh_kernel);
         let (fresh, calls) = session::profiled(|| {
@@ -1329,12 +1683,18 @@ mod tests {
             for part in &parts[1..] {
                 // A B-rep in, a B-rep out, as the old engine did: the proof is dropped.
                 let input = SolidBody::new(acc.brep().clone_standing_for_self().expect("copy"));
-                acc = OpsSession::new(&mut fresh_kernel).boolean(&input, part, BooleanOp::Union).expect("union");
+                acc = OpsSession::new(&mut fresh_kernel)
+                    .boolean(&input, part, BooleanOp::Union)
+                    .expect("union");
                 acc = SolidBody::new(acc.brep().clone_standing_for_self().expect("copy"));
             }
             acc
         });
-        assert_eq!(proof_decisions(&calls), 9, "a fresh B-rep per step proves every operand and result");
+        assert_eq!(
+            proof_decisions(&calls),
+            9,
+            "a fresh B-rep per step proves every operand and result"
+        );
         assert_eq!(carried.brep().face_list().len(), fresh.brep().face_list().len());
     }
 
@@ -1345,15 +1705,27 @@ mod tests {
         use solidcore::primitive::api_primitives::create_box;
         use solidcore_ops::session;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let a = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("a"));
-        let b = SolidBody::new(create_box(&mut kernel, Point3::new(10.0,0.0,0.0), 20.0,20.0,20.0).expect("b"));
-        let shared = OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Subtract).expect("first");
+        let a = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("a"),
+        );
+        let b = SolidBody::new(
+            create_box(&mut kernel, Point3::new(10.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("b"),
+        );
+        let shared =
+            OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Subtract).expect("first");
         let tools: Vec<SolidBody> = (0..2)
-            .map(|i| SolidBody::new(create_box(&mut kernel, Point3::new(5.0, 5.0 * i as f64, 5.0), 4.0, 4.0, 4.0).expect("tool")))
+            .map(|i| {
+                SolidBody::new(
+                    create_box(&mut kernel, Point3::new(5.0, 5.0 * i as f64, 5.0), 4.0, 4.0, 4.0)
+                        .expect("tool"),
+                )
+            })
             .collect();
         let (_, calls) = session::profiled(|| {
             for tool in &tools {
-                let _ = OpsSession::new(&mut kernel).boolean(&shared, tool, BooleanOp::Subtract).expect("cut");
+                let _ = OpsSession::new(&mut kernel)
+                    .boolean(&shared, tool, BooleanOp::Subtract)
+                    .expect("cut");
             }
         });
         // each cut: the tool (1) and the result (1); the shared body's proof is reused (0)
@@ -1367,7 +1739,8 @@ mod tests {
         use solidcore::primitive::api_primitives::create_box;
         use solidcore::topology::brep::p3::brep_copy;
         use solidcore::topology::face::p1::flip_face_orientation;
-        let boxed = create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).expect("box");
+        let boxed =
+            create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).expect("box");
         let mut brep = brep_copy(kernel, &boxed).expect("copy");
         for face in brep.face_list().to_vec() {
             flip_face_orientation(&mut brep, face).expect("flip");
@@ -1382,7 +1755,9 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let body = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("box"));
+        let body = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box"),
+        );
         assert_eq!(body.proof_state(), ProofState::Unknown);
         body.prove(&mut kernel).expect("prove");
         assert_eq!(body.proof_state(), ProofState::Proved);
@@ -1416,9 +1791,14 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let a = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("a"));
-        let b = SolidBody::new(create_box(&mut kernel, Point3::new(10.0,0.0,0.0), 20.0,20.0,20.0).expect("b"));
-        let stepped = OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Union).expect("union");
+        let a = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("a"),
+        );
+        let b = SolidBody::new(
+            create_box(&mut kernel, Point3::new(10.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("b"),
+        );
+        let stepped =
+            OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Union).expect("union");
         assert_eq!(stepped.proof_state(), ProofState::Proved);
         let node = validating(Validation::EachNode, || {
             OpsSession::new(&mut kernel).boolean(&a, &b, BooleanOp::Union).expect("union")
@@ -1508,8 +1888,10 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let brep = create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("box");
-        let (faces, edges, vertices) = (brep.face_list().to_vec(), brep.edge_list().to_vec(), brep.vertex_list().to_vec());
+        let brep =
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box");
+        let (faces, edges, vertices) =
+            (brep.face_list().to_vec(), brep.edge_list().to_vec(), brep.vertex_list().to_vec());
         let body = SolidBody::new(brep);
         body.prove(&mut kernel).expect("prove");
         assert_eq!(body.brep().face_list(), faces.as_slice());
@@ -1532,7 +1914,10 @@ mod tests {
         assert!(reversed.refused().is_some());
         assert_eq!(reversed.proof_attempts(), 1, "the proof ran once, before the shell");
 
-        let valid = SolidBody::new(create_box(&mut kernel, Point3::new(-10.0,-10.0,-10.0), 20.0,20.0,20.0).expect("box"));
+        let valid = SolidBody::new(
+            create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+                .expect("box"),
+        );
         let top = face_facing(&kernel, valid.brep(), [0.0, 0.0, 1.0]);
         OpsSession::new(&mut kernel)
             .offset_faces_body(&valid, &[top], 1.0)
@@ -1554,7 +1939,10 @@ mod tests {
         assert!(matches!(error, SessionError::Invalid(_)), "{error}");
         assert!(reversed.refused().is_some());
         assert_eq!(reversed.proof_attempts(), 1);
-        let valid = SolidBody::new(create_box(&mut kernel, Point3::new(-10.0,-10.0,-10.0), 20.0,20.0,20.0).expect("box"));
+        let valid = SolidBody::new(
+            create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+                .expect("box"),
+        );
         let report = OpsSession::new(&mut kernel)
             .check_body(&valid, CheckLevel::Geometry)
             .expect("a valid body checks");
@@ -1568,14 +1956,18 @@ mod tests {
         use solidcore::math::Point3;
         use solidcore::primitive::api_primitives::create_box;
         let mut kernel = nodecraft_kernel_profile::kernel();
-        let source = SolidBody::new(create_box(&mut kernel, Point3::new(0.0,0.0,0.0), 20.0,20.0,20.0).expect("box"));
+        let source = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box"),
+        );
         source.prove(&mut kernel).expect("prove");
         let copy = SolidBody::new(source.brep().clone_standing_for_self().expect("copy"));
         copy.carry_proof_from(&source);
         assert!(copy.is_proved(), "a rigid/identical copy keeps the proof");
         let refused = SolidBody::new(inside_out_box(&mut kernel));
         assert!(refused.prove(&mut kernel).is_err());
-        let other = SolidBody::new(create_box(&mut kernel, Point3::new(30.0,0.0,0.0), 10.0,10.0,10.0).expect("other"));
+        let other = SolidBody::new(
+            create_box(&mut kernel, Point3::new(30.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("other"),
+        );
         other.prove(&mut kernel).expect("prove other");
         refused.carry_proof_from(&other);
         assert!(refused.refused().is_some(), "a refusal is not overwritten by a proved copy");

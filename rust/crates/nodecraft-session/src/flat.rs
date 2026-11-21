@@ -3,7 +3,9 @@
 //! Nesting is a UI/presentation concept. The engine always receives one flat
 //! graph. This cache keeps that flat graph until a source document changes.
 
-use crate::{expand_linked_parts_with, flatten_inline_graphs, ContentHash, GraphDocument, SessionError};
+use crate::{
+    ContentHash, GraphDocument, SessionError, expand_linked_parts_with, flatten_inline_graphs,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
@@ -48,17 +50,10 @@ impl FlatGraphCache {
         linked_documents: &BTreeMap<PathBuf, GraphDocument>,
     ) -> Result<&FlatGraph, SessionError> {
         let fingerprint = source_fingerprint(document, linked_documents);
-        if self
-            .current
-            .as_ref()
-            .is_none_or(|flat| flat.fingerprint != fingerprint)
-        {
+        if self.current.as_ref().is_none_or(|flat| flat.fingerprint != fingerprint) {
             let grouped = flatten_inline_graphs(document)?;
             let flattened = expand_linked_parts_with(&grouped, linked_documents)?;
-            self.current = Some(FlatGraph {
-                document: flattened,
-                fingerprint,
-            });
+            self.current = Some(FlatGraph { document: flattened, fingerprint });
         }
         Ok(self.current.as_ref().expect("flat graph inserted"))
     }
@@ -76,20 +71,12 @@ pub fn source_fingerprint(
 ) -> ContentHash {
     let mut combined: u128 = 0x9e37_79b9_7f4a_7c15;
     let mix = |combined: &mut u128, hash: ContentHash| {
-        *combined = combined
-            .rotate_left(17)
-            .wrapping_add(hash.0)
-            .wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        *combined =
+            combined.rotate_left(17).wrapping_add(hash.0).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     };
-    mix(
-        &mut combined,
-        crate::store::document_hash(document).unwrap_or(ContentHash(0)),
-    );
+    mix(&mut combined, crate::store::document_hash(document).unwrap_or(ContentHash(0)));
     for (path, linked) in linked_documents {
-        mix(
-            &mut combined,
-            crate::store::document_hash(linked).unwrap_or(ContentHash(0)),
-        );
+        mix(&mut combined, crate::store::document_hash(linked).unwrap_or(ContentHash(0)));
         for byte in path.to_string_lossy().as_bytes() {
             combined = (combined ^ u128::from(*byte)).wrapping_mul(0x100_0000_01b3);
         }
@@ -100,7 +87,7 @@ pub fn source_fingerprint(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{GraphConnection, GraphNode, GraphInterface};
+    use crate::{GraphConnection, GraphInterface, GraphNode};
     use serde_json::json;
     use std::path::PathBuf;
 
@@ -112,14 +99,15 @@ mod tests {
                 id: "root".into(),
                 name: "Root".into(),
                 kind: "graph".into(),
-                nodes: vec![GraphNode { expressions: Default::default(),
-                id: "p".into(),
-                node_type: "primitive".into(),
-                values: json!({"primitiveType": "box", "length": value}),
-                suppressed: false,
-                x: 0.0,
-                y: 0.0,
-            }],
+                nodes: vec![GraphNode {
+                    expressions: Default::default(),
+                    id: "p".into(),
+                    node_type: "primitive".into(),
+                    values: json!({"primitiveType": "box", "length": value}),
+                    suppressed: false,
+                    x: 0.0,
+                    y: 0.0,
+                }],
                 connections: Vec::<GraphConnection>::new(),
                 interface: GraphInterface::default(),
             },
@@ -214,5 +202,4 @@ mod tests {
         assert!(flat.document().nodes.iter().any(|node| node.id == "g"));
         assert!(flat.document().nodes.iter().any(|node| node.id == "g::box"));
     }
-
 }

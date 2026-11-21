@@ -11,7 +11,6 @@ use nodecraft_solidcore::solidcore::{
     topology::Brep,
 };
 
-
 /// Typed value crossing the node boundary. Node ids are always flat graph ids;
 /// UI nesting is presentation only.
 #[derive(Clone)]
@@ -115,76 +114,21 @@ impl NodeInputs {
 /// Exact work that can execute on a single kernel worker.
 pub(crate) enum ExactNodeTask {
     Primitive(Node),
-    Boolean {
-        op: nodecraft_bool::BooleanOp,
-        a: Vec<SolidBody>,
-        b: Vec<SolidBody>,
-    },
-    Extrude {
-        body: SolidBody,
-        face_index: usize,
-        amount: f64,
-    },
-    ExtrudeSketch {
-        output: std::sync::Arc<crate::SketchOutput>,
-        amount: f64,
-    },
-    Fillet {
-        body: SolidBody,
-        values: serde_json::Value,
-    },
-    Shell {
-        body: SolidBody,
-        signed_thickness: f64,
-        openings: Vec<usize>,
-    },
-    Mirror {
-        brep: Brep,
-        values: serde_json::Value,
-    },
-    LoftSketch {
-        bottom: crate::SketchOutput,
-        top: crate::SketchOutput,
-        ruled: bool,
-    },
-    Chamfer {
-        body: SolidBody,
-        values: serde_json::Value,
-    },
-    SurfaceLoft {
-        sections: Vec<crate::SketchOutput>,
-        ruled: bool,
-    },
-    BooleanLists {
-        op: nodecraft_bool::BooleanOp,
-        a: Vec<SolidBody>,
-        b: Vec<SolidBody>,
-    },
-    ExtrudeFeature {
-        body: SolidBody,
-        face_index: usize,
-        amount: f64,
-        operation: String,
-    },
-    OffsetFaces {
-        body: SolidBody,
-        faces: Vec<usize>,
-        distance: f64,
-    },
-    LookMany {
-        breps: Vec<std::sync::Arc<Brep>>,
-        colour: [f64; 3],
-    },
-    Realize {
-        body: SolidBody,
-        placement: nodecraft_exact::Placement,
-    },
-    FaceLoft {
-        bottom: Brep,
-        top: Brep,
-        ruled: bool,
-        cap_ends: bool,
-    },
+    Boolean { op: nodecraft_bool::BooleanOp, a: Vec<SolidBody>, b: Vec<SolidBody> },
+    Extrude { body: SolidBody, face_index: usize, amount: f64 },
+    ExtrudeSketch { output: std::sync::Arc<crate::SketchOutput>, amount: f64 },
+    Fillet { body: SolidBody, values: serde_json::Value },
+    Shell { body: SolidBody, signed_thickness: f64, openings: Vec<usize> },
+    Mirror { brep: Brep, values: serde_json::Value },
+    LoftSketch { bottom: crate::SketchOutput, top: crate::SketchOutput, ruled: bool },
+    Chamfer { body: SolidBody, values: serde_json::Value },
+    SurfaceLoft { sections: Vec<crate::SketchOutput>, ruled: bool },
+    BooleanLists { op: nodecraft_bool::BooleanOp, a: Vec<SolidBody>, b: Vec<SolidBody> },
+    ExtrudeFeature { body: SolidBody, face_index: usize, amount: f64, operation: String },
+    OffsetFaces { body: SolidBody, faces: Vec<usize>, distance: f64 },
+    LookMany { breps: Vec<std::sync::Arc<Brep>>, colour: [f64; 3] },
+    Realize { body: SolidBody, placement: nodecraft_exact::Placement },
+    FaceLoft { bottom: Brep, top: Brep, ruled: bool, cap_ends: bool },
 }
 
 impl ExactNodeTask {
@@ -192,7 +136,20 @@ impl ExactNodeTask {
     /// remains the long-term capability source; this is the implemented subset.
     #[allow(dead_code)] // Implemented subset; descriptor table remains the authority.
     pub(crate) fn supports(node_type: &str) -> bool {
-        matches!(node_type, "solid" | "primitive" | "boolean" | "fuse" | "extrude" | "fillet" | "shell" | "mirror" | "loft" | "surfaceloft" | "chamfer")
+        matches!(
+            node_type,
+            "solid"
+                | "primitive"
+                | "boolean"
+                | "fuse"
+                | "extrude"
+                | "fillet"
+                | "shell"
+                | "mirror"
+                | "loft"
+                | "surfaceloft"
+                | "chamfer"
+        )
     }
 
     pub(crate) fn run(self, kernel: &mut Kernel) -> Result<NodeOutput, String> {
@@ -262,8 +219,9 @@ impl ExactNodeTask {
                     .ids()
                     .nth(face_index)
                     .ok_or_else(|| format!("Extrude face {face_index} does not exist"))?;
-                let tool = nodecraft_extrude::extrude_planar_face_exact(kernel, body.brep(), face, amount)
-                    .map_err(|error| format!("extrude: {error}"))?;
+                let tool =
+                    nodecraft_extrude::extrude_planar_face_exact(kernel, body.brep(), face, amount)
+                        .map_err(|error| format!("extrude: {error}"))?;
                 let op = match operation.as_str() {
                     "remove" => nodecraft_bool::BooleanOp::Difference,
                     "intersect" => nodecraft_bool::BooleanOp::Intersection,
@@ -288,16 +246,21 @@ impl ExactNodeTask {
             Self::LookMany { breps, colour } => {
                 let mut out = Vec::with_capacity(breps.len());
                 for brep in breps {
-                    let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, &brep)
-                        .map_err(|error| error.to_string())?;
+                    let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
+                        kernel, &brep,
+                    )
+                    .map_err(|error| error.to_string())?;
                     crate::look::apply_look_color(&mut brep, colour)?;
                     out.push(SolidBody::new(brep));
                 }
                 Ok(NodeOutput::Shapes(out))
             }
             Self::Realize { body, placement } => {
-                let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(kernel, body.brep())
-                    .map_err(|error| error.to_string())?;
+                let mut brep = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
+                    kernel,
+                    body.brep(),
+                )
+                .map_err(|error| error.to_string())?;
                 nodecraft_exact::realize_brep(kernel, &mut brep, &placement)?;
                 Ok(NodeOutput::Shape(SolidBody::new(brep)))
             }
@@ -336,14 +299,14 @@ fn copy_solids(solids: &[SolidBody]) -> Vec<SolidBody> {
 ///
 /// A side holding several solids is a Combine, and the user means the Part as a whole, so
 /// its pieces are unioned before the operation applies to them. `None` is an empty side.
-fn union_side(session: &mut nodecraft_ops::OpsSession<'_>, solids: &[SolidBody]) -> Result<Option<SolidBody>, String> {
+fn union_side(
+    session: &mut nodecraft_ops::OpsSession<'_>,
+    solids: &[SolidBody],
+) -> Result<Option<SolidBody>, String> {
     match solids {
         [] => Ok(None),
         [solid] => Ok(Some(solid.clone())),
-        solids => session
-            .union_all(solids)
-            .map(Some)
-            .map_err(|error| format!("Boolean: {error}")),
+        solids => session.union_all(solids).map(Some).map_err(|error| format!("Boolean: {error}")),
     }
 }
 
@@ -387,9 +350,7 @@ fn boolean_solids(
             _ => {
                 let mut results = if a_list.is_empty() || b_list.is_empty() {
                     let all: Vec<_> = a_list.into_iter().chain(b_list).collect();
-                    vec![session
-                        .union_all(&all)
-                        .map_err(|error| format!("Boolean: {error}"))?]
+                    vec![session.union_all(&all).map_err(|error| format!("Boolean: {error}"))?]
                 } else {
                     session
                         .boolean_lists(&a_list, &b_list, nodecraft_ops::BooleanOp::Union)
@@ -399,9 +360,9 @@ fn boolean_solids(
                     1 => results.pop().expect("one solid"),
                     // A list union normally merges into one body; if the kernel returns
                     // separate pieces, merge them as the node's single output.
-                    _ => session
-                        .union_all(&results)
-                        .map_err(|error| format!("Boolean: {error}"))?,
+                    _ => {
+                        session.union_all(&results).map_err(|error| format!("Boolean: {error}"))?
+                    }
                 }
             }
         };
@@ -476,12 +437,11 @@ fn run_edge_session(
     use nodecraft_blend::treatment::{ChamferType, Continuity, EdgeMode};
     let treatment = nodecraft_blend::treatment::EdgeTreatment::from_node_values(values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    treatment
-        .validate()
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     // G3 has no ops section yet; it keeps the direct kernel path.
     if treatment.mode == EdgeMode::Fillet && treatment.continuity == Continuity::G3 {
-        let blended = nodecraft_blend::fillet_brep_exact_with_kernel_warned(kernel, source, values)?;
+        let blended =
+            nodecraft_blend::fillet_brep_exact_with_kernel_warned(kernel, source, values)?;
         return Ok((blended.brep, blended.warnings));
     }
     let selections = nodecraft_blend::edge::select_edges_from_values(kernel, source, values)
@@ -511,24 +471,15 @@ impl ExactNodeTask {
         match self {
             Self::Fillet { body, values } => {
                 let (brep, warnings) = run_edge_session(kernel, &body, &values)?;
-                Ok(TaskResult {
-                    output: NodeOutput::Shape(SolidBody::new(brep)),
-                    warnings,
-                })
+                Ok(TaskResult { output: NodeOutput::Shape(SolidBody::new(brep)), warnings })
             }
             Self::Chamfer { body, values } => {
                 let (brep, warnings) = run_edge_session(kernel, &body, &values)?;
-                Ok(TaskResult {
-                    output: NodeOutput::Shape(SolidBody::new(brep)),
-                    warnings,
-                })
+                Ok(TaskResult { output: NodeOutput::Shape(SolidBody::new(brep)), warnings })
             }
             Self::BooleanLists { op, a, b } => {
                 let (results, warnings) = boolean_solids(kernel, &a, &b, op)?;
-                Ok(TaskResult {
-                    output: NodeOutput::Shapes(results),
-                    warnings,
-                })
+                Ok(TaskResult { output: NodeOutput::Shapes(results), warnings })
             }
             Self::Boolean { op, a, b } => {
                 // The proof is not on the evaluation path: ops runs under `EachNode` (see
@@ -602,8 +553,8 @@ mod tests {
         use nodecraft_solidcore::solidcore::primitive::api_primitives::create_box;
         use nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy;
         use nodecraft_solidcore::solidcore::topology::face::p1::flip_face_orientation;
-        let boxed = create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
-            .expect("box");
+        let boxed =
+            create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).expect("box");
         let mut brep = brep_copy(kernel, &boxed).expect("copy");
         for face in brep.face_list().to_vec() {
             flip_face_orientation(&mut brep, face).expect("flip");
@@ -671,7 +622,8 @@ mod tests {
     #[test]
     fn intersect_with_empty_b_is_empty_and_warns() {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let a = vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
+        let a =
+            vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
         let (results, warnings) =
             boolean_solids(&mut kernel, &a, &[], nodecraft_bool::BooleanOp::Intersection)
                 .expect("intersect with empty B");
@@ -682,7 +634,8 @@ mod tests {
     #[test]
     fn subtract_with_empty_b_keeps_a() {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let a = vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
+        let a =
+            vec![SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"))];
         let (results, warnings) =
             boolean_solids(&mut kernel, &a, &[], nodecraft_bool::BooleanOp::Difference)
                 .expect("subtract with empty B");
@@ -704,9 +657,8 @@ mod tests {
             a: vec![SolidBody::new(a)],
             b: vec![SolidBody::new(b)],
         };
-        let result = task
-            .run_warned(&mut kernel)
-            .expect("a sheet Boolean behaves as under EachStep");
+        let result =
+            task.run_warned(&mut kernel).expect("a sheet Boolean behaves as under EachStep");
         let NodeOutput::Shape(body) = result.output else {
             panic!("a sheet Boolean has a shape output");
         };
@@ -722,11 +674,8 @@ mod tests {
         let mut kernel = nodecraft_solidcore::kernel::kernel();
         let a = SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box A"));
         let b = SolidBody::new(crate::nodes::primitive_brep(&primitive(10.0)).expect("box B"));
-        let task = ExactNodeTask::Boolean {
-            op: nodecraft_bool::BooleanOp::Union,
-            a: vec![a],
-            b: vec![b],
-        };
+        let task =
+            ExactNodeTask::Boolean { op: nodecraft_bool::BooleanOp::Union, a: vec![a], b: vec![b] };
         let output = execute_exact(task, "boolean", 7).expect("solid Boolean");
         let NodeOutput::Shape(body) = output else {
             panic!("a solid Boolean has a shape output");

@@ -67,6 +67,7 @@
 
 use std::fmt;
 
+use nodecraft_protocol::Mesh;
 use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::tol::{USE_DEFAULT, zone_tol3d};
@@ -84,7 +85,6 @@ use solidcore::sweep::api_brep::{
 };
 use solidcore::topology::face::p2 as face_p2;
 use solidcore::{Brep, EdgeId, FaceId, SolidError};
-use nodecraft_protocol::Mesh;
 
 /// Distance below which two consecutive loop samples are treated as one point.
 const POINT_EPSILON: f64 = 1.0e-9;
@@ -255,11 +255,7 @@ impl LoopSegment {
     ///
     /// Those of [`evaluate_curve`].
     pub fn start_point(&self, k: &Kernel) -> Result<Point3, ExtrudeError> {
-        let parameter = if self.sense {
-            self.interval.min()
-        } else {
-            self.interval.max()
-        };
+        let parameter = if self.sense { self.interval.min() } else { self.interval.max() };
         let values = evaluate_curve(k, Some(&self.curve), parameter)
             .map_err(|error| ExtrudeError::solid("query::face::p1::evaluate_curve", error))?;
         Ok(values[0])
@@ -272,17 +268,13 @@ impl LoopSegment {
     /// The copy error of [`Curve::copy`], or the reversal error of
     /// [`Curve::reverse_parameterization`] for a curve kind that cannot be reversed.
     pub fn oriented_curve(&self, k: &Kernel) -> Result<Curve, ExtrudeError> {
-        let mut curve = self
-            .curve
-            .copy(k)
-            .map_err(|error| ExtrudeError::solid("curve::Curve::copy", error))?;
+        let mut curve =
+            self.curve.copy(k).map_err(|error| ExtrudeError::solid("curve::Curve::copy", error))?;
         curve = bound_infinite_line(curve, &self.interval);
         if !self.sense {
-            curve
-                .reverse_parameterization(k, &self.interval)
-                .map_err(|error| {
-                    ExtrudeError::solid("curve::Curve::reverse_parameterization", error)
-                })?;
+            curve.reverse_parameterization(k, &self.interval).map_err(|error| {
+                ExtrudeError::solid("curve::Curve::reverse_parameterization", error)
+            })?;
         }
         Ok(curve)
     }
@@ -306,12 +298,7 @@ fn bound_infinite_line(curve: Curve, interval: &Extent1d) -> Curve {
         canonical.point,
         canonical.vector,
         interval,
-        &BoundedLineOptions {
-            scale: 1.0,
-            dim: 3,
-            nurb: None,
-            inside_out: canonical.inside_out,
-        },
+        &BoundedLineOptions { scale: 1.0, dim: 3, nurb: None, inside_out: canonical.inside_out },
     );
     Curve::from(bounded)
 }
@@ -371,10 +358,7 @@ impl FaceLoop {
     ///
     /// Those of [`LoopSegment::oriented_curve`].
     pub fn oriented_curves(&self, k: &Kernel) -> Result<Vec<Curve>, ExtrudeError> {
-        self.segments
-            .iter()
-            .map(|segment| segment.oriented_curve(k))
-            .collect()
+        self.segments.iter().map(|segment| segment.oriented_curve(k)).collect()
     }
 }
 
@@ -419,23 +403,13 @@ pub fn face_plane(k: &Kernel, brep: &Brep, face: FaceId) -> Result<FacePlane, Ex
                 .normal
                 .unitize()
                 .map_err(|error| ExtrudeError::solid("math::Vec3::unitize", error))?;
-            Ok(FacePlane {
-                point: planar.point,
-                normal,
-                deviation: planar.deviation,
-            })
+            Ok(FacePlane { point: planar.point, normal, deviation: planar.deviation })
         }
-        Ok(planar) => Err(ExtrudeError::NotPlanar {
-            face,
-            deviation: planar.deviation,
-        }),
+        Ok(planar) => Err(ExtrudeError::NotPlanar { face, deviation: planar.deviation }),
         // A surface whose planarity test needs an unported face tolerance still
         // gets an answer: sample the surface normal over the face's UV domain.
         Err(error) if error.is_unported() => sample_face_plane(k, brep, face, surface, tolerance),
-        Err(error) => Err(ExtrudeError::solid(
-            "surface::surface::p7::Surface::is_planar",
-            error,
-        )),
+        Err(error) => Err(ExtrudeError::solid("surface::surface::p7::Surface::is_planar", error)),
     }
 }
 
@@ -450,11 +424,7 @@ pub fn face_plane(k: &Kernel, brep: &Brep, face: FaceId) -> Result<FacePlane, Ex
 ///
 /// [`ExtrudeError::NoBoundaryLoops`] for a face without boundary loops, plus the
 /// errors of the solidcore queries and curve evaluation used.
-pub fn face_boundary(
-    k: &Kernel,
-    brep: &Brep,
-    face: FaceId,
-) -> Result<Vec<FaceLoop>, ExtrudeError> {
+pub fn face_boundary(k: &Kernel, brep: &Brep, face: FaceId) -> Result<Vec<FaceLoop>, ExtrudeError> {
     let loops = face_get_boundary_loops(brep, face).map_err(|error| {
         ExtrudeError::solid("query::api_queries::face_get_boundary_loops", error)
     })?;
@@ -467,21 +437,12 @@ pub fn face_boundary(
     for &edge_count in &loops.edge_counts {
         if edge_count == 0 {
             // A vertex loop carries no curve to extrude.
-            return Err(ExtrudeError::DegenerateLoop {
-                loop_index: result.len(),
-            });
+            return Err(ExtrudeError::DegenerateLoop { loop_index: result.len() });
         }
-        let end = cursor
-            .checked_add(edge_count)
-            .ok_or(ExtrudeError::MalformedBoundary(face))?;
-        let edge_ids = loops
-            .edges
-            .get(cursor..end)
-            .ok_or(ExtrudeError::MalformedBoundary(face))?;
-        let orientations = loops
-            .orientations
-            .get(cursor..end)
-            .ok_or(ExtrudeError::MalformedBoundary(face))?;
+        let end = cursor.checked_add(edge_count).ok_or(ExtrudeError::MalformedBoundary(face))?;
+        let edge_ids = loops.edges.get(cursor..end).ok_or(ExtrudeError::MalformedBoundary(face))?;
+        let orientations =
+            loops.orientations.get(cursor..end).ok_or(ExtrudeError::MalformedBoundary(face))?;
 
         let mut segments = Vec::with_capacity(edge_count);
         let mut points = Vec::with_capacity(edge_count);
@@ -489,18 +450,12 @@ pub fn face_boundary(
             let edge = brep
                 .edge(edge_id)
                 .map_err(|error| ExtrudeError::solid("topology::Brep::edge", error))?;
-            let curve = edge
-                .curve
-                .as_ref()
-                .ok_or(ExtrudeError::NoCurve { face, edge: edge_id })?;
+            let curve = edge.curve.as_ref().ok_or(ExtrudeError::NoCurve { face, edge: edge_id })?;
             let sense = match orientation {
                 OrientType::Same => true,
                 OrientType::Opposite => false,
                 _ => {
-                    return Err(ExtrudeError::InvalidOrientation {
-                        face,
-                        edge: edge_id,
-                    });
+                    return Err(ExtrudeError::InvalidOrientation { face, edge: edge_id });
                 }
             };
             let segment = LoopSegment {
@@ -551,11 +506,7 @@ pub fn planar_face_profile(
     if deviation > allowed * (1.0 + 1e-9) + 1e-12 {
         return Err(ExtrudeError::NotPlanar { face, deviation });
     }
-    Ok(PlanarFaceProfile {
-        face,
-        plane,
-        loops,
-    })
+    Ok(PlanarFaceProfile { face, plane, loops })
 }
 
 /// Extrudes `face` into an exact solidcore `Brep` with
@@ -638,9 +589,7 @@ fn taper_extrude(k: &mut Kernel, curves: Vec<Curve>, distance: f64) -> Result<Br
     match taper_once(k, &curves, distance) {
         Ok(brep) => Ok(brep),
         Err(original) => {
-            let blocked = original
-                .solidcore()
-                .is_some_and(SolidError::is_unported);
+            let blocked = original.solidcore().is_some_and(SolidError::is_unported);
             if blocked && curves.len() == 1 {
                 if let Some(halves) = split_closed_curve(k, &curves[0]) {
                     if let Ok(brep) = taper_once(k, &halves, distance) {
@@ -665,9 +614,7 @@ fn taper_once(k: &mut Kernel, curves: &[Curve], distance: f64) -> Result<Brep, E
 /// caller then keeps the original solidcore error.
 fn split_closed_curve(k: &Kernel, curve: &Curve) -> Option<Vec<Curve>> {
     let interval = curve.natural_interval();
-    let closed = curve
-        .is_closed(k, &interval, k.tolerances.zone_tol_3d)
-        .ok()?;
+    let closed = curve.is_closed(k, &interval, k.tolerances.zone_tol_3d).ok()?;
     if !closed {
         return None;
     }
@@ -768,9 +715,8 @@ fn sweep_linear(
         return Err(ExtrudeError::NoBoundaryLoops(profile.face));
     }
     let curves_ref: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
-    create_linear_sweep(k, &curves_ref, profile.plane.normal, distance, true).map_err(|error| {
-        ExtrudeError::solid("sweep::api_brep::create_linear_sweep", error)
-    })
+    create_linear_sweep(k, &curves_ref, profile.plane.normal, distance, true)
+        .map_err(|error| ExtrudeError::solid("sweep::api_brep::create_linear_sweep", error))
 }
 
 fn sweep_edges(
@@ -785,15 +731,13 @@ fn sweep_edges(
             edges.push((brep, segment.edge));
         }
     }
-    let Some(start) = profile
-        .outer_loop()
-        .and_then(|loop_| loop_.points.first())
-        .copied()
-    else {
+    let Some(start) = profile.outer_loop().and_then(|loop_| loop_.points.first()).copied() else {
         return Err(ExtrudeError::NoBoundaryLoops(profile.face));
     };
     let path = api_curves::create_line_segment(start, start + profile.plane.normal * distance)
-        .map_err(|error| ExtrudeError::solid("primitive::api_curves::create_line_segment", error))?;
+        .map_err(|error| {
+            ExtrudeError::solid("primitive::api_curves::create_line_segment", error)
+        })?;
     let path: Curve = path.into();
     let options = SweepOptions {
         cap_ends: true,
@@ -821,9 +765,7 @@ pub struct PreviewOptions {
 
 impl Default for PreviewOptions {
     fn default() -> Self {
-        Self {
-            curved_segments: DEFAULT_CURVED_SEGMENTS,
-        }
+        Self { curved_segments: DEFAULT_CURVED_SEGMENTS }
     }
 }
 
@@ -868,20 +810,14 @@ pub fn extrude_planar_face_preview_with_options(
     let profile = planar_face_profile(k, brep, face)?;
     let curved_segments = options.curved_segments.max(1);
 
-    let mut mesh = Mesh {
-        lightweight: true,
-        ..Mesh::default()
-    };
+    let mut mesh = Mesh { lightweight: true, ..Mesh::default() };
     let normal = profile.plane.normal;
 
     for (loop_index, loop_) in profile.loops.iter().enumerate() {
         let points = loop_.sample(k, curved_segments)?;
         let count = points.len();
         let base_center = centroid(&points);
-        let top: Vec<Point3> = points
-            .iter()
-            .map(|point| *point + normal * distance)
-            .collect();
+        let top: Vec<Point3> = points.iter().map(|point| *point + normal * distance).collect();
         let top_center = base_center + normal * distance;
 
         // Side walls: one quad (two triangles) per boundary segment.
@@ -891,10 +827,7 @@ pub fn extrude_planar_face_preview_with_options(
             let base_b = points[next];
             let top_a = top[index];
             let top_b = top[next];
-            let face_normal = (base_b - base_a)
-                .cross(normal)
-                .unitize()
-                .unwrap_or(Vec3::ZERO);
+            let face_normal = (base_b - base_a).cross(normal).unitize().unwrap_or(Vec3::ZERO);
             push_triangle(
                 &mut mesh,
                 face_normal,
@@ -927,14 +860,7 @@ pub fn extrude_planar_face_preview_with_options(
                 points[next],
                 "extrude:0:base",
             )?;
-            push_triangle(
-                &mut mesh,
-                normal,
-                top_center,
-                top[index],
-                top[next],
-                "extrude:0:top",
-            )?;
+            push_triangle(&mut mesh, normal, top_center, top[index], top[next], "extrude:0:top")?;
         }
     }
 
@@ -976,11 +902,7 @@ fn check_distance(distance: f64) -> Result<(), ExtrudeError> {
 fn face_tolerance(k: &Kernel, brep: &Brep, face: FaceId) -> Result<f64, ExtrudeError> {
     let tolerance = face_p2::tolerance(brep, face)
         .map_err(|error| ExtrudeError::solid("topology::face::p2::tolerance", error))?;
-    if tolerance > 0.0 {
-        Ok(tolerance)
-    } else {
-        Ok(zone_tol3d(k, USE_DEFAULT))
-    }
+    if tolerance > 0.0 { Ok(tolerance) } else { Ok(zone_tol3d(k, USE_DEFAULT)) }
 }
 
 /// Planarity fallback for surfaces whose `is_planar` needs an unported face
@@ -1015,9 +937,9 @@ fn sample_face_plane(
                     })?;
                     samples.push(point);
                     if reference.is_none() {
-                        let normal = normal.unitize().map_err(|error| {
-                            ExtrudeError::solid("math::Vec3::unitize", error)
-                        })?;
+                        let normal = normal
+                            .unitize()
+                            .map_err(|error| ExtrudeError::solid("math::Vec3::unitize", error))?;
                         reference = Some((point, normal));
                     }
                 }
@@ -1051,11 +973,7 @@ fn sample_face_plane(
     if !parallel || deviation > tolerance * 10.0 {
         return Err(ExtrudeError::NotPlanar { face, deviation });
     }
-    Ok(FacePlane {
-        point: plane_point,
-        normal: plane_normal,
-        deviation,
-    })
+    Ok(FacePlane { point: plane_point, normal: plane_normal, deviation })
 }
 
 fn sample_count(segment: &LoopSegment, curved_segments: usize) -> usize {
@@ -1070,10 +988,7 @@ fn points_coincide(a: Point3, b: Point3) -> bool {
 }
 
 fn push_distinct(points: &mut Vec<Point3>, point: Point3) {
-    if points
-        .last()
-        .is_none_or(|last| !points_coincide(*last, point))
-    {
+    if points.last().is_none_or(|last| !points_coincide(*last, point)) {
         points.push(point);
     }
 }
@@ -1096,11 +1011,7 @@ fn push_triangle(
     c: Point3,
     group: &str,
 ) -> Result<(), ExtrudeError> {
-    let (b, c) = if (b - a).cross(c - a).dot(normal) < 0.0 {
-        (c, b)
-    } else {
-        (b, c)
-    };
+    let (b, c) = if (b - a).cross(c - a).dot(normal) < 0.0 { (c, b) } else { (b, c) };
     let ia = push_vertex(mesh, a, normal)?;
     let ib = push_vertex(mesh, b, normal)?;
     let ic = push_vertex(mesh, c, normal)?;
@@ -1111,10 +1022,8 @@ fn push_triangle(
 
 fn push_vertex(mesh: &mut Mesh, point: Point3, normal: Vec3) -> Result<u32, ExtrudeError> {
     let index = u32::try_from(mesh.vertices.len()).map_err(|_| ExtrudeError::PreviewOverflow)?;
-    mesh.vertices
-        .push([point.x as f32, point.y as f32, point.z as f32]);
-    mesh.normals
-        .push([normal.x as f32, normal.y as f32, normal.z as f32]);
+    mesh.vertices.push([point.x as f32, point.y as f32, point.z as f32]);
+    mesh.normals.push([normal.x as f32, normal.y as f32, normal.z as f32]);
     Ok(index)
 }
 
@@ -1145,11 +1054,7 @@ mod tests {
         let extent = calculate_bounding_box(
             k,
             brep,
-            BoundingBoxOptions {
-                approx: false,
-                tight: true,
-                expand_by_zone_tol_3d: false,
-            },
+            BoundingBoxOptions { approx: false, tight: true, expand_by_zone_tol_3d: false },
         )
         .expect("bounding box");
         (
@@ -1243,8 +1148,7 @@ mod tests {
 
         let linear =
             extrude_planar_face_linear_sweep(&mut k, &brep, top, 5.0).expect("linear sweep");
-        let curve =
-            extrude_planar_face_curve_sweep(&mut k, &brep, top, 5.0).expect("curve sweep");
+        let curve = extrude_planar_face_curve_sweep(&mut k, &brep, top, 5.0).expect("curve sweep");
         let expected_min = [0.0, 0.0, 20.0];
         let expected_max = [10.0, 4.0, 25.0];
         for solid in [&linear, &curve] {
@@ -1266,10 +1170,7 @@ mod tests {
             match face_plane(&k, &brep, face) {
                 Ok(plane) => {
                     planar += 1;
-                    assert!(
-                        plane.normal.z.abs() > 0.999,
-                        "only the caps are planar in a cylinder"
-                    );
+                    assert!(plane.normal.z.abs() > 0.999, "only the caps are planar in a cylinder");
                 }
                 Err(ExtrudeError::NotPlanar { deviation, .. }) => {
                     non_planar += 1;
@@ -1285,10 +1186,7 @@ mod tests {
             .iter()
             .map(|(face, _)| face)
             .find(|&face| {
-                matches!(
-                    face_plane(&k, &brep, face),
-                    Err(ExtrudeError::NotPlanar { .. })
-                )
+                matches!(face_plane(&k, &brep, face), Err(ExtrudeError::NotPlanar { .. }))
             })
             .expect("cylinder side face");
         let error = extrude_planar_face(&mut k, &brep, lateral, 1.0).expect_err("must reject");
@@ -1338,14 +1236,8 @@ mod tests {
                 max[axis] = max[axis].max(vertex[axis]);
             }
         }
-        assert_close(
-            [min[0] as f64, min[1] as f64, min[2] as f64],
-            [0.0, 0.0, 20.0],
-        );
-        assert_close(
-            [max[0] as f64, max[1] as f64, max[2] as f64],
-            [10.0, 4.0, 25.0],
-        );
+        assert_close([min[0] as f64, min[1] as f64, min[2] as f64], [0.0, 0.0, 20.0]);
+        assert_close([max[0] as f64, max[1] as f64, max[2] as f64], [10.0, 4.0, 25.0]);
 
         for normal in &mesh.normals {
             let length =
@@ -1378,8 +1270,8 @@ mod tests {
         let brep = box_brep(&mut kernel);
         let top = face_with_normal(&kernel, &brep, Vec3::new(0.0, 0.0, 1.0));
         let extruded = extrude_planar_face_exact(&mut kernel, &brep, top, 5.0).expect("extrude");
-        let extruded_volume = nodecraft_layers::kernel_volume(&mut kernel, &extruded)
-            .expect("extruded volume");
+        let extruded_volume =
+            nodecraft_layers::kernel_volume(&mut kernel, &extruded).expect("extruded volume");
 
         let region = solidcore_record::Region2 {
             outer: solidcore_record::Loop2::polygon(&[

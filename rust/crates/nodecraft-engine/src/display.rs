@@ -8,7 +8,9 @@ use crate::kernel_pool::RevisionToken;
 use nodecraft_protocol::Mesh;
 use std::sync::Arc;
 
-pub use nodecraft_display::{Affine3, DisplayTransform, Placement, PlanInstance, face_colors_by_index};
+pub use nodecraft_display::{
+    Affine3, DisplayTransform, Placement, PlanInstance, face_colors_by_index,
+};
 
 /// Bump when the meshing algorithm changes so cached meshes are not reused.
 pub const TESSELLATION_VERSION: u32 = 1;
@@ -150,10 +152,8 @@ mod tests {
                 plan: None,
                 plan_edge_ids: Vec::new(),
                 stats: None,
-                placement: Placement::identity().then(DisplayTransform::Place {
-                    offset: [10.0, 0.0, 0.0],
-                    rotation: [0.0; 3],
-                }),
+                placement: Placement::identity()
+                    .then(DisplayTransform::Place { offset: [10.0, 0.0, 0.0], rotation: [0.0; 3] }),
             }],
         };
         let merged = asset.merged();

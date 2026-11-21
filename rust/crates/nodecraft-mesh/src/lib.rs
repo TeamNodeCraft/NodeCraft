@@ -25,7 +25,8 @@ thread_local! {
 
 /// Set the max-sag used for display tessellation on the current thread.
 pub fn set_display_tolerance(tolerance: Option<f64>) {
-    DISPLAY_TOLERANCE.with(|slot| slot.set(tolerance.filter(|value| value.is_finite() && *value > 0.0)));
+    DISPLAY_TOLERANCE
+        .with(|slot| slot.set(tolerance.filter(|value| value.is_finite() && *value > 0.0)));
 }
 
 /// Current display max-sag in model units.
@@ -48,7 +49,9 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
     let mut triangle_normals = Vec::with_capacity(mesh.faces.len());
     for face in &mesh.faces {
         let [a, b, c] = face.map(|index| index as usize);
-        let (Some(pa), Some(pb), Some(pc)) = (mesh.vertices.get(a), mesh.vertices.get(b), mesh.vertices.get(c)) else {
+        let (Some(pa), Some(pb), Some(pc)) =
+            (mesh.vertices.get(a), mesh.vertices.get(b), mesh.vertices.get(c))
+        else {
             triangle_normals.push(None);
             continue;
         };
@@ -96,7 +99,8 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
             for (cluster, sum) in cluster_sums[vertex].iter().enumerate() {
                 let length = (sum[0] * sum[0] + sum[1] * sum[1] + sum[2] * sum[2]).sqrt();
                 if length > 1.0e-12
-                    && (sum[0] * normal[0] + sum[1] * normal[1] + sum[2] * normal[2]) / length >= CREASE_COSINE
+                    && (sum[0] * normal[0] + sum[1] * normal[1] + sum[2] * normal[2]) / length
+                        >= CREASE_COSINE
                 {
                     assigned = Some(cluster);
                     break;
@@ -176,15 +180,10 @@ pub fn split_shading_normals(mesh: &Mesh) -> Mesh {
 fn shading_triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> Option<[f32; 3]> {
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let normal = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
+    let normal = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
     let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
     (length > 1.0e-12).then(|| [normal[0] / length, normal[1] / length, normal[2] / length])
 }
-
 
 #[cfg(test)]
 mod tests {

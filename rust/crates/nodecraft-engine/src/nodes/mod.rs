@@ -45,8 +45,8 @@ mod combine;
 mod exporter;
 mod extrude;
 mod fillet;
-mod look;
 mod loft;
+mod look;
 mod mirror;
 mod offsetfaces;
 mod primitive;
@@ -331,9 +331,7 @@ fn validated_section(part: &Part, label: &str) -> Result<SectionValue, String> {
         return Err(format!("{label} has no geometry"));
     }
     if has_bodies && has_sketches {
-        return Err(format!(
-            "{label} contains both bodies and sketches; connect one or the other"
-        ));
+        return Err(format!("{label} contains both bodies and sketches; connect one or the other"));
     }
     if has_bodies {
         return Ok(SectionValue::Body);
@@ -479,10 +477,7 @@ pub(crate) fn input_layout<'a>(
     inputs: &'a [(&str, Vec<String>)],
     port: &str,
 ) -> Option<&'a [String]> {
-    inputs
-        .iter()
-        .find(|(name, _)| *name == port)
-        .map(|(_, layout)| layout.as_slice())
+    inputs.iter().find(|(name, _)| *name == port).map(|(_, layout)| layout.as_slice())
 }
 
 /// Whether an edge-feature node has a saved edge selection.
@@ -490,10 +485,7 @@ pub(crate) fn input_layout<'a>(
 /// A fresh Fillet/Chamfer has no edges yet and passes its input through; only
 /// a non-empty `edges` array runs the blend.
 pub(crate) fn has_edges(values: &serde_json::Value) -> bool {
-    values
-        .get("edges")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|edges| !edges.is_empty())
+    values.get("edges").and_then(serde_json::Value::as_array).is_some_and(|edges| !edges.is_empty())
 }
 
 /// What a node may ask the exact Part evaluator for.
@@ -545,10 +537,7 @@ pub(crate) trait PartEval {
     /// The one sketch connected to `port`, or `None` when the port is
     /// unconnected or its Part is a body. A Part carrying several sketches (or
     /// both bodies and sketches) is an error: a section is exactly one sketch.
-    fn input_sketch(
-        &mut self,
-        port: &str,
-    ) -> Result<Option<std::sync::Arc<SketchOutput>>, String>;
+    fn input_sketch(&mut self, port: &str) -> Result<Option<std::sync::Arc<SketchOutput>>, String>;
 
     /// Every connection to `port`, in connection order, source-labelled. Each
     /// section is validated as exactly one sketch or a body, never mixed; a
@@ -614,11 +603,10 @@ fn write_temp_source(bytes: &[u8]) -> Result<std::path::PathBuf, String> {
     use std::io::Write as _;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "nodecraft-ingest-{}-{id}.step",
-        std::process::id()
-    ));
-    let mut file = std::fs::File::create(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let path =
+        std::env::temp_dir().join(format!("nodecraft-ingest-{}-{id}.step", std::process::id()));
+    let mut file =
+        std::fs::File::create(&path).map_err(|error| format!("{}: {error}", path.display()))?;
     file.write_all(bytes).map_err(|error| format!("{}: {error}", path.display()))?;
     file.sync_all().map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(path)
@@ -672,17 +660,13 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
             }
         };
         let path = source.path();
-        let default_quality = (nodecraft_mesh::display_tolerance()
-            - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE)
-            .abs()
-            < 1.0e-9;
+        let default_quality =
+            (nodecraft_mesh::display_tolerance() - nodecraft_mesh::DEFAULT_DISPLAY_TOLERANCE).abs()
+                < 1.0e-9;
         let options = if default_quality { "display:default" } else { "display:custom" };
         let key = crate::import_cache_key(&resolved.content_hash, options);
-        let full = self
-            .eval
-            .index
-            .node(node.id)
-            .ok_or("STEP import node missing from the request")?;
+        let full =
+            self.eval.index.node(node.id).ok_or("STEP import node missing from the request")?;
         let fresh = crate::cache::node_cache_is_fresh(full);
         let (diagnostics, breps) = if !self.eval.bypass_cache
             && default_quality
@@ -700,9 +684,7 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
             let combined = nodecraft_mesh::import_step_with_breps(path)?;
             let diagnostics = combined.display.diagnostics.clone();
             if default_quality {
-                self.eval
-                    .cache
-                    .insert_import(key, std::sync::Arc::new(combined.display));
+                self.eval.cache.insert_import(key, std::sync::Arc::new(combined.display));
             }
             (diagnostics, combined.breps)
         };
@@ -710,16 +692,13 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
         if let Some(warning) = resolved.warning {
             warnings.push(warning);
         }
-        if let Some(warning) = node.values.get(crate::import_io::PATH_WARNING_KEY).and_then(serde_json::Value::as_str)
+        if let Some(warning) =
+            node.values.get(crate::import_io::PATH_WARNING_KEY).and_then(serde_json::Value::as_str)
             && !warning.is_empty()
         {
             warnings.push(warning.to_owned());
         }
-        Ok(Some(StepImport {
-            bodies: breps.bodies,
-            warnings,
-            diagnostics,
-        }))
+        Ok(Some(StepImport { bodies: breps.bodies, warnings, diagnostics }))
     }
 
     fn export_input(&mut self, node: NodeView<'_>) -> ExportInput {
@@ -727,26 +706,20 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
             return ExportInput::missing("Export node has no shape input.");
         };
         let source = link.from.clone();
-        let source_type = self
-            .eval
-            .index
-            .node(&source)
-            .map(|entry| entry.node_type.clone())
-            .unwrap_or_default();
+        let source_type =
+            self.eval.index.node(&source).map(|entry| entry.node_type.clone()).unwrap_or_default();
         let combine = crate::is_combine_node(
-            self.eval
-                .index
-                .node(&source)
-                .expect("export source is in the request"),
+            self.eval.index.node(&source).expect("export source is in the request"),
         );
-        let chain = crate::resolve_part_chain(&self.eval.index, &source).map(|(node, offset, rotation)| {
-            ExportChain {
-                node: node.clone(),
-                offset,
-                rotation,
-                imported_step: crate::is_stepimporter_node(node),
-            }
-        });
+        let chain =
+            crate::resolve_part_chain(&self.eval.index, &source).map(|(node, offset, rotation)| {
+                ExportChain {
+                    node: node.clone(),
+                    offset,
+                    rotation,
+                    imported_step: crate::is_stepimporter_node(node),
+                }
+            });
         let part = self.eval.evaluate_part(&source);
         let breps = crate::exact_operand_breps(self.eval, &source);
         let member_sources: Vec<String> = if combine {
@@ -812,20 +785,12 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
             let b = index.first_incoming(node.id, "b")?.from.clone();
             crate::exact_eval::fused_union_leaves(index, node.id, &a, &b)?
         };
-        let operands = leaves
-            .into_iter()
-            .map(|leaf| self.eval.evaluate_part(&leaf))
-            .collect();
+        let operands = leaves.into_iter().map(|leaf| self.eval.evaluate_part(&leaf)).collect();
         Some(UnionRun { operands })
     }
 
     fn cached_brep(&mut self, node: NodeView<'_>) -> Result<std::sync::Arc<Brep>, String> {
-        let full = self
-            .eval
-            .index
-            .node(node.id)
-            .cloned()
-            .ok_or("node missing from the request")?;
+        let full = self.eval.index.node(node.id).cloned().ok_or("node missing from the request")?;
         self.eval.cached_primitive_brep_arc(&full)
     }
 
@@ -837,21 +802,12 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
             .filter(|link| link.input == port)
             .map(|link| link.from.clone())
             .collect();
-        sources
-            .into_iter()
-            .map(|source| self.eval.evaluate_part(&source))
-            .collect()
+        sources.into_iter().map(|source| self.eval.evaluate_part(&source)).collect()
     }
 
-    fn input_sketch(
-        &mut self,
-        port: &str,
-    ) -> Result<Option<std::sync::Arc<SketchOutput>>, String> {
-        let Some(source) = self
-            .eval
-            .index
-            .first_incoming(&self.node_id, port)
-            .map(|link| link.from.clone())
+    fn input_sketch(&mut self, port: &str) -> Result<Option<std::sync::Arc<SketchOutput>>, String> {
+        let Some(source) =
+            self.eval.index.first_incoming(&self.node_id, port).map(|link| link.from.clone())
         else {
             return Ok(None);
         };
@@ -875,15 +831,15 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
         sources
             .into_iter()
             .map(|from| {
-                let part = self
-                    .eval
-                    .evaluate_part(&from)
-                    .and_then(|part| match validated_section(&part, &format!("Section {from}"))? {
-                        SectionValue::Sketches(sketches) => {
-                            exactly_one_sketch(sketches, &format!("Section {from}"))?;
-                            Ok(part)
+                let part =
+                    self.eval.evaluate_part(&from).and_then(|part| {
+                        match validated_section(&part, &format!("Section {from}"))? {
+                            SectionValue::Sketches(sketches) => {
+                                exactly_one_sketch(sketches, &format!("Section {from}"))?;
+                                Ok(part)
+                            }
+                            SectionValue::Body => Ok(part),
                         }
-                        SectionValue::Body => Ok(part),
                     });
                 InputSection { from, part }
             })
@@ -891,11 +847,8 @@ impl PartEval for EnginePartEval<'_, '_, '_> {
     }
 
     fn input_profile(&mut self, ports: &[&str]) -> Result<ProfileInput, String> {
-        let Some(source) = self
-            .eval
-            .index
-            .first_incoming_any(&self.node_id, ports)
-            .map(|link| link.from.clone())
+        let Some(source) =
+            self.eval.index.first_incoming_any(&self.node_id, ports).map(|link| link.from.clone())
         else {
             return Err("Profile input has no connected source".into());
         };
@@ -985,10 +938,7 @@ pub fn handles(node_type: &str) -> bool {
 
 /// Display body layout for the session's drag preview, when the node is ported.
 #[must_use]
-pub fn body_layout(
-    node: NodeView<'_>,
-    inputs: &[(&str, Vec<String>)],
-) -> Option<Vec<String>> {
+pub fn body_layout(node: NodeView<'_>, inputs: &[(&str, Vec<String>)]) -> Option<Vec<String>> {
     find(node.node_type)?.body_layout(node, inputs)
 }
 
@@ -1057,9 +1007,7 @@ mod tests {
 
     fn sketch() -> crate::sketch::Sketch {
         let mut sketch = crate::sketch::Sketch::new();
-        sketch
-            .add_circle(solidcore_record::Vec2::new(0.0, 0.0), 10.0, None, None)
-            .expect("circle");
+        sketch.add_circle(solidcore_record::Vec2::new(0.0, 0.0), 10.0, None, None).expect("circle");
         sketch
     }
 
@@ -1085,13 +1033,7 @@ mod tests {
     }
 
     fn node(id: &str, node_type: &str, values: serde_json::Value) -> Node {
-        Node {
-            id: id.into(),
-            node_type: node_type.into(),
-            values,
-            suppressed: false,
-            cache: None,
-        }
+        Node { id: id.into(), node_type: node_type.into(), values, suppressed: false, cache: None }
     }
 
     /// `step_import` is the engine-owned import route: it returns every body,

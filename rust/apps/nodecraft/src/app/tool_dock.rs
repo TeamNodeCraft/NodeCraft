@@ -131,13 +131,33 @@ impl ToolSection {
 
     fn icon(self) -> (&'static str, &'static [u8]) {
         match self {
-            Self::Create => ("iconify-create", include_bytes!("../../../../../vendor/iconify-design/create.svg")),
-            Self::Modify => ("iconify-modify", include_bytes!("../../../../../vendor/iconify-design/modify.svg")),
-            Self::Boolean => ("iconify-boolean", include_bytes!("../../../../../vendor/iconify-design/boolean.svg")),
-            Self::Pattern => ("iconify-pattern", include_bytes!("../../../../../vendor/iconify-design/pattern.svg")),
-            Self::Organise => ("iconify-organise", include_bytes!("../../../../../vendor/iconify-design/organise.svg")),
-            Self::Animate => ("iconify-animate", include_bytes!("../../../../../vendor/iconify-design/animate.svg")),
-            Self::Io => ("iconify-io", include_bytes!("../../../../../vendor/iconify-design/io.svg")),
+            Self::Create => (
+                "iconify-create",
+                include_bytes!("../../../../../vendor/iconify-design/create.svg"),
+            ),
+            Self::Modify => (
+                "iconify-modify",
+                include_bytes!("../../../../../vendor/iconify-design/modify.svg"),
+            ),
+            Self::Boolean => (
+                "iconify-boolean",
+                include_bytes!("../../../../../vendor/iconify-design/boolean.svg"),
+            ),
+            Self::Pattern => (
+                "iconify-pattern",
+                include_bytes!("../../../../../vendor/iconify-design/pattern.svg"),
+            ),
+            Self::Organise => (
+                "iconify-organise",
+                include_bytes!("../../../../../vendor/iconify-design/organise.svg"),
+            ),
+            Self::Animate => (
+                "iconify-animate",
+                include_bytes!("../../../../../vendor/iconify-design/animate.svg"),
+            ),
+            Self::Io => {
+                ("iconify-io", include_bytes!("../../../../../vendor/iconify-design/io.svg"))
+            }
         }
     }
 
@@ -201,15 +221,10 @@ fn build_sections() -> Vec<BuiltSection> {
             let groups: Vec<ToolGroup> = groups
                 .into_iter()
                 .map(|(_, heading, mut rows)| {
-                    rows.sort_by_key(|metadata| {
-                        metadata.dock.map_or(0, |dock| dock.order)
-                    });
+                    rows.sort_by_key(|metadata| metadata.dock.map_or(0, |dock| dock.order));
                     let tools: Vec<ToolItem> = rows.into_iter().map(tool_item).collect();
                     let tools: &'static [ToolItem] = Box::leak(tools.into_boxed_slice());
-                    ToolGroup {
-                        heading: (!heading.is_empty()).then_some(heading),
-                        tools,
-                    }
+                    ToolGroup { heading: (!heading.is_empty()).then_some(heading), tools }
                 })
                 .collect();
             BuiltSection {
@@ -253,9 +268,6 @@ fn solid_variants() -> &'static [ToolItem] {
     })
 }
 
-
-
-
 impl NodeCraftApp {
     pub(super) fn active_tool_menu(&self) -> Option<ToolSection> {
         match self.tool_dock_focus {
@@ -265,10 +277,7 @@ impl NodeCraftApp {
     }
 
     pub(super) fn tool_section_index(section: ToolSection) -> usize {
-        ToolSection::ALL
-            .iter()
-            .position(|candidate| *candidate == section)
-            .unwrap_or(0)
+        ToolSection::ALL.iter().position(|candidate| *candidate == section).unwrap_or(0)
     }
 
     pub(super) fn open_tool_menu(&mut self, section: ToolSection, select_first: bool) {
@@ -400,8 +409,7 @@ impl NodeCraftApp {
                 if grip_response.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                     let max_offset =
-                        ((panel.height() - self.tool_dock_measured_height) * 0.5 - 12.0)
-                            .max(0.0);
+                        ((panel.height() - self.tool_dock_measured_height) * 0.5 - 12.0).max(0.0);
                     self.tool_dock_offset_y = (self.tool_dock_offset_y
                         + grip_response.drag_delta().y)
                         .clamp(-max_offset, max_offset);
@@ -413,10 +421,7 @@ impl NodeCraftApp {
                 for row in 0..2 {
                     for column in 0..3 {
                         let centre = grip_rect.center()
-                            + egui::vec2(
-                                (column as f32 - 1.0) * 5.0,
-                                (row as f32 - 0.5) * 5.0,
-                            );
+                            + egui::vec2((column as f32 - 1.0) * 5.0, (row as f32 - 0.5) * 5.0);
                         ui.painter().circle_filled(centre, 1.4, dot);
                     }
                 }
@@ -443,12 +448,7 @@ impl NodeCraftApp {
             egui::Order::Foreground,
             egui::Id::new("node-tool-dock-background"),
         ));
-        paint_background(
-            &background,
-            dock,
-            TOOL_METRICS,
-            tool_dock_style(&theme),
-        );
+        paint_background(&background, dock, TOOL_METRICS, tool_dock_style(&theme));
         self.tool_dock_measured_height = dock.height();
 
         let category_clicked = clicked_section.is_some();
@@ -511,8 +511,7 @@ impl NodeCraftApp {
 
         if self.tool_search_open {
             let mut chosen = None;
-            let search_centre_y =
-                dock.min.y + TOOL_METRICS.padding + TOOL_METRICS.row_size() * 0.5;
+            let search_centre_y = dock.min.y + TOOL_METRICS.padding + TOOL_METRICS.row_size() * 0.5;
             let search_popup_y = (search_centre_y - TOOL_METRICS.row_size() * 0.5 - 8.0)
                 .clamp(panel.top() + 8.0, panel.bottom() - 48.0);
             let search_response = egui::Area::new(egui::Id::new("node-tool-search"))
@@ -528,10 +527,7 @@ impl NodeCraftApp {
                             ui.set_width(260.0);
                             let query_frame = egui::Frame::new()
                                 .fill(theme.color(theme.control))
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    theme.color(theme.border_strong),
-                                ))
+                                .stroke(egui::Stroke::new(1.0, theme.color(theme.border_strong)))
                                 .corner_radius(egui::CornerRadius::same(8))
                                 .inner_margin(egui::Margin::symmetric(8, 6))
                                 .show(ui, |ui| {
@@ -579,22 +575,38 @@ impl NodeCraftApp {
                             for section in ToolSection::ALL {
                                 for group in section.groups() {
                                     for tool in group.tools {
-                                        let variants = std::iter::once(tool).chain(
-                                            tool.submenu.unwrap_or(&[]).iter(),
-                                        );
+                                        let variants = std::iter::once(tool)
+                                            .chain(tool.submenu.unwrap_or(&[]).iter());
                                         for candidate in variants {
-                                            let wildcard = nodecraft_search::wildcard_matches(&pattern, candidate.label)
-                                                || nodecraft_search::wildcard_matches(&pattern, candidate.node_type);
-                                            let distance = nodecraft_search::best_levenshtein(&needle, candidate.label)
-                                                .min(nodecraft_search::best_levenshtein(&needle, candidate.node_type));
+                                            let wildcard = nodecraft_search::wildcard_matches(
+                                                &pattern,
+                                                candidate.label,
+                                            ) || nodecraft_search::wildcard_matches(
+                                                &pattern,
+                                                candidate.node_type,
+                                            );
+                                            let distance = nodecraft_search::best_levenshtein(
+                                                &needle,
+                                                candidate.label,
+                                            )
+                                            .min(nodecraft_search::best_levenshtein(
+                                                &needle,
+                                                candidate.node_type,
+                                            ));
                                             if wildcard || distance <= threshold {
-                                                found.push((if wildcard { 0 } else { distance }, section, *candidate));
+                                                found.push((
+                                                    if wildcard { 0 } else { distance },
+                                                    section,
+                                                    *candidate,
+                                                ));
                                             }
                                         }
                                     }
                                 }
                             }
-                            found.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.label.cmp(b.2.label)));
+                            found.sort_by(|a, b| {
+                                a.0.cmp(&b.0).then_with(|| a.2.label.cmp(b.2.label))
+                            });
                             if found.is_empty() {
                                 ui.label(
                                     egui::RichText::new("No matching tools")
@@ -619,10 +631,8 @@ impl NodeCraftApp {
                             let (up_pressed, down_pressed) = if results_focused {
                                 ctx.input_mut(|input| {
                                     (
-                                        input.consume_key(
-                                            egui::Modifiers::NONE,
-                                            egui::Key::ArrowUp,
-                                        ),
+                                        input
+                                            .consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
                                         input.consume_key(
                                             egui::Modifiers::NONE,
                                             egui::Key::ArrowDown,
@@ -657,9 +667,7 @@ impl NodeCraftApp {
                                     }
                                 }
                             }
-                            for (index, (_, section, tool)) in
-                                found.iter().take(10).enumerate()
-                            {
+                            for (index, (_, section, tool)) in found.iter().take(10).enumerate() {
                                 let selected = self.tool_search_result_index == Some(index);
                                 let (rect, response) = ui.allocate_exact_size(
                                     egui::Vec2::new(260.0, 26.0),
@@ -699,9 +707,8 @@ impl NodeCraftApp {
             self.tool_menu_rect = Some(search_response.response.rect);
             // The click that opens the popup is outside it, but inside the dock;
             // do not treat that same click as click-away.
-            let pointer_on_dock = ctx
-                .pointer_latest_pos()
-                .is_some_and(|pointer| dock.contains(pointer));
+            let pointer_on_dock =
+                ctx.pointer_latest_pos().is_some_and(|pointer| dock.contains(pointer));
             if search_response.response.clicked_elsewhere() && !pointer_on_dock {
                 self.tool_search_open = false;
                 self.tool_search_clear_due = None;
@@ -730,9 +737,8 @@ impl NodeCraftApp {
                 _ => None,
             };
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) {
-                let index = focused
-                    .map(|index| (index + 1).min(keyboard_row_count - 1))
-                    .unwrap_or(0);
+                let index =
+                    focused.map(|index| (index + 1).min(keyboard_row_count - 1)).unwrap_or(0);
                 if index == 0 {
                     self.focus_tool_search();
                 } else {
@@ -740,9 +746,8 @@ impl NodeCraftApp {
                 }
             }
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) {
-                let index = focused
-                    .map(|index| index.saturating_sub(1))
-                    .unwrap_or(keyboard_row_count - 1);
+                let index =
+                    focused.map(|index| index.saturating_sub(1)).unwrap_or(keyboard_row_count - 1);
                 if index == 0 {
                     self.focus_tool_search();
                 } else {
@@ -785,10 +790,7 @@ impl NodeCraftApp {
             return;
         }
         let groups = section.groups();
-        let items: Vec<&ToolItem> = groups
-            .iter()
-            .flat_map(|group| group.tools.iter())
-            .collect();
+        let items: Vec<&ToolItem> = groups.iter().flat_map(|group| group.tools.iter()).collect();
         if !items.is_empty() {
             if let Some(index) = self.tool_menu_index.as_mut() {
                 *index = (*index).min(items.len() - 1);
@@ -835,10 +837,7 @@ impl NodeCraftApp {
                     .x
             })
         };
-        let longest = items
-            .iter()
-            .map(|tool| label_width(tool.label))
-            .fold(0.0_f32, f32::max);
+        let longest = items.iter().map(|tool| label_width(tool.label)).fold(0.0_f32, f32::max);
         // Leave room for the row's text padding but keep long labels readable
         // without letting the flyout grow across the canvas.
         let row_width = (longest + 20.0).clamp(140.0, 264.0);
@@ -855,9 +854,7 @@ impl NodeCraftApp {
         let keyboard_choice = if self.tool_dock_keyboard_active
             && ctx.input(|input| input.key_pressed(egui::Key::Enter))
         {
-            self.tool_menu_index
-                .and_then(|index| items.get(index))
-                .map(|tool| **tool)
+            self.tool_menu_index.and_then(|index| items.get(index)).map(|tool| **tool)
         } else {
             None
         };
@@ -913,93 +910,95 @@ impl NodeCraftApp {
                                 ui.add_space(2.0);
                             }
                             for tool in group.tools {
-                            let selected = self.tool_menu_index == Some(item_index);
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::Vec2::new(row_width, 28.0),
-                                egui::Sense::click(),
-                            );
-                            let split = tool.submenu.is_some();
-                            let chevron_width = 22.0;
-                            let chevron_rect = egui::Rect::from_min_max(
-                                egui::Pos2::new(rect.right() - chevron_width, rect.top()),
-                                rect.max,
-                            );
-                            let chevron = split.then(|| {
-                                ui.interact(
-                                    chevron_rect,
-                                    egui::Id::new(("tool-split-chevron", section.label(), item_index)),
+                                let selected = self.tool_menu_index == Some(item_index);
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::Vec2::new(row_width, 28.0),
                                     egui::Sense::click(),
-                                )
-                            });
-                            let row_hovered = response.hovered()
-                                || chevron.as_ref().is_some_and(|response| response.hovered());
-                            if row_hovered || selected {
-                                let fill = if selected {
-                                    theme.with_alpha(theme.accent, 170)
-                                } else {
-                                    theme.with_alpha(theme.control, 190)
-                                };
-                                ui_shape::fill(&ui.painter(), rect, fill);
-                                if row_hovered {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                }
-                            }
-                            let text_width = label_width(tool.label);
-                            let label = if text_width <= row_width - 20.0 {
-                                tool.label.to_owned()
-                            } else {
-                                let ellipsis = "…";
-                                let mut cut = tool.label;
-                                while !cut.is_empty()
-                                    && label_width(&format!("{cut}{ellipsis}")) > row_width - 20.0
-                                {
-                                    cut = &cut[..cut.len().saturating_sub(1)];
-                                }
-                                format!("{cut}{ellipsis}")
-                            };
-                            ui.painter().text(
-                                egui::Pos2::new(rect.min.x + 10.0, rect.center().y),
-                                egui::Align2::LEFT_CENTER,
-                                label,
-                                label_font.clone(),
-                                theme.color(theme.text),
-                            );
-                            if split {
-                                let separator_x = rect.right() - chevron_width;
-                                ui.painter().line_segment(
-                                    [
-                                        egui::Pos2::new(separator_x, rect.top() + 5.0),
-                                        egui::Pos2::new(separator_x, rect.bottom() - 5.0),
-                                    ],
-                                    egui::Stroke::new(1.0, theme.with_alpha(theme.border, 170)),
                                 );
+                                let split = tool.submenu.is_some();
+                                let chevron_width = 22.0;
+                                let chevron_rect = egui::Rect::from_min_max(
+                                    egui::Pos2::new(rect.right() - chevron_width, rect.top()),
+                                    rect.max,
+                                );
+                                let chevron = split.then(|| {
+                                    ui.interact(
+                                        chevron_rect,
+                                        egui::Id::new((
+                                            "tool-split-chevron",
+                                            section.label(),
+                                            item_index,
+                                        )),
+                                        egui::Sense::click(),
+                                    )
+                                });
+                                let row_hovered = response.hovered()
+                                    || chevron.as_ref().is_some_and(|response| response.hovered());
+                                if row_hovered || selected {
+                                    let fill = if selected {
+                                        theme.with_alpha(theme.accent, 170)
+                                    } else {
+                                        theme.with_alpha(theme.control, 190)
+                                    };
+                                    ui_shape::fill(&ui.painter(), rect, fill);
+                                    if row_hovered {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                }
+                                let text_width = label_width(tool.label);
+                                let label = if text_width <= row_width - 20.0 {
+                                    tool.label.to_owned()
+                                } else {
+                                    let ellipsis = "…";
+                                    let mut cut = tool.label;
+                                    while !cut.is_empty()
+                                        && label_width(&format!("{cut}{ellipsis}"))
+                                            > row_width - 20.0
+                                    {
+                                        cut = &cut[..cut.len().saturating_sub(1)];
+                                    }
+                                    format!("{cut}{ellipsis}")
+                                };
                                 ui.painter().text(
-                                    egui::Pos2::new(
-                                        rect.right() - chevron_width * 0.5,
-                                        rect.center().y,
-                                    ),
-                                    egui::Align2::CENTER_CENTER,
-                                    "›",
-                                    egui::FontId::proportional(18.0),
+                                    egui::Pos2::new(rect.min.x + 10.0, rect.center().y),
+                                    egui::Align2::LEFT_CENTER,
+                                    label,
+                                    label_font.clone(),
                                     theme.color(theme.text),
                                 );
-                                solid_split_rect = Some(rect);
-                                solid_submenu = tool.submenu;
-                            }
-                            let response = response.on_hover_text(match tool.primitive {
-                                Some(primitive) => format!("Add {} ({primitive})", tool.label),
-                                None => format!("Add {}", tool.label),
-                            });
-                            if chevron
-                                .as_ref()
-                                .is_some_and(|response| response.clicked())
-                            {
-                                self.tool_solid_submenu_open = !self.tool_solid_submenu_open;
-                                solid_submenu = tool.submenu;
-                                solid_split_rect = Some(rect);
-                            } else if response.clicked() {
-                                chosen = Some(*tool);
-                            }
+                                if split {
+                                    let separator_x = rect.right() - chevron_width;
+                                    ui.painter().line_segment(
+                                        [
+                                            egui::Pos2::new(separator_x, rect.top() + 5.0),
+                                            egui::Pos2::new(separator_x, rect.bottom() - 5.0),
+                                        ],
+                                        egui::Stroke::new(1.0, theme.with_alpha(theme.border, 170)),
+                                    );
+                                    ui.painter().text(
+                                        egui::Pos2::new(
+                                            rect.right() - chevron_width * 0.5,
+                                            rect.center().y,
+                                        ),
+                                        egui::Align2::CENTER_CENTER,
+                                        "›",
+                                        egui::FontId::proportional(18.0),
+                                        theme.color(theme.text),
+                                    );
+                                    solid_split_rect = Some(rect);
+                                    solid_submenu = tool.submenu;
+                                }
+                                let response = response.on_hover_text(match tool.primitive {
+                                    Some(primitive) => format!("Add {} ({primitive})", tool.label),
+                                    None => format!("Add {}", tool.label),
+                                });
+                                if chevron.as_ref().is_some_and(|response| response.clicked()) {
+                                    self.tool_solid_submenu_open = !self.tool_solid_submenu_open;
+                                    solid_submenu = tool.submenu;
+                                    solid_split_rect = Some(rect);
+                                } else if response.clicked() {
+                                    chosen = Some(*tool);
+                                }
                                 item_index += 1;
                             }
                         }
@@ -1013,10 +1012,7 @@ impl NodeCraftApp {
             && let (Some(anchor), Some(tools)) = (solid_split_rect, solid_submenu)
         {
             let submenu_font = egui::FontId::proportional(13.0);
-            let longest = tools
-                .iter()
-                .map(|tool| label_width(tool.label))
-                .fold(0.0_f32, f32::max);
+            let longest = tools.iter().map(|tool| label_width(tool.label)).fold(0.0_f32, f32::max);
             let submenu_width = (longest + 20.0).clamp(140.0, 264.0);
             let submenu_height = 32.0 + tools.len() as f32 * 28.0;
             let x = menu_response.response.rect.right() + 4.0;
@@ -1079,9 +1075,7 @@ impl NodeCraftApp {
         self.tool_menu_rect = Some(menu_rect);
         let clicked_outside_menu = !category_clicked
             && ctx.input(|input| input.pointer.any_click())
-            && ctx
-                .pointer_latest_pos()
-                .is_none_or(|pointer| !menu_rect.contains(pointer));
+            && ctx.pointer_latest_pos().is_none_or(|pointer| !menu_rect.contains(pointer));
         if clicked_outside_menu {
             self.close_tool_dock();
             self.tool_add_source = None;
@@ -1092,7 +1086,6 @@ impl NodeCraftApp {
             self.close_tool_dock();
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1102,11 +1095,8 @@ mod tests {
     #[test]
     fn create_menu_has_a_split_solid_with_hidden_primitives() {
         let groups = ToolSection::Create.groups();
-        let top_level: Vec<&str> = groups
-            .iter()
-            .flat_map(|group| group.tools.iter())
-            .map(|tool| tool.label)
-            .collect();
+        let top_level: Vec<&str> =
+            groups.iter().flat_map(|group| group.tools.iter()).map(|tool| tool.label).collect();
         assert_eq!(top_level, vec!["Sketch", "Spline", "Solid", "Extrude", "Loft", "Surface Loft"]);
         let solid = groups
             .iter()
@@ -1129,12 +1119,7 @@ mod tests {
             section
                 .groups()
                 .iter()
-                .map(|group| {
-                    (
-                        group.heading,
-                        group.tools.iter().map(|tool| tool.label).collect(),
-                    )
-                })
+                .map(|group| (group.heading, group.tools.iter().map(|tool| tool.label).collect()))
                 .collect()
         }
 
@@ -1171,12 +1156,8 @@ mod tests {
             .flat_map(|group| group.tools.iter())
             .find(|tool| tool.label == "Solid")
             .expect("Solid split item");
-        let variants: Vec<&str> = solid
-            .submenu
-            .expect("Solid submenu")
-            .iter()
-            .map(|tool| tool.label)
-            .collect();
+        let variants: Vec<&str> =
+            solid.submenu.expect("Solid submenu").iter().map(|tool| tool.label).collect();
         assert_eq!(
             variants,
             vec![

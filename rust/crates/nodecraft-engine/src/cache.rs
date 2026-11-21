@@ -57,13 +57,37 @@ pub struct EngineCache {
 }
 
 impl Default for EngineCache {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EngineCache {
     #[must_use]
     pub fn new() -> Self {
-        Self { breps: HashMap::new(), brep_order: std::collections::VecDeque::new(), brep_bytes: 0, brep_limit: BREP_CACHE_BYTES, brep_hits: 0, parts: HashMap::new(), part_order: std::collections::VecDeque::new(), part_limit: DEFAULT_PART_CACHE_ENTRIES, parts_hits: 0, warnings: HashMap::new(), failures: HashMap::new(), failure_order: std::collections::VecDeque::new(), failure_hits: 0, comparisons: HashMap::new(), comparison_order: VecDeque::new(), comparison_failures: HashMap::new(), comparison_bytes: 0, comparison_hits: 0, imports: HashMap::new(), import_order: std::collections::VecDeque::new(), import_hits: 0 }
+        Self {
+            breps: HashMap::new(),
+            brep_order: std::collections::VecDeque::new(),
+            brep_bytes: 0,
+            brep_limit: BREP_CACHE_BYTES,
+            brep_hits: 0,
+            parts: HashMap::new(),
+            part_order: std::collections::VecDeque::new(),
+            part_limit: DEFAULT_PART_CACHE_ENTRIES,
+            parts_hits: 0,
+            warnings: HashMap::new(),
+            failures: HashMap::new(),
+            failure_order: std::collections::VecDeque::new(),
+            failure_hits: 0,
+            comparisons: HashMap::new(),
+            comparison_order: VecDeque::new(),
+            comparison_failures: HashMap::new(),
+            comparison_bytes: 0,
+            comparison_hits: 0,
+            imports: HashMap::new(),
+            import_order: std::collections::VecDeque::new(),
+            import_hits: 0,
+        }
     }
 
     #[must_use]
@@ -73,10 +97,18 @@ impl EngineCache {
         cache
     }
 
-    pub(crate) fn note_brep_hit(&mut self) { self.brep_hits = self.brep_hits.saturating_add(1); }
-    pub(crate) fn note_part_hit(&mut self) { self.parts_hits = self.parts_hits.saturating_add(1); }
-    pub(crate) fn note_failure_hit(&mut self) { self.failure_hits = self.failure_hits.saturating_add(1); }
-    pub(crate) fn note_import_hit(&mut self) { self.import_hits = self.import_hits.saturating_add(1); }
+    pub(crate) fn note_brep_hit(&mut self) {
+        self.brep_hits = self.brep_hits.saturating_add(1);
+    }
+    pub(crate) fn note_part_hit(&mut self) {
+        self.parts_hits = self.parts_hits.saturating_add(1);
+    }
+    pub(crate) fn note_failure_hit(&mut self) {
+        self.failure_hits = self.failure_hits.saturating_add(1);
+    }
+    pub(crate) fn note_import_hit(&mut self) {
+        self.import_hits = self.import_hits.saturating_add(1);
+    }
 
     #[must_use]
     pub(crate) fn difference(&self, key: &CacheKey) -> Option<DifferenceMeshes> {
@@ -107,25 +139,43 @@ impl EngineCache {
         }
         self.comparison_bytes = self.comparison_bytes.saturating_add(bytes);
         while self.comparison_bytes > COMPARISON_CACHE_BYTES && self.comparisons.len() > 1 {
-            let Some(oldest) = self.comparison_order.pop_front() else { break; };
+            let Some(oldest) = self.comparison_order.pop_front() else {
+                break;
+            };
             if let Some(old) = self.comparisons.remove(&oldest) {
-                self.comparison_bytes = self.comparison_bytes.saturating_sub(difference_bytes(&old));
+                self.comparison_bytes =
+                    self.comparison_bytes.saturating_sub(difference_bytes(&old));
             }
         }
     }
 
-    pub(crate) fn note_difference_hit(&mut self) { self.comparison_hits = self.comparison_hits.saturating_add(1); }
+    pub(crate) fn note_difference_hit(&mut self) {
+        self.comparison_hits = self.comparison_hits.saturating_add(1);
+    }
 
     #[must_use]
-    pub fn difference_entries(&self) -> usize { self.comparisons.len() }
+    pub fn difference_entries(&self) -> usize {
+        self.comparisons.len()
+    }
 
     #[must_use]
-    pub fn difference_hits(&self) -> u64 { self.comparison_hits }
+    pub fn difference_hits(&self) -> u64 {
+        self.comparison_hits
+    }
 
     #[must_use]
-    pub fn brep(&self, key: &CacheKey) -> Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>> { self.breps.get(key).cloned() }
+    pub fn brep(
+        &self,
+        key: &CacheKey,
+    ) -> Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>> {
+        self.breps.get(key).cloned()
+    }
 
-    pub fn insert_brep(&mut self, key: CacheKey, brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>) {
+    pub fn insert_brep(
+        &mut self,
+        key: CacheKey,
+        brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
+    ) {
         let bytes = brep_bytes(&brep);
         if let Some(old) = self.breps.insert(key.clone(), brep) {
             self.brep_bytes = self.brep_bytes.saturating_sub(brep_bytes(&old));
@@ -134,16 +184,24 @@ impl EngineCache {
         }
         self.brep_bytes = self.brep_bytes.saturating_add(bytes);
         while self.brep_bytes > self.brep_limit && self.breps.len() > 1 {
-            let Some(oldest) = self.brep_order.pop_front() else { break; };
-            if let Some(old) = self.breps.remove(&oldest) { self.brep_bytes = self.brep_bytes.saturating_sub(brep_bytes(&old)); }
+            let Some(oldest) = self.brep_order.pop_front() else {
+                break;
+            };
+            if let Some(old) = self.breps.remove(&oldest) {
+                self.brep_bytes = self.brep_bytes.saturating_sub(brep_bytes(&old));
+            }
         }
     }
 
     #[must_use]
-    pub fn brep_entries(&self) -> usize { self.breps.len() }
+    pub fn brep_entries(&self) -> usize {
+        self.breps.len()
+    }
 
     #[must_use]
-    pub fn brep_hits(&self) -> u64 { self.brep_hits }
+    pub fn brep_hits(&self) -> u64 {
+        self.brep_hits
+    }
 
     #[must_use]
     pub(crate) fn part(&self, key: &CacheKey) -> Option<Arc<Part>> {
@@ -158,7 +216,9 @@ impl EngineCache {
             .saturating_add(2048)
             .clamp(DEFAULT_PART_CACHE_ENTRIES, MAX_PART_CACHE_ENTRIES);
         while self.parts.len() > self.part_limit {
-            let Some(oldest) = self.part_order.pop_front() else { break; };
+            let Some(oldest) = self.part_order.pop_front() else {
+                break;
+            };
             self.parts.remove(&oldest);
             self.warnings.remove(&oldest);
         }
@@ -177,29 +237,41 @@ impl EngineCache {
             self.part_order.push_back(key);
         }
         while self.parts.len() > self.part_limit {
-            let Some(oldest) = self.part_order.pop_front() else { break; };
+            let Some(oldest) = self.part_order.pop_front() else {
+                break;
+            };
             self.parts.remove(&oldest);
             self.warnings.remove(&oldest);
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn set_part_limit(&mut self, limit: usize) { self.part_limit = limit; }
+    pub(crate) fn set_part_limit(&mut self, limit: usize) {
+        self.part_limit = limit;
+    }
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn warning_entries(&self) -> usize { self.warnings.len() }
+    pub(crate) fn warning_entries(&self) -> usize {
+        self.warnings.len()
+    }
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn part_entries(&self) -> usize { self.parts.len() }
+    pub(crate) fn part_entries(&self) -> usize {
+        self.parts.len()
+    }
 
     #[cfg(test)]
     #[must_use]
-    pub(crate) fn part_hits(&self) -> u64 { self.parts_hits }
+    pub(crate) fn part_hits(&self) -> u64 {
+        self.parts_hits
+    }
 
     #[must_use]
-    pub fn failure(&self, key: &CacheKey) -> Option<String> { self.failures.get(key).cloned() }
+    pub fn failure(&self, key: &CacheKey) -> Option<String> {
+        self.failures.get(key).cloned()
+    }
 
     pub fn insert_failure(&mut self, key: CacheKey, error: String) {
         if crate::kernel_pool::current_revision_token().is_cancelled() {
@@ -209,28 +281,53 @@ impl EngineCache {
             self.failure_order.push_back(key);
         }
         while self.failure_order.len() > FAILURE_CACHE_ENTRIES {
-            if let Some(oldest) = self.failure_order.pop_front() { self.failures.remove(&oldest); }
+            if let Some(oldest) = self.failure_order.pop_front() {
+                self.failures.remove(&oldest);
+            }
         }
     }
 
-    pub fn remove_failure(&mut self, key: &CacheKey) { self.failures.remove(key); }
-
-    #[must_use]
-    pub fn failure_entries(&self) -> usize { self.failures.len() }
-
-    #[must_use]
-    pub fn failure_hits(&self) -> u64 { self.failure_hits }
-
-    #[must_use]
-    pub fn import(&self, key: &(String, String, String)) -> Option<Arc<nodecraft_mesh::StepImport>> { self.imports.get(key).cloned() }
-
-    pub fn insert_import(&mut self, key: (String, String, String), import: Arc<nodecraft_mesh::StepImport>) {
-        if self.imports.insert(key.clone(), import).is_none() { self.import_order.push_back(key); }
-        while self.import_order.len() > 32 { if let Some(oldest) = self.import_order.pop_front() { self.imports.remove(&oldest); } }
+    pub fn remove_failure(&mut self, key: &CacheKey) {
+        self.failures.remove(key);
     }
 
     #[must_use]
-    pub fn import_hits(&self) -> u64 { self.import_hits }
+    pub fn failure_entries(&self) -> usize {
+        self.failures.len()
+    }
+
+    #[must_use]
+    pub fn failure_hits(&self) -> u64 {
+        self.failure_hits
+    }
+
+    #[must_use]
+    pub fn import(
+        &self,
+        key: &(String, String, String),
+    ) -> Option<Arc<nodecraft_mesh::StepImport>> {
+        self.imports.get(key).cloned()
+    }
+
+    pub fn insert_import(
+        &mut self,
+        key: (String, String, String),
+        import: Arc<nodecraft_mesh::StepImport>,
+    ) {
+        if self.imports.insert(key.clone(), import).is_none() {
+            self.import_order.push_back(key);
+        }
+        while self.import_order.len() > 32 {
+            if let Some(oldest) = self.import_order.pop_front() {
+                self.imports.remove(&oldest);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn import_hits(&self) -> u64 {
+        self.import_hits
+    }
 }
 
 /// Import cache identity: content hash, import options and the importer/cadmpeg
@@ -245,17 +342,23 @@ pub(crate) fn import_cache_key(content_hash: &str, options: &str) -> (String, St
 }
 
 fn mesh_bytes(mesh: &Mesh) -> usize {
-    mesh.vertices.len() * 24 + mesh.normals.len() * 24 + mesh.faces.len() * 12 + mesh.face_groups.iter().map(|group| group.len()).sum::<usize>() + 512
+    mesh.vertices.len() * 24
+        + mesh.normals.len() * 24
+        + mesh.faces.len() * 12
+        + mesh.face_groups.iter().map(|group| group.len()).sum::<usize>()
+        + 512
 }
 
 fn brep_bytes(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> usize {
-    brep.face_list().len() * 1024 + brep.edge_list().len() * 512 + brep.vertex_list().len() * 128 + 4096
+    brep.face_list().len() * 1024
+        + brep.edge_list().len() * 512
+        + brep.vertex_list().len() * 128
+        + 4096
 }
 
 fn difference_bytes(difference: &DifferenceMeshes) -> usize {
     mesh_bytes(&difference.added) + mesh_bytes(&difference.removed)
 }
-
 
 #[cfg(test)]
 mod tests {

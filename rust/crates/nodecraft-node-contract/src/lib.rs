@@ -49,7 +49,8 @@ pub struct NodeDescriptor {
     pub preview_requires_value: Option<&'static str>,
 }
 
-const GEOMETRY: &[PortSpec] = &[PortSpec { name: "shape", kind: ValueKind::Geometry, required: true }];
+const GEOMETRY: &[PortSpec] =
+    &[PortSpec { name: "shape", kind: ValueKind::Geometry, required: true }];
 const NO_PORTS: &[PortSpec] = &[];
 
 macro_rules! descriptor {
@@ -115,7 +116,15 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
         true,
         true
     ),
-    descriptor_with_preview!("chamfer", GEOMETRY, ValueKind::Geometry, true, true, "shape", "edges"),
+    descriptor_with_preview!(
+        "chamfer",
+        GEOMETRY,
+        ValueKind::Geometry,
+        true,
+        true,
+        "shape",
+        "edges"
+    ),
     descriptor_with_preview!("fillet", GEOMETRY, ValueKind::Geometry, true, true, "shape", "edges"),
     descriptor!("look", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("shell", GEOMETRY, ValueKind::Geometry, true, true),
@@ -161,7 +170,6 @@ static DESCRIPTORS: &[NodeDescriptor] = &[
     descriptor!("time", GEOMETRY, ValueKind::Geometry, true, true),
     descriptor!("sceneTransform", GEOMETRY, ValueKind::Geometry, true, true),
 ];
-
 
 // ---------------------------------------------------------------------------
 // Neutral inspector field metadata
@@ -258,7 +266,12 @@ const fn field_choice(
     default: &'static str,
     choices: &'static [(&'static str, &'static str)],
 ) -> NodeFieldSpec {
-    NodeFieldSpec { key, label, default: FieldDefault::Choice(default), kind: FieldKind::Choice(choices) }
+    NodeFieldSpec {
+        key,
+        label,
+        default: FieldDefault::Choice(default),
+        kind: FieldKind::Choice(choices),
+    }
 }
 
 const TRANSLATE_FIELDS: &[NodeFieldSpec] = &[
@@ -275,19 +288,39 @@ const BOOLEAN_FIELDS: &[NodeFieldSpec] = &[field_choice(
     "mode",
     "Operation",
     "union",
-    &[("union", "Union"), ("subtract", "Subtract A − B"), ("subtract-reverse", "Subtract B − A"), ("intersect", "Intersect")],
+    &[
+        ("union", "Union"),
+        ("subtract", "Subtract A − B"),
+        ("subtract-reverse", "Subtract B − A"),
+        ("intersect", "Intersect"),
+    ],
 )];
 
 const EXTRUDE_FIELDS: &[NodeFieldSpec] = &[
     field_number("amount", "Amount", 10.0, Some(0.0), None, 0.1),
-    field_choice("operation", "Operation", "new", &[("new", "New"), ("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect")]),
+    field_choice(
+        "operation",
+        "Operation",
+        "new",
+        &[("new", "New"), ("join", "Join"), ("cut", "Cut"), ("intersect", "Intersect")],
+    ),
 ];
 
-const LOFT_FIELDS: &[NodeFieldSpec] = &[field_unitless("ruled", "Ruled", 0.0, Some(0.0), Some(1.0), 1.0)];
+const LOFT_FIELDS: &[NodeFieldSpec] =
+    &[field_unitless("ruled", "Ruled", 0.0, Some(0.0), Some(1.0), 1.0)];
 
 const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
     field_number("length", "Distance", 2.0, Some(0.0), None, 0.1),
-    field_choice("chamferType", "Type", "equal", &[("equal", "Equal distance"), ("two-distance", "Two distances"), ("distance-angle", "Distance + angle")]),
+    field_choice(
+        "chamferType",
+        "Type",
+        "equal",
+        &[
+            ("equal", "Equal distance"),
+            ("two-distance", "Two distances"),
+            ("distance-angle", "Distance + angle"),
+        ],
+    ),
     field_number("distance2", "Distance 2", 2.0, Some(0.0), None, 0.1),
     field_angle("angle", "Angle°", 45.0, Some(0.1), Some(179.9), 0.1),
     field_switch("tangentChain", "Tangent chain", true),
@@ -297,16 +330,27 @@ const CHAMFER_FIELDS: &[NodeFieldSpec] = &[
 
 const FILLET_FIELDS: &[NodeFieldSpec] = &[
     field_number("length", "Radius", 2.0, Some(0.0), None, 0.1),
-    field_choice("continuity", "Continuity", "", &[("", "Circular (G1)"), ("G2", "Curvature (G2)"), ("G3", "Curvature (G3)")]),
+    field_choice(
+        "continuity",
+        "Continuity",
+        "",
+        &[("", "Circular (G1)"), ("G2", "Curvature (G2)"), ("G3", "Curvature (G3)")],
+    ),
     field_choice("cornerTurn", "Corner turn", "mitre", &[("mitre", "Mitre"), ("swept", "Swept")]),
     field_switch("tangentChain", "Tangent chain", true),
 ];
 
-const OFFSET_FIELDS: &[NodeFieldSpec] = &[field_number("distance", "Distance", 1.0, Some(0.0), None, 0.1)];
+const OFFSET_FIELDS: &[NodeFieldSpec] =
+    &[field_number("distance", "Distance", 1.0, Some(0.0), None, 0.1)];
 
 const SHELL_FIELDS: &[NodeFieldSpec] = &[
     field_number("thickness", "Thickness", 2.0, Some(0.0), None, 0.1),
-    field_choice("direction", "Direction", "inward", &[("inward", "Inward"), ("outward", "Outward")]),
+    field_choice(
+        "direction",
+        "Direction",
+        "inward",
+        &[("inward", "Inward"), ("outward", "Outward")],
+    ),
 ];
 
 const MIRROR_FIELDS: &[NodeFieldSpec] = &[
@@ -321,7 +365,12 @@ const SCATTER_FIELDS: &[NodeFieldSpec] = &[
     field_number("spanX", "Span X", 240.0, None, None, 0.1),
     field_number("spanY", "Span Y", 160.0, None, None, 0.1),
     field_unitless("seed", "Seed", 1.0, None, None, 0.1),
-    field_choice("distribution", "Distribution", "random", &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")]),
+    field_choice(
+        "distribution",
+        "Distribution",
+        "random",
+        &[("random", "Random"), ("stratified", "Stratified"), ("grid", "Grid")],
+    ),
     field_unitless("minScale", "Min scale", 0.75, None, None, 0.1),
     field_unitless("maxScale", "Max scale", 1.25, None, None, 0.1),
 ];
@@ -359,7 +408,6 @@ const STEP_IMPORTER_FIELDS: &[NodeFieldSpec] = &[
 pub const STEP_IMPORT_LOCATE_LABEL: &str = "Locate…";
 pub const STEP_IMPORT_SAVE_COPY_LABEL: &str = "Save copy as…";
 
-
 pub const PRIMITIVE_TYPES: &[(&str, &str)] = &[
     ("box", "Box"),
     ("cylinder", "Cylinder"),
@@ -389,7 +437,8 @@ const CONE_FIELDS: &[NodeFieldSpec] = &[
     field_number("height", "Height", 40.0, Some(0.0), None, 0.1),
 ];
 
-const SPHERE_FIELDS: &[NodeFieldSpec] = &[field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1)];
+const SPHERE_FIELDS: &[NodeFieldSpec] =
+    &[field_number("radius", "Radius", 20.0, Some(0.0), None, 0.1)];
 
 const TORUS_FIELDS: &[NodeFieldSpec] = &[
     field_number("majorRadius", "Major radius", 15.0, Some(0.0), None, 0.1),
@@ -464,10 +513,7 @@ const STATIC_FIELD_TABLES: &[(&str, &[NodeFieldSpec])] = &[
 /// dedicated UI until a conditional-field model is needed.
 #[must_use]
 pub fn fields(node_type: &str) -> Option<&'static [NodeFieldSpec]> {
-    STATIC_FIELD_TABLES
-        .iter()
-        .find(|(name, _)| *name == node_type)
-        .map(|(_, fields)| *fields)
+    STATIC_FIELD_TABLES.iter().find(|(name, _)| *name == node_type).map(|(_, fields)| *fields)
 }
 
 /// Every field spec the contract defines, both static tables and each primitive
@@ -478,11 +524,7 @@ pub fn field_specs() -> impl Iterator<Item = &'static NodeFieldSpec> {
     STATIC_FIELD_TABLES
         .iter()
         .flat_map(|(_, fields)| fields.iter())
-        .chain(
-            PRIMITIVE_TYPES
-                .iter()
-                .flat_map(|(kind, _)| primitive_fields(kind).iter()),
-        )
+        .chain(PRIMITIVE_TYPES.iter().flat_map(|(kind, _)| primitive_fields(kind).iter()))
 }
 
 /// Every distinct field key the contract defines, sorted. The
@@ -539,10 +581,8 @@ impl NodeFieldSpec {
 pub fn fields_for(node_type: &str, values: &serde_json::Value) -> &'static [NodeFieldSpec] {
     match node_type {
         "primitive" | "solid" => {
-            let kind = values
-                .get("primitiveType")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
+            let kind =
+                values.get("primitiveType").and_then(serde_json::Value::as_str).unwrap_or("");
             primitive_fields(kind)
         }
         _ => fields(node_type).unwrap_or(&[]),
@@ -556,9 +596,7 @@ pub fn field_spec(
     values: &serde_json::Value,
     key: &str,
 ) -> Option<&'static NodeFieldSpec> {
-    fields_for(node_type, values)
-        .iter()
-        .find(|spec| spec.key == key)
+    fields_for(node_type, values).iter().find(|spec| spec.key == key)
 }
 
 /// Legacy keys whose values older documents stored in place of the contract
@@ -611,11 +649,7 @@ pub fn resolve_field<'a>(
     let spec = field_spec(node_type, values, key)?;
     let stored = values
         .get(key)
-        .or_else(|| {
-            legacy_field_keys(node_type, key)
-                .iter()
-                .find_map(|alias| values.get(*alias))
-        });
+        .or_else(|| legacy_field_keys(node_type, key).iter().find_map(|alias| values.get(*alias)));
     if let Some(raw) = stored
         && let Some(value) = parse_field_value(spec, raw)
     {
@@ -634,11 +668,7 @@ pub fn resolve_field<'a>(
 
 /// Resolve a contract switch.
 #[must_use]
-pub fn resolve_bool(
-    node_type: &str,
-    values: &serde_json::Value,
-    key: &str,
-) -> Option<bool> {
+pub fn resolve_bool(node_type: &str, values: &serde_json::Value, key: &str) -> Option<bool> {
     match resolve_field(node_type, values, key)? {
         FieldValue::Bool(value) => Some(value),
         _ => None,
@@ -647,11 +677,7 @@ pub fn resolve_bool(
 
 /// Resolve a contract number.
 #[must_use]
-pub fn resolve_number(
-    node_type: &str,
-    values: &serde_json::Value,
-    key: &str,
-) -> Option<f64> {
+pub fn resolve_number(node_type: &str, values: &serde_json::Value, key: &str) -> Option<f64> {
     match resolve_field(node_type, values, key)? {
         FieldValue::Number(value) => Some(value),
         _ => None,
@@ -714,11 +740,7 @@ pub fn resolve_choice_value(
         panic!("node contract choice field {node_type}.{key} has a non-choice default");
     };
     let accepted = || {
-        choices
-            .iter()
-            .map(|(canonical, _)| format!("{canonical:?}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        choices.iter().map(|(canonical, _)| format!("{canonical:?}")).collect::<Vec<_>>().join(", ")
     };
     let Some(raw) = values.get(key) else {
         return Ok(default);
@@ -769,7 +791,10 @@ pub fn preview_input(node_type: &str) -> Option<&'static str> {
 /// preview meaningful. An empty edge selection means there is no feature to
 /// ghost, regardless of the descriptor capability.
 #[must_use]
-pub fn preview_input_if_active(node_type: &str, values: &serde_json::Value) -> Option<&'static str> {
+pub fn preview_input_if_active(
+    node_type: &str,
+    values: &serde_json::Value,
+) -> Option<&'static str> {
     let descriptor = descriptor(node_type)?;
     let input = descriptor.preview_input?;
     if let Some(field) = descriptor.preview_requires_value {
@@ -784,14 +809,30 @@ pub fn preview_input_if_active(node_type: &str, values: &serde_json::Value) -> O
     Some(input)
 }
 
-
 /// Node types whose exact result is a Part and whose selected result can be
 /// displayed by the Part display path. This is capability metadata, independent
 /// of the geometry implementation.
 const PART_DISPLAY_TYPES: &[&str] = &[
-    "solid", "primitive", "translate", "mirror", "combine", "boolean", "fuse",
-    "stepimporter", "extrude", "sketch", "spline", "loft", "surfaceloft",
-    "shell", "offsetfaces", "scatter", "circularpattern", "chamfer", "fillet", "look",
+    "solid",
+    "primitive",
+    "translate",
+    "mirror",
+    "combine",
+    "boolean",
+    "fuse",
+    "stepimporter",
+    "extrude",
+    "sketch",
+    "spline",
+    "loft",
+    "surfaceloft",
+    "shell",
+    "offsetfaces",
+    "scatter",
+    "circularpattern",
+    "chamfer",
+    "fillet",
+    "look",
 ];
 
 /// Whether this node type owns a CAD source path that can be ingested,
@@ -814,7 +855,6 @@ pub fn part_display_supported(node_type: &str) -> bool {
 pub fn overlay_only(node_type: &str) -> bool {
     node_type == "sketch"
 }
-
 
 /// Topology field a node collects from the viewport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -854,12 +894,7 @@ pub enum ContractError {
     UnknownInput { node: String, node_type: String, input: String },
     MissingSource { node: String, source: String },
     MissingOutput { node: String, source: String },
-    WrongKind {
-        node: String,
-        input: String,
-        expected: ValueKind,
-        actual: ValueKind,
-    },
+    WrongKind { node: String, input: String, expected: ValueKind, actual: ValueKind },
 }
 
 impl fmt::Display for ContractError {
@@ -878,7 +913,10 @@ impl fmt::Display for ContractError {
                 write!(f, "connection source {source:?} has no geometry output")
             }
             Self::WrongKind { node, input, expected, actual } => {
-                write!(f, "connection to {node:?}.{input} expects {expected:?}, source is {actual:?}")
+                write!(
+                    f,
+                    "connection to {node:?}.{input} expects {expected:?}, source is {actual:?}"
+                )
             }
         }
     }
@@ -911,26 +949,22 @@ pub fn validate_connections(
 fn accepts(port: ValueKind, output: ValueKind) -> bool {
     match port {
         ValueKind::Any => output != ValueKind::Empty,
-        ValueKind::Geometry => matches!(output, ValueKind::Shape | ValueKind::Part | ValueKind::Geometry),
+        ValueKind::Geometry => {
+            matches!(output, ValueKind::Shape | ValueKind::Part | ValueKind::Geometry)
+        }
         _ => port == output,
     }
 }
 
 type NodeMap<'a> = std::collections::BTreeMap<&'a str, &'a Node>;
 
-fn validate_connection(
-    connection: &Connection,
-    nodes: &NodeMap<'_>,
-) -> Result<(), ContractError> {
+fn validate_connection(connection: &Connection, nodes: &NodeMap<'_>) -> Result<(), ContractError> {
     let Some(target) = nodes.get(connection.to.as_str()) else {
         return Ok(());
     };
     let target_descriptor = descriptor(&target.node_type).expect("target validated");
-    let Some(port) = target_descriptor
-        .inputs
-        .iter()
-        .find(|port| port.name == connection.input)
-        .copied()
+    let Some(port) =
+        target_descriptor.inputs.iter().find(|port| port.name == connection.input).copied()
     else {
         return Err(ContractError::UnknownInput {
             node: target.id.clone(),
@@ -974,9 +1008,28 @@ mod tests {
             assert!(!descriptor.inputs.iter().any(|port| port.name.is_empty()));
         }
         for node_type in [
-            "primitive", "solid", "stepimporter", "translate", "mirror", "combine", "boolean",
-            "fuse", "chamfer", "fillet", "look", "shell", "extrude", "loft", "surfaceloft",
-            "scatter", "circularpattern", "sketch", "spline", "exporter", "linkedpart", "time",
+            "primitive",
+            "solid",
+            "stepimporter",
+            "translate",
+            "mirror",
+            "combine",
+            "boolean",
+            "fuse",
+            "chamfer",
+            "fillet",
+            "look",
+            "shell",
+            "extrude",
+            "loft",
+            "surfaceloft",
+            "scatter",
+            "circularpattern",
+            "sketch",
+            "spline",
+            "exporter",
+            "linkedpart",
+            "time",
             "sceneTransform",
         ] {
             assert!(descriptor(node_type).is_some(), "missing descriptor for {node_type}");
@@ -1002,10 +1055,7 @@ mod tests {
         assert_eq!(preview_input("fillet"), Some("shape"));
         assert_eq!(preview_input("chamfer"), Some("shape"));
         assert_eq!(preview_input("translate"), None);
-        assert_eq!(
-            preview_input_if_active("fillet", &serde_json::json!({"edges": []})),
-            None
-        );
+        assert_eq!(preview_input_if_active("fillet", &serde_json::json!({"edges": []})), None);
         assert_eq!(
             preview_input_if_active("fillet", &serde_json::json!({"edges": [{"id": "edge:0"}]})),
             Some("shape")
@@ -1070,11 +1120,9 @@ mod tests {
 
     #[test]
     fn choice_value_matches_direction_ascii_case_insensitively() {
-        for (stored, canonical) in [
-            ("Inward", "inward"),
-            ("INWARD", "inward"),
-            ("Outward", "outward"),
-        ] {
+        for (stored, canonical) in
+            [("Inward", "inward"), ("INWARD", "inward"), ("Outward", "outward")]
+        {
             let values = serde_json::json!({"direction": stored});
             assert_eq!(
                 resolve_choice_value("shell", &values, "direction"),
@@ -1110,10 +1158,7 @@ mod tests {
     #[test]
     fn choice_value_missing_direction_uses_contract_default() {
         let values = serde_json::json!({});
-        assert_eq!(
-            resolve_choice_value("shell", &values, "direction"),
-            Ok("inward")
-        );
+        assert_eq!(resolve_choice_value("shell", &values, "direction"), Ok("inward"));
     }
 
     #[test]
@@ -1130,7 +1175,10 @@ mod capability_tests {
     #[test]
     fn part_display_capabilities_are_known_node_types() {
         for node_type in PART_DISPLAY_TYPES {
-            assert!(descriptor(node_type).is_some(), "part display type {node_type:?} has no descriptor");
+            assert!(
+                descriptor(node_type).is_some(),
+                "part display type {node_type:?} has no descriptor"
+            );
         }
         assert!(overlay_only("sketch"));
         assert!(!overlay_only("spline"));
@@ -1142,8 +1190,22 @@ mod capability_tests {
         for spec in SELECTION_SPECS {
             assert!(descriptor(spec.node_type).is_some(), "selection type has no descriptor");
         }
-        for node_type in ["translate", "boolean", "extrude", "loft", "chamfer", "fillet", "shell", "mirror", "scatter", "circularpattern", "spline", "stepimporter"] {
-            let fields = fields(node_type).unwrap_or_else(|| panic!("missing fields for {node_type}"));
+        for node_type in [
+            "translate",
+            "boolean",
+            "extrude",
+            "loft",
+            "chamfer",
+            "fillet",
+            "shell",
+            "mirror",
+            "scatter",
+            "circularpattern",
+            "spline",
+            "stepimporter",
+        ] {
+            let fields =
+                fields(node_type).unwrap_or_else(|| panic!("missing fields for {node_type}"));
             let mut keys = std::collections::BTreeSet::new();
             for field in fields {
                 assert!(keys.insert(field.key), "duplicate field {} on {node_type}", field.key);
@@ -1155,7 +1217,11 @@ mod capability_tests {
             let fields = primitive_fields(kind);
             assert!(!fields.is_empty(), "primitive {kind} has no fields");
             for field in fields {
-                assert!(primitive_keys.insert((*kind, field.key)), "duplicate primitive field {} on {kind}", field.key);
+                assert!(
+                    primitive_keys.insert((*kind, field.key)),
+                    "duplicate primitive field {} on {kind}",
+                    field.key
+                );
             }
         }
     }
@@ -1177,7 +1243,12 @@ mod capability_tests {
                 let explicit = resolve_field(node_type, &defaults, spec.key)
                     .unwrap_or_else(|| panic!("{node_type}.{} default did not resolve", spec.key));
                 assert_eq!(missing, spec.default_value(), "{node_type}.{} missing value", spec.key);
-                assert_eq!(explicit, spec.default_value(), "{node_type}.{} explicit default", spec.key);
+                assert_eq!(
+                    explicit,
+                    spec.default_value(),
+                    "{node_type}.{} explicit default",
+                    spec.key
+                );
                 match spec.default {
                     FieldDefault::Bool(value) => {
                         assert_eq!(resolve_bool(node_type, base, spec.key), Some(value));
@@ -1186,10 +1257,7 @@ mod capability_tests {
                         assert_eq!(resolve_number(node_type, base, spec.key), Some(value));
                     }
                     FieldDefault::Text(value) | FieldDefault::Choice(value) => {
-                        assert_eq!(
-                            resolve_text(node_type, base, spec.key).as_deref(),
-                            Some(value)
-                        );
+                        assert_eq!(resolve_text(node_type, base, spec.key).as_deref(), Some(value));
                         assert_eq!(
                             resolve_choice(node_type, base, spec.key).as_deref(),
                             Some(value)
@@ -1200,8 +1268,20 @@ mod capability_tests {
         }
 
         for node_type in [
-            "translate", "boolean", "fuse", "extrude", "loft", "surfaceloft",
-            "chamfer", "fillet", "offsetfaces", "shell", "mirror", "scatter", "circularpattern", "spline",
+            "translate",
+            "boolean",
+            "fuse",
+            "extrude",
+            "loft",
+            "surfaceloft",
+            "chamfer",
+            "fillet",
+            "offsetfaces",
+            "shell",
+            "mirror",
+            "scatter",
+            "circularpattern",
+            "spline",
             "stepimporter",
         ] {
             let base = serde_json::json!({});
@@ -1244,8 +1324,7 @@ mod capability_tests {
             .map(|value| value.trim().trim_matches('\''))
             .unwrap_or_else(|| panic!("{} FIELD constraint has no regex", rule.display()));
         assert_eq!(
-            actual,
-            expected,
+            actual, expected,
             "ast-grep FIELD regex drifted from nodecraft-node-contract::field_keys(); \
              replace the contract-defaults-only FIELD constraint with:\n  FIELD:\n    regex: '{expected}'"
         );
@@ -1302,12 +1381,8 @@ mod capability_tests {
             Some(true)
         );
         assert_eq!(
-            resolve_choice(
-                "boolean",
-                &serde_json::json!({"operation": "subtract"}),
-                "mode"
-            )
-            .as_deref(),
+            resolve_choice("boolean", &serde_json::json!({"operation": "subtract"}), "mode")
+                .as_deref(),
             Some("subtract")
         );
         assert_eq!(

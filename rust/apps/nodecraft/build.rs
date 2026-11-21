@@ -16,8 +16,7 @@ fn main() {
         .filter(|hash| !hash.is_empty())
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=NODECRAFT_GIT_HASH={hash}");
-    let lock = std::fs::read_to_string(format!("{manifest}/../../Cargo.lock"))
-        .unwrap_or_default();
+    let lock = std::fs::read_to_string(format!("{manifest}/../../Cargo.lock")).unwrap_or_default();
     let mut in_solidcore = false;
     let mut solidcore = "unknown".to_owned();
     for line in lock.lines() {

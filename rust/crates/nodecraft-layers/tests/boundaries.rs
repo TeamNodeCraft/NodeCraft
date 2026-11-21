@@ -58,8 +58,8 @@ fn app_and_engine_do_not_import_upstream_layers_directly() {
 #[test]
 fn app_does_not_depend_on_upstream_layer_crates_directly() {
     let rust = rust_root();
-    let manifest = std::fs::read_to_string(rust.join("apps/nodecraft/Cargo.toml"))
-        .expect("app manifest");
+    let manifest =
+        std::fs::read_to_string(rust.join("apps/nodecraft/Cargo.toml")).expect("app manifest");
     let forbidden = ["solidcore =", "solidcore-ops", "solidcore-tess", "solidcore-convert"];
     let mut offenders = Vec::new();
     for line in manifest.lines() {
@@ -186,7 +186,8 @@ fn only_nodecraft_ops_and_the_listed_exceptions_depend_on_solidcore_ops() {
                 continue;
             }
             let crate_dir = source_relative(&rust, &entry.path());
-            if crate_dir == "crates/nodecraft-ops" || solidcore_ops_exception(&crate_dir).is_some() {
+            if crate_dir == "crates/nodecraft-ops" || solidcore_ops_exception(&crate_dir).is_some()
+            {
                 continue;
             }
             offenders.push(crate_dir);
@@ -278,7 +279,11 @@ fn the_old_step_route_is_not_named() {
             offenders.push(format!("Cargo.toml: {needle}"));
         }
     }
-    assert!(offenders.is_empty(), "the old STEP route is still named:\n  {}", offenders.join("\n  "));
+    assert!(
+        offenders.is_empty(),
+        "the old STEP route is still named:\n  {}",
+        offenders.join("\n  ")
+    );
 }
 
 /// The retired assembly crate is gone from every manifest and product source.
@@ -360,7 +365,9 @@ fn product_source_has_no_hand_written_part_21() {
             let compact = line.replace(' ', "");
             if compact.contains("\"#{")
                 && compact.contains("}=")
-                && (compact.contains("format!(") || compact.contains("write!(") || compact.contains("writeln!("))
+                && (compact.contains("format!(")
+                    || compact.contains("write!(")
+                    || compact.contains("writeln!("))
             {
                 offenders.push(format!("{path}: entity-format line"));
                 break;

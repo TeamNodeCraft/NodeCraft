@@ -5,7 +5,7 @@
 //! a stable JSON document. Runtime cache keys, progress, and selection are not part of
 //! the durable document.
 
-use crate::{canonicalize_node, ContentHash, GraphDocument, Session, SessionError};
+use crate::{ContentHash, GraphDocument, Session, SessionError, canonicalize_node};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -35,8 +35,10 @@ fn canonicalize_all(document: &mut GraphDocument) {
 }
 
 pub fn load(path: &Path) -> Result<GraphDocument, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
-    let mut document: GraphDocument = serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut document: GraphDocument =
+        serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))?;
     crate::groups::migrate_legacy_group_nodes(&mut document)
         .map_err(|error| format!("{}: {error}", path.display()))?;
     canonicalize_all(&mut document);
@@ -70,8 +72,7 @@ fn rewrite_import_node(node: &mut crate::GraphNode, directory: &Path) {
     }
     // Resolve through the shared helper so a rooted Windows path stored in a
     // document saved elsewhere is not joined to the document folder.
-    let Some(absolute) =
-        nodecraft_engine::import_io::primary_path(&node.values, Some(directory))
+    let Some(absolute) = nodecraft_engine::import_io::primary_path(&node.values, Some(directory))
     else {
         return;
     };
@@ -176,19 +177,12 @@ pub fn prepare_document_for_save(document: &mut GraphDocument, path: &Path) {
         .iter()
         .chain(document.definitions.iter().flat_map(|definition| definition.nodes.iter()))
         .filter_map(|node| {
-            node.values
-                .get("ingestHash")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
+            node.values.get("ingestHash").and_then(serde_json::Value::as_str).map(str::to_owned)
         })
         .collect();
-    document.ingested_sources.retain(|record| {
-        referenced.contains(&record.content_hash)
-    });
+    document.ingested_sources.retain(|record| referenced.contains(&record.content_hash));
     let mut seen = std::collections::BTreeSet::new();
-    document.ingested_sources.retain(|record| {
-        seen.insert(record.content_hash.clone())
-    });
+    document.ingested_sources.retain(|record| seen.insert(record.content_hash.clone()));
 }
 
 /// Writes a document atomically. The temp file lives beside the target so the final
@@ -206,21 +200,28 @@ pub fn save_atomic(path: &Path, document: &GraphDocument) -> Result<(), String> 
 }
 
 /// Save an editor envelope with canonical graph values merged into it.
-pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &GraphDocument) -> Result<(), String> {
+pub fn save_atomic_value(
+    path: &Path,
+    value: &mut serde_json::Value,
+    document: &GraphDocument,
+) -> Result<(), String> {
     let mut canonical = document.clone();
-    for node in &mut canonical.nodes { canonicalize_node(node); }
+    for node in &mut canonical.nodes {
+        canonicalize_node(node);
+    }
     prepare_document_for_save(&mut canonical, path);
     canonical.node_hashes().map_err(|error| format!("{}: {error}", path.display()))?;
     value["root"] = serde_json::to_value(&canonical.root).map_err(|error| error.to_string())?;
-    value["definitions"] = serde_json::to_value(&canonical.definitions).map_err(|error| error.to_string())?;
+    value["definitions"] =
+        serde_json::to_value(&canonical.definitions).map_err(|error| error.to_string())?;
     value["schemaVersion"] = serde_json::json!(canonical.schema_version);
     if canonical.ingested_sources.is_empty() {
         if let Some(object) = value.as_object_mut() {
             object.remove("ingestedSources");
         }
     } else {
-        value["ingestedSources"] = serde_json::to_value(&canonical.ingested_sources)
-            .map_err(|error| error.to_string())?;
+        value["ingestedSources"] =
+            serde_json::to_value(&canonical.ingested_sources).map_err(|error| error.to_string())?;
     }
     save_value_atomic(path, value)
 }
@@ -229,16 +230,22 @@ pub fn save_atomic_value(path: &Path, value: &mut serde_json::Value, document: &
 /// beside the graph. The caller is responsible for canonical graph validation.
 pub fn save_value_atomic(path: &Path, value: &serde_json::Value) -> Result<(), String> {
     let bytes = pretty_json(value).into_bytes();
-    let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| format!("{}: invalid file name", path.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{}: invalid file name", path.display()))?;
     let temp = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     let result = (|| -> Result<(), String> {
-        let mut file = std::fs::File::create(&temp).map_err(|error| format!("{}: {error}", temp.display()))?;
+        let mut file =
+            std::fs::File::create(&temp).map_err(|error| format!("{}: {error}", temp.display()))?;
         use std::io::Write as _;
         file.write_all(&bytes).map_err(|error| format!("{}: {error}", temp.display()))?;
         file.sync_all().map_err(|error| format!("{}: {error}", temp.display()))?;
         std::fs::rename(&temp, path).map_err(|error| format!("{}: {error}", path.display()))
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
     result
 }
 
@@ -281,10 +288,18 @@ pub struct DocumentStore {
 
 impl DocumentStore {
     #[must_use]
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-    pub fn insert(&mut self, id: impl Into<String>, mut document: GraphDocument) -> Result<(), SessionError> {
-        for node in &mut document.nodes { canonicalize_node(node); }
+    pub fn insert(
+        &mut self,
+        id: impl Into<String>,
+        mut document: GraphDocument,
+    ) -> Result<(), SessionError> {
+        for node in &mut document.nodes {
+            canonicalize_node(node);
+        }
         document.node_hashes()?;
         let id = id.into();
         self.documents.insert(id, document);
@@ -292,7 +307,9 @@ impl DocumentStore {
     }
 
     #[must_use]
-    pub fn get(&self, id: &str) -> Option<&GraphDocument> { self.documents.get(id) }
+    pub fn get(&self, id: &str) -> Option<&GraphDocument> {
+        self.documents.get(id)
+    }
 
     pub fn documents(&self) -> impl Iterator<Item = (&String, &GraphDocument)> {
         self.documents.iter()
@@ -305,13 +322,21 @@ impl DocumentStore {
     }
 
     #[must_use]
-    pub fn session(&self, id: &str) -> Option<&Session> { self.sessions.get(id) }
+    pub fn session(&self, id: &str) -> Option<&Session> {
+        self.sessions.get(id)
+    }
 
     #[must_use]
-    pub fn session_mut(&mut self, id: &str) -> Option<&mut Session> { self.sessions.get_mut(id) }
+    pub fn session_mut(&mut self, id: &str) -> Option<&mut Session> {
+        self.sessions.get_mut(id)
+    }
 
     /// Update a document from its session and keep the durable graph in sync.
-    pub fn set_session(&mut self, id: impl Into<String>, session: Session) -> Result<(), SessionError> {
+    pub fn set_session(
+        &mut self,
+        id: impl Into<String>,
+        session: Session,
+    ) -> Result<(), SessionError> {
         let id = id.into();
         session.document().node_hashes()?;
         self.documents.insert(id.clone(), session.document().clone());
@@ -345,9 +370,15 @@ impl DocumentStore {
     }
 
     #[must_use]
-    pub fn path(&self, id: &str) -> Option<&Path> { self.paths.get(id).map(PathBuf::as_path) }
+    pub fn path(&self, id: &str) -> Option<&Path> {
+        self.paths.get(id).map(PathBuf::as_path)
+    }
 
-    pub fn load(&mut self, id: impl Into<String>, path: impl Into<PathBuf>) -> Result<&GraphDocument, String> {
+    pub fn load(
+        &mut self,
+        id: impl Into<String>,
+        path: impl Into<PathBuf>,
+    ) -> Result<&GraphDocument, String> {
         let id = id.into();
         let path = path.into();
         let document = load(&path)?;
@@ -358,7 +389,8 @@ impl DocumentStore {
     }
 
     pub fn save(&mut self, id: &str, path: impl Into<PathBuf>) -> Result<(), String> {
-        let document = self.documents.get(id).ok_or_else(|| format!("document {id} is not open"))?;
+        let document =
+            self.documents.get(id).ok_or_else(|| format!("document {id} is not open"))?;
         let path = path.into();
         save_atomic(&path, document)?;
         self.paths.insert(id.to_string(), path);
@@ -367,7 +399,12 @@ impl DocumentStore {
 
     /// Save only if the file on disk still has the hash this document was loaded
     /// from. A mismatch is an external edit and must be resolved by the caller.
-    pub fn save_checked(&mut self, id: &str, path: impl Into<PathBuf>, expected: ContentHash) -> Result<(), String> {
+    pub fn save_checked(
+        &mut self,
+        id: &str,
+        path: impl Into<PathBuf>,
+        expected: ContentHash,
+    ) -> Result<(), String> {
         let path = path.into();
         let current = load(&path)?;
         if document_hash(&current).map_err(|error| error.to_string())? != expected {
@@ -389,15 +426,25 @@ impl DocumentStore {
         if !self.documents.contains_key(document_id) {
             self.load(document_id, &path)?;
         }
-        let document = self.documents.get(document_id).ok_or_else(|| format!("linked document {document_id} is not open"))?;
+        let document = self
+            .documents
+            .get(document_id)
+            .ok_or_else(|| format!("linked document {document_id} is not open"))?;
         let content_hash = document_hash(document).map_err(|error| error.to_string())?;
-        let link = LinkedPart { document_id: document_id.to_string(), path: path.clone(), content_hash, mode };
+        let link = LinkedPart {
+            document_id: document_id.to_string(),
+            path: path.clone(),
+            content_hash,
+            mode,
+        };
         self.links.entry(host_id.to_string()).or_default().insert(link_id.to_string(), link);
         Ok(self.links[host_id].get(link_id).expect("inserted link"))
     }
 
     #[must_use]
-    pub fn links(&self, host_id: &str) -> Option<&BTreeMap<String, LinkedPart>> { self.links.get(host_id) }
+    pub fn links(&self, host_id: &str) -> Option<&BTreeMap<String, LinkedPart>> {
+        self.links.get(host_id)
+    }
 
     #[must_use]
     pub fn resolve(&self, host_id: &str, link_id: &str) -> Option<&GraphDocument> {
@@ -411,19 +458,31 @@ impl DocumentStore {
         let mut changes = Vec::new();
         for (host_id, links) in &self.links {
             for (link_id, link) in links {
-                let Ok(document) = load(&link.path) else { continue; };
+                let Ok(document) = load(&link.path) else {
+                    continue;
+                };
                 let new_hash = document_hash(&document).map_err(|error| error.to_string())?;
-                if new_hash == link.content_hash { continue; }
+                if new_hash == link.content_hash {
+                    continue;
+                }
                 changes.push(LinkChange {
-                    host_id: host_id.clone(), link_id: link_id.clone(), path: link.path.clone(),
-                    old_hash: link.content_hash, new_hash, mode: link.mode,
+                    host_id: host_id.clone(),
+                    link_id: link_id.clone(),
+                    path: link.path.clone(),
+                    old_hash: link.content_hash,
+                    new_hash,
+                    mode: link.mode,
                 });
             }
         }
         for change in &changes {
             if change.mode == LinkMode::FollowLatest {
                 let document = load(&change.path)?;
-                if let Some(link) = self.links.get_mut(&change.host_id).and_then(|links| links.get_mut(&change.link_id)) {
+                if let Some(link) = self
+                    .links
+                    .get_mut(&change.host_id)
+                    .and_then(|links| links.get_mut(&change.link_id))
+                {
                     link.content_hash = change.new_hash;
                 }
                 let document_id = self.links[&change.host_id][&change.link_id].document_id.clone();
@@ -520,7 +579,11 @@ mod tests {
     fn test_dir() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!("sn-document-store-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
+        let dir = std::env::temp_dir().join(format!(
+            "sn-document-store-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -534,10 +597,31 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                GraphNode { expressions: Default::default(), id: "a".into(), node_type: "primitive".into(), values: json!({}), suppressed: false, x: 10.0, y: 20.0 },
-                GraphNode { expressions: Default::default(), id: "b".into(), node_type: "translate".into(), values: json!({"x": 5.0}), suppressed: false, x: 0.0, y: 0.0 },
-            ],
-                connections: vec![GraphConnection { from: "a".into(), to: "b".into(), input: "shape".into(), out: "shape".into() }],
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "a".into(),
+                        node_type: "primitive".into(),
+                        values: json!({}),
+                        suppressed: false,
+                        x: 10.0,
+                        y: 20.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "b".into(),
+                        node_type: "translate".into(),
+                        values: json!({"x": 5.0}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                ],
+                connections: vec![GraphConnection {
+                    from: "a".into(),
+                    to: "b".into(),
+                    input: "shape".into(),
+                    out: "shape".into(),
+                }],
                 interface: GraphInterface::default(),
             },
             definitions: Vec::new(),
@@ -550,7 +634,9 @@ mod tests {
         let dir = test_dir();
         let path = dir.join("part.nodecraft");
         let mut original = document();
-        for node in &mut original.nodes { canonicalize_node(node); }
+        for node in &mut original.nodes {
+            canonicalize_node(node);
+        }
         save_atomic(&path, &original).expect("save");
         let loaded = load(&path).expect("load");
         assert_eq!(loaded.nodes[0].values["primitiveType"], "box");
@@ -572,15 +658,52 @@ mod tests {
                 name: "Root".into(),
                 kind: "graph".into(),
                 nodes: vec![
-                    GraphNode { expressions: Default::default(), id: "in".into(), node_type: "groupinput".into(), values: json!({"ports":["shape"]}), suppressed: false, x: -120.0, y: 0.0 },
-                    GraphNode { expressions: Default::default(), id: "box".into(), node_type: "solid".into(), values: json!({"primitiveType":"box"}), suppressed: false, x: 0.0, y: 0.0 },
-                    GraphNode { expressions: Default::default(), id: "out".into(), node_type: "groupoutput".into(), values: json!({"ports":["shape"]}), suppressed: false, x: 120.0, y: 0.0 },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "in".into(),
+                        node_type: "groupinput".into(),
+                        values: json!({"ports":["shape"]}),
+                        suppressed: false,
+                        x: -120.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "box".into(),
+                        node_type: "solid".into(),
+                        values: json!({"primitiveType":"box"}),
+                        suppressed: false,
+                        x: 0.0,
+                        y: 0.0,
+                    },
+                    GraphNode {
+                        expressions: Default::default(),
+                        id: "out".into(),
+                        node_type: "groupoutput".into(),
+                        values: json!({"ports":["shape"]}),
+                        suppressed: false,
+                        x: 120.0,
+                        y: 0.0,
+                    },
                 ],
                 connections: vec![
-                    GraphConnection { from: "in".into(), to: "box".into(), input: "shape".into(), out: "shape".into() },
-                    GraphConnection { from: "box".into(), to: "out".into(), input: "shape".into(), out: "shape".into() },
+                    GraphConnection {
+                        from: "in".into(),
+                        to: "box".into(),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    },
+                    GraphConnection {
+                        from: "box".into(),
+                        to: "out".into(),
+                        input: "shape".into(),
+                        out: "shape".into(),
+                    },
                 ],
-                interface: GraphInterface { inputs: vec!["shape".into()], outputs: vec!["shape".into()] },
+                interface: GraphInterface {
+                    inputs: vec!["shape".into()],
+                    outputs: vec!["shape".into()],
+                },
             },
             definitions: Vec::new(),
             ingested_sources: Vec::new(),
@@ -732,7 +855,9 @@ mod tests {
         save_atomic(&part, &source).expect("seed part");
 
         let mut store = DocumentStore::new();
-        store.link("host", "follow", "part-follow", &part, LinkMode::FollowLatest).expect("follow link");
+        store
+            .link("host", "follow", "part-follow", &part, LinkMode::FollowLatest)
+            .expect("follow link");
         store.link("host", "pinned", "part-pinned", &part, LinkMode::Pinned).expect("pinned link");
         let old = store.links("host").unwrap()["follow"].content_hash;
 
@@ -756,11 +881,7 @@ mod tests {
         let mut store = DocumentStore::new();
         let mut session = Session::new(load(&path).expect("load"));
         session
-            .apply_commands(&[crate::Command::SetPosition {
-                node: "a".into(),
-                x: 42.0,
-                y: 7.0,
-            }])
+            .apply_commands(&[crate::Command::SetPosition { node: "a".into(), x: 42.0, y: 7.0 }])
             .expect("edit");
         store.set_session("doc", session).expect("session");
         store.set_path("doc", &path);
@@ -777,7 +898,8 @@ mod tests {
     fn published_document_is_visible_to_linked_roots_immediately() {
         let mut store = DocumentStore::new();
         let mut document = GraphDocument::new("child");
-        document.nodes.push(crate::GraphNode { expressions: Default::default(),
+        document.nodes.push(crate::GraphNode {
+            expressions: Default::default(),
             id: "n".into(),
             node_type: "primitive".into(),
             values: serde_json::json!({}),
@@ -885,10 +1007,7 @@ mod tests {
 
     #[test]
     fn save_normalization_commands_update_the_live_session() {
-        let dir = std::env::temp_dir().join(format!(
-            "sn-save-commands-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("sn-save-commands-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("part.nodecraft");
@@ -925,8 +1044,10 @@ mod tests {
     fn ingested_sources_round_trip_deduplicate_and_drop_unreferenced() {
         let dir = test_dir();
         let path = dir.join("ingest.nodecraft");
-        let used = nodecraft_engine::import_io::ingest_record("used.step", b"used bytes").expect("record");
-        let unused = nodecraft_engine::import_io::ingest_record("unused.step", b"unused bytes").expect("record");
+        let used =
+            nodecraft_engine::import_io::ingest_record("used.step", b"used bytes").expect("record");
+        let unused = nodecraft_engine::import_io::ingest_record("unused.step", b"unused bytes")
+            .expect("record");
         let mut document = GraphDocument::new("ingest");
         document.ingested_sources = vec![used.clone(), used.clone(), unused];
         document.nodes.push(GraphNode {
@@ -945,11 +1066,19 @@ mod tests {
         });
         save_atomic(&path, &document).expect("save ingest");
         let loaded = load(&path).expect("load ingest");
-        assert_eq!(loaded.ingested_sources, vec![used.clone()], "only one referenced record survives");
-        let text = std::fs::read_to_string(&path).expect("read");
-        assert!(text.contains("\"ingestedSources\""), "records live in one top-level section:\n{text}");
         assert_eq!(
-            nodecraft_engine::import_io::decode_ingest_record(&loaded.ingested_sources[0]).expect("decode"),
+            loaded.ingested_sources,
+            vec![used.clone()],
+            "only one referenced record survives"
+        );
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            text.contains("\"ingestedSources\""),
+            "records live in one top-level section:\n{text}"
+        );
+        assert_eq!(
+            nodecraft_engine::import_io::decode_ingest_record(&loaded.ingested_sources[0])
+                .expect("decode"),
             b"used bytes"
         );
         std::fs::remove_dir_all(dir).ok();
@@ -972,5 +1101,4 @@ mod tests {
         assert!(error.contains("changed on disk"), "{error}");
         std::fs::remove_dir_all(dir).ok();
     }
-
 }

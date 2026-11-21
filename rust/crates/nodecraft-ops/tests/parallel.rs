@@ -50,7 +50,10 @@ fn sixteen_shells_speed_up_on_four_threads() {
     };
     let serial = wall_seconds(1, job);
     let parallel = wall_seconds(4, job);
-    eprintln!("16 shells: serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}", serial / parallel);
+    eprintln!(
+        "16 shells: serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}",
+        serial / parallel
+    );
     assert!(serial / parallel > 2.0, "shells speedup {:.2}", serial / parallel);
 }
 
@@ -71,6 +74,9 @@ fn sixteen_booleans_speed_up_on_four_threads() {
     };
     let serial = wall_seconds(1, job);
     let parallel = wall_seconds(4, job);
-    eprintln!("16 booleans: serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}", serial / parallel);
+    eprintln!(
+        "16 booleans: serial {serial:.3}s parallel {parallel:.3}s speedup {:.2}",
+        serial / parallel
+    );
     assert!(serial / parallel > 2.0, "booleans speedup {:.2}", serial / parallel);
 }

@@ -60,10 +60,7 @@ pub(super) fn show_debug_window_shell<T>(
     mut body: impl FnMut(&mut egui::Ui) -> T,
 ) -> DebugWindowShell<T> {
     if !*enabled {
-        return DebugWindowShell {
-            close_requested: false,
-            body: None,
-        };
+        return DebugWindowShell { close_requested: false, body: None };
     }
 
     if ctx.embed_viewports() {
@@ -81,10 +78,7 @@ pub(super) fn show_debug_window_shell<T>(
                 close_requested = true;
                 return;
             }
-            if ui
-                .ctx()
-                .input_mut(|input| input.consume_shortcut(&debug_window_close_shortcut()))
-            {
+            if ui.ctx().input_mut(|input| input.consume_shortcut(&debug_window_close_shortcut())) {
                 close_requested = true;
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 return;
@@ -115,10 +109,7 @@ pub(super) fn show_debug_window_shell<T>(
     if close_requested {
         *enabled = false;
     }
-    DebugWindowShell {
-        close_requested,
-        body: body_result,
-    }
+    DebugWindowShell { close_requested, body: body_result }
 }
 
 fn show_embedded_debug_window<T>(
@@ -140,10 +131,7 @@ fn show_embedded_debug_window<T>(
     if !open {
         *enabled = false;
     }
-    DebugWindowShell {
-        close_requested: !open,
-        body: body_result,
-    }
+    DebugWindowShell { close_requested: !open, body: body_result }
 }
 
 impl NodeCraftApp {
@@ -172,10 +160,8 @@ impl NodeCraftApp {
     /// Poll the asynchronous trace-save picker. One `Option` check when no
     /// picker is open.
     pub(super) fn poll_profiler_trace(&mut self) {
-        let Some(result) = self
-            .pending_profiler_trace
-            .as_mut()
-            .and_then(PendingFileDialog::try_finish)
+        let Some(result) =
+            self.pending_profiler_trace.as_mut().and_then(PendingFileDialog::try_finish)
         else {
             return;
         };
@@ -285,11 +271,10 @@ impl NodeCraftApp {
     fn save_profiler_trace(&mut self) {
         // `rfd`'s synchronous panel must not start inside winit's event
         // handler; `PendingFileDialog` owns the worker-thread pattern.
-        self.pending_profiler_trace = Some(PendingFileDialog::spawn(
-            FileDialogKind::SaveProfilerTrace {
+        self.pending_profiler_trace =
+            Some(PendingFileDialog::spawn(FileDialogKind::SaveProfilerTrace {
                 suggested_name: "nodecraft-frame-trace.json".to_owned(),
-            },
-        ));
+            }));
         self.profiler_window.status = Some("Choose a trace path…".to_owned());
     }
 }
@@ -335,17 +320,13 @@ fn debug_tab_row(ui: &mut egui::Ui, theme: &crate::theme::Theme, active: &mut De
 }
 
 fn debug_rows_table(ui: &mut egui::Ui, id: &str, rows: &[DebugRow], theme: &crate::theme::Theme) {
-    egui::Grid::new(id)
-        .num_columns(2)
-        .spacing([18.0, 5.0])
-        .striped(true)
-        .show(ui, |ui| {
-            for row in rows {
-                ui.label(egui::RichText::new(row.label).color(theme.color(theme.muted)));
-                ui.monospace(&row.value);
-                ui.end_row();
-            }
-        });
+    egui::Grid::new(id).num_columns(2).spacing([18.0, 5.0]).striped(true).show(ui, |ui| {
+        for row in rows {
+            ui.label(egui::RichText::new(row.label).color(theme.color(theme.muted)));
+            ui.monospace(&row.value);
+            ui.end_row();
+        }
+    });
 }
 
 /// GPU/frame diagnostics previously painted over the viewport. The frame time
@@ -359,17 +340,17 @@ fn gpu_tab(
 ) -> DebugWindowActions {
     let frame = slot.stats(Series::CpuFrame);
     let rows = viewport.gpu_debug_rows(frame.current);
-    egui::ScrollArea::vertical()
-        .id_salt("debug-gpu-scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("debug-gpu-scroll").auto_shrink([false, false]).show(
+        ui,
+        |ui| {
             debug_rows_table(ui, "debug-gpu-rows", &rows, theme);
             ui.add_space(6.0);
             ui.small(
                 "Frame time is the profiler's CPU frame series. GPU pass timings \
                  are in the Frame tab.",
             );
-        });
+        },
+    );
     DebugWindowActions::default()
 }
 
@@ -380,12 +361,12 @@ fn camera_tab(
     theme: &crate::theme::Theme,
 ) -> DebugWindowActions {
     let rows = viewport.camera_debug_rows();
-    egui::ScrollArea::vertical()
-        .id_salt("debug-camera-scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("debug-camera-scroll").auto_shrink([false, false]).show(
+        ui,
+        |ui| {
             debug_rows_table(ui, "debug-camera-rows", &rows, theme);
-        });
+        },
+    );
     DebugWindowActions::default()
 }
 
@@ -402,10 +383,7 @@ fn frame_tab(
         ui.small("This adapter has no GPU timestamp queries; showing CPU timings only.");
     }
     ui.horizontal(|ui| {
-        if ui
-            .button(if slot.is_paused() { "Resume" } else { "Pause" })
-            .clicked()
-        {
+        if ui.button(if slot.is_paused() { "Resume" } else { "Pause" }).clicked() {
             actions.pause_request = Some(!slot.is_paused());
         }
         if ui
@@ -419,10 +397,7 @@ fn frame_tab(
             actions.save_clicked = true;
         }
         let frame = slot.stats(Series::CpuFrame);
-        ui.small(format!(
-            "last {:.2} ms   avg {:.2} ms",
-            frame.current, frame.average
-        ));
+        ui.small(format!("last {:.2} ms   avg {:.2} ms", frame.current, frame.average));
     });
 
     let plot_height = (ui.available_height() - 250.0).clamp(90.0, 180.0);
@@ -472,11 +447,9 @@ fn frame_tab(
         });
 
     ui.add_space(4.0);
-    egui::Grid::new("debug-frame-series")
-        .num_columns(5)
-        .spacing([10.0, 3.0])
-        .striped(true)
-        .show(ui, |ui| {
+    egui::Grid::new("debug-frame-series").num_columns(5).spacing([10.0, 3.0]).striped(true).show(
+        ui,
+        |ui| {
             ui.label("");
             ui.label(egui::RichText::new("Series").strong());
             ui.label(egui::RichText::new("Now").strong());
@@ -495,7 +468,8 @@ fn frame_tab(
                 ui.monospace(format!("{:.2}", stats.maximum));
                 ui.end_row();
             }
-        });
+        },
+    );
     let counters = slot.counters();
     ui.small(format!(
         "Upload {:.1} KB/frame   ·   {} frames retained   ·   {} scopes / {} resolves",
@@ -530,19 +504,14 @@ mod tests {
     fn install_renderer(requests: Arc<Mutex<Vec<ViewportRequest>>>, close_requested: bool) {
         egui::Context::set_immediate_viewport_renderer(move |ctx, mut viewport| {
             let builder = viewport.builder.clone();
-            requests
-                .lock()
-                .expect("viewport request log")
-                .push(ViewportRequest {
-                    id: viewport.ids.this,
-                    title: builder.title.clone(),
-                    inner_size: builder.inner_size,
-                    min_inner_size: builder.min_inner_size,
-                    resizable: builder.resizable,
-                });
-            let screen = builder
-                .inner_size
-                .unwrap_or_else(|| egui::vec2(800.0, 600.0));
+            requests.lock().expect("viewport request log").push(ViewportRequest {
+                id: viewport.ids.this,
+                title: builder.title.clone(),
+                inner_size: builder.inner_size,
+                min_inner_size: builder.min_inner_size,
+                resizable: builder.resizable,
+            });
+            let screen = builder.inner_size.unwrap_or_else(|| egui::vec2(800.0, 600.0));
             let mut input = egui::RawInput {
                 viewport_id: viewport.ids.this,
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, screen)),
@@ -764,12 +733,6 @@ mod tests {
 
         let camera = run_body(DebugTab::Camera);
         assert!(camera.iter().any(|text| text == "Yaw"));
-        assert_eq!(
-            camera
-                .iter()
-                .filter(|text| text.as_str() == "View row")
-                .count(),
-            4
-        );
+        assert_eq!(camera.iter().filter(|text| text.as_str() == "View row").count(), 4);
     }
 }

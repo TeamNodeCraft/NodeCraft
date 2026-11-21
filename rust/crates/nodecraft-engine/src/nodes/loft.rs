@@ -5,17 +5,14 @@
 //! than a first-item guess.
 
 use crate::node_task::ExactNodeTask;
-use crate::{contract_number, Part, RequestIndex};
+use crate::{Part, RequestIndex, contract_number};
 
 use super::{BuiltinNode, InputSection, NodeView, PartEval};
 
 /// Registered for the `loft` contract id.
 pub(crate) struct Loft;
 
-fn single_section(
-    mut sections: Vec<InputSection>,
-    missing: &str,
-) -> Result<InputSection, String> {
+fn single_section(mut sections: Vec<InputSection>, missing: &str) -> Result<InputSection, String> {
     if sections.is_empty() {
         return Err(missing.to_owned());
     }
@@ -74,11 +71,7 @@ impl BuiltinNode for Loft {
         10
     }
 
-    fn suppression_source(
-        &self,
-        _node: NodeView<'_>,
-        _index: &RequestIndex<'_>,
-    ) -> Option<String> {
+    fn suppression_source(&self, _node: NodeView<'_>, _index: &RequestIndex<'_>) -> Option<String> {
         // Loft is a generator over its sections: suppressing it turns it off.
         None
     }
@@ -99,18 +92,10 @@ mod tests {
 
     fn square_sketch() -> crate::sketch::Sketch {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, -10.0), None)
-            .expect("a");
-        let b = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, -10.0), None)
-            .expect("b");
-        let c = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, 10.0), None)
-            .expect("c");
-        let d = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, 10.0), None)
-            .expect("d");
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).expect("a");
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).expect("b");
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).expect("c");
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).expect("d");
         sketch.add_line_pts(a, b, None).expect("ab");
         sketch.add_line_pts(b, c, None).expect("bc");
         sketch.add_line_pts(c, d, None).expect("cd");

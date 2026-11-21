@@ -45,14 +45,25 @@ impl BuiltinNode for CircularPattern {
                 // rotate, then translate it back. Copy 0 above stays untouched,
                 // so its instance is the identity.
                 for body in &mut instance_bodies {
-                    body.push_transform(BodyTransform::Place { offset: negative_center, rotation: [0.0; 3] });
+                    body.push_transform(BodyTransform::Place {
+                        offset: negative_center,
+                        rotation: [0.0; 3],
+                    });
                     body.push_transform(BodyTransform::Place { offset: [0.0; 3], rotation });
-                    body.push_transform(BodyTransform::Place { offset: center, rotation: [0.0; 3] });
+                    body.push_transform(BodyTransform::Place {
+                        offset: center,
+                        rotation: [0.0; 3],
+                    });
                 }
                 for sketch in &mut instance_sketches {
-                    sketch.placement = sketch.placement.then(BodyTransform::Place { offset: negative_center, rotation: [0.0; 3] });
-                    sketch.placement = sketch.placement.then(BodyTransform::Place { offset: [0.0; 3], rotation });
-                    sketch.placement = sketch.placement.then(BodyTransform::Place { offset: center, rotation: [0.0; 3] });
+                    sketch.placement = sketch
+                        .placement
+                        .then(BodyTransform::Place { offset: negative_center, rotation: [0.0; 3] });
+                    sketch.placement =
+                        sketch.placement.then(BodyTransform::Place { offset: [0.0; 3], rotation });
+                    sketch.placement = sketch
+                        .placement
+                        .then(BodyTransform::Place { offset: center, rotation: [0.0; 3] });
                 }
             }
             bodies.extend(instance_bodies);
@@ -70,9 +81,7 @@ impl BuiltinNode for CircularPattern {
     }
 
     fn suppression_source(&self, node: NodeView<'_>, index: &RequestIndex<'_>) -> Option<String> {
-        index
-            .first_incoming_any(&node.id, &["shape", "profile"])
-            .map(|link| link.from.clone())
+        index.first_incoming_any(&node.id, &["shape", "profile"]).map(|link| link.from.clone())
     }
 
     fn body_layout(
@@ -99,9 +108,7 @@ fn count(node: NodeView<'_>) -> usize {
 }
 
 fn count_values(values: &serde_json::Value) -> usize {
-    crate::contract_number("circularpattern", values, "count")
-        .round()
-        .clamp(1.0, 5000.0) as usize
+    crate::contract_number("circularpattern", values, "count").round().clamp(1.0, 5000.0) as usize
 }
 
 /// Angle between adjacent copies. A full turn divides by `count` (so the last
@@ -154,11 +161,7 @@ mod tests {
             .map(|brep| {
                 let record = nodecraft_step::record_of_brep(brep).expect("copy record");
                 let (min, max) = nodecraft_step::record_bounds(&record).expect("copy bounds");
-                [
-                    (min[0] + max[0]) / 2.0,
-                    (min[1] + max[1]) / 2.0,
-                    (min[2] + max[2]) / 2.0,
-                ]
+                [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0, (min[2] + max[2]) / 2.0]
             })
             .collect()
     }

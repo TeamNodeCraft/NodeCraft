@@ -20,7 +20,7 @@ use std::sync::{Mutex, OnceLock};
 
 use objc2::ffi::class_addMethod;
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
-use objc2::{define_class, msg_send, MainThreadOnly};
+use objc2::{MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSApplicationWillFinishLaunchingNotification};
 use objc2_foundation::{
     MainThreadMarker, NSArray, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol,
@@ -83,9 +83,7 @@ unsafe extern "C-unwind" fn open_urls(
             continue;
         }
         let path = unsafe {
-            CStr::from_ptr(url.fileSystemRepresentation().as_ptr())
-                .to_string_lossy()
-                .into_owned()
+            CStr::from_ptr(url.fileSystemRepresentation().as_ptr()).to_string_lossy().into_owned()
         };
         push_path(PathBuf::from(path));
     }
@@ -135,32 +133,30 @@ fn install_delegate_methods() {
     let Some(delegate) = application.delegate() else {
         return;
     };
-    let class = unsafe {
-        &*objc2::ffi::object_getClass(&*delegate as *const _ as *const AnyObject)
-    };
-    let urls = add_method(
-        class,
-        c"application:openURLs:",
-        unsafe { std::mem::transmute::<
-            unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut NSApplication, *mut NSArray<NSURL>),
+    let class =
+        unsafe { &*objc2::ffi::object_getClass(&*delegate as *const _ as *const AnyObject) };
+    let urls = add_method(class, c"application:openURLs:", unsafe {
+        std::mem::transmute::<
+            unsafe extern "C-unwind" fn(
+                *mut AnyObject,
+                Sel,
+                *mut NSApplication,
+                *mut NSArray<NSURL>,
+            ),
             Imp,
-        >(open_urls) },
-    );
-    let files = add_method(
-        class,
-        c"application:openFiles:",
-        unsafe {
-            std::mem::transmute::<
-                unsafe extern "C-unwind" fn(
-                    *mut AnyObject,
-                    Sel,
-                    *mut NSApplication,
-                    *mut NSArray<NSString>,
-                ),
-                Imp,
-            >(open_files)
-        },
-    );
+        >(open_urls)
+    });
+    let files = add_method(class, c"application:openFiles:", unsafe {
+        std::mem::transmute::<
+            unsafe extern "C-unwind" fn(
+                *mut AnyObject,
+                Sel,
+                *mut NSApplication,
+                *mut NSArray<NSString>,
+            ),
+            Imp,
+        >(open_files)
+    });
     if urls || files {
         let _ = INSTALLED.set(());
     }
@@ -197,12 +193,8 @@ pub fn install(ctx: egui::Context) {
 
 /// Take documents delivered by macOS since the previous frame.
 pub fn take_pending() -> Vec<PathBuf> {
-    PENDING
-        .lock()
-        .map(|mut pending| std::mem::take(&mut *pending))
-        .unwrap_or_default()
+    PENDING.lock().map(|mut pending| std::mem::take(&mut *pending)).unwrap_or_default()
 }
-
 
 fn round_window(title: &str) {
     use objc2::MainThreadMarker;
@@ -243,11 +235,7 @@ pub fn round_debug_window() {
     round_window("Debug");
 }
 
-fn position_standard_button(
-    button: &objc2_app_kit::NSButton,
-    x: f64,
-    center_from_top: f64,
-) {
+fn position_standard_button(button: &objc2_app_kit::NSButton, x: f64, center_from_top: f64) {
     let Some(host) = (unsafe { button.superview() }) else {
         return;
     };
@@ -257,10 +245,7 @@ fn position_standard_button(
     } else {
         host.bounds().size.height - center_from_top - frame.size.height * 0.5
     };
-    button.setFrame(NSRect::new(
-        NSPoint::new(x, y),
-        frame.size,
-    ));
+    button.setFrame(NSRect::new(NSPoint::new(x, y), frame.size));
 }
 
 /// Show and align the three standard traffic lights in the main app bar.

@@ -86,8 +86,7 @@ pub fn body_bounds(brep: &Brep) -> Option<BodyBounds> {
         let face = brep.face(face).ok()?;
         let Some(surface) = face.surface.as_ref() else { continue };
         let domain = face.uv_domain;
-        let (u0, u1, v0, v1) =
-            (domain.u_min(), domain.u_max(), domain.v_min(), domain.v_max());
+        let (u0, u1, v0, v1) = (domain.u_min(), domain.u_max(), domain.v_min(), domain.v_max());
         if ![u0, u1, v0, v1].iter().all(|value| value.is_finite()) {
             continue;
         }
@@ -108,11 +107,7 @@ pub fn body_bounds(brep: &Brep) -> Option<BodyBounds> {
         let extent = calculate_bounding_box(
             &kernel,
             brep,
-            BoundingBoxOptions {
-                approx: true,
-                tight: false,
-                expand_by_zone_tol_3d: true,
-            },
+            BoundingBoxOptions { approx: true, tight: false, expand_by_zone_tol_3d: true },
         )
         .ok()?;
         let mut center = [0.0; 3];
@@ -152,11 +147,7 @@ fn bounds_of_points(points: &[[f64; 3]], inflation: f64) -> Option<BodyBounds> {
     if points.is_empty() {
         return None;
     }
-    let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
-    ];
+    let center = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5, (min[2] + max[2]) * 0.5];
     let mut radius_sq: f64 = 0.0;
     for point in points {
         let dx = point[0] - center[0];
@@ -276,11 +267,7 @@ fn distance3(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// negative results; positive infinity becomes `f64::MAX`.
 fn finite_positive(value: f64, fallback: f64) -> f64 {
     if value.is_finite() {
-        if value > 0.0 {
-            value
-        } else {
-            fallback.max(f64::MIN_POSITIVE)
-        }
+        if value > 0.0 { value } else { fallback.max(f64::MIN_POSITIVE) }
     } else if value > 0.0 {
         f64::MAX
     } else {
@@ -289,11 +276,7 @@ fn finite_positive(value: f64, fallback: f64) -> f64 {
 }
 
 fn nonnegative_radius(radius: f64) -> f64 {
-    if radius.is_finite() {
-        radius.max(0.0)
-    } else {
-        0.0
-    }
+    if radius.is_finite() { radius.max(0.0) } else { 0.0 }
 }
 
 /// World units covered by one physical pixel at the body's silhouette.
@@ -370,11 +353,7 @@ pub fn ladder_index(tolerance: f64) -> usize {
 }
 
 fn sanitize_tolerance(value: f64, fallback: f64) -> f64 {
-    if value.is_finite() && value > 0.0 {
-        value
-    } else {
-        fallback
-    }
+    if value.is_finite() && value > 0.0 { value } else { fallback }
 }
 
 /// Index range allowed by the requested min/max tolerance: the first rung at or
@@ -383,14 +362,8 @@ fn allowed_range(params: &LodParams) -> (usize, usize) {
     let last = LOD_LADDER.len() - 1;
     let min = sanitize_tolerance(params.min_tolerance, LOD_LADDER[0]);
     let max = sanitize_tolerance(params.max_tolerance, LOD_LADDER[last]);
-    let low = LOD_LADDER
-        .iter()
-        .position(|&rung| rung >= min)
-        .unwrap_or(last);
-    let high = LOD_LADDER
-        .iter()
-        .rposition(|&rung| rung <= max)
-        .unwrap_or(0);
+    let low = LOD_LADDER.iter().position(|&rung| rung >= min).unwrap_or(last);
+    let high = LOD_LADDER.iter().rposition(|&rung| rung <= max).unwrap_or(0);
     // An inverted range has no legal rung; ignore it rather than return a
     // tolerance outside the fixed ladder.
     if low <= high { (low, high) } else { (0, last) }
@@ -404,10 +377,7 @@ fn first_choice(pixel: f64, error_px: f64, allowed: (usize, usize)) -> usize {
     let ideal = error_px * pixel;
     // The largest rung still inside the error budget. Below the first rung the
     // budget is unreachable; the ladder has no finer level, so use rung 0.
-    let index = LOD_LADDER
-        .iter()
-        .rposition(|&rung| rung <= ideal)
-        .unwrap_or(0);
+    let index = LOD_LADDER.iter().rposition(|&rung| rung <= ideal).unwrap_or(0);
     clamp_index(index, allowed)
 }
 
@@ -479,11 +449,8 @@ pub fn quality_for(
     let pixel = world_per_pixel(bounds, camera, viewport, pixels_per_point);
     let allowed = allowed_range(&params);
     let tiny_px = projected_diameter_px(bounds, camera, viewport, pixels_per_point);
-    let tiny_limit = if params.tiny_body_px.is_finite() {
-        params.tiny_body_px.max(0.0)
-    } else {
-        0.0
-    };
+    let tiny_limit =
+        if params.tiny_body_px.is_finite() { params.tiny_body_px.max(0.0) } else { 0.0 };
     // The one conversion from logical to physical pixels. Every threshold
     // below, including the tiny-body test and both hysteresis edges, uses the
     // converted value.
@@ -517,25 +484,15 @@ mod tests {
     }
 
     fn perspective_at(distance: f64) -> LodCamera {
-        LodCamera {
-            eye: [0.0, 0.0, distance],
-            fov_y: FOV_90,
-            ortho_height: 0.0,
-        }
+        LodCamera { eye: [0.0, 0.0, distance], fov_y: FOV_90, ortho_height: 0.0 }
     }
 
     fn viewport_height(height: f64) -> ViewportSize {
-        ViewportSize {
-            width: height * 1.5,
-            height,
-        }
+        ViewportSize { width: height * 1.5, height }
     }
 
     fn bounds(radius: f64) -> BodyBounds {
-        BodyBounds {
-            center: [0.0; 3],
-            radius,
-        }
+        BodyBounds { center: [0.0; 3], radius }
     }
 
     /// Pick a camera distance whose ideal tolerance is `ideal` for a 90° fov,
@@ -592,10 +549,7 @@ mod tests {
                 camera,
                 view,
                 1.0,
-                LodParams {
-                    current_tolerance: current,
-                    ..params
-                },
+                LodParams { current_tolerance: current, ..params },
             );
             let rung = tolerance(next);
             levels.push(rung);
@@ -631,10 +585,7 @@ mod tests {
                 perspective_at(depth + radius),
                 view,
                 1.0,
-                LodParams {
-                    current_tolerance: current,
-                    ..params
-                },
+                LodParams { current_tolerance: current, ..params },
             );
             current = Some(tolerance(quality));
         }
@@ -647,10 +598,7 @@ mod tests {
             perspective_at(end_depth + radius),
             view,
             1.0,
-            LodParams {
-                current_tolerance: Some(LOD_LADDER[0]),
-                ..params
-            },
+            LodParams { current_tolerance: Some(LOD_LADDER[0]), ..params },
         ));
         assert_eq!(fast, slow, "one fast zoom-out must match the slow sequence");
         // The fixed point is the hysteresis band's choice, not first_choice:
@@ -678,10 +626,7 @@ mod tests {
                 camera_at_pixel(pixel),
                 view,
                 1.0,
-                LodParams {
-                    current_tolerance: Some(current),
-                    ..params
-                },
+                LodParams { current_tolerance: Some(current), ..params },
             );
             assert_eq!(
                 tolerance(quality),
@@ -698,10 +643,7 @@ mod tests {
             camera_at_pixel(0.049),
             view,
             1.0,
-            LodParams {
-                current_tolerance: Some(LOD_LADDER[3]),
-                ..params
-            },
+            LodParams { current_tolerance: Some(LOD_LADDER[3]), ..params },
         ));
         assert_eq!(refined, LOD_LADDER[2]);
         for pixel in [0.049, 0.051, 0.049, 0.051] {
@@ -710,16 +652,9 @@ mod tests {
                 camera_at_pixel(pixel),
                 view,
                 1.0,
-                LodParams {
-                    current_tolerance: Some(refined),
-                    ..params
-                },
+                LodParams { current_tolerance: Some(refined), ..params },
             );
-            assert_eq!(
-                tolerance(quality),
-                refined,
-                "pixel {pixel} must not flap back to 0.05"
-            );
+            assert_eq!(tolerance(quality), refined, "pixel {pixel} must not flap back to 0.05");
         }
     }
 
@@ -730,11 +665,7 @@ mod tests {
         // logical pixels, so the chosen world tolerance must not change.
         let body = bounds(10.0);
         let view = viewport_height(1000.0);
-        let camera = LodCamera {
-            eye: [0.0, 0.0, 100.0],
-            fov_y: 0.0,
-            ortho_height: 100.0,
-        };
+        let camera = LodCamera { eye: [0.0, 0.0, 100.0], fov_y: 0.0, ortho_height: 100.0 };
         let at_one = tolerance(quality_for(body, camera, view, 1.0, LodParams::default()));
         let at_two = tolerance(quality_for(body, camera, view, 2.0, LodParams::default()));
         assert_eq!(
@@ -750,19 +681,9 @@ mod tests {
         // 0.75-logical-pixel budget is 1.5 physical px, so the ideal world
         // tolerance is 0.0682 and the largest rung inside it is 0.05 (3,968
         // triangles in the report), not 0.025 (10,784).
-        let body = BodyBounds {
-            center: [0.0; 3],
-            radius: 20.0,
-        };
-        let camera = LodCamera {
-            eye: [0.0, 0.0, 100.0],
-            fov_y: 0.0,
-            ortho_height: 50.82,
-        };
-        let view = ViewportSize {
-            width: 1100.0,
-            height: 559.0,
-        };
+        let body = BodyBounds { center: [0.0; 3], radius: 20.0 };
+        let camera = LodCamera { eye: [0.0, 0.0, 100.0], fov_y: 0.0, ortho_height: 50.82 };
+        let view = ViewportSize { width: 1100.0, height: 559.0 };
         let chosen = tolerance(quality_for(body, camera, view, 2.0, LodParams::default()));
         assert_eq!(chosen, 0.05, "0.75 logical px at ppp 2 must choose the 0.05 rung");
     }
@@ -772,15 +693,8 @@ mod tests {
         let body = bounds(1.0);
         let params = LodParams::default();
         let at = |ortho_height: f64, viewport_height: f64| {
-            let camera = LodCamera {
-                eye: [0.0, 0.0, 10.0],
-                fov_y: 0.0,
-                ortho_height,
-            };
-            let view = ViewportSize {
-                width: 1500.0,
-                height: viewport_height,
-            };
+            let camera = LodCamera { eye: [0.0, 0.0, 10.0], fov_y: 0.0, ortho_height };
+            let view = ViewportSize { width: 1500.0, height: viewport_height };
             tolerance(quality_for(body, camera, view, 1.0, params))
         };
 
@@ -795,15 +709,8 @@ mod tests {
 
         let pixel = world_per_pixel(
             body,
-            LodCamera {
-                eye: [0.0, 0.0, 10.0],
-                fov_y: 0.0,
-                ortho_height: 100.0,
-            },
-            ViewportSize {
-                width: 1500.0,
-                height: 1000.0,
-            },
+            LodCamera { eye: [0.0, 0.0, 10.0], fov_y: 0.0, ortho_height: 100.0 },
+            ViewportSize { width: 1500.0, height: 1000.0 },
             1.0,
         );
         assert!((pixel - 0.1).abs() < 1.0e-12, "orthographic pixel {pixel}");
@@ -833,10 +740,7 @@ mod tests {
         assert_eq!(LOD_LADDER[0], 0.00625);
         assert_eq!(LOD_LADDER[3], 0.05);
         for pair in LOD_LADDER.windows(2) {
-            assert!(
-                (pair[1] / pair[0] - 2.0).abs() < 1.0e-12,
-                "{pair:?} is not a doubling"
-            );
+            assert!((pair[1] / pair[0] - 2.0).abs() < 1.0e-12, "{pair:?} is not a doubling");
         }
 
         let radius = 10.0;
@@ -846,10 +750,7 @@ mod tests {
         for &rung in &LOD_LADDER {
             let camera = perspective_at(distance_for_ideal(rung, radius));
             let quality = quality_for(body, camera, view, 1.0, params);
-            assert!(
-                LOD_LADDER.contains(&tolerance(quality)),
-                "{quality:?} is not a ladder rung"
-            );
+            assert!(LOD_LADDER.contains(&tolerance(quality)), "{quality:?} is not a ladder rung");
             assert_eq!(tolerance(quality), rung);
         }
 
@@ -900,11 +801,8 @@ mod tests {
     fn reference_transform(mut p: [f64; 3], transform: &DisplayTransform) -> [f64; 3] {
         match transform {
             DisplayTransform::Place { offset, rotation } => {
-                let (rx, ry, rz) = (
-                    rotation[0].to_radians(),
-                    rotation[1].to_radians(),
-                    rotation[2].to_radians(),
-                );
+                let (rx, ry, rz) =
+                    (rotation[0].to_radians(), rotation[1].to_radians(), rotation[2].to_radians());
                 let (sx, cx) = rx.sin_cos();
                 let (sy, cy) = ry.sin_cos();
                 let (sz, cz) = rz.sin_cos();
@@ -944,8 +842,8 @@ mod tests {
         use nodecraft_solidcore::solidcore::primitive::api_primitives::create_sphere;
 
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let brep = create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
-            .expect("r20 sphere");
+        let brep =
+            create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0).expect("r20 sphere");
         nodecraft_layers::plan_stats::reset();
         let bounds = body_bounds(&brep).expect("body bounds");
         assert!(bounds.radius > 0.0);
@@ -962,28 +860,19 @@ mod tests {
         use nodecraft_solidcore::solidcore::primitive::api_primitives as api;
 
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let sphere = api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
-            .expect("r20 sphere");
-        let box_ = api::create_box(
-            &mut kernel,
-            Point3::new(-10.0, -10.0, -10.0),
-            20.0,
-            20.0,
-            20.0,
-        )
-        .expect("box");
+        let sphere =
+            api::create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0).expect("r20 sphere");
+        let box_ = api::create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
+            .expect("box");
         let path = format!(
             "{}/../../../tests/Sample AP203 Data Files/moon_buggy.stp",
             env!("CARGO_MANIFEST_DIR")
         );
         let bytes = std::fs::read(&path).expect("read moon_buggy.stp");
         let import = nodecraft_step::read_cad(&bytes, &path).expect("moon_buggy.stp imports");
-        let (moon_buggy, _) = solidcore_convert::brep::to_kernel(
-            &mut kernel,
-            &import.bodies[0].brep,
-            true,
-        )
-        .expect("moon_buggy kernel body");
+        let (moon_buggy, _) =
+            solidcore_convert::brep::to_kernel(&mut kernel, &import.bodies[0].brep, true)
+                .expect("moon_buggy kernel body");
 
         for (name, brep) in [("sphere", sphere), ("box", box_), ("moon_buggy", moon_buggy)] {
             let bounds = body_bounds(&brep).expect("body bounds");
@@ -1019,8 +908,8 @@ mod tests {
         use nodecraft_solidcore::solidcore::primitive::api_primitives::create_sphere;
 
         let mut kernel = nodecraft_solidcore::kernel::kernel();
-        let brep = create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0)
-            .expect("r20 sphere");
+        let brep =
+            create_sphere(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0).expect("r20 sphere");
         let bounds = body_bounds(&brep).expect("body bounds");
 
         let centre_error = distance3(bounds.center, [0.0; 3]);
@@ -1032,8 +921,8 @@ mod tests {
         );
 
         // Every vertex of a normal display plan is inside the LOD bound.
-        let planned = nodecraft_layers::plan_kernel(&mut kernel, &brep, 0.1, None)
-            .expect("display plan");
+        let planned =
+            nodecraft_layers::plan_kernel(&mut kernel, &brep, 0.1, None).expect("display plan");
         let (mesh, _) = planned.plan.evaluate();
         for point in &mesh.positions {
             let distance = distance3([point.x, point.y, point.z], bounds.center);
@@ -1047,28 +936,20 @@ mod tests {
 
     #[test]
     fn body_bounds_transformed_matches_plan_transform() {
-        let original = BodyBounds {
-            center: [0.3, -0.7, 1.1],
-            radius: 1.5,
-        };
-        let place = DisplayTransform::Place {
-            offset: [10.0, -2.0, 3.5],
-            rotation: [20.0, -35.0, 50.0],
-        };
+        let original = BodyBounds { center: [0.3, -0.7, 1.1], radius: 1.5 };
+        let place =
+            DisplayTransform::Place { offset: [10.0, -2.0, 3.5], rotation: [20.0, -35.0, 50.0] };
 
         let placed = original.transformed(std::slice::from_ref(&place));
         assert_close(placed.center, reference_transform(original.center, &place));
         assert_eq!(placed.radius, original.radius);
 
         let scale = DisplayTransform::Scale { factor: -2.0 };
-        let mirror = DisplayTransform::Mirror {
-            plane: "xz",
-            offset: 0.75,
-        };
+        let mirror = DisplayTransform::Mirror { plane: "xz", offset: 0.75 };
         let chain = [place, scale, mirror];
-        let expected_center = chain.iter().fold(original.center, |point, transform| {
-            reference_transform(point, transform)
-        });
+        let expected_center = chain
+            .iter()
+            .fold(original.center, |point, transform| reference_transform(point, transform));
         let transformed = original.transformed(&chain);
         assert_close(transformed.center, expected_center);
         assert_eq!(transformed.radius, original.radius * 2.0);
@@ -1077,10 +958,7 @@ mod tests {
         for (plane, offset) in [("xz", 0.5), ("yz", -1.25), ("xy", 2.0)] {
             let mirror = DisplayTransform::Mirror { plane, offset };
             let mirrored = original.transformed(std::slice::from_ref(&mirror));
-            assert_close(
-                mirrored.center,
-                reference_transform(original.center, &mirror),
-            );
+            assert_close(mirrored.center, reference_transform(original.center, &mirror));
             assert_eq!(mirrored.radius, original.radius);
         }
     }

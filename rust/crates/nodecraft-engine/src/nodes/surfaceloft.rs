@@ -5,9 +5,9 @@
 //! loft needs profiles/curves, not solids.
 
 use crate::node_task::ExactNodeTask;
-use crate::{contract_number, Part, RequestIndex};
+use crate::{Part, RequestIndex, contract_number};
 
-use super::{section_sketch, BuiltinNode, NodeView, PartEval};
+use super::{BuiltinNode, NodeView, PartEval, section_sketch};
 
 /// Registered for the `surfaceloft` contract id.
 pub(crate) struct SurfaceLoft;
@@ -26,10 +26,7 @@ impl BuiltinNode for SurfaceLoft {
         for section in sections {
             let part = section.part?;
             let sketch = section_sketch(&part).ok_or_else(|| {
-                format!(
-                    "Surface Loft section {} must be a sketch or spline curve",
-                    section.from
-                )
+                format!("Surface Loft section {} must be a sketch or spline curve", section.from)
             })?;
             outputs.push(sketch.as_ref().clone());
         }
@@ -46,11 +43,7 @@ impl BuiltinNode for SurfaceLoft {
         12
     }
 
-    fn suppression_source(
-        &self,
-        _node: NodeView<'_>,
-        _index: &RequestIndex<'_>,
-    ) -> Option<String> {
+    fn suppression_source(&self, _node: NodeView<'_>, _index: &RequestIndex<'_>) -> Option<String> {
         // Surface Loft is a generator over its sections: suppressing it turns
         // it off.
         None
@@ -72,18 +65,10 @@ mod tests {
 
     fn square_sketch() -> crate::sketch::Sketch {
         let mut sketch = crate::sketch::Sketch::new();
-        let a = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, -10.0), None)
-            .expect("a");
-        let b = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, -10.0), None)
-            .expect("b");
-        let c = sketch
-            .add_point(solidcore_record::Vec2::new(10.0, 10.0), None)
-            .expect("c");
-        let d = sketch
-            .add_point(solidcore_record::Vec2::new(-10.0, 10.0), None)
-            .expect("d");
+        let a = sketch.add_point(solidcore_record::Vec2::new(-10.0, -10.0), None).expect("a");
+        let b = sketch.add_point(solidcore_record::Vec2::new(10.0, -10.0), None).expect("b");
+        let c = sketch.add_point(solidcore_record::Vec2::new(10.0, 10.0), None).expect("c");
+        let d = sketch.add_point(solidcore_record::Vec2::new(-10.0, 10.0), None).expect("d");
         sketch.add_line_pts(a, b, None).expect("ab");
         sketch.add_line_pts(b, c, None).expect("bc");
         sketch.add_line_pts(c, d, None).expect("cd");

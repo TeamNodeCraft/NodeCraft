@@ -117,9 +117,7 @@ pub fn fillet_brep_exact_with_kernel_warned(
 ) -> Result<crate::ops_blend::Blended, String> {
     let treatment = EdgeTreatment::from_node_values(values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
-    treatment
-        .validate()
-        .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
+    treatment.validate().map_err(|error| nodecraft_solidcore::error::user_message(error))?;
     if treatment.mode != EdgeMode::Fillet {
         return Err("exact fillet requires fillet mode".into());
     }
@@ -349,7 +347,9 @@ mod exact_fillet_tests {
         let coloured = filleted
             .faces()
             .iter()
-            .filter(|(face, _)| filleted.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some())
+            .filter(|(face, _)| {
+                filleted.find_attribute(solidcore::EntityRef::Face(*face), 100).is_some()
+            })
             .count();
         assert_eq!(coloured, 6, "the six box faces keep their colour");
         let marked = solidcore::blend::definition_check::blend_face_marks(&filleted)
@@ -358,9 +358,7 @@ mod exact_fillet_tests {
             .expect("made round")
             .face;
         assert!(
-            filleted
-                .find_attribute(solidcore::EntityRef::Face(marked), 100)
-                .is_none(),
+            filleted.find_attribute(solidcore::EntityRef::Face(marked), 100).is_none(),
             "the made round must be uncoloured"
         );
     }
@@ -373,7 +371,9 @@ mod exact_fillet_tests {
         });
         let once = fillet_brep_exact(&brep, &first).expect("first fillet");
         let selections = crate::edge_selections(&kernel, &once).expect("edges");
-        let edge = selections.iter().find(|selection| selection.edge == once.edge_list()[0])
+        let edge = selections
+            .iter()
+            .find(|selection| selection.edge == once.edge_list()[0])
             .or_else(|| selections.first())
             .expect("edge on the new body")
             .clone();
@@ -386,5 +386,4 @@ mod exact_fillet_tests {
         let twice = fillet_brep_exact(&once, &second).expect("second fillet");
         assert!(solidcore::query::api_queries::brep_is_manifold_solid(&twice).expect("manifold"));
     }
-
 }

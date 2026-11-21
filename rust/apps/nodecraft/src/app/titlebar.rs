@@ -19,11 +19,7 @@ pub(super) fn window_button(
 ) -> bool {
     let hit = egui::Rect::from_center_size(center, egui::Vec2::splat(20.0));
     let response = ui.interact(hit, id, egui::Sense::click());
-    let fill = if response.hovered() {
-        color.gamma_multiply(1.15)
-    } else {
-        color
-    };
+    let fill = if response.hovered() { color.gamma_multiply(1.15) } else { color };
     ui.painter().circle_filled(center, 6.0, fill);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -42,11 +38,7 @@ pub(super) fn close_light(ui: &mut egui::Ui, center: egui::Pos2, id: egui::Id) -
 }
 
 /// A title-bar surface that can start a native window drag from empty space.
-pub(super) fn drag_response(
-    ui: &mut egui::Ui,
-    rect: egui::Rect,
-    id: egui::Id,
-) -> egui::Response {
+pub(super) fn drag_response(ui: &mut egui::Ui, rect: egui::Rect, id: egui::Id) -> egui::Response {
     ui.interact(rect, id, egui::Sense::drag())
 }
 
@@ -55,12 +47,7 @@ pub(super) fn start_drag(ui: &egui::Ui) {
 }
 
 /// Draw a title-bar label.
-pub(super) fn title(
-    ui: &egui::Ui,
-    position: egui::Pos2,
-    text: &str,
-    color: egui::Color32,
-) {
+pub(super) fn title(ui: &egui::Ui, position: egui::Pos2, text: &str, color: egui::Color32) {
     ui.painter().text(
         position,
         egui::Align2::LEFT_CENTER,
@@ -104,4 +91,3 @@ pub(super) fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui:
         ResizeDirection::NorthWest | ResizeDirection::SouthEast => egui::CursorIcon::ResizeNwSe,
     }
 }
-

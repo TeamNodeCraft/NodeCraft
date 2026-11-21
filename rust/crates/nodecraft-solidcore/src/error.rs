@@ -32,7 +32,9 @@ mod tests {
 
     #[test]
     fn trim_failure_gets_actionable_guidance() {
-        let message = user_message("ray_classify: the trims of face 4 cannot be implanted while it is edited");
+        let message = user_message(
+            "ray_classify: the trims of face 4 cannot be implanted while it is edited",
+        );
         assert!(message.contains("heal or retrim"));
     }
 

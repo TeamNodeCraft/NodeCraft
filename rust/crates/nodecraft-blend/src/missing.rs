@@ -36,5 +36,3 @@ pub const LAW_CONTINUITY: &[&str] = &[
     "SmFilletLaw::Evaluate on the executive's law path",
     "blend.fillet_standard_solver_p2 (G2/G3 law setup)",
 ];
-
-

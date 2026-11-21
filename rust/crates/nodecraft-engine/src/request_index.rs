@@ -114,27 +114,17 @@ impl<'a> RequestIndex<'a> {
     }
 
     /// Every connection entering `node_id`, in request order.
-    pub(crate) fn incoming(
-        &self,
-        node_id: &str,
-    ) -> impl Iterator<Item = &'a Connection> + '_ {
+    pub(crate) fn incoming(&self, node_id: &str) -> impl Iterator<Item = &'a Connection> + '_ {
         #[cfg(test)]
         test_counters::note_lookup();
-        self.incoming
-            .get(node_id)
-            .into_iter()
-            .flat_map(|links| links.iter().copied())
+        self.incoming.get(node_id).into_iter().flat_map(|links| links.iter().copied())
     }
 
     /// The first connection entering `node_id` on `input`, in request order.
     pub(crate) fn first_incoming(&self, node_id: &str, input: &str) -> Option<&'a Connection> {
         #[cfg(test)]
         test_counters::note_lookup();
-        self.incoming
-            .get(node_id)?
-            .iter()
-            .copied()
-            .find(|link| link.input == input)
+        self.incoming.get(node_id)?.iter().copied().find(|link| link.input == input)
     }
 
     /// The first connection entering `node_id` on any of `ports`, in request
@@ -155,16 +145,10 @@ impl<'a> RequestIndex<'a> {
     }
 
     /// Every connection leaving `node_id`, in request order.
-    pub(crate) fn outgoing(
-        &self,
-        node_id: &str,
-    ) -> impl Iterator<Item = &'a Connection> + '_ {
+    pub(crate) fn outgoing(&self, node_id: &str) -> impl Iterator<Item = &'a Connection> + '_ {
         #[cfg(test)]
         test_counters::note_lookup();
-        self.outgoing
-            .get(node_id)
-            .into_iter()
-            .flat_map(|links| links.iter().copied())
+        self.outgoing.get(node_id).into_iter().flat_map(|links| links.iter().copied())
     }
 }
 
@@ -238,10 +222,7 @@ mod tests {
         let mut cache = crate::EngineCache::new();
         for node in &request.nodes {
             let key = node.cache.as_ref().and_then(|cache| cache.key.clone()).expect("cache key");
-            cache.insert_part(
-                (node.id.clone(), key),
-                std::sync::Arc::new(crate::Part::empty()),
-            );
+            cache.insert_part((node.id.clone(), key), std::sync::Arc::new(crate::Part::empty()));
         }
 
         test_counters::reset();
@@ -279,10 +260,7 @@ mod tests {
                 node("third", "translate", "third"),
                 node("dup", "translate", "second"),
             ],
-            connections: vec![
-                link("other", "dup", "shape"),
-                link("third", "dup", "shape"),
-            ],
+            connections: vec![link("other", "dup", "shape"), link("third", "dup", "shape")],
             binary_mesh: false,
             project_directory: None,
             progress: false,
@@ -297,7 +275,10 @@ mod tests {
             assert!(index.node(&node.id).is_some(), "{id:?} is not resolvable", id = node.id);
         }
         assert_eq!(
-            index.node("dup").and_then(|node| node.values.get("label")).and_then(serde_json::Value::as_str),
+            index
+                .node("dup")
+                .and_then(|node| node.values.get("label"))
+                .and_then(serde_json::Value::as_str),
             Some("first"),
             "duplicate ids resolve to the first request node, like the scan did",
         );
@@ -306,10 +287,7 @@ mod tests {
             Some("other"),
         );
         assert_eq!(
-            index
-                .incoming("dup")
-                .map(|link| link.from.as_str())
-                .collect::<Vec<_>>(),
+            index.incoming("dup").map(|link| link.from.as_str()).collect::<Vec<_>>(),
             vec!["other", "third"],
             "connection order is request order",
         );

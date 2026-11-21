@@ -122,7 +122,6 @@ pub struct DockStyle {
     pub shadow: Color32,
 }
 
-
 /// One icon row in a dock.
 #[derive(Clone, Copy)]
 pub struct DockItem<'a> {
@@ -134,12 +133,7 @@ pub struct DockItem<'a> {
 
 impl<'a> DockItem<'a> {
     pub fn new(label: &'a str, icon_name: &'a str, icon: &'static [u8]) -> Self {
-        Self {
-            label,
-            icon_name,
-            icon,
-            active: false,
-        }
+        Self { label, icon_name, icon, active: false }
     }
 
     pub fn active(mut self, active: bool) -> Self {
@@ -170,20 +164,10 @@ pub fn highlight_rect(row: Rect, metrics: DockMetrics) -> Rect {
 }
 
 /// Paint the shared dock background, including its shadow and border.
-pub fn paint_background(
-    painter: &Painter,
-    rect: Rect,
-    metrics: DockMetrics,
-    style: DockStyle,
-) {
+pub fn paint_background(painter: &Painter, rect: Rect, metrics: DockMetrics, style: DockStyle) {
     painter.add(
-        egui::epaint::Shadow {
-            offset: [0, 0],
-            blur: 32,
-            spread: 0,
-            color: style.shadow,
-        }
-        .as_shape(rect, egui::CornerRadius::same(metrics.background_radius as u8)),
+        egui::epaint::Shadow { offset: [0, 0], blur: 32, spread: 0, color: style.shadow }
+            .as_shape(rect, egui::CornerRadius::same(metrics.background_radius as u8)),
     );
     painter.add(squircle::shape(
         rect,
@@ -208,11 +192,7 @@ pub fn icon_button(
 ) -> Response {
     let (rect, response) = ui.allocate_exact_size(metrics.row_allocation(), Sense::click());
     if item.active || response.hovered() {
-        let fill = if item.active {
-            style.accent
-        } else {
-            style.border.gamma_multiply(0.75)
-        };
+        let fill = if item.active { style.accent } else { style.border.gamma_multiply(0.75) };
         let painter = ui.painter();
         painter.add(squircle::shape(
             highlight_rect(rect, metrics),
@@ -245,10 +225,8 @@ pub fn icon_button(
         svg.into_bytes(),
     )
     .fit_to_exact_size(Vec2::splat(metrics.icon_size));
-    let image_response = ui.put(
-        Rect::from_center_size(rect.center(), Vec2::splat(metrics.icon_size)),
-        image,
-    );
+    let image_response =
+        ui.put(Rect::from_center_size(rect.center(), Vec2::splat(metrics.icon_size)), image);
     let response = response.union(image_response).on_hover_text(item.label);
     if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -279,7 +257,8 @@ mod tests {
     fn default_metrics_produce_a_square_highlight() {
         let metrics = DockMetrics::DEFAULT;
         assert_eq!(metrics.row_size(), 35.0);
-        let row = Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(metrics.width, metrics.row_size()));
+        let row =
+            Rect::from_min_size(egui::Pos2::ZERO, Vec2::new(metrics.width, metrics.row_size()));
         let highlight = highlight_rect(row, metrics);
         let background = background_rect(row, metrics);
         assert_eq!(background.height(), row.height() + metrics.padding * 2.0);

@@ -26,7 +26,8 @@ fn sample_proofs() {
     let document: serde_json::Value = serde_json::from_str(&text).expect("sample json");
     let root = document.get("root").cloned().unwrap_or_else(|| document.clone());
     let nodes = root.get("nodes").and_then(|value| value.as_array()).cloned().unwrap_or_default();
-    let connections = root.get("connections").and_then(|value| value.as_array()).cloned().unwrap_or_default();
+    let connections =
+        root.get("connections").and_then(|value| value.as_array()).cloned().unwrap_or_default();
     let produced: HashSet<String> = connections
         .iter()
         .filter_map(|link| link.get("from").and_then(|value| value.as_str()).map(str::to_owned))
@@ -37,7 +38,10 @@ fn sample_proofs() {
         .filter(|id| !produced.contains(id))
         .collect();
     if targets.is_empty() {
-        targets = nodes.iter().filter_map(|node| node.get("id").and_then(|value| value.as_str()).map(str::to_owned)).collect();
+        targets = nodes
+            .iter()
+            .filter_map(|node| node.get("id").and_then(|value| value.as_str()).map(str::to_owned))
+            .collect();
     }
     let request: Request = serde_json::from_value(serde_json::json!({
         "requestId": 1,
@@ -50,7 +54,8 @@ fn sample_proofs() {
     }))
     .expect("request");
     // The critical path: this returns before the background proofs.
-    let output = nodecraft_engine::evaluate_exact(request, nodecraft_engine::EngineCache::new(), None);
+    let output =
+        nodecraft_engine::evaluate_exact(request, nodecraft_engine::EngineCache::new(), None);
     let evaluation_ms = output.response.evaluation_ms;
     let generation = output.proof_generation;
     let errors = output.response.node_errors.len();

@@ -32,18 +32,16 @@ pub(super) fn config_dir_for(
     xdg_config_home: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
     match platform {
-        ConfigPlatform::MacOs => home
-            .map(|home| PathBuf::from(home).join("Library/Application Support/NodeCraft")),
-        ConfigPlatform::Windows => appdata
-            .map(|path| PathBuf::from(path).join("NodeCraft"))
-            .or_else(|| {
+        ConfigPlatform::MacOs => {
+            home.map(|home| PathBuf::from(home).join("Library/Application Support/NodeCraft"))
+        }
+        ConfigPlatform::Windows => {
+            appdata.map(|path| PathBuf::from(path).join("NodeCraft")).or_else(|| {
                 userprofile.map(|path| {
-                    PathBuf::from(path)
-                        .join("AppData")
-                        .join("Roaming")
-                        .join("NodeCraft")
+                    PathBuf::from(path).join("AppData").join("Roaming").join("NodeCraft")
                 })
-            }),
+            })
+        }
         ConfigPlatform::Unix => xdg_config_home
             .map(|path| PathBuf::from(path).join("nodecraft"))
             .or_else(|| home.map(|home| PathBuf::from(home).join(".config/nodecraft"))),
@@ -200,10 +198,7 @@ pub(super) fn save_app_settings(
         tool_dock_offset_y,
         tool_dock_shortcut: tool_dock_shortcut.to_owned(),
         tool_search_shortcut: tool_search_shortcut.to_owned(),
-        recent_files: recent_files
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect(),
+        recent_files: recent_files.iter().map(|path| path.display().to_string()).collect(),
     };
     let text = serde_json::to_string_pretty(&settings).map_err(|_| ())?;
     let temp = path.with_extension("json.tmp");
@@ -215,11 +210,8 @@ pub(super) fn save_app_settings(
 /// Apply the saved theme id. Missing, moved or invalid themes intentionally fall
 /// back to the embedded default dark palette.
 pub(super) fn apply_saved_theme(id: Option<&str>) {
-    let mut preset = id.and_then(|id| {
-        crate::theme::available_themes()
-            .into_iter()
-            .find(|preset| preset.id == id)
-    });
+    let mut preset = id
+        .and_then(|id| crate::theme::available_themes().into_iter().find(|preset| preset.id == id));
     if preset.is_none()
         && let Some(id) = id
         && id != "default"
@@ -233,9 +225,7 @@ pub(super) fn apply_saved_theme(id: Option<&str>) {
             path: Some(PathBuf::from(id)),
         });
     }
-    let loaded = preset
-        .as_ref()
-        .is_some_and(|preset| crate::theme::load_preset(preset).is_ok());
+    let loaded = preset.as_ref().is_some_and(|preset| crate::theme::load_preset(preset).is_ok());
     if !loaded {
         let default = crate::theme::ThemePreset {
             name: crate::theme::DEFAULT_THEME_NAME.to_owned(),

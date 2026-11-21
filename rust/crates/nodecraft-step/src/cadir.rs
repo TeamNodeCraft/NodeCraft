@@ -39,11 +39,7 @@ pub fn is_cad_path(path: &str) -> bool {
     std::path::Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            CAD_EXTS
-                .iter()
-                .any(|known| extension.eq_ignore_ascii_case(known))
-        })
+        .is_some_and(|extension| CAD_EXTS.iter().any(|known| extension.eq_ignore_ascii_case(known)))
 }
 
 /// One body region read into a record.
@@ -326,12 +322,7 @@ fn one_face_sheet(
             let edge = edges
                 .get_mut(use_.edge as usize)
                 .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
-            edge.uses.push(EdgeUseRef {
-                face: 0,
-                r#loop: li,
-                position,
-                upper: !use_.forward,
-            });
+            edge.uses.push(EdgeUseRef { face: 0, r#loop: li, position, upper: !use_.forward });
             let pcurve = match &use_.pcurve {
                 Some(pcurve) => pcurve.clone(),
                 None => {
@@ -348,34 +339,18 @@ fn one_face_sheet(
                     }
                 }
             };
-            uses.push(OrientedEdge {
-                edge: use_.edge,
-                forward: use_.forward,
-                pcurve,
-            });
+            uses.push(OrientedEdge { edge: use_.edge, forward: use_.forward, pcurve });
         }
         loops.push(Loop::Edges { edges: uses });
     }
-    let vertices = face
-        .vertices
-        .iter()
-        .map(|&point| Vertex {
-            point,
-            tolerance: face.tolerance,
-        })
-        .collect();
+    let vertices =
+        face.vertices.iter().map(|&point| Vertex { point, tolerance: face.tolerance }).collect();
     let record = b::Brep {
         version: b::VERSION,
         tolerance: face.tolerance,
-        regions: vec![Region {
-            shells: vec![0],
-            void: false,
-        }],
+        regions: vec![Region { shells: vec![0], void: false }],
         shells: vec![Shell::Faces {
-            faces: vec![OrientedFace {
-                face: 0,
-                forward: true,
-            }],
+            faces: vec![OrientedFace { face: 0, forward: true }],
             wires: Vec::new(),
         }],
         faces: vec![b::Face {
@@ -461,19 +436,14 @@ fn fitted_trims(
                 .edges
                 .get(use_.edge as usize)
                 .ok_or_else(|| format!("face use names missing edge {}", use_.edge))?;
-            let made_edge = made
-                .edges
-                .get(edge_index)
-                .ok_or_else(|| "the record lost an edge".to_string())?;
+            let made_edge =
+                made.edges.get(edge_index).ok_or_else(|| "the record lost an edge".to_string())?;
             let tolerance = made_edge.tolerance.max(ours.tolerance);
             // How far each end may move: within its vertex's tolerance where the caller
             // covers the gap (`TrimFace::vertex_tolerances`), else within the edge's.
-            let reach = ours.vertices.map(|vertex| {
-                face.vertex_tolerances
-                    .get(vertex as usize)
-                    .copied()
-                    .unwrap_or(0.0)
-            });
+            let reach = ours
+                .vertices
+                .map(|vertex| face.vertex_tolerances.get(vertex as usize).copied().unwrap_or(0.0));
             pcurves.push(on_our_interval(
                 made_use.pcurve.clone(),
                 ours,
@@ -507,16 +477,9 @@ fn on_our_interval(
     let curve = solidcore_convert::curve(ours.nurbs.unwrap_or(ours.curve))
         .map_err(|error| error.to_string())?;
     let curve = solidcore::eval::CurveEval::new(&curve).map_err(|error| error.to_string())?;
-    let at = |t: f64| {
-        curve
-            .point(t)
-            .ok_or_else(|| format!("the edge's curve has no point at {t}"))
-    };
+    let at = |t: f64| curve.point(t).ok_or_else(|| format!("the edge's curve has no point at {t}"));
     let moved = [at(a)?.distance(at(c)?), at(b)?.distance(at(d)?)];
-    let within = moved
-        .iter()
-        .zip(reach)
-        .all(|(moved, reach)| *moved <= tolerance.max(reach));
+    let within = moved.iter().zip(reach).all(|(moved, reach)| *moved <= tolerance.max(reach));
     if !within || !(d > c) {
         let shift = moved[0].max(moved[1]);
         return Err(format!(
@@ -534,14 +497,12 @@ fn on_our_interval(
         }
     };
     Ok(match pcurve {
-        Curve2::Spline { knots, points } => Curve2::Spline {
-            knots: knots.into_iter().map(map).collect(),
-            points,
-        },
-        Curve2::RationalSpline { knots, homogeneous } => Curve2::RationalSpline {
-            knots: knots.into_iter().map(map).collect(),
-            homogeneous,
-        },
+        Curve2::Spline { knots, points } => {
+            Curve2::Spline { knots: knots.into_iter().map(map).collect(), points }
+        }
+        Curve2::RationalSpline { knots, homogeneous } => {
+            Curve2::RationalSpline { knots: knots.into_iter().map(map).collect(), homogeneous }
+        }
     })
 }
 
@@ -549,10 +510,7 @@ fn on_our_interval(
 fn policy() -> DecodePolicy {
     DecodePolicy {
         mode: DecodeMode::Salvage,
-        limits: ResourceLimits {
-            max_input_bytes: MAX_INPUT_BYTES,
-            ..ResourceLimits::service()
-        },
+        limits: ResourceLimits { max_input_bytes: MAX_INPUT_BYTES, ..ResourceLimits::service() },
     }
 }
 
@@ -609,18 +567,13 @@ fn decode_at(
             "{name}: {format} files are not supported (STEP .step/.stp, FreeCAD .FCStd and Rhino .3dm only)"
         ));
     }
-    let options = DecodeOptions {
-        depth: DecodeDepth::Full,
-        policy,
-    };
-    let decoded = codec
-        .decode(&mut Cursor::new(bytes), &options)
-        .map_err(|error| match error {
-            DecodeFailure::Codec(error) => {
-                format!("{name}: could not read this {format} file: {error}")
-            }
-            other => format!("{name}: {other}"),
-        })?;
+    let options = DecodeOptions { depth: DecodeDepth::Full, policy };
+    let decoded = codec.decode(&mut Cursor::new(bytes), &options).map_err(|error| match error {
+        DecodeFailure::Codec(error) => {
+            format!("{name}: could not read this {format} file: {error}")
+        }
+        other => format!("{name}: {other}"),
+    })?;
     Ok((format, decoded))
 }
 
@@ -636,12 +589,8 @@ fn matrix_mul(left: [[f64; 4]; 4], right: [[f64; 4]; 4]) -> [[f64; 4]; 4] {
 }
 
 fn column_major(rows: [[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
-    let identity = [
-        [1.0, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0],
-        [0.0, 0.0, 0.0, 1.0],
-    ];
+    let identity =
+        [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
     (rows != identity).then(|| {
         let mut out = [[0.0; 4]; 4];
         for row in 0..4 {
@@ -752,19 +701,11 @@ impl<'a> Instances<'a> {
                 }
             }
         }
-        (
-            Self { by_definition },
-            ir.model.occurrences.len(),
-            unplaced,
-            warnings,
-        )
+        (Self { by_definition }, ir.model.occurrences.len(), unplaced, warnings)
     }
 
     fn for_definition(&self, definition: &str) -> &[OccurrenceWorld<'a>] {
-        self.by_definition
-            .get(definition)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.by_definition.get(definition).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -791,48 +732,20 @@ fn owner<'a>(ir: &'a CadIr, body: &str) -> Option<(&'a ProductDefinition, Vec<St
 /// owns carries (STEP styling is per face, and exporters commonly style every face).
 fn body_color(ir: &CadIr, body: &cadmpeg_ir::topology::Body) -> Option<[f64; 3]> {
     if let Some(color) = body.color {
-        return Some([
-            f64::from(color.r()),
-            f64::from(color.g()),
-            f64::from(color.b()),
-        ]);
+        return Some([f64::from(color.r()), f64::from(color.g()), f64::from(color.b())]);
     }
-    let faces: BTreeMap<&str, &cadmpeg_ir::topology::Face> = ir
-        .model
-        .faces
-        .iter()
-        .map(|face| (face.id.as_str(), face))
-        .collect();
-    let shells: BTreeMap<&str, &cadmpeg_ir::topology::Shell> = ir
-        .model
-        .shells
-        .iter()
-        .map(|shell| (shell.id.as_str(), shell))
-        .collect();
-    let regions: BTreeMap<&str, &cadmpeg_ir::topology::Region> = ir
-        .model
-        .regions
-        .iter()
-        .map(|region| (region.id.as_str(), region))
-        .collect();
+    let faces: BTreeMap<&str, &cadmpeg_ir::topology::Face> =
+        ir.model.faces.iter().map(|face| (face.id.as_str(), face)).collect();
+    let shells: BTreeMap<&str, &cadmpeg_ir::topology::Shell> =
+        ir.model.shells.iter().map(|shell| (shell.id.as_str(), shell)).collect();
+    let regions: BTreeMap<&str, &cadmpeg_ir::topology::Region> =
+        ir.model.regions.iter().map(|region| (region.id.as_str(), region)).collect();
     let mut found: Option<[f64; 3]> = None;
-    for region in body
-        .regions
-        .iter()
-        .filter_map(|id| regions.get(id.as_str()))
-    {
-        for shell in region
-            .shells
-            .iter()
-            .filter_map(|id| shells.get(id.as_str()))
-        {
+    for region in body.regions.iter().filter_map(|id| regions.get(id.as_str())) {
+        for shell in region.shells.iter().filter_map(|id| shells.get(id.as_str())) {
             for face in shell.faces().iter().filter_map(|id| faces.get(id.as_str())) {
                 let Some(color) = face.color else { continue };
-                let color = [
-                    f64::from(color.r()),
-                    f64::from(color.g()),
-                    f64::from(color.b()),
-                ];
+                let color = [f64::from(color.r()), f64::from(color.g()), f64::from(color.b())];
                 match found {
                     Some(previous) if previous != color => return None,
                     Some(_) => {}
@@ -867,7 +780,12 @@ impl SurfaceKinds {
     }
 
     fn faces(self) -> usize {
-        self.planes + self.cylinders + self.cones + self.spheres + self.tori + self.bsplines
+        self.planes
+            + self.cylinders
+            + self.cones
+            + self.spheres
+            + self.tori
+            + self.bsplines
             + self.other
     }
 }
@@ -875,35 +793,16 @@ impl SurfaceKinds {
 fn surface_kinds(geometry: &cadmpeg_ir::geometry::SolvedSurfaceGeometry) -> SurfaceKinds {
     use cadmpeg_ir::geometry::SolvedSurfaceGeometry;
     match geometry {
-        SolvedSurfaceGeometry::Plane(_) => SurfaceKinds {
-            planes: 1,
-            ..SurfaceKinds::default()
-        },
-        SolvedSurfaceGeometry::Cylinder(_) => SurfaceKinds {
-            cylinders: 1,
-            ..SurfaceKinds::default()
-        },
-        SolvedSurfaceGeometry::Cone(_) => SurfaceKinds {
-            cones: 1,
-            ..SurfaceKinds::default()
-        },
-        SolvedSurfaceGeometry::Sphere(_) => SurfaceKinds {
-            spheres: 1,
-            ..SurfaceKinds::default()
-        },
-        SolvedSurfaceGeometry::Torus(_) => SurfaceKinds {
-            tori: 1,
-            ..SurfaceKinds::default()
-        },
-        SolvedSurfaceGeometry::Nurbs(_) => SurfaceKinds {
-            bsplines: 1,
-            ..SurfaceKinds::default()
-        },
+        SolvedSurfaceGeometry::Plane(_) => SurfaceKinds { planes: 1, ..SurfaceKinds::default() },
+        SolvedSurfaceGeometry::Cylinder(_) => {
+            SurfaceKinds { cylinders: 1, ..SurfaceKinds::default() }
+        }
+        SolvedSurfaceGeometry::Cone(_) => SurfaceKinds { cones: 1, ..SurfaceKinds::default() },
+        SolvedSurfaceGeometry::Sphere(_) => SurfaceKinds { spheres: 1, ..SurfaceKinds::default() },
+        SolvedSurfaceGeometry::Torus(_) => SurfaceKinds { tori: 1, ..SurfaceKinds::default() },
+        SolvedSurfaceGeometry::Nurbs(_) => SurfaceKinds { bsplines: 1, ..SurfaceKinds::default() },
         SolvedSurfaceGeometry::Transformed(placed) => surface_kinds(placed.basis()),
-        _ => SurfaceKinds {
-            other: 1,
-            ..SurfaceKinds::default()
-        },
+        _ => SurfaceKinds { other: 1, ..SurfaceKinds::default() },
     }
 }
 
@@ -913,11 +812,7 @@ fn face_kinds(ir: &CadIr) -> BTreeMap<&str, SurfaceKinds> {
         .surfaces
         .iter()
         .map(|surface| {
-            let kinds = surface
-                .geometry
-                .solved()
-                .map(surface_kinds)
-                .unwrap_or_default();
+            let kinds = surface.geometry.solved().map(surface_kinds).unwrap_or_default();
             (surface.id.as_str(), kinds)
         })
         .collect();
@@ -925,45 +820,23 @@ fn face_kinds(ir: &CadIr) -> BTreeMap<&str, SurfaceKinds> {
         .faces
         .iter()
         .map(|face| {
-            (
-                face.id.as_str(),
-                surfaces
-                    .get(face.surface.as_str())
-                    .copied()
-                    .unwrap_or_default(),
-            )
+            (face.id.as_str(), surfaces.get(face.surface.as_str()).copied().unwrap_or_default())
         })
         .collect()
 }
 
 fn type_reports(ir: &CadIr) -> (CadTypeReport, Vec<CadSolidTypeReport>) {
     let faces = face_kinds(ir);
-    let regions: BTreeMap<&str, &cadmpeg_ir::topology::Region> = ir
-        .model
-        .regions
-        .iter()
-        .map(|region| (region.id.as_str(), region))
-        .collect();
-    let shells: BTreeMap<&str, &cadmpeg_ir::topology::Shell> = ir
-        .model
-        .shells
-        .iter()
-        .map(|shell| (shell.id.as_str(), shell))
-        .collect();
+    let regions: BTreeMap<&str, &cadmpeg_ir::topology::Region> =
+        ir.model.regions.iter().map(|region| (region.id.as_str(), region)).collect();
+    let shells: BTreeMap<&str, &cadmpeg_ir::topology::Shell> =
+        ir.model.shells.iter().map(|shell| (shell.id.as_str(), shell)).collect();
     let mut total = SurfaceKinds::default();
     let mut solids = Vec::with_capacity(ir.model.bodies.len());
     for (index, body) in ir.model.bodies.iter().enumerate() {
         let mut kinds = SurfaceKinds::default();
-        for region in body
-            .regions
-            .iter()
-            .filter_map(|id| regions.get(id.as_str()))
-        {
-            for shell in region
-                .shells
-                .iter()
-                .filter_map(|id| shells.get(id.as_str()))
-            {
+        for region in body.regions.iter().filter_map(|id| regions.get(id.as_str())) {
+            for shell in region.shells.iter().filter_map(|id| shells.get(id.as_str())) {
                 for face in shell.faces() {
                     kinds.add(faces.get(face.as_str()).copied().unwrap_or_default());
                 }
@@ -1021,10 +894,7 @@ pub fn read_schema(path: &str) -> Result<Option<String>, String> {
     let codec = detect(&catalog, &policy, &extension, &bytes)
         .map_err(|error| format!("{path}: {error}"))?
         .ok_or_else(|| format!("{path}: unrecognised file contents"))?;
-    let options = DecodeOptions {
-        depth: DecodeDepth::Container,
-        policy,
-    };
+    let options = DecodeOptions { depth: DecodeDepth::Container, policy };
     let decoded = codec
         .decode(&mut Cursor::new(&bytes), &options)
         .map_err(|error| format!("{path}: {error}"))?;
@@ -1091,9 +961,7 @@ fn read_cad_inner(bytes: &[u8], name: &str) -> Result<CadImport, String> {
     let policy = policy();
     let (ir, report, _) = decoded.into_parts();
     if !report.geometry_transferred() {
-        return Err(format!(
-            "{name}: no geometry could be read from this {format} file"
-        ));
+        return Err(format!("{name}: no geometry could be read from this {format} file"));
     }
     let mut warnings: Vec<String> = report
         .losses
@@ -1134,12 +1002,8 @@ fn read_cad_inner(bytes: &[u8], name: &str) -> Result<CadImport, String> {
             cover_fitted_gaps(&mut region.solid.brep);
         }
     }
-    let by_id: BTreeMap<&str, &cadmpeg_ir::topology::Body> = ir
-        .model
-        .bodies
-        .iter()
-        .map(|body| (body.id.as_str(), body))
-        .collect();
+    let by_id: BTreeMap<&str, &cadmpeg_ir::topology::Body> =
+        ir.model.bodies.iter().map(|body| (body.id.as_str(), body)).collect();
 
     let mut bodies = Vec::with_capacity(read.read.len());
     let mut placed_instances = 0usize;
@@ -1163,9 +1027,7 @@ fn read_cad_inner(bytes: &[u8], name: &str) -> Result<CadImport, String> {
                 .filter(|name| !name.trim().is_empty())
         });
         let color = body_color(&ir, body);
-        let base = body_name
-            .or(definition_name)
-            .unwrap_or_else(|| region.body.clone());
+        let base = body_name.or(definition_name).unwrap_or_else(|| region.body.clone());
         let body_placement = body.transform.map(Transform::rows);
         if worlds.is_empty() {
             // No occurrence places this body: keep it where its own placement says.
@@ -1204,11 +1066,8 @@ fn read_cad_inner(bytes: &[u8], name: &str) -> Result<CadImport, String> {
                 rows = matrix_mul(rows, placement);
             }
             let mut instance_path = path.clone();
-            if let Some(instance) = world
-                .occurrence
-                .name
-                .clone()
-                .filter(|name| !name.trim().is_empty())
+            if let Some(instance) =
+                world.occurrence.name.clone().filter(|name| !name.trim().is_empty())
             {
                 instance_path.push(instance);
             }

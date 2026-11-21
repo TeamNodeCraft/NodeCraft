@@ -23,11 +23,8 @@ fn moon_buggy_face_37_pcurves_lift_onto_the_surface() {
     assert!(!body.sheet, "moon_buggy imported as a surface body");
     assert_eq!(body.brep.faces.len(), 77);
 
-    let index = body
-        .face_origin
-        .iter()
-        .position(|&origin| origin == 37)
-        .expect("moon_buggy face #37");
+    let index =
+        body.face_origin.iter().position(|&origin| origin == 37).expect("moon_buggy face #37");
     let face = &body.brep.faces[index];
     let surface = solidcore_convert::surface(face.nurbs.as_ref().unwrap_or(&face.surface))
         .expect("face surface");
@@ -46,19 +43,13 @@ fn moon_buggy_face_37_pcurves_lift_onto_the_surface() {
             let [start, end] = edge.interval;
             let mut gap: f64 = 0.0;
             for step in 0..=16 {
-                let t = if step == 16 {
-                    end
-                } else {
-                    start + (end - start) * (step as f64 / 16.0)
-                };
+                let t = if step == 16 { end } else { start + (end - start) * (step as f64 / 16.0) };
                 let uv = solidcore_ops::pcurve::eval(&use_.pcurve, t)
                     .unwrap_or_else(|| panic!("pcurve of edge {} has no point at {t}", use_.edge));
-                let lifted = surface
-                    .point(uv)
-                    .unwrap_or_else(|| panic!("surface has no point at {uv:?}"));
-                let on_edge = curve
-                    .point(t)
-                    .unwrap_or_else(|| panic!("edge curve has no point at {t}"));
+                let lifted =
+                    surface.point(uv).unwrap_or_else(|| panic!("surface has no point at {uv:?}"));
+                let on_edge =
+                    curve.point(t).unwrap_or_else(|| panic!("edge curve has no point at {t}"));
                 gap = gap.max(lifted.distance(on_edge));
             }
             assert!(
