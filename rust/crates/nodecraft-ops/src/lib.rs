@@ -121,7 +121,6 @@ pub struct OpsResult {
     pub warnings: Vec<String>,
     /// Faces ops reported as made by this blend.
     pub made_faces: Vec<FaceId>,
-    pub volume: f64,
 }
 
 /// Why an ops session call failed.
@@ -243,11 +242,9 @@ impl<'k> OpsSession<'k> {
                 });
                 self.note_reset(reset);
                 let _ = result.map_err(|error| map_error(OpKind::Blend, error))?;
-                let volume =
-                    body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
                 let mut brep = body.into_brep();
                 let made_faces = self.mark_made(&mut brep)?;
-                return Ok(OpsResult { brep, warnings: Vec::new(), made_faces, volume });
+                return Ok(OpsResult { brep, warnings: Vec::new(), made_faces });
             }
         };
         let (blended, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
@@ -271,10 +268,9 @@ impl<'k> OpsSession<'k> {
             .filter(|(_, dropped)| **dropped)
             .map(|(index, _)| format!("edge {} was removed by a larger round", index + 1))
             .collect();
-        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Blend, error))?;
         let mut brep = body.into_brep();
         let made_faces = self.mark_made(&mut brep)?;
-        Ok(OpsResult { brep, warnings, made_faces, volume })
+        Ok(OpsResult { brep, warnings, made_faces })
     }
 
     /// Boolean two solid bodies; `None` when the result is empty. The empty answer is ops'
@@ -297,8 +293,11 @@ impl<'k> OpsSession<'k> {
         }
         let ab = a.ops_copy(self.kernel)?;
         let bb = b.ops_copy(self.kernel)?;
+        // Proved, like every OpsSession operation: since solidcore#18237 a plain ops Boolean
+        // runs under Contract::Closed and proves nothing. The validation mode decides when the
+        // proof is taken (EachStep: here; EachNode: deferred to the node / proof queue).
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
-            solidcore_ops::boolean::boolean(ab, bb, op)
+            solidcore_ops::boolean::boolean_with(ab, bb, op, Contract::Proved)
         });
         self.note_reset(reset);
         match result.map_err(|error| map_error(OpKind::Boolean, error))? {
@@ -365,8 +364,9 @@ impl<'k> OpsSession<'k> {
         for body in bodies {
             kernels.push(body.ops_copy(self.kernel)?);
         }
+        // Proved, as `boolean_outcome`: a plain `union_all` is Contract::Closed (solidcore#18237).
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
-            solidcore_ops::boolean::union_all(kernels)
+            solidcore_ops::boolean::union_all_with(kernels, Contract::Proved)
         });
         self.note_reset(reset);
         let body = result.map_err(|error| map_error(OpKind::Boolean, error))?;
@@ -498,13 +498,7 @@ impl<'k> OpsSession<'k> {
         });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Shell, error))?;
-        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Shell, error))?;
-        Ok(OpsResult {
-            brep: body.into_brep(),
-            warnings: Vec::new(),
-            made_faces: Vec::new(),
-            volume,
-        })
+        Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new() })
     }
 
     /// Offset a solid's faces by `distance` along their outward normals.
@@ -549,13 +543,7 @@ impl<'k> OpsSession<'k> {
         });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Offset, error))?;
-        let volume = body.volume(1.0e-8).map_err(|error| map_error(OpKind::Offset, error))?;
-        Ok(OpsResult {
-            brep: body.into_brep(),
-            warnings: Vec::new(),
-            made_faces: Vec::new(),
-            volume,
-        })
+        Ok(OpsResult { brep: body.into_brep(), warnings: Vec::new(), made_faces: Vec::new() })
     }
 
     /// Two-distance / distance-angle chamfer.
@@ -590,6 +578,15 @@ impl<'k> OpsSession<'k> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A result's exact volume, measured the way the product does ([`SolidBody::volume`]):
+    /// `OpsResult` carries no volume, so a blend/shell/offset never pays for one it does not use.
+    fn volume_of(result: &OpsResult) -> f64 {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let copy =
+            solidcore::topology::brep::p3::brep_copy(&mut kernel, &result.brep).expect("copy");
+        SolidBody::new(copy).volume(&mut kernel).expect("volume")
+    }
     use solidcore::geom::attribute::{Attribute, Behavior};
     use solidcore::geom::vector3d::Vec3;
     use solidcore::math::Point3;
@@ -654,7 +651,7 @@ mod tests {
     fn round_volume_and_made_face() {
         let result = run(1.0, OpsBlend::Round(Turn::Mitre));
         let expected = 8000.0 - (1.0 - std::f64::consts::PI / 4.0) * 20.0;
-        assert!((result.volume - expected).abs() < 1.0e-4, "{}", result.volume);
+        assert!((volume_of(&result) - expected).abs() < 1.0e-4, "{}", volume_of(&result));
         assert_eq!(result.made_faces.len(), 1);
         assert!(result.warnings.is_empty());
     }
@@ -662,9 +659,13 @@ mod tests {
     #[test]
     fn chamfer_curvature_and_sides() {
         let chamfer = run(1.0, OpsBlend::Chamfer(ChamferCorner::Mitre));
-        assert!((chamfer.volume - 7990.0).abs() < 1.0e-4, "{}", chamfer.volume);
+        assert!((volume_of(&chamfer) - 7990.0).abs() < 1.0e-4, "{}", volume_of(&chamfer));
         let curvature = run(1.0, OpsBlend::Curvature);
-        assert!(curvature.volume > 7990.0 && curvature.volume < 7995.8, "{}", curvature.volume);
+        assert!(
+            volume_of(&curvature) > 7990.0 && volume_of(&curvature) < 7995.8,
+            "{}",
+            volume_of(&curvature)
+        );
         let sides = run(
             1.0,
             OpsBlend::ChamferSides {
@@ -673,7 +674,7 @@ mod tests {
                 flip: false,
             },
         );
-        assert!((sides.volume - 7980.0).abs() < 1.0e-3, "{}", sides.volume);
+        assert!((volume_of(&sides) - 7980.0).abs() < 1.0e-3, "{}", volume_of(&sides));
     }
 
     #[test]
@@ -797,8 +798,8 @@ mod tests {
         let flipped = OpsSession::new(&mut kernel)
             .chamfer_sides(&brep, &[edge], 1.0, ChamferSecond::Distance(2.0), [0.0, 0.0, 1.0], true)
             .expect("flipped");
-        assert!((plain.volume - 7980.0).abs() < 1.0e-3, "{}", plain.volume);
-        assert!((flipped.volume - 7980.0).abs() < 1.0e-3, "{}", flipped.volume);
+        assert!((volume_of(&plain) - 7980.0).abs() < 1.0e-3, "{}", volume_of(&plain));
+        assert!((volume_of(&flipped) - 7980.0).abs() < 1.0e-3, "{}", volume_of(&flipped));
         use solidcore::blend::definition_check::blend_face_marks;
         let normal = |result: &OpsResult| {
             let face = blend_face_marks(&result.brep).expect("marks")[0].face;
@@ -858,17 +859,17 @@ mod tests {
             .blend(&brep, &edges, 1.0, OpsBlend::Round(Turn::Mitre))
             .expect("round");
         assert!(
-            chamfer.volume < g2.volume && chamfer.volume < round.volume,
+            volume_of(&chamfer) < volume_of(&g2) && volume_of(&chamfer) < volume_of(&round),
             "chamfer {} < G2 {}, round {}",
-            chamfer.volume,
-            g2.volume,
-            round.volume
+            volume_of(&chamfer),
+            volume_of(&g2),
+            volume_of(&round)
         );
         assert!(
-            (g2.volume - round.volume).abs() < 0.5,
+            (volume_of(&g2) - volume_of(&round)).abs() < 0.5,
             "G2 {} vs round {}",
-            g2.volume,
-            round.volume
+            volume_of(&g2),
+            volume_of(&round)
         );
     }
 
@@ -912,7 +913,8 @@ mod tests {
                 let edges = if one { vec![all[0]] } else { all };
                 let started = std::time::Instant::now();
                 let result = OpsSession::new(&mut kernel).blend(&brep, &edges, size, kind);
-                let _ = tx.send((started.elapsed(), result.map(|r| r.volume), edges_count(&brep)));
+                let _ =
+                    tx.send((started.elapsed(), result.map(|r| volume_of(&r)), edges_count(&brep)));
             });
             match rx.recv_timeout(std::time::Duration::from_secs(10)) {
                 Ok((elapsed, result, count)) => {
@@ -1057,14 +1059,14 @@ mod tests {
         let dirty = OpsSession::new(&mut kernel).blend(&brep, &[edge], 8.0, OpsBlend::Curvature);
         eprintln!(
             "carried context {before:?} -> {:?} in {:.1} ms",
-            dirty.as_ref().map(|r| r.volume),
+            dirty.as_ref().map(|r| volume_of(&r)),
             started.elapsed().as_secs_f64() * 1000.0
         );
         let mut fresh = nodecraft_kernel_profile::kernel();
         let brep = box_brep(&mut fresh);
         let edge = brep.edge_list()[0];
         let clean = OpsSession::new(&mut fresh).blend(&brep, &[edge], 8.0, OpsBlend::Curvature);
-        eprintln!("fresh: {:?}", clean.as_ref().map(|r| r.volume));
+        eprintln!("fresh: {:?}", clean.as_ref().map(|r| volume_of(&r)));
     }
 
     #[test]
@@ -1168,12 +1170,12 @@ mod tests {
         let brep = create_box(&mut kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
             .expect("box");
         let result = OpsSession::new(&mut kernel).shell(&brep, &[], 1.0).expect("shell");
-        assert!((result.volume - 2648.0).abs() < 1.0e-6, "{}", result.volume);
+        assert!((volume_of(&result) - 2648.0).abs() < 1.0e-6, "{}", volume_of(&result));
         let inward = OpsSession::new(&mut kernel).shell(&brep, &[], -1.0).expect("inward shell");
-        assert!((inward.volume - 2168.0).abs() < 1.0e-6, "{}", inward.volume);
+        assert!((volume_of(&inward) - 2168.0).abs() < 1.0e-6, "{}", volume_of(&inward));
         let top = face_facing(&kernel, &brep, [0.0, 0.0, 1.0]);
         let opened = OpsSession::new(&mut kernel).shell(&brep, &[top], -1.0).expect("open shell");
-        assert!((opened.volume - 1844.0).abs() < 1.0e-6, "{}", opened.volume);
+        assert!((volume_of(&opened) - 1844.0).abs() < 1.0e-6, "{}", volume_of(&opened));
         let work = |threads: usize| {
             let started = std::time::Instant::now();
             let handles: Vec<_> = (0..threads)
@@ -1247,19 +1249,19 @@ mod tests {
         let old_body = solidcore_ops::Body::from_brep(&mut old_kernel, old).expect("old body");
         let old_volume = old_body.volume(1e-8).expect("volume");
         assert!((old_volume - 3840.0).abs() < 1e-6, "{old_volume}");
-        assert!((new.volume - 3840.0).abs() < 1e-6, "{}", new.volume);
-        assert!((old_volume - new.volume).abs() < 1e-6);
+        assert!((volume_of(&new) - 3840.0).abs() < 1e-6, "{}", volume_of(&new));
+        assert!((old_volume - volume_of(&new)).abs() < 1e-6);
         let old_faces = old_body.copy().expect("copy").into_brep().face_list().len();
         assert_eq!(old_faces, new.brep.face_list().len());
         let open_top =
             OpsSession::new(&mut new_kernel).shell(&brep, &[top], -1.0).expect("open top");
-        assert!((open_top.volume - 4344.0).abs() < 1e-6, "{}", open_top.volume);
+        assert!((volume_of(&open_top) - 4344.0).abs() < 1e-6, "{}", volume_of(&open_top));
         assert_eq!(new.brep.face_list().len(), 10);
         eprintln!(
             "shell conformance volume {} faces {} open-top {}",
-            new.volume,
+            volume_of(&new),
             new.brep.face_list().len(),
-            open_top.volume
+            volume_of(&open_top)
         );
     }
     #[test]
@@ -1289,11 +1291,11 @@ mod tests {
                 OpsSession::new(&mut kernel).offset_faces(&brep, faces, -2.0).expect("new offset");
             let old_body = solidcore_ops::Body::from_brep(&mut old_kernel, old).expect("body");
             let old_v = old_body.volume(1e-8).expect("volume");
-            assert!((old_v - new.volume).abs() < 1e-6, "{old_v} vs {}", new.volume);
-            assert!((new.volume - expected).abs() < 1e-6, "{} vs {expected}", new.volume);
+            assert!((old_v - volume_of(&new)).abs() < 1e-6, "{old_v} vs {}", volume_of(&new));
+            assert!((volume_of(&new) - expected).abs() < 1e-6, "{} vs {expected}", volume_of(&new));
             eprintln!(
                 "offset conformance volume {} faces {} expected {expected}",
-                new.volume,
+                volume_of(&new),
                 new.brep.face_list().len()
             );
         };
