@@ -488,6 +488,20 @@ pub(crate) fn has_edges(values: &serde_json::Value) -> bool {
     values.get("edges").and_then(serde_json::Value::as_array).is_some_and(|edges| !edges.is_empty())
 }
 
+/// An edge blend's (Fillet's, Chamfer's) result as the node's Part: the body as the task made
+/// it, so the next node's operand is its kernel body with every round's exact blend definition.
+/// Never through a B-rep copy: `SolidBody::into_brep` falls back to an evaluation copy, which
+/// carries no definitions, whenever the B-rep is shared.
+pub(crate) fn edge_blend_part(
+    output: crate::node_task::NodeOutput,
+    node_name: &str,
+) -> Result<Part, String> {
+    match output {
+        crate::node_task::NodeOutput::Shape(body) => Ok(Part::from_bodies([body])),
+        _ => Err(format!("{node_name} task returned no shape")),
+    }
+}
+
 /// What a node may ask the exact Part evaluator for.
 ///
 /// This is intentionally narrower than `Eval`: a node cannot reach the caches,

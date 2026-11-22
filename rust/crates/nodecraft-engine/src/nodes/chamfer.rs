@@ -40,10 +40,7 @@ impl BuiltinNode for Chamfer {
         // Keep the blend's user-facing warnings on this node instead of
         // dropping them with the task output.
         ctx.warn(warnings);
-        output
-            .into_brep()
-            .ok_or_else(|| "chamfer task returned no shape".into())
-            .map(Part::from_brep)
+        super::edge_blend_part(output, "chamfer")
     }
 
     fn exact_weight(&self, _node: NodeView<'_>) -> usize {

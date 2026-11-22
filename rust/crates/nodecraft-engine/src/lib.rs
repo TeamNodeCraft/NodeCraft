@@ -7265,6 +7265,50 @@ mod tests {
         );
     }
 
+    /// Fillet and Chamfer hand on their result through one helper (`nodes::edge_blend_part`):
+    /// a round made before a chamfer reaches the node after it with its exact blend definition,
+    /// and the chamfer tags the face it made for the selected-feature overlay.
+    #[test]
+    fn a_round_stays_exact_through_a_chamfer() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 1,
+            "targets": ["bevel"],
+            "meshTargets": [],
+            "nodes": [
+                {"id": "cyl", "type": "solid", "values": {"primitiveType": "cylinder"}, "cache": {"key": "cyl", "state": "cached"}},
+                {"id": "round", "type": "fillet", "values": {"length": 10.3, "edges": [{"center": [-20.0, 0.0, -20.0]}]}, "cache": {"key": "round", "state": "cached"}},
+                {"id": "bevel", "type": "chamfer", "values": {"length": 2.0, "edges": [{"center": [-20.0, 0.0, 20.0]}]}, "cache": {"key": "bevel", "state": "cached"}}
+            ],
+            "connections": [
+                {"from": "cyl", "to": "round", "in": "shape", "out": "shape"},
+                {"from": "round", "to": "bevel", "in": "shape", "out": "shape"}
+            ]
+        }))
+        .expect("request");
+        let output = evaluate_exact(request, EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("bevel").expect("chamfer Part");
+        assert_eq!(part.bodies.len(), 1);
+        let brep = &part.bodies[0].brep;
+        let marks = nodecraft_solidcore::solidcore::blend::definition_check::blend_face_marks(brep)
+            .expect("marks");
+        assert_eq!(marks.len(), 2, "the round's face and the chamfer's face are tagged");
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let copy = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(&mut kernel, brep)
+            .expect("copy");
+        let (record, _) = nodecraft_ops::SolidBody::new(copy)
+            .ops_copy(&mut kernel)
+            .expect("operand")
+            .to_record()
+            .expect("record");
+        let exact = record
+            .faces
+            .iter()
+            .filter(|face| matches!(face.surface, solidcore_record::brep::Surface::Blend { .. }))
+            .count();
+        assert_eq!(exact, 1, "the round reaches the chamfer's result with its blend definition");
+    }
+
     #[test]
     fn deterministic_failure_is_reused_from_cache() {
         let request: Request = serde_json::from_value(serde_json::json!({
