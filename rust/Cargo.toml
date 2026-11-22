@@ -51,12 +51,12 @@ license = "MIT OR Apache-2.0"
 serde = { version = "1", features = ["derive"] }
 rayon = "1"
 serde_json = "1"
-solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
-solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
-solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
-solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
-solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
-solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
+solidcore = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
+solidcore-record = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
+solidcore-convert = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
+solidcore-tess = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
+solidcore-ops = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
+solidcraft-sketch = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
 # cadmpeg (CADIR) is pinned to exactly the versions and features SolidCraft pins.
 cadmpeg-core = "=0.6.12"
 cadmpeg-ir = "=0.6.12"
@@ -65,7 +65,7 @@ cadmpeg-codec-step = "=0.6.12"
 # solidcore-cadir is in the pinned revision: SolidCraft PR 16906 merged, so the
 # crate now comes from the same git pin as the rest of the kernel and only the
 # ops seam remains local. See docs/solidcore-sync.md.
-solidcore-cadir = { git = "https://github.com/tangency-labs/solidcraft", rev = "9d1194d0097ba33f0a42038fe4fbf20d3988ff5c" }
+solidcore-cadir = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
 
 
 # Run scripts/setup-solidcore-seam.sh first; it creates the local seam checkout.

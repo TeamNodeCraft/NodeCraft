@@ -3585,6 +3585,8 @@ impl GpuViewport {
                 // Ghost edges are part of the same ribbon pass: the ghost matrix
                 // is a uniform, so there is no separate moving scene slot.
                 moving: None,
+                motions: Default::default(),
+                ground: None,
                 product_lights: None,
                 upload_error: None,
                 clouds: Vec::new(),
@@ -4374,6 +4376,8 @@ mod tests {
             product: false,
             preview_bounds: None,
             moving: None,
+            motions: Default::default(),
+            ground: None,
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),

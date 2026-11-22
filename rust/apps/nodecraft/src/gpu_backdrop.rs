@@ -576,6 +576,8 @@ impl BackdropRenderer {
             product: false,
             preview_bounds: None,
             moving: None,
+            motions: Default::default(),
+            ground: None,
             product_lights: None,
             upload_error: None,
             clouds: Vec::new(),

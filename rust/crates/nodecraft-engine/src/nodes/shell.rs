@@ -698,4 +698,56 @@ mod tests {
         assert!((inward_volume - 2168.0).abs() < 1.0e-6, "{inward_volume}");
         assert!((outward_volume - 2648.0).abs() < 1.0e-6, "{outward_volume}");
     }
+
+    /// A shell keeps a round exact: the shell's working copy keeps each face's blend
+    /// definition (SolidCraft #20754), so the round offsets by its definition. A cylinder
+    /// r 20 with its bottom rim rounded r 10.3, shelled 2 inward and closed, keeps two blend
+    /// faces: the outer round r 10.3 and the cavity's r 8.3. Before, both came out as NURBS fits.
+    #[test]
+    fn a_shelled_round_stays_two_exact_blends() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 6, "targets": ["shell"], "meshTargets": [], "binaryMesh": false,
+            "nodes": [
+                {"id": "cyl", "type": "solid", "cache": {"key": "cyl"},
+                 "values": {"primitiveType": "cylinder"}},
+                {"id": "round", "type": "fillet", "cache": {"key": "round"},
+                 "values": {"length": 10.3, "edges": [{"center": [-20.0, 0.0, -20.0]}]}},
+                {"id": "shell", "type": "shell", "cache": {"key": "shell"},
+                 "values": {"thickness": 2.0, "direction": "inward"}}
+            ],
+            "connections": [link("cyl", "round"), link("round", "shell")]
+        }))
+        .expect("shell request");
+        let output = crate::evaluate_exact(request, crate::EngineCache::new(), None);
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("shell").expect("shell exact part");
+        assert_eq!(part.bodies.len(), 1);
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let copy = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
+            &mut kernel,
+            &part.bodies[0].brep,
+        )
+        .expect("copy");
+        let (record, _) = nodecraft_ops::SolidBody::new(copy)
+            .ops_copy(&mut kernel)
+            .expect("operand")
+            .to_record()
+            .expect("record");
+        let kinds: Vec<String> = record
+            .faces
+            .iter()
+            .map(|face| {
+                format!("{:?}", face.surface).split([' ', '{', '(']).next().unwrap_or("").to_owned()
+            })
+            .collect();
+        let blends = record
+            .faces
+            .iter()
+            .filter(|face| matches!(face.surface, solidcore_record::brep::Surface::Blend { .. }))
+            .count();
+        assert_eq!(
+            blends, 2,
+            "the outer round and the cavity's round stay exact blends: {kinds:?}"
+        );
+    }
 }
