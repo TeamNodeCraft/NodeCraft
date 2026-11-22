@@ -57,6 +57,14 @@ impl Default for EngineCache {
 
 impl EngineCache {
     #[must_use]
+    /// Whether this thread's evaluation may still write the cache. A cache entry must be the
+    /// result of its content key. Once the revision token is cancelled, a kernel call can fail for
+    /// that reason alone, and its node passes its input through; anything built after that may
+    /// stand on such a pass-through, so no write of any kind is accepted.
+    fn accepts_writes() -> bool {
+        !crate::kernel_pool::current_revision_token().is_cancelled()
+    }
+
     pub fn new() -> Self {
         Self {
             breps: HashMap::new(),
@@ -111,6 +119,9 @@ impl EngineCache {
         key: CacheKey,
         brep: Arc<nodecraft_solidcore::solidcore::topology::Brep>,
     ) {
+        if !Self::accepts_writes() {
+            return;
+        }
         let bytes = brep_bytes(&brep);
         if let Some(old) = self.breps.insert(key.clone(), brep) {
             self.brep_bytes = self.brep_bytes.saturating_sub(brep_bytes(&old));
@@ -160,6 +171,9 @@ impl EngineCache {
     }
 
     pub(crate) fn insert_warnings(&mut self, key: CacheKey, warnings: Vec<String>) {
+        if !Self::accepts_writes() {
+            return;
+        }
         self.warnings.insert(key, warnings);
     }
 
@@ -168,6 +182,9 @@ impl EngineCache {
     }
 
     pub(crate) fn insert_part(&mut self, key: CacheKey, part: Arc<Part>) {
+        if !Self::accepts_writes() {
+            return;
+        }
         if self.parts.insert(key.clone(), part).is_none() {
             self.part_order.push_back(key);
         }
@@ -209,7 +226,7 @@ impl EngineCache {
     }
 
     pub fn insert_failure(&mut self, key: CacheKey, error: String) {
-        if crate::kernel_pool::current_revision_token().is_cancelled() {
+        if !Self::accepts_writes() {
             return;
         }
         if self.failures.insert(key.clone(), error).is_none() {
@@ -249,6 +266,9 @@ impl EngineCache {
         key: (String, String, String),
         import: Arc<nodecraft_mesh::StepImport>,
     ) {
+        if !Self::accepts_writes() {
+            return;
+        }
         if self.imports.insert(key.clone(), import).is_none() {
             self.import_order.push_back(key);
         }

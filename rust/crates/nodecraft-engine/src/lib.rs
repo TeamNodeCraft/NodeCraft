@@ -7216,6 +7216,55 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
+    /// A Boolean refused because its revision was cancelled passes its first operand through, so
+    /// anything built on it in that run is not the graph's result. The next, live evaluation of the
+    /// same graph must see the cut through the translate after it, not a Part the cancelled run
+    /// cached from the pass-through (a mug handle drawn with the half of the torus a box cut away).
+    #[test]
+    fn a_cancelled_run_caches_nothing_built_on_a_refused_node() {
+        let request = |targets: &[&str]| -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1,
+                "targets": targets,
+                "meshTargets": [],
+                "nodes": [
+                    {"id": "block", "type": "primitive", "values": {"primitiveType": "box", "length": 10, "width": 10, "height": 10}, "cache": {"key": "block", "state": "cached"}},
+                    {"id": "pin", "type": "primitive", "values": {"primitiveType": "box", "length": 4, "width": 4, "height": 20}, "cache": {"key": "pin", "state": "cached"}},
+                    {"id": "cut", "type": "boolean", "values": {"mode": "subtract"}, "cache": {"key": "cut", "state": "cached"}},
+                    {"id": "moved", "type": "translate", "values": {"x": 30}, "cache": {"key": "moved", "state": "cached"}}
+                ],
+                "connections": [
+                    {"from": "block", "to": "cut", "in": "a", "out": "shape"},
+                    {"from": "pin", "to": "cut", "in": "b", "out": "shape"},
+                    {"from": "cut", "to": "moved", "in": "shape", "out": "shape"}
+                ]
+            }))
+            .expect("request")
+        };
+        let faces = |output: &EngineOutput, id: &str| -> usize {
+            let part = output.exact_parts.get(id).unwrap_or_else(|| panic!("{id} has no Part"));
+            part.bodies.iter().map(|body| body.brep.face_list().len()).sum()
+        };
+        // the operands, evaluated live
+        crate::kernel_pool::set_current_revision_token(crate::kernel_pool::RevisionToken::new());
+        let warm = evaluate_exact(request(&["block", "pin"]), EngineCache::new(), None);
+        // the whole graph under a cancelled revision: the Boolean is refused and passes `block` on
+        let cancelled_token = crate::kernel_pool::RevisionToken::new();
+        cancelled_token.cancel();
+        crate::kernel_pool::set_current_revision_token(cancelled_token);
+        let cancelled = evaluate_exact(request(&["moved"]), warm.cache, None);
+        // the same graph, live
+        crate::kernel_pool::set_current_revision_token(crate::kernel_pool::RevisionToken::new());
+        let live = evaluate_exact(request(&["moved", "cut"]), cancelled.cache, None);
+        assert!(live.response.node_errors.is_empty(), "{:?}", live.response.node_errors);
+        assert!(faces(&live, "cut") > 6, "the pin must cut the block");
+        assert_eq!(
+            faces(&live, "moved"),
+            faces(&live, "cut"),
+            "the translate after the Boolean came from the cancelled run's pass-through"
+        );
+    }
+
     #[test]
     fn deterministic_failure_is_reused_from_cache() {
         let request: Request = serde_json::from_value(serde_json::json!({
