@@ -95,7 +95,6 @@ fn suppression_walk_cap_misses_live_input_after_64_translates() {
         run_exporters: false,
         mesh_tolerance: None,
         preview_detail: None,
-        comparison_targets: None,
         bypass_cache: false,
     };
 

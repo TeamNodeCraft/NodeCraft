@@ -439,20 +439,6 @@ struct PendingDialogState {
     status_before: String,
 }
 
-/// The before/after pair for the selected feature. The viewport chooses whether
-/// to use the selected result as the base or overlay its difference on the
-/// viewed breakpoint's body.
-fn comparison_for_selection(
-    document: &GraphDocument,
-    selected: Option<&str>,
-    feature_overlay: bool,
-) -> Option<(String, String)> {
-    if !feature_overlay {
-        return None;
-    }
-    NodeCraftApp::comparison_pair_for(document, selected?)
-}
-
 /// The upstream input mesh to ghost under a selected feature's result.
 fn transform_edit_input(document: &GraphDocument, edit_target: &str) -> Option<String> {
     let node = document.nodes.iter().find(|node| node.id == edit_target)?;
@@ -806,7 +792,6 @@ pub struct NodeCraftApp {
     /// Target whose display mesh is currently shown. Picking is only valid when
     /// this is the explicit topology source for the active selection session.
     eval_target: Option<String>,
-    comparison_pair: Option<(String, String)>,
     /// Display-only input ghost for the selected feature.
     preview_ghost: Option<String>,
     /// Selected nodes outside the viewed closure that are evaluated for error
@@ -820,7 +805,6 @@ pub struct NodeCraftApp {
     /// Diagnostics from the displayed exact result, before validation merges.
     base_node_errors: std::collections::BTreeMap<String, String>,
     base_node_warnings: std::collections::BTreeMap<String, Vec<String>>,
-    difference_stats: Option<(usize, usize)>,
     node_errors: HashSet<String>,
     node_warnings: std::collections::BTreeMap<String, Vec<String>>,
     activity_seen: HashSet<String>,
@@ -829,8 +813,6 @@ pub struct NodeCraftApp {
     /// The exact result's background proof generation; a refusing report that names it is
     /// applied to the nodes after the fact.
     proof_generation: Option<u64>,
-    difference_error: Option<String>,
-    difference_approximate: bool,
     /// Developer-only: panic on the first frame to exercise the local crash dialog.
     crash_test: bool,
     feature_overlay: bool,
@@ -1455,7 +1437,6 @@ impl NodeCraftApp {
             selection_view_target: None,
             selection_node: None,
             eval_target: None,
-            comparison_pair: None,
             preview_ghost: None,
             validation_selection: None,
             validation_next: 0,
@@ -1464,15 +1445,12 @@ impl NodeCraftApp {
             validation_results: HashMap::new(),
             base_node_errors: std::collections::BTreeMap::new(),
             base_node_warnings: std::collections::BTreeMap::new(),
-            difference_stats: None,
             node_errors: HashSet::new(),
             node_warnings: std::collections::BTreeMap::new(),
             activity_seen: HashSet::new(),
             activity_active: HashSet::new(),
             node_error_messages: std::collections::BTreeMap::new(),
             proof_generation: None,
-            difference_error: None,
-            difference_approximate: false,
             crash_test,
             feature_overlay: settings.feature_overlay,
             engine_threads: settings.engine_threads,
@@ -4246,26 +4224,6 @@ impl NodeCraftApp {
         }
     }
 
-    /// While the face selector is active on a Shell node, show the shell's
-    /// upstream body so picked face groups refer to the exact input topology.
-    fn comparison_pair_for(document: &GraphDocument, selected: &str) -> Option<(String, String)> {
-        let node = document.nodes.iter().find(|node| node.id == selected)?;
-        // Comparison is an opt-in capability, not a universal selection effect.
-        // Only nodes that own a topology-selection field and currently have a
-        // non-empty selection can produce a meaningful before/after difference.
-        let (field, _) = Self::selection_spec(&node.node_type)?;
-        let has_selection = node
-            .values
-            .get(field)
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|items| !items.is_empty());
-        if !has_selection {
-            return None;
-        }
-        let before = Self::single_geometry_input(document, node)?;
-        Some((before, node.id.clone()))
-    }
-
     fn begin_selection_session(&mut self, node_id: &str, field: &str) -> bool {
         let Some(session) = &self.session else { return false };
         let Some(node) = session.document().nodes.iter().find(|node| node.id == node_id) else {
@@ -4283,9 +4241,8 @@ impl NodeCraftApp {
             self.face_pick_target = None;
             self.selection_view_target = None;
             self.selection_node = None;
-            self.comparison_pair = None;
             self.viewport.set_edge_picking_enabled(false);
-            self.sync_comparison_target();
+            self.sync_selection_preview();
             self.preserve_view_for_next_mesh = true;
             self.evaluate();
             return true;
@@ -4312,7 +4269,6 @@ impl NodeCraftApp {
                 self.edit_preview_target = None;
             }
         }
-        self.comparison_pair = None;
         self.viewport.clear_edge_selection();
         self.refresh_topology_picking();
         // Keep the camera where the user left it instead of refitting to the
@@ -4332,15 +4288,14 @@ impl NodeCraftApp {
         if self.edit_target.is_some() && self.edge_selection_on_preview() {
             self.clear_edit_target();
         }
-        self.comparison_pair = None;
-        self.sync_comparison_target();
+        self.sync_selection_preview();
         self.preserve_view_for_next_mesh = true;
         self.evaluate();
         self.egui_ctx.request_repaint();
     }
 
     /// Transform nodes between the edited feature and the viewed breakpoint. The
-    /// engine graph stays canonical; this only re-frames comparison display data.
+    /// engine graph stays canonical; this only re-frames display data.
     /// Selected-feature frame → displayed downstream frame, for picks and
     /// highlights while a downstream selection target is active.
     fn selection_view_affine(
@@ -4352,10 +4307,10 @@ impl NodeCraftApp {
         nodecraft_session::placement::transform_chain(document, selected, target)
     }
 
-    /// Frame for comparison meshes: the selected feature's result placed in
+    /// Frame for the selected feature's result placed in
     /// the downstream view. Uses the one affine path helper, not a second
     /// graph walk.
-    fn comparison_view_affine(
+    fn selection_result_view_affine(
         &self,
         selected: &str,
     ) -> Option<nodecraft_session::placement::Affine3> {
@@ -4370,8 +4325,8 @@ impl NodeCraftApp {
         nodecraft_session::placement::transform_chain(document, selected, &target)
     }
 
-    fn reframe_comparison(&self, selected: &str, mesh: &Mesh) -> Mesh {
-        let Some(frame) = self.comparison_view_affine(selected) else {
+    fn reframe_selection_result(&self, selected: &str, mesh: &Mesh) -> Mesh {
+        let Some(frame) = self.selection_result_view_affine(selected) else {
             return mesh.clone();
         };
         let mut transformed = mesh.clone();
@@ -4586,24 +4541,8 @@ impl NodeCraftApp {
         links.next().is_none().then(|| link.from.clone())
     }
 
-    fn sync_comparison_target(&mut self) {
+    fn sync_selection_preview(&mut self) {
         let mut changed = false;
-        let desired = if self.selected_nodes.len() == 1 {
-            let selected = self.selected_nodes.iter().next().cloned();
-            self.session.as_ref().and_then(|session| {
-                comparison_for_selection(
-                    session.document(),
-                    selected.as_deref(),
-                    self.feature_overlay,
-                )
-            })
-        } else {
-            None
-        };
-        if desired != self.comparison_pair {
-            self.comparison_pair = desired;
-            changed = true;
-        }
         let preview_ghost = if self.selected_nodes.len() == 1
             && self.face_pick_target.is_none()
             && self.feature_overlay
@@ -5022,7 +4961,7 @@ impl NodeCraftApp {
                     self.selected_nodes.clear();
                     self.selected_nodes.insert(id);
                     self.selected_connections.clear();
-                    self.sync_comparison_target();
+                    self.sync_selection_preview();
                     "{\"ok\":true}".to_owned()
                 }
                 control_server::Command::EditNode(id) => {
@@ -5182,10 +5121,6 @@ impl NodeCraftApp {
                         "gizmoEdit": self.gizmo_edited,
                         "gizmoDrag": self.gizmo_drag.as_ref().map(|drag| drag.node_id.clone()),
                         "beginSelectionActive": self.active_selection_field(),
-                        "comparisonActive": self.comparison_pair.is_some(),
-                        "differenceFaces": self.difference_stats,
-                        "differenceError": self.difference_error,
-                        "differenceApproximate": self.difference_approximate,
                         "errors": self.error,
                         "nodeErrors": self.node_errors,
                         "tessellationDiagnostics": self.tessellation_diagnostics.iter().take(64).collect::<Vec<_>>(),
@@ -6223,7 +6158,7 @@ impl NodeCraftApp {
             }
         });
         self.show_breadcrumb(ui.ctx(), node_panel_rect);
-        self.sync_comparison_target();
+        self.sync_selection_preview();
         self.handle_gizmo_update(selected_node.as_ref());
 
         self.sync_face_pick_target();
@@ -7619,8 +7554,6 @@ mod tests {
         let edited_u34 = exact_key(1, 6, Some("u34".to_owned()));
         let evaluation = |target: &str, ms: f64| engine_bridge::Evaluation {
             target: target.to_owned(),
-            difference_error: None,
-            difference_approximate: false,
             node_errors: Default::default(),
             node_warnings: Default::default(),
             error: None,
@@ -7631,7 +7564,6 @@ mod tests {
             brep_hits: 0,
             part_hits: 0,
             exact_parts: Default::default(),
-            exact_comparison: None,
             proof_generation: 0,
         };
         cache.insert(u34.clone(), evaluation("u34", 58.0));
@@ -7737,9 +7669,9 @@ mod tests {
             target.to_owned(),
             nodecraft_engine::EngineCache::new(),
             None,
-            None,
             false,
             &HashSet::new(),
+            None,
             None,
             &[],
             None,
@@ -8451,10 +8383,6 @@ mod tests {
             ]
         }));
 
-        assert_eq!(
-            comparison_for_selection(&document, Some("fillet"), true),
-            Some(("extrude".to_owned(), "fillet".to_owned()))
-        );
         assert_eq!(feature_ghost_input(&document, "fillet"), Some("extrude".to_owned()));
         assert_eq!(feature_ghost_input(&document, "fillet-copy1"), Some("fillet".to_owned()));
 
@@ -8468,7 +8396,6 @@ mod tests {
             ]
         }));
         assert_eq!(feature_ghost_input(&inactive, "fillet"), None);
-        assert_eq!(comparison_for_selection(&inactive, Some("fillet"), true), None);
     }
 
     #[test]
@@ -9967,9 +9894,11 @@ mod tests {
 
         let mut frame = eframe::Frame::_new_kittest();
         let screen = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 800.0));
-        for _ in 0..300 {
+        // A previous tab's large default document can still be finishing on the
+        // worker. Wait for this test's own target, not just any exact result.
+        for _ in 0..2000 {
             run_app_frame(&mut app, &ctx, &mut frame, screen, Vec::new());
-            if app.last_exact.is_some() {
+            if app.last_exact.as_ref().is_some_and(|(_, evaluation)| evaluation.target == "shell") {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));

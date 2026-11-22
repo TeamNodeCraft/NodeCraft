@@ -262,11 +262,13 @@ impl NodeCraftApp {
             Some(binding) => map_body_id_to_eval(binding, selected),
             None => Some(selected.clone()),
         });
-        let comparison = if self.selected_nodes.len() == 1 {
-            comparison_for_selection(eval_document, selected_eval.as_deref(), self.feature_overlay)
-        } else {
-            None
-        };
+        // Only a topology-selection mode overlays the selected node's result.
+        // Object mode already has its display inputs (ghost/edit/feature) and
+        // does not add this display target.
+        let selection_overlay = (self.viewport.selection_mode()
+            != crate::viewport::SelectionMode::Object)
+            .then_some(selected_eval.clone())
+            .flatten();
         let ghost_input = if self.face_pick_target.is_none()
             && self.feature_overlay
             && self.selected_nodes.len() == 1
@@ -368,7 +370,7 @@ impl NodeCraftApp {
             eval_document_id,
             revision,
             evaluation_selection.clone(),
-            comparison.clone(),
+            selection_overlay.clone(),
             ghost_input.clone(),
             edit_preview.clone(),
             feature_ghost,
@@ -413,7 +415,7 @@ impl NodeCraftApp {
                 feature_ghost,
                 edit_preview.as_deref(),
                 ghost_input.as_deref(),
-                comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
+                selection_overlay.as_deref(),
                 run_exporters,
             );
             self.egui_ctx.request_repaint();
@@ -448,7 +450,7 @@ impl NodeCraftApp {
                 feature_ghost,
                 edit_preview: edit_preview.clone(),
                 ghost_input: ghost_input.clone(),
-                comparison: comparison.clone(),
+                selected_node: selection_overlay.clone(),
                 run_exporters,
             },
         ));
@@ -465,7 +467,6 @@ impl NodeCraftApp {
         self.activity_seen.clear();
         self.activity_active.clear();
         self.status = "Evaluating…".to_owned();
-        self.comparison_pair = comparison.clone();
         // Prepare the validation requests first (bookkeeping only), then hand
         // both to the worker through the one submission path. The foreground
         // job must be enqueued before the validations it owns: the worker is
@@ -497,8 +498,8 @@ impl NodeCraftApp {
                 // graph the worker will request; `None` asks the bridge to hash.
                 session_hashes,
                 selected: evaluation_selection,
-                comparison,
                 ghost_input,
+                selected_node: selection_overlay,
                 edit_preview,
                 clear_cache,
                 run_exporters,
@@ -529,8 +530,10 @@ pub(super) struct EvalJob {
     session_hashes:
         Option<std::sync::Arc<std::collections::BTreeMap<String, nodecraft_session::ContentHash>>>,
     selected: Option<String>,
-    comparison: Option<(String, String)>,
     ghost_input: Option<String>,
+    /// The selected node's Part for the topology-selection overlay. A display
+    /// target only; it never adds an evaluation operation.
+    selected_node: Option<String>,
     edit_preview: Option<String>,
     clear_cache: bool,
     run_exporters: bool,
@@ -654,9 +657,11 @@ pub(super) struct ExactKey {
     document_id: String,
     revision: u64,
     /// The viewed target, not the selected node. Selection only changes the
-    /// comparison/ghost/edit inputs derived below.
+    /// ghost/edit/selection inputs derived below.
     target: Option<String>,
-    comparison: Option<(String, String)>,
+    /// The selected node's exact Part feeds the topology-selection overlay.
+    /// It is display data, never an evaluation operation.
+    selected_node: Option<String>,
     ghost_input: Option<String>,
     edit_preview: Option<String>,
     feature_ghost: bool,
@@ -672,7 +677,7 @@ impl ExactKey {
         document_id: String,
         revision: u64,
         target: Option<String>,
-        comparison: Option<(String, String)>,
+        selected_node: Option<String>,
         ghost_input: Option<String>,
         edit_preview: Option<String>,
         feature_ghost: bool,
@@ -685,7 +690,7 @@ impl ExactKey {
             document_id,
             revision,
             target,
-            comparison,
+            selected_node,
             ghost_input,
             edit_preview,
             feature_ghost,
@@ -702,8 +707,9 @@ impl ExactKey {
         self.session_generation == generation && self.revision == revision
     }
 
-    /// Graph identity without the request-specific fields (target, comparison,
-    /// ghost, edit preview). Foreground and validation keys for the same graph
+    /// Graph identity without the request-specific fields (target, selected
+    /// node, ghost, edit preview). Foreground and validation keys for the same
+    /// graph
     /// agree here even though their targets differ, so the worker can retire
     /// validation work as soon as a foreground job carries a different graph.
     /// `document_id` is deliberately excluded: a validation key uses the tab's
@@ -782,7 +788,8 @@ pub(super) struct DisplayFields {
     pub feature_ghost: bool,
     pub edit_preview: Option<String>,
     pub ghost_input: Option<String>,
-    pub comparison: Option<(String, String)>,
+    /// The selected node whose exact Part is the topology-selection overlay.
+    pub selected_node: Option<String>,
     pub run_exporters: bool,
 }
 
@@ -1065,7 +1072,7 @@ pub(super) fn build_display(
     exact: &engine_bridge::Evaluation,
     edit_preview: Option<&str>,
     ghost_input: Option<&str>,
-    comparison: Option<(&str, &str)>,
+    selected_node: Option<&str>,
 ) -> std::sync::Arc<nodecraft_display::service::ExactSnapshot> {
     use nodecraft_display::service::{ExactSnapshot, OverlayKind, OverlayRequest};
     let Some(part) = exact.exact_parts.get(&exact.target) else {
@@ -1085,28 +1092,11 @@ pub(super) fn build_display(
     {
         push(OverlayKind::FeatureGhost, part);
     }
-    if let Some((before, after)) = comparison {
-        for (id, kind) in
-            [(before, OverlayKind::ComparisonBefore), (after, OverlayKind::ComparisonAfter)]
-        {
-            if let Some(part) = exact.exact_parts.get(id) {
-                push(kind, part);
-            }
-        }
-    }
-    if let Some(difference) = exact.exact_comparison.as_ref() {
-        if let (Some(added), Some(key)) = (difference.added.as_ref(), difference.added_key) {
-            push(
-                OverlayKind::DifferenceAdded,
-                &nodecraft_exact::ExactPart::singleton(key, std::sync::Arc::clone(added)),
-            );
-        }
-        if let (Some(removed), Some(key)) = (difference.removed.as_ref(), difference.removed_key) {
-            push(
-                OverlayKind::DifferenceRemoved,
-                &nodecraft_exact::ExactPart::singleton(key, std::sync::Arc::clone(removed)),
-            );
-        }
+    if let Some(selected) = selected_node
+        && selected != exact.target
+        && let Some(part) = exact.exact_parts.get(selected)
+    {
+        push(OverlayKind::SelectedResult, part);
     }
     let breakpoint = vec![(exact.target.clone(), part.clone())].into_iter().collect();
     std::sync::Arc::new(ExactSnapshot { breakpoint, overlays })
@@ -1213,8 +1203,6 @@ impl PendingJobs {
 fn empty_validation_evaluation(target: String, error: Option<String>) -> engine_bridge::Evaluation {
     engine_bridge::Evaluation {
         target,
-        difference_error: None,
-        difference_approximate: false,
         node_errors: Default::default(),
         node_warnings: Default::default(),
         error,
@@ -1225,7 +1213,6 @@ fn empty_validation_evaluation(target: String, error: Option<String>) -> engine_
         brep_hits: 0,
         part_hits: 0,
         exact_parts: Default::default(),
-        exact_comparison: None,
         proof_generation: 0,
     }
 }
@@ -1285,9 +1272,9 @@ impl EvalWorker {
                                 job.target.clone(),
                                 cache,
                                 None,
-                                None,
                                 false,
                                 &Default::default(),
+                                None,
                                 None,
                                 &[],
                                 None,
@@ -1370,8 +1357,6 @@ impl EvalWorker {
                                 engine_bridge::target_for(&job.document, job.selected.as_deref());
                             let evaluation = target.map(|target| engine_bridge::Evaluation {
                                 target,
-                                difference_error: None,
-                                difference_approximate: false,
                                 node_errors: Default::default(),
                                 node_warnings: Default::default(),
                                 error: Some(error.to_string()),
@@ -1382,7 +1367,6 @@ impl EvalWorker {
                                 brep_hits: 0,
                                 part_hits: 0,
                                 exact_parts: Default::default(),
-                                exact_comparison: None,
                                 proof_generation: 0,
                             });
                             states.insert(job.document_id.clone(), state);
@@ -1417,12 +1401,10 @@ impl EvalWorker {
                                 target.clone().unwrap_or_default(),
                                 cache,
                                 Some(&mut on_progress),
-                                job.comparison
-                                    .as_ref()
-                                    .map(|(before, after)| (before.as_str(), after.as_str())),
                                 job.run_exporters,
                                 &job.dirty_nodes,
                                 job.ghost_input.as_deref(),
+                                job.selected_node.as_deref(),
                                 &[],
                                 job.edit_preview.as_deref(),
                                 job.clear_cache,
@@ -1440,8 +1422,6 @@ impl EvalWorker {
                             cache = EngineCache::new();
                             let evaluation = target.map(|target| engine_bridge::Evaluation {
                                 target,
-                                difference_error: None,
-                                difference_approximate: false,
                                 node_errors: Default::default(),
                                 node_warnings: Default::default(),
                                 error: Some("Engine panicked during exact evaluation".into()),
@@ -1452,7 +1432,6 @@ impl EvalWorker {
                                 brep_hits: 0,
                                 part_hits: 0,
                                 exact_parts: Default::default(),
-                                exact_comparison: None,
                                 proof_generation: 0,
                             });
                             state.cache = cache;
@@ -1646,8 +1625,6 @@ impl NodeCraftApp {
         // The displayed result replaces the base diagnostics; validation
         // diagnostics for the current selection are merged on top.
         self.refresh_diagnostics();
-        self.difference_error = evaluation.difference_error.clone();
-        self.difference_approximate = evaluation.difference_approximate;
         self.display_error = None;
         if let Some(binding) = binding {
             let display_target = map_eval_id_to_body(binding, &evaluation.target)
@@ -1678,13 +1655,13 @@ impl NodeCraftApp {
         feature_ghost: bool,
         edit_preview: Option<&str>,
         ghost_input: Option<&str>,
-        comparison: Option<(&str, &str)>,
+        selected_node: Option<&str>,
         run_exporters: bool,
     ) {
         if run_exporters {
             return;
         }
-        let snapshot = build_display(evaluation, edit_preview, ghost_input, comparison);
+        let snapshot = build_display(evaluation, edit_preview, ghost_input, selected_node);
         let view = self.viewport.lod_view(self.egui_ctx.pixels_per_point());
         // Reconcile the display-only levels with this snapshot before the
         // submission. A colour edit keeps both the levels and the placed
@@ -1927,32 +1904,18 @@ impl NodeCraftApp {
         // the staged geometry so the preview survives until the new mesh and
         // edges activate together.
 
-        let mut before = None;
-        let mut after = None;
+        let mut selected_result = None;
         let mut ghost = None;
-        let mut added = None;
-        let mut removed = None;
         let mut ghost_plans = Vec::new();
-        let mut added_plans = Vec::new();
         let mut edit_overlay = None;
         for overlay in &frame.overlays {
             match overlay.kind {
-                Some(nodecraft_display::service::OverlayKind::ComparisonBefore) => {
-                    before = Some(overlay.mesh.clone());
-                }
-                Some(nodecraft_display::service::OverlayKind::ComparisonAfter) => {
-                    after = Some(overlay.mesh.clone());
+                Some(nodecraft_display::service::OverlayKind::SelectedResult) => {
+                    selected_result = Some(overlay.mesh.clone());
                 }
                 Some(nodecraft_display::service::OverlayKind::FeatureGhost) => {
                     ghost = Some(overlay.mesh.clone());
                     ghost_plans = overlay.plans.clone();
-                }
-                Some(nodecraft_display::service::OverlayKind::DifferenceAdded) => {
-                    added = Some(overlay.mesh.clone());
-                    added_plans = overlay.plans.clone();
-                }
-                Some(nodecraft_display::service::OverlayKind::DifferenceRemoved) => {
-                    removed = Some(overlay.mesh.clone());
                 }
                 Some(nodecraft_display::service::OverlayKind::EditInput) => {
                     edit_overlay = Some((overlay.mesh.clone(), overlay.plans.clone()));
@@ -1960,43 +1923,30 @@ impl NodeCraftApp {
                 None => {}
             }
         }
-        self.difference_stats = added
-            .as_ref()
-            .zip(removed.as_ref())
-            .map(|(added, removed)| (added.faces.len(), removed.faces.len()));
-        if let Some((before, after)) = before.as_ref().zip(after.as_ref()) {
-            let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
-            let before = self.reframe_comparison(&selected, before);
-            let after = self.reframe_comparison(&selected, after);
-            let exact = added
-                .as_ref()
-                .zip(removed.as_ref())
-                .filter(|(added, removed)| !added.faces.is_empty() || !removed.faces.is_empty());
-            if self.viewport.selection_mode() == crate::viewport::SelectionMode::Object {
-                if let Some((added, removed)) = exact {
-                    let added = self.reframe_comparison(&selected, added);
-                    let removed = self.reframe_comparison(&selected, removed);
-                    if let Some(base) = &self.mesh {
-                        self.viewport.set_exact_comparison_mesh(base, &added, &removed);
-                    }
-                } else if let Some(ghost) = &ghost {
-                    if let Some(base) = &self.mesh {
-                        self.viewport.set_feature_ghost_mesh(base, ghost);
-                    }
-                } else {
-                    self.viewport.set_mesh_preserving_camera(self.mesh.as_ref());
-                }
-            } else if let Some((added, removed)) = exact {
-                let added = self.reframe_comparison(&selected, added);
-                let removed = self.reframe_comparison(&selected, removed);
-                let base = self.mesh.as_ref().unwrap_or(&before);
-                self.viewport.set_selection_comparison_mesh(base, base, &added, &removed);
-            } else {
+        if self.viewport.selection_mode() != crate::viewport::SelectionMode::Object {
+            if let Some(result) = &selected_result {
+                let selected = self.selected_nodes.iter().next().cloned().unwrap_or_default();
+                let result = self.reframe_selection_result(&selected, result);
                 let empty = Mesh::default();
-                let base = self.mesh.as_ref().unwrap_or(&before);
-                self.viewport.set_selection_comparison_mesh(base, base, &after, &empty);
-            }
-            if !preserve {
+                if let Some(base) = self.mesh.as_ref().or(ghost.as_ref()) {
+                    self.viewport.set_selection_comparison_mesh(base, base, &result, &empty);
+                }
+                if !preserve {
+                    self.viewport.fit();
+                    self.camera_initialized = true;
+                }
+            } else if let Some(ghost) = &ghost {
+                if let Some(base) = &self.mesh {
+                    self.viewport.set_feature_ghost_mesh(base, ghost);
+                }
+                if !preserve {
+                    self.viewport.fit();
+                    self.camera_initialized = true;
+                }
+            } else if self.mesh.is_none() {
+                self.preserve_view_for_next_mesh = true;
+                self.camera_initialized = true;
+            } else if !preserve {
                 self.viewport.fit();
                 self.camera_initialized = true;
             }
@@ -2024,15 +1974,7 @@ impl NodeCraftApp {
                 self.session.as_ref()?.document().nodes.iter().find(|node| &node.id == id)
             })
             .is_some_and(|node| matches!(node.node_type.as_str(), "fillet" | "chamfer"));
-        let overlay_plans = if selected_blend && !frame.feature_plans.is_empty() {
-            frame.feature_plans.clone()
-        } else if selected_blend {
-            added_plans
-        } else if !added_plans.is_empty() {
-            added_plans
-        } else {
-            ghost_plans
-        };
+        let overlay_plans = if selected_blend { frame.feature_plans.clone() } else { ghost_plans };
         self.viewport.set_feature_ghost_plans(overlay_plans);
         if let Some((mesh, plans)) = edit_overlay {
             let edit_started = std::time::Instant::now();
@@ -2216,7 +2158,7 @@ impl NodeCraftApp {
                 fields.feature_ghost,
                 fields.edit_preview.as_deref(),
                 fields.ghost_input.as_deref(),
-                fields.comparison.as_ref().map(|(before, after)| (before.as_str(), after.as_str())),
+                fields.selected_node.as_deref(),
                 fields.run_exporters,
             );
             self.egui_ctx.request_repaint();
@@ -2388,8 +2330,8 @@ mod tests {
             imports: Default::default(),
             session_hashes: None,
             selected: Some("p".to_owned()),
-            comparison: None,
             ghost_input: None,
+            selected_node: None,
             edit_preview: None,
             clear_cache: false,
             run_exporters: false,
@@ -2722,5 +2664,131 @@ mod tests {
         test_support::reset();
         assert!(pending.is_empty(), "every validation request must retire");
         assert!(requested.is_empty(), "no superseded key may stay requested");
+    }
+    /// A selected fillet's display snapshot is the input ghost plus the marked
+    /// blend faces. It must not carry any Boolean-difference overlay, and the
+    /// feature-plan face count must equal the faces the blend marks.
+    #[test]
+    fn selected_fillet_display_uses_marked_blend_faces_not_a_difference_overlay() {
+        use nodecraft_display::service::OverlayKind;
+        let mut document = GraphDocument::new("marked-fillet-display");
+        document.nodes = vec![
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
+                id: "box".to_owned(),
+                node_type: "primitive".to_owned(),
+                values: serde_json::json!({
+                    "primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0
+                }),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            },
+            nodecraft_session::GraphNode {
+                expressions: Default::default(),
+                id: "fillet".to_owned(),
+                node_type: "fillet".to_owned(),
+                values: serde_json::json!({"length": 1.0, "edges": [{"ordinal": 0}]}),
+                suppressed: false,
+                x: 0.0,
+                y: 0.0,
+            },
+        ];
+        document.connections.push(nodecraft_session::GraphConnection {
+            from: "box".to_owned(),
+            to: "fillet".to_owned(),
+            input: "shape".to_owned(),
+            out: "shape".to_owned(),
+        });
+        let (evaluation, _) = engine_bridge::evaluate_flat_exact(
+            &document,
+            "fillet".to_owned(),
+            nodecraft_engine::EngineCache::new(),
+            None,
+            false,
+            &std::collections::HashSet::new(),
+            Some("box"),
+            None,
+            &[],
+            None,
+            false,
+        );
+        let evaluation = evaluation.expect("exact fillet evaluation");
+        assert!(evaluation.node_errors.is_empty(), "{:?}", evaluation.node_errors);
+        let part = evaluation.exact_parts.get("fillet").expect("fillet exact part");
+        let marked: usize = part
+            .bodies
+            .iter()
+            .map(|body| {
+                nodecraft_solidcore::solidcore::blend::definition_check::blend_face_marks(
+                    body.brep.as_ref(),
+                )
+                .expect("blend marks")
+                .len()
+            })
+            .sum();
+        assert!(marked > 0, "the fillet must mark the faces it made");
+        let snapshot = build_display(&evaluation, None, Some("box"), Some("fillet"));
+        assert_eq!(
+            snapshot.overlays.len(),
+            1,
+            "a selected fillet's snapshot is its input ghost alone; got {:?}",
+            snapshot.overlays.iter().map(|overlay| overlay.kind).collect::<Vec<_>>(),
+        );
+        assert!(
+            snapshot
+                .overlays
+                .iter()
+                .all(|overlay| matches!(overlay.kind, OverlayKind::FeatureGhost)),
+            "the display snapshot must not carry a difference overlay",
+        );
+        let mut service = nodecraft_display::service::DisplayService::new(8);
+        let frame = service
+            .plan(&nodecraft_display::service::DisplayRequest {
+                revision: 1,
+                snapshot_id: 1,
+                quality: nodecraft_display::default_quality(),
+                body_quality: Default::default(),
+                body_priority: Vec::new(),
+                feature_ghost: true,
+                snapshot,
+            })
+            .expect("display frame");
+        let feature_faces: usize =
+            frame.feature_plans.iter().map(|plan| plan.plan.faces.len()).sum();
+        assert_eq!(
+            feature_faces, marked,
+            "the fillet highlight must be exactly the marked blend faces",
+        );
+
+        // Face selection displays the feature's input as the breakpoint, so
+        // the selected result must be added as a display target or its overlay
+        // has no Part to plan.
+        let (face_evaluation, _) = engine_bridge::evaluate_flat_exact(
+            &document,
+            "box".to_owned(),
+            nodecraft_engine::EngineCache::new(),
+            None,
+            false,
+            &std::collections::HashSet::new(),
+            None,
+            Some("fillet"),
+            &[],
+            None,
+            false,
+        );
+        let face_evaluation = face_evaluation.expect("exact input evaluation");
+        assert!(face_evaluation.node_errors.is_empty(), "{:?}", face_evaluation.node_errors);
+        let face_snapshot = build_display(&face_evaluation, None, None, Some("fillet"));
+        assert_eq!(
+            face_snapshot.overlays.len(),
+            1,
+            "face selection should overlay exactly the selected result: {:?}",
+            face_snapshot.overlays.iter().map(|overlay| overlay.kind).collect::<Vec<_>>(),
+        );
+        assert!(
+            matches!(face_snapshot.overlays[0].kind, OverlayKind::SelectedResult),
+            "face selection must use the selected result overlay",
+        );
     }
 }

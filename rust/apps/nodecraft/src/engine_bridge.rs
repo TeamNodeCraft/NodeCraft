@@ -4,28 +4,12 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use nodecraft_engine::EngineCache;
-use nodecraft_protocol::{CacheState, Connection, Mesh, Node, Request};
+use nodecraft_protocol::{CacheState, Connection, Node, Request};
 use nodecraft_session::GraphDocument;
-
-/// The two input bodies of a Boolean target, before the merge.
-///
-/// The merged result has no per-operand display provenance. Keeping the
-/// pre-merge bodies lets a transform drag show the edited branch while the
-/// other operand stays put; the Boolean itself is re-evaluated on release.
-#[derive(Clone)]
-#[allow(dead_code)] // test-visible pre-merge provenance; production drags use PreviewWorker
-pub struct PreMerge {
-    pub a: (String, Mesh),
-    pub b: (String, Mesh),
-}
 
 #[derive(Clone)]
 pub struct Evaluation {
     pub target: String,
-    /// False for the exact-only pre-pass; true for a final exact result (for example an exporter).
-    pub difference_error: Option<String>,
-    /// The ghost came from the display-surface fallback, not the exact Boolean.
-    pub difference_approximate: bool,
     pub node_errors: std::collections::BTreeMap<String, String>,
     pub node_warnings: std::collections::BTreeMap<String, Vec<String>>,
     pub error: Option<String>,
@@ -38,8 +22,6 @@ pub struct Evaluation {
     pub part_hits: u32,
     /// Exact Part/BRep handles from the exact pass; empty after a display pass.
     pub exact_parts: std::collections::BTreeMap<String, nodecraft_exact::ExactPart>,
-    /// Exact feature difference from the exact pass.
-    pub exact_comparison: Option<nodecraft_engine::ExactComparison>,
     /// The background proof queue's generation for this evaluation. A refusal report that
     /// carries this generation belongs to the result on screen.
     pub proof_generation: u64,
@@ -104,24 +86,22 @@ pub fn evaluate_with_linked_progress(
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_with_linked_progress_comparison(
+    evaluate_with_linked_progress_exporters(
         document,
         cache,
         selected,
         linked_documents,
         progress,
-        None,
         false,
     )
 }
 
-pub fn evaluate_with_linked_progress_comparison(
+pub fn evaluate_with_linked_progress_exporters(
     document: &GraphDocument,
     cache: EngineCache,
     selected: Option<&str>,
     linked_documents: &std::collections::BTreeMap<std::path::PathBuf, GraphDocument>,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
 ) -> (Option<Evaluation>, EngineCache) {
     let Some(target) = target_for(document, selected) else {
@@ -136,8 +116,6 @@ pub fn evaluate_with_linked_progress_comparison(
             return (
                 Some(Evaluation {
                     target,
-                    difference_error: None,
-                    difference_approximate: false,
                     node_errors: Default::default(),
                     node_warnings: Default::default(),
                     error: Some(error.to_string()),
@@ -148,21 +126,13 @@ pub fn evaluate_with_linked_progress_comparison(
                     brep_hits: 0,
                     part_hits: 0,
                     exact_parts: Default::default(),
-                    exact_comparison: None,
                     proof_generation: 0,
                 }),
                 cache,
             );
         }
     };
-    evaluate_flat_with_progress_comparison(
-        &expanded,
-        target,
-        cache,
-        progress,
-        comparison,
-        run_exporters,
-    )
+    evaluate_flat_with_progress_exporters(&expanded, target, cache, progress, run_exporters)
 }
 
 /// Evaluate an already-flattened graph. Linked-document expansion is cached by
@@ -187,22 +157,21 @@ pub(crate) fn pre_merge_sources(
     Some((source("a")?, source("b")?))
 }
 
-pub fn evaluate_flat_with_progress_comparison(
+pub fn evaluate_flat_with_progress_exporters(
     document: &GraphDocument,
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_flat_with_progress_comparison_dirty(
+    evaluate_flat_with_progress_dirty(
         document,
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         &HashSet::new(),
+        None,
         None,
         &[],
         None,
@@ -210,28 +179,28 @@ pub fn evaluate_flat_with_progress_comparison(
     )
 }
 
-pub fn evaluate_flat_with_progress_comparison_dirty(
+pub fn evaluate_flat_with_progress_dirty(
     document: &GraphDocument,
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     bypass_cache: bool,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_flat_with_progress_comparison_dirty_mode(
+    evaluate_flat_with_progress_mode(
         document,
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         dirty_nodes,
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         false,
@@ -245,29 +214,29 @@ pub fn evaluate_flat_with_progress_comparison_dirty(
 /// Display evaluation with a provisional preview detail. Used for coarse-first
 /// display; the exact pass remains full quality.
 #[allow(clippy::too_many_arguments)]
-pub fn evaluate_flat_with_progress_comparison_dirty_preview(
+pub fn evaluate_flat_with_progress_dirty_preview(
     document: &GraphDocument,
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     bypass_cache: bool,
     preview_detail: Option<u8>,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_flat_with_progress_comparison_dirty_mode(
+    evaluate_flat_with_progress_mode(
         document,
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         dirty_nodes,
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         false,
@@ -286,10 +255,10 @@ pub fn evaluate_flat_exact(
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     bypass_cache: bool,
@@ -299,10 +268,10 @@ pub fn evaluate_flat_exact(
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         dirty_nodes,
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         bypass_cache,
@@ -319,10 +288,10 @@ pub fn evaluate_flat_exact_with_imports(
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     bypass_cache: bool,
@@ -333,10 +302,10 @@ pub fn evaluate_flat_exact_with_imports(
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         dirty_nodes,
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         bypass_cache,
@@ -358,25 +327,25 @@ pub fn evaluate_flat_exact_with_imports_and_hashes(
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     bypass_cache: bool,
     imports: &nodecraft_engine::ImportContext,
     hashes: Option<&std::collections::BTreeMap<String, nodecraft_session::ContentHash>>,
 ) -> (Option<Evaluation>, EngineCache) {
-    evaluate_flat_with_progress_comparison_dirty_mode(
+    evaluate_flat_with_progress_mode(
         document,
         target,
         cache,
         progress,
-        comparison,
         run_exporters,
         dirty_nodes,
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         true,
@@ -409,9 +378,9 @@ pub(crate) fn build_exact_request(
     target: &str,
     hashes: &std::collections::BTreeMap<String, nodecraft_session::ContentHash>,
     dirty_nodes: &HashSet<String>,
-    comparison: Option<(&str, &str)>,
     pre_merge: Option<(&str, &str)>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     run_exporters: bool,
@@ -432,17 +401,15 @@ pub(crate) fn build_exact_request(
                     }
                 }
             }
-            if let Some((before, after)) = comparison {
-                for id in [before, after] {
-                    if !targets.iter().any(|existing| existing == id) {
-                        targets.push(id.to_owned());
-                    }
-                }
-            }
             if let Some(ghost) = ghost_input
                 && !targets.iter().any(|existing| existing == ghost)
             {
                 targets.push(ghost.to_owned());
+            }
+            if let Some(selected) = selected_node
+                && !targets.iter().any(|existing| existing == selected)
+            {
+                targets.push(selected.to_owned());
             }
             if let Some(preview) = edit_preview
                 && !targets.iter().any(|existing| existing == preview)
@@ -465,17 +432,15 @@ pub(crate) fn build_exact_request(
                     }
                 }
             }
-            if let Some((before, after)) = comparison {
-                for id in [before, after] {
-                    if !targets.iter().any(|existing| existing == id) {
-                        targets.push(id.to_owned());
-                    }
-                }
-            }
             if let Some(ghost) = ghost_input
                 && !targets.iter().any(|existing| existing == ghost)
             {
                 targets.push(ghost.to_owned());
+            }
+            if let Some(selected) = selected_node
+                && !targets.iter().any(|existing| existing == selected)
+            {
+                targets.push(selected.to_owned());
             }
             if let Some(preview) = edit_preview
                 && !targets.iter().any(|existing| existing == preview)
@@ -529,21 +494,19 @@ pub(crate) fn build_exact_request(
         run_exporters,
         mesh_tolerance: None,
         preview_detail,
-        comparison_targets: comparison
-            .map(|(before, after)| vec![before.to_owned(), after.to_owned()]),
         bypass_cache,
     }
 }
 
-fn evaluate_flat_with_progress_comparison_dirty_mode(
+fn evaluate_flat_with_progress_mode(
     document: &GraphDocument,
     target: String,
     cache: EngineCache,
     progress: Option<&mut dyn FnMut(nodecraft_engine::ProgressEvent)>,
-    comparison: Option<(&str, &str)>,
     run_exporters: bool,
     dirty_nodes: &HashSet<String>,
     ghost_input: Option<&str>,
+    selected_node: Option<&str>,
     validation_targets: &[String],
     edit_preview: Option<&str>,
     exact_only: bool,
@@ -571,9 +534,9 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
         &target,
         &hashes,
         dirty_nodes,
-        comparison,
         pre_merge.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
         ghost_input,
+        selected_node,
         validation_targets,
         edit_preview,
         run_exporters,
@@ -587,127 +550,18 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     let cache_stats = output.response.cache_stats;
     let exact_parts = output.exact_parts;
-    let exact_comparison = output.exact_comparison;
     let (kernel_ms, _) = timing_breakdown(
         elapsed_ms,
         output.response.timings.get(&target).copied().unwrap_or(0.0),
         output.response.brep_timings.get(&target).copied().unwrap_or(0.0),
     );
     let error = output.response.node_errors.get(&target).cloned();
-    let mut display_cache = nodecraft_display::PlanCache::new(1024);
-    let quality = nodecraft_display::default_quality();
-    let mut plans = Vec::new();
-    let mut feature_plans = Vec::new();
-    let mut tessellation_diagnostics = Vec::new();
-    let mut display_ms = 0.0;
-    let mesh = if exact_only {
-        None
-    } else {
-        let started = Instant::now();
-        let result = exact_parts
-            .get(&target)
-            .and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok());
-        display_ms = started.elapsed().as_secs_f64() * 1000.0;
-        result.map(|mut display| {
-            for plan in &mut display.plans {
-                plan.target.clone_from(&target);
-            }
-            plans = display.plans;
-            feature_plans = display.feature_plans;
-            tessellation_diagnostics
-                .extend(display.stats.iter().flat_map(|stats| stats.diagnostics.iter().cloned()));
-            display.mesh
-        })
-    };
-    let edit_preview_mesh = if exact_only {
-        None
-    } else {
-        edit_preview.and_then(|id| exact_parts.get(id)).and_then(|part| {
-            nodecraft_display::mesh_part(part, quality, &mut display_cache)
-                .ok()
-                .map(|display| display.mesh)
-        })
-    };
-    let edit_preview_target = edit_preview.map(str::to_owned);
-    let (ghost_mesh, ghost_plans) = if exact_only {
-        (None, Vec::new())
-    } else {
-        ghost_input
-            .and_then(|id| exact_parts.get(id))
-            .and_then(|part| nodecraft_display::mesh_part(part, quality, &mut display_cache).ok())
-            .map(|display| (Some(display.mesh), display.plans))
-            .unwrap_or((None, Vec::new()))
-    };
-    let comparison = if exact_only {
-        None
-    } else {
-        comparison.and_then(|(before, after)| {
-            let before = exact_parts
-                .get(before)
-                .and_then(|part| {
-                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
-                })?
-                .mesh;
-            let after = exact_parts
-                .get(after)
-                .and_then(|part| {
-                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
-                })?
-                .mesh;
-            Some((before, after))
-        })
-    };
-    let mut difference_plans = None;
-    let difference = if exact_only {
-        None
-    } else {
-        exact_comparison.as_ref().and_then(|comparison| {
-            let added = comparison.added.as_ref().and_then(|brep| {
-                nodecraft_display::brep_display(brep, quality, &mut display_cache).ok()
-            });
-            let removed = comparison.removed.as_ref().and_then(|brep| {
-                nodecraft_display::brep_display(brep, quality, &mut display_cache).ok()
-            });
-            difference_plans = Some((
-                added.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
-                removed.as_ref().map(|display| display.plans.clone()).unwrap_or_default(),
-            ));
-            Some((
-                added.map(|display| display.mesh).unwrap_or_default(),
-                removed.map(|display| display.mesh).unwrap_or_default(),
-            ))
-        })
-    };
-    let difference_error =
-        exact_comparison.as_ref().and_then(|comparison| comparison.error.clone());
-    let pre_merge = if exact_only {
-        None
-    } else {
-        pre_merge.and_then(|(a, b)| {
-            let a_mesh = exact_parts
-                .get(&a)
-                .and_then(|part| {
-                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
-                })?
-                .mesh;
-            let b_mesh = exact_parts
-                .get(&b)
-                .and_then(|part| {
-                    nodecraft_display::mesh_part(part, quality, &mut display_cache).ok()
-                })?
-                .mesh;
-            Some(PreMerge { a: (a, a_mesh), b: (b, b_mesh) })
-        })
-    };
     let exact_parts = if exact_only { exact_parts } else { Default::default() };
-    let exact_comparison = if exact_only { exact_comparison } else { None };
     (
         Some(Evaluation {
             target,
             // An errored node bypasses to its input, so the mesh can still be
             // valid even though the node reports its own error.
-            difference_error,
-            difference_approximate: false,
             node_errors: output.response.node_errors,
             node_warnings: output.response.node_warnings,
             error,
@@ -718,7 +572,6 @@ fn evaluate_flat_with_progress_comparison_dirty_mode(
             brep_hits: cache_stats.as_ref().map_or(0, |stats| stats.brep_hits),
             part_hits: cache_stats.as_ref().map_or(0, |stats| stats.part_hits),
             exact_parts,
-            exact_comparison,
             proof_generation: output.proof_generation,
         }),
         cache,
@@ -797,9 +650,9 @@ mod tests {
             "t".into(),
             EngineCache::new(),
             None,
-            None,
             false,
             &HashSet::new(),
+            None,
             None,
             &[],
             None,
@@ -849,6 +702,95 @@ mod tests {
             out: "shape".into(),
         }];
         document
+    }
+
+    fn box_fillet_document() -> GraphDocument {
+        let mut document = GraphDocument::new("selection-request");
+        let mut source = node("box");
+        source.values = serde_json::json!({
+            "primitiveType": "box", "length": 10.0, "width": 10.0, "height": 10.0
+        });
+        let mut fillet = node("fillet");
+        fillet.node_type = "fillet".into();
+        fillet.values = serde_json::json!({"length": 1.0, "edges": [{"ordinal": 0}]});
+        document.nodes = vec![source, fillet];
+        document.connections = vec![nodecraft_session::GraphConnection {
+            from: "box".into(),
+            to: "fillet".into(),
+            input: "shape".into(),
+            out: "shape".into(),
+        }];
+        document
+    }
+
+    /// Selecting a feature may add display targets (its ghost input), but must
+    /// not add any request field that makes the engine do more work. Before the
+    /// fix selection added `comparisonTargets`, which ran two exact Boolean
+    /// subtractions inside the evaluation.
+    #[test]
+    fn selected_fillet_adds_no_request_work_beyond_display_targets() {
+        let document = box_fillet_document();
+        let hashes = document_hashes(&document, &nodecraft_engine::ImportContext::default());
+        let unselected = build_exact_request(
+            &document,
+            "fillet",
+            &hashes,
+            &HashSet::new(),
+            None,
+            None,
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+            false,
+        );
+        let selected = build_exact_request(
+            &document,
+            "fillet",
+            &hashes,
+            &HashSet::new(),
+            None,
+            Some("box"),
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+            false,
+        );
+        let without_targets = |request: &Request| {
+            let mut value = serde_json::to_value(request).expect("request json");
+            let object = value.as_object_mut().expect("request object");
+            object.remove("targets");
+            object.remove("meshTargets");
+            value
+        };
+        assert_eq!(
+            without_targets(&unselected),
+            without_targets(&selected),
+            "selection added a request field that can trigger evaluation work",
+        );
+        let added: Vec<&str> = selected
+            .targets
+            .iter()
+            .filter(|target| !unselected.targets.contains(target))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(added, ["box"], "selection may only add the ghost display target");
+        let added_mesh: Vec<&str> = selected
+            .mesh_targets
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|target| {
+                !unselected.mesh_targets.as_deref().unwrap_or_default().contains(target)
+            })
+            .map(String::as_str)
+            .collect();
+        assert_eq!(added_mesh, ["box"], "only display meshes may be added");
     }
 
     fn build_with_session_hashes(

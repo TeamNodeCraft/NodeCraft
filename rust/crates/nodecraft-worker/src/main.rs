@@ -356,7 +356,6 @@ fn handle_evaluation(
         mut response,
         cache: cache_output,
         exact_parts,
-        exact_comparison: _,
         diagnostics: engine_diagnostics,
         tessellation_diagnostics: _,
         proof_generation: _,

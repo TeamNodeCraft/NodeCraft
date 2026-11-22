@@ -145,6 +145,22 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// The position of each of `ids` in `list` (a B-rep's record order), or `missing` for one that is
+/// not in it.
+fn positions<T: PartialEq>(
+    list: &[T],
+    ids: &[T],
+    missing: &str,
+) -> Result<Vec<usize>, SessionError> {
+    ids.iter()
+        .map(|id| {
+            list.iter()
+                .position(|candidate| candidate == id)
+                .ok_or_else(|| SessionError::Invalid(missing.to_owned()))
+        })
+        .collect()
+}
+
 /// A kernel borrowed for the duration of one node's ops work.
 pub struct OpsSession<'k> {
     kernel: &'k mut Kernel,
@@ -164,7 +180,11 @@ impl<'k> OpsSession<'k> {
         }
     }
 
-    /// Round, G2 or chamfer the selected edges.
+    /// Round, G2 or chamfer the selected edges of a bare B-rep (its `edges`).
+    ///
+    /// The operand is the kernel's copy of `brep`, which keeps any exact blend definitions the
+    /// B-rep has. For a [`SolidBody`] use [`Self::blend_body`]: its display record may not
+    /// carry them (a result of [`SolidBody::from_ops`]), its kernel body does.
     pub fn blend(
         &mut self,
         brep: &Brep,
@@ -172,20 +192,43 @@ impl<'k> OpsSession<'k> {
         size: f64,
         kind: OpsBlend,
     ) -> Result<OpsResult, SessionError> {
-        let input_edges = brep.edge_list().to_vec();
-        let indices = edges
-            .iter()
-            .map(|edge| {
-                input_edges.iter().position(|candidate| candidate == edge).ok_or_else(|| {
-                    SessionError::Invalid("selected edge is not on the body".to_owned())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let indices = positions(brep.edge_list(), edges, "selected edge is not on the body")?;
         let copy = brep_copy(self.kernel, brep)
             .map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
         let body =
             Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Blend, error))?;
+        self.blend_operand(body, &order, &indices, size, kind)
+    }
+
+    /// Round, G2 or chamfer the selected edges of `solid` (`edges` of [`SolidBody::brep`]).
+    /// The operand is a copy of the body's kernel body, so earlier rounds keep their exact blend
+    /// definitions (a blend along a round's edge is then evaluated on its definition, not
+    /// certified from a generic NURBS face).
+    pub fn blend_body(
+        &mut self,
+        solid: &SolidBody,
+        edges: &[EdgeId],
+        size: f64,
+        kind: OpsBlend,
+    ) -> Result<OpsResult, SessionError> {
+        let indices =
+            positions(solid.brep().edge_list(), edges, "selected edge is not on the body")?;
+        let (body, order) = solid.ops_copy_ordered(self.kernel)?;
+        self.blend_operand(body, &order, &indices, size, kind)
+    }
+
+    /// The blend itself, on an operand whose record order is `order`; `indices` are record
+    /// edge indices.
+    fn blend_operand(
+        &mut self,
+        body: Body,
+        order: &Order,
+        indices: &[usize],
+        size: f64,
+        kind: OpsBlend,
+    ) -> Result<OpsResult, SessionError> {
+        let indices = indices.to_vec();
         self.kernel.blend_face_log = Some(Default::default());
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (
@@ -218,7 +261,7 @@ impl<'k> OpsSession<'k> {
                     indices
                         .iter()
                         .map(|edge| {
-                            solidcore_ops::blend::edge_faces_along_ordered(&body, &order, *edge, up)
+                            solidcore_ops::blend::edge_faces_along_ordered(&body, order, *edge, up)
                         })
                         .collect::<Result<Vec<_>, _>>()
                 });
@@ -232,7 +275,7 @@ impl<'k> OpsSession<'k> {
                 let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
                     solidcore_ops::blend::chamfer_sides_ordered_with(
                         &body,
-                        &order,
+                        order,
                         &indices,
                         &along,
                         size,
@@ -250,7 +293,7 @@ impl<'k> OpsSession<'k> {
         let (blended, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
             solidcore_ops::blend::blend_ordered(
                 &body,
-                &order,
+                order,
                 blend,
                 &indices,
                 &[size],
@@ -468,7 +511,9 @@ impl<'k> OpsSession<'k> {
         signed_thickness: f64,
     ) -> Result<OpsResult, SessionError> {
         body.prove(self.kernel)?;
-        self.shell(body.brep(), open, signed_thickness)
+        let open = positions(body.brep().face_list(), open, "open face is not on the body")?;
+        let (operand, order) = body.ops_copy_ordered(self.kernel)?;
+        self.shell_operand(operand, &order, &open, signed_thickness)
     }
 
     /// Shell the body by `signed_thickness` (positive outward, negative inward), leaving
@@ -479,22 +524,26 @@ impl<'k> OpsSession<'k> {
         open: &[FaceId],
         thickness: f64,
     ) -> Result<OpsResult, SessionError> {
-        let faces = brep.face_list().to_vec();
-        let open =
-            open.iter()
-                .map(|face| {
-                    faces.iter().position(|candidate| candidate == face).ok_or_else(|| {
-                        SessionError::Invalid("open face is not on the body".to_owned())
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+        let open = positions(brep.face_list(), open, "open face is not on the body")?;
         let copy = brep_copy(self.kernel, brep)
             .map_err(|error| SessionError::Kernel(error.to_string()))?;
         let order = Order::of(&copy);
         let body =
             Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Shell, error))?;
+        self.shell_operand(body, &order, &open, thickness)
+    }
+
+    /// The shell itself, on an operand whose record order is `order`; `open` are record face
+    /// indices.
+    fn shell_operand(
+        &mut self,
+        body: Body,
+        order: &Order,
+        open: &[usize],
+        thickness: f64,
+    ) -> Result<OpsResult, SessionError> {
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
-            solidcore_ops::shell(&body, &order, &open, thickness)
+            solidcore_ops::shell(&body, order, open, thickness)
         });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Shell, error))?;
@@ -515,7 +564,9 @@ impl<'k> OpsSession<'k> {
         distance: f64,
     ) -> Result<OpsResult, SessionError> {
         body.prove(self.kernel)?;
-        self.offset_faces(body.brep(), faces, distance)
+        let indices = positions(body.brep().face_list(), faces, "offset face is not on the body")?;
+        let (operand, order) = body.ops_copy_ordered(self.kernel)?;
+        self.offset_operand(operand, &order, &indices, distance)
     }
 
     /// Offset `faces` by `distance` through ops.
@@ -525,21 +576,25 @@ impl<'k> OpsSession<'k> {
         faces: &[FaceId],
         distance: f64,
     ) -> Result<OpsResult, SessionError> {
-        let faces_on_body = brep.face_list().to_vec();
-        let indices = faces
-            .iter()
-            .map(|face| {
-                faces_on_body.iter().position(|c| c == face).ok_or_else(|| {
-                    SessionError::Invalid("offset face is not on the body".to_owned())
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let indices = positions(brep.face_list(), faces, "offset face is not on the body")?;
         let copy = brep_copy(self.kernel, brep).map_err(|e| SessionError::Kernel(e.to_string()))?;
         let order = Order::of(&copy);
         let body =
             Body::from_brep(self.kernel, copy).map_err(|error| map_error(OpKind::Offset, error))?;
+        self.offset_operand(body, &order, &indices, distance)
+    }
+
+    /// The offset itself, on an operand whose record order is `order`; `indices` are record
+    /// face indices.
+    fn offset_operand(
+        &mut self,
+        body: Body,
+        order: &Order,
+        indices: &[usize],
+        distance: f64,
+    ) -> Result<OpsResult, SessionError> {
         let (result, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
-            solidcore_ops::offset_faces(&body, &order, &indices, distance)
+            solidcore_ops::offset_faces(&body, order, indices, distance)
         });
         self.note_reset(reset);
         result.map_err(|error| map_error(OpKind::Offset, error))?;
@@ -591,6 +646,83 @@ mod tests {
     use solidcore::geom::vector3d::Vec3;
     use solidcore::math::Point3;
     use solidcore::primitive::api_primitives::create_box;
+
+    /// How many faces of `solid`'s kernel operand (what the next operation takes) keep an
+    /// exact blend definition (a record `Surface::Blend`), rather than only its NURBS net.
+    fn blend_faces(kernel: &mut Kernel, solid: &SolidBody) -> usize {
+        let body = solid.ops_copy(kernel).expect("operand");
+        let (record, _) = body.to_record().expect("record");
+        record
+            .faces
+            .iter()
+            .filter(|face| matches!(face.surface, solidcore_record::brep::Surface::Blend { .. }))
+            .count()
+    }
+
+    /// A cylinder (radius 20, z from -20 to 20) and its bottom rim edge.
+    fn cylinder_and_rim(kernel: &mut Kernel) -> (Brep, EdgeId) {
+        let brep = solidcore::primitive::api_primitives::create_cylinder(
+            kernel,
+            Point3::new(0.0, 0.0, -20.0),
+            20.0,
+            40.0,
+        )
+        .expect("cylinder");
+        let probe = SolidBody::new(brep.clone_standing_for_self().expect("copy"));
+        let body = probe.ops_copy(kernel).expect("body");
+        let picked = solidcore_ops::pick::edges(&body, &[[-20.0, 0.0, -20.0]], 1.0e-3)
+            .expect("pick")
+            .expect("the rim");
+        let rim = brep.edge_list()[picked[0]];
+        (brep, rim)
+    }
+
+    /// A round keeps its exact blend definition when the body crosses to the next operation.
+    /// The engine wraps an operation's result B-rep in a new `SolidBody`; the operand built
+    /// from it must keep the definition. A lossy copy there (`clone_standing_for_self`, whose
+    /// surfaces are evaluation copies without definitions) turns every earlier round into a
+    /// generic NURBS face, which later blends must certify from scratch (a 4.5 s fillet on the
+    /// user's graph, against SolidCraft's operands that keep their definitions).
+    #[test]
+    fn a_round_keeps_its_blend_definition_across_a_node_boundary() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let (cylinder, rim) = cylinder_and_rim(&mut kernel);
+        let round = OpsSession::new(&mut kernel)
+            .blend(&cylinder, &[rim], 10.3, OpsBlend::Round(Turn::Mitre))
+            .expect("round");
+        let next = SolidBody::new(round.brep);
+        assert_eq!(blend_faces(&mut kernel, &next), 1, "the round reaches the next node exact");
+    }
+
+    /// A blend of a `SolidBody` takes the body's kernel body as its operand, so a second round
+    /// keeps the first one exact, also when the body came from an ops result
+    /// ([`SolidBody::from_ops`], whose display record is an evaluation copy).
+    #[test]
+    fn a_second_round_keeps_the_first_one_exact() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let (cylinder, rim) = cylinder_and_rim(&mut kernel);
+        let first = OpsSession::new(&mut kernel)
+            .blend_body(&SolidBody::new(cylinder), &[rim], 5.0, OpsBlend::Round(Turn::Mitre))
+            .expect("first round");
+        let first = SolidBody::new(first.brep);
+        // the top rim, on the first round's result
+        let top = {
+            let body = first.ops_copy(&mut kernel).expect("body");
+            let picked = solidcore_ops::pick::edges(&body, &[[-20.0, 0.0, 20.0]], 1.0e-3)
+                .expect("pick")
+                .expect("the top rim");
+            first.brep().edge_list()[picked[0]]
+        };
+        let second = OpsSession::new(&mut kernel)
+            .blend_body(&first, &[top], 5.0, OpsBlend::Round(Turn::Mitre))
+            .expect("second round");
+        let second = SolidBody::new(second.brep);
+        assert_eq!(blend_faces(&mut kernel, &second), 2, "both rounds stay exact");
+        // and through an ops result's body, whose display record has no definitions
+        let via_ops =
+            SolidBody::from_ops(second.ops_copy(&mut kernel).expect("copy")).expect("ops");
+        assert_eq!(blend_faces(&mut kernel, &via_ops), 2, "an ops result keeps them too");
+    }
 
     fn box_brep(kernel: &mut Kernel) -> Brep {
         create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0).expect("box")

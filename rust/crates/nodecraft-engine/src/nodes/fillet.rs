@@ -39,10 +39,12 @@ impl BuiltinNode for Fillet {
         // The warned task is the same one the display/operand path uses; keep the
         // blend's user-facing warnings on this node instead of dropping them.
         ctx.warn(warnings);
-        output
-            .into_brep()
-            .ok_or_else(|| "fillet task returned no shape".into())
-            .map(Part::from_brep)
+        // Keep the body as the task made it: its kernel body is the next node's operand, with
+        // this round's exact blend definition.
+        match output {
+            crate::node_task::NodeOutput::Shape(body) => Ok(Part::from_bodies([body])),
+            _ => Err("fillet task returned no shape".into()),
+        }
     }
 
     fn exact_weight(&self, _node: NodeView<'_>) -> usize {

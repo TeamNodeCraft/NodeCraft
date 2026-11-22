@@ -9,14 +9,13 @@ use base64::Engine as _;
 use nodecraft_kernel::Kernel;
 use nodecraft_kernel::ProceduralKernel;
 mod cache;
-mod comparison;
 mod display_eval;
 mod exact_eval;
 pub mod import_io;
 pub use import_io::ImportContext;
 
 pub use cache::EngineCache;
-use cache::{import_cache_key, node_cache_is_fresh};
+use cache::import_cache_key;
 mod brep;
 mod look;
 #[cfg(test)]
@@ -32,8 +31,6 @@ pub(crate) use request_index::RequestIndex;
 pub mod bench_support;
 pub mod proof_queue;
 use bypass::{bypass_source, suppression_source};
-
-pub(crate) use comparison::compare_parts;
 
 #[cfg(test)]
 use nodecraft_mesh::import_step;
@@ -1013,20 +1010,6 @@ pub struct ProgressEvent {
 
 pub(crate) const MAX_BOOLEAN_SOLIDS: usize = 256;
 
-/// Exact before/after feature difference, returned by the exact pass for the
-/// display service. The engine does not mesh it.
-#[derive(Clone, Debug)]
-pub struct ExactComparison {
-    pub before: String,
-    pub after: String,
-    pub removed: Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>>,
-    pub added: Option<Arc<nodecraft_solidcore::solidcore::topology::Brep>>,
-    pub removed_key: Option<nodecraft_exact::BodyKey>,
-    pub added_key: Option<nodecraft_exact::BodyKey>,
-    pub unchanged_volume: bool,
-    pub error: Option<String>,
-}
-
 pub struct EngineOutput {
     pub response: Response,
     pub cache: EngineCache,
@@ -1039,8 +1022,6 @@ pub struct EngineOutput {
     /// Exact Part/BRep inputs for a separate display service. The engine does
     /// not create plans or meshes for these.
     pub exact_parts: BTreeMap<String, nodecraft_exact::ExactPart>,
-    /// Exact before/after feature difference, when requested.
-    pub exact_comparison: Option<ExactComparison>,
     /// Planner defects from the display tessellation (lenient/capped/over-tolerance
     /// faces and edges).
     pub tessellation_diagnostics: Vec<String>,
@@ -1755,166 +1736,6 @@ fn respond(
     )
 }
 
-fn exact_comparison_unsupported(index: &RequestIndex<'_>, targets: &[String]) -> bool {
-    let Some(after) = targets.get(1) else {
-        return false;
-    };
-    let Some(node) = index.node(after) else {
-        return false;
-    };
-    if node.node_type != "fillet" {
-        return false;
-    }
-    node.values.get("continuity").and_then(serde_json::Value::as_str).is_some_and(|continuity| {
-        continuity.eq_ignore_ascii_case("g2") || continuity.eq_ignore_ascii_case("g3")
-    })
-}
-
-/// Faces the exact result has that its input did not: for a fillet these are
-/// the blend faces. Surfaces are compared exactly through the kernel's own
-/// surface equality, so no display-triangle sampling or surface-kind guess is
-/// involved.
-fn generated_new_faces(
-    before: &Part,
-    after: &Part,
-) -> (std::collections::HashSet<(usize, usize)>, std::collections::HashSet<(usize, usize)>) {
-    use nodecraft_solidcore::solidcore::surface::surface::SurfaceKind;
-    let blend_surface = |kind: &SurfaceKind| {
-        matches!(
-            kind,
-            SurfaceKind::BSpline(_) | SurfaceKind::ProceduralBlend(_) | SurfaceKind::BallPatch(_)
-        )
-    };
-    let kernel = nodecraft_solidcore::kernel::kernel();
-    let mut before_surfaces = Vec::new();
-    for body in &before.bodies {
-        for face_id in body.body.brep().faces().ids() {
-            if let Ok(Some(surface)) =
-                nodecraft_solidcore::solidcore::topology::face::surface(body.body.brep(), face_id)
-                && blend_surface(surface.kind())
-            {
-                before_surfaces.push(surface);
-            }
-        }
-    }
-    let mut faces = std::collections::HashSet::new();
-    let mut edges = std::collections::HashSet::new();
-    for (body_index, body) in after.bodies.iter().enumerate() {
-        let mut generated = Vec::new();
-        for face_id in body.body.brep().faces().ids() {
-            let Ok(Some(surface)) =
-                nodecraft_solidcore::solidcore::topology::face::surface(body.body.brep(), face_id)
-            else {
-                continue;
-            };
-            if blend_surface(surface.kind())
-                && before_surfaces
-                    .iter()
-                    .all(|old| !surface.approx_eq(&kernel, old).unwrap_or(false))
-            {
-                generated.push(face_id);
-            }
-        }
-        if generated.is_empty() {
-            continue;
-        }
-        // Display face groups use the record's order, not the kernel's.
-        let Ok(mut copy) = body.body.brep().clone_standing_for_self() else { continue };
-        let Ok((_record, order)) = solidcore_convert::brep::to_record(
-            &mut nodecraft_solidcore::kernel::kernel(),
-            &mut copy,
-        ) else {
-            continue;
-        };
-        for face_id in generated {
-            if let Some(record_face) = order.faces.iter().position(|face| *face == face_id) {
-                faces.insert((body_index, record_face));
-            }
-            let Ok(loops) = nodecraft_solidcore::solidcore::topology::face::loops(
-                body.body.brep(),
-                face_id,
-                false,
-                None,
-            ) else {
-                continue;
-            };
-            for loop_id in loops {
-                let Ok(loop_edges) = nodecraft_solidcore::solidcore::topology::loopuse::loop_edges(
-                    body.body.brep(),
-                    loop_id,
-                ) else {
-                    continue;
-                };
-                for edge_id in loop_edges.into_iter().flatten() {
-                    if let Some(record_edge) = order.edges.iter().position(|edge| *edge == edge_id)
-                    {
-                        edges.insert((body_index, record_edge));
-                    }
-                }
-            }
-        }
-    }
-    (faces, edges)
-}
-
-/// Select the display triangles and BRep edges named by the generated face set.
-fn mesh_for_faces(
-    mesh: &nodecraft_protocol::Mesh,
-    faces: &std::collections::HashSet<(usize, usize)>,
-    edges: &std::collections::HashSet<(usize, usize)>,
-) -> nodecraft_protocol::Mesh {
-    if faces.is_empty() || mesh.face_groups.len() != mesh.faces.len() {
-        return nodecraft_protocol::Mesh::default();
-    }
-    let mut selected = nodecraft_protocol::Mesh {
-        // Keep the original vertex indices: the selected BRep edges index them.
-        vertices: mesh.vertices.clone(),
-        normals: mesh.normals.clone(),
-        // The subset keeps the source vertices and normals untouched, so it
-        // inherits their shading provenance.
-        exact_normals: mesh.exact_normals,
-        ..nodecraft_protocol::Mesh::default()
-    };
-    for (triangle, group) in mesh.faces.iter().zip(&mesh.face_groups) {
-        let Some((body, face)) = group_entity(group, "face") else { continue };
-        if faces.contains(&(body, face)) {
-            selected.faces.push(*triangle);
-        }
-    }
-    selected.brep_edges = mesh
-        .brep_edges
-        .iter()
-        .filter(|edge| group_entity(&edge.id, "edge").is_some_and(|key| edges.contains(&key)))
-        .cloned()
-        .collect();
-    selected
-}
-
-/// `body:N:kind:M` (a merged body) or `kind:M` (a single body) as a key.
-fn group_entity(name: &str, kind: &str) -> Option<(usize, usize)> {
-    let (body, rest) = match name.rsplit_once("body:") {
-        Some((_, rest)) => rest.split_once(':')?,
-        None => ("0", name),
-    };
-    let (name_kind, index) = rest.split_once(':')?;
-    if name_kind != kind {
-        return None;
-    }
-    Some((body.parse().ok()?, index.parse().ok()?))
-}
-
-fn comparison_cache_key(index: &RequestIndex<'_>, targets: &[String]) -> Option<(String, String)> {
-    let key = |id: &str| {
-        let node = index.node(id)?;
-        if !node_cache_is_fresh(node) {
-            return None;
-        }
-        let hash = node.cache.as_ref()?.key.as_ref()?;
-        Some(format!("{id}@{hash}"))
-    };
-    Some((key(targets.first()?)?, key(targets.get(1)?)?))
-}
-
 /// Evaluate the exact graph result and its display meshes.
 #[cfg(test)]
 pub fn evaluate(
@@ -2091,83 +1912,6 @@ fn evaluate_mode(
             None => empty_targets.push(id.clone()),
         }
     }
-    let comparison = request
-        .comparison_targets
-        .as_ref()
-        .filter(|targets| targets.len() == 2)
-        .and_then(|targets| {
-            // Skip the kernel difference when the display payloads already prove
-            // there is no material change. This also avoids coincident-solid
-            // booleans for pass-through features.
-            let before_display = mesh_payloads.get(&targets[0])?.mesh.clone();
-            let after_display = mesh_payloads.get(&targets[1])?.mesh.clone();
-            let before_volume = comparison::mesh_volume(&before_display);
-            let after_volume = comparison::mesh_volume(&after_display);
-            if (before_volume - after_volume).abs() <= before_volume.abs().max(1.0) * 1.0e-6 {
-                return None;
-            }
-            let before = eval.evaluate_part(&targets[0]).ok()?;
-            let after = eval.evaluate_part(&targets[1]).ok()?;
-            let cache_key = comparison_cache_key(&eval.index, targets);
-            let difference = if exact_comparison_unsupported(&eval.index, targets) {
-                // G2/G3 fillets use a curved interface whose exact surface
-                // intersection is not ported. Attempting the Boolean difference
-                // costs over a second and then fails. The exact fillet result
-                // already names its generated blend faces, so use those.
-                let (generated_faces, generated_edges) = generated_new_faces(&before, &after);
-                let added = mesh_for_faces(&after_display, &generated_faces, &generated_edges);
-                if added.faces.is_empty() {
-                    Err("exact difference is not supported for this fillet continuity".to_owned())
-                } else {
-                    Ok(comparison::DifferenceMeshes {
-                        removed: nodecraft_protocol::Mesh::default(),
-                        added,
-                    })
-                }
-            } else if let Some(key) = &cache_key {
-                if let Some(failure) = eval.cache.difference_failure(key) {
-                    Err(failure)
-                } else if let Some(cached) = eval.cache.difference(key) {
-                    eval.cache.note_difference_hit();
-                    Ok(cached)
-                } else {
-                    let result = compare_parts(&before, &after);
-                    match &result {
-                        Ok(difference) => {
-                            eval.cache.insert_difference(key.clone(), difference.clone())
-                        }
-                        Err(error) => {
-                            eval.cache.insert_difference_failure(key.clone(), error.clone())
-                        }
-                    }
-                    result
-                }
-            } else {
-                compare_parts(&before, &after)
-            };
-            Some((difference, before_display, after_display))
-        })
-        .map(|(difference, before_mesh, after_mesh)| match difference {
-            Ok(difference) => nodecraft_protocol::ComparisonPayload {
-                added: difference.added,
-                removed: difference.removed,
-                approximate: false,
-                error: None,
-            },
-            Err(error) => {
-                // The exact surface intersection is not ported for every
-                // curved interface. Keep the feature ghost useful by falling
-                // back to a display-surface difference, while reporting that it
-                // is approximate.
-                let approximate = comparison::surface_difference(&before_mesh, &after_mesh);
-                nodecraft_protocol::ComparisonPayload {
-                    added: approximate.added,
-                    removed: approximate.removed,
-                    approximate: true,
-                    error: Some(format!("exact difference unavailable: {error}")),
-                }
-            }
-        });
     let exact_parts: BTreeMap<String, nodecraft_exact::ExactPart> = eval
         .parts
         .iter()
@@ -2180,54 +1924,6 @@ fn evaluate_mode(
             (id.clone(), exact_part_from(part.as_ref(), source))
         })
         .collect();
-    let exact_comparison = if exact_only {
-        request.comparison_targets.as_ref().and_then(|targets| {
-            let before = targets.first()?.clone();
-            let after = targets.get(1)?.clone();
-            let result = (|| {
-                let before_part = eval.evaluate_part(&before).map_err(|error| error.to_string())?;
-                let after_part = eval.evaluate_part(&after).map_err(|error| error.to_string())?;
-                comparison::compare_part_breps(before_part.as_ref(), after_part.as_ref())
-            })();
-            let content = |id: &str| {
-                eval.index
-                    .node(id)
-                    .and_then(|node| node.cache.as_ref())
-                    .and_then(|cache| cache.key.as_deref())
-                    .map_or_else(|| fnv_seed(id).to_string(), str::to_owned)
-            };
-            let difference_key = |role: &str| {
-                nodecraft_exact::BodyKey::new(
-                    fnv_seed(&format!("{}:{}:{role}", content(&before), content(&after))),
-                    0,
-                )
-            };
-            Some(match result {
-                Ok(difference) => ExactComparison {
-                    removed_key: difference.removed.as_ref().map(|_| difference_key("removed")),
-                    added_key: difference.added.as_ref().map(|_| difference_key("added")),
-                    before,
-                    after,
-                    removed: difference.removed.map(Arc::new),
-                    added: difference.added.map(Arc::new),
-                    unchanged_volume: difference.unchanged_volume,
-                    error: None,
-                },
-                Err(error) => ExactComparison {
-                    before,
-                    after,
-                    removed: None,
-                    added: None,
-                    removed_key: None,
-                    added_key: None,
-                    unchanged_volume: false,
-                    error: Some(error),
-                },
-            })
-        })
-    } else {
-        None
-    };
     // Exact export is a blocking boundary: the exporter's realised bodies are proved before
     // the writer runs, so an unknown body is decided now and a refused one is an error.
     if request.run_exporters {
@@ -2427,7 +2123,6 @@ fn evaluate_mode(
             part_hits: eval.part_cache_hits,
             display_mesh_hits: eval.display_mesh_cache_hits,
         }),
-        comparison,
         engine: "solidcore-experiment".into(),
     };
     nodecraft_mesh::set_display_tolerance(None);
@@ -2438,7 +2133,6 @@ fn evaluate_mode(
         meshes: mesh_payloads,
         diagnostics: eval.diagnostics,
         exact_parts,
-        exact_comparison,
         tessellation_diagnostics: eval.tessellation_diagnostics,
         proof_generation: proof_guard.generation(),
     }
@@ -3165,98 +2859,6 @@ mod tests {
         let ids: std::collections::BTreeSet<u32> =
             selections.iter().map(|selection| selection.edge.index()).collect();
         assert_eq!(ids, [4, 5].into_iter().collect(), "selected the wrong cylinder edges: {ids:?}");
-    }
-
-    #[test]
-    fn exact_feature_comparison_is_reused_from_cache() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 997,
-            "targets": ["box", "chamfer"],
-            "meshTargets": ["box", "chamfer"],
-            "comparisonTargets": ["box", "chamfer"],
-            "binaryMesh": false,
-            "nodes": [
-                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "box-v1", "state": "cached"}},
-                {"id": "chamfer", "type": "chamfer", "values": {"length": 2.0, "edges": [{"ordinal": 0}]}, "cache": {"key": "chamfer-v1", "state": "cached"}}
-            ],
-            "connections": [{"from": "box", "to": "chamfer", "in": "shape", "out": "shape"}]
-        })).expect("comparison cache json");
-        let first = evaluate(request.clone(), EngineCache::new(), None);
-        assert!(first.response.node_errors.is_empty(), "{:?}", first.response.node_errors);
-        let payload = first.response.comparison.expect("comparison payload");
-        assert!(!payload.approximate, "planar chamfer should compare exactly: {:?}", payload.error);
-        assert_eq!(first.cache.difference_entries(), 1);
-        let second = evaluate(request, first.cache, None);
-        assert!(second.cache.difference_hits() > 0, "exact comparison was not reused from cache");
-        let second_payload = second.response.comparison.expect("cached comparison payload");
-        assert_eq!(second_payload.added.faces.len(), payload.added.faces.len());
-        assert_eq!(second_payload.removed.faces.len(), payload.removed.faces.len());
-    }
-
-    #[test]
-    fn dirty_comparison_targets_bypass_the_exact_difference_cache() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 996,
-            "targets": ["box", "chamfer"],
-            "meshTargets": ["box", "chamfer"],
-            "comparisonTargets": ["box", "chamfer"],
-            "binaryMesh": false,
-            "nodes": [
-                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "box-v2", "state": "dirty"}},
-                {"id": "chamfer", "type": "chamfer", "values": {"length": 2.0, "edges": [{"ordinal": 0}]}, "cache": {"key": "chamfer-v2", "state": "dirty"}}
-            ],
-            "connections": [{"from": "box", "to": "chamfer", "in": "shape", "out": "shape"}]
-        })).expect("dirty comparison json");
-        let output = evaluate(request, EngineCache::new(), None);
-        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        assert_eq!(
-            output.cache.difference_entries(),
-            0,
-            "dirty comparison targets must not enter the exact-comparison cache"
-        );
-    }
-
-    #[test]
-    #[ignore = "exact comparison >60 s; see 2026-11-12-solidcraft-fix-profile-review"]
-    fn g2_fillet_comparison_stays_on_the_fillet_area() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 998,
-            "targets": ["fillet", "solid"],
-            "meshTargets": ["fillet", "solid"],
-            "comparisonTargets": ["solid", "fillet"],
-            "binaryMesh": false,
-            "nodes": [
-                {"id": "solid", "type": "solid", "values": {"height": 100.0, "primitiveType": "cylinder"}},
-                {"id": "fillet", "type": "fillet", "values": {"continuity": "G2", "length": 19.2, "edges": [{"center": [-20.0, 2.4492935992912173e-15, 50.0], "id": "edge:2"}]}}
-            ],
-            "connections": [{"from": "solid", "to": "fillet", "in": "shape", "out": "shape"}]
-        })).expect("g2 fillet comparison json");
-        let output = evaluate(request, EngineCache::new(), None);
-        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        assert_eq!(
-            output.cache.difference_entries(),
-            0,
-            "approximate display fallbacks must not enter the exact-comparison cache"
-        );
-        let comparison = output.response.comparison.expect("g2 comparison payload");
-        assert_eq!(
-            comparison.approximate,
-            comparison.error.is_some(),
-            "approximate flag and exact-difference error disagree: {}",
-            comparison.error.as_deref().unwrap_or("no error")
-        );
-        assert!(
-            !comparison.removed.faces.is_empty() || !comparison.added.faces.is_empty(),
-            "g2 comparison has no ghost geometry: {:?}",
-            comparison.error
-        );
-        let min_z = comparison
-            .removed
-            .vertices
-            .iter()
-            .map(|vertex| vertex[2])
-            .fold(f32::INFINITY, f32::min);
-        assert!(min_z > 1.0, "ghost covers the whole cylinder: min z {min_z}");
     }
 
     #[test]
@@ -4853,44 +4455,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn group_entity_reads_single_and_merged_names() {
-        assert_eq!(group_entity("face:7", "face"), Some((0, 7)));
-        assert_eq!(group_entity("body:2:face:7", "face"), Some((2, 7)));
-        assert_eq!(group_entity("edge:3", "edge"), Some((0, 3)));
-        assert_eq!(group_entity("body:1:edge:4", "edge"), Some((1, 4)));
-        assert_eq!(group_entity("body:1:face:4", "edge"), None);
-    }
-
-    #[test]
-    fn g2_fillet_difference_skips_the_unsupported_exact_boolean() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 1,
-            "targets": ["fillet"],
-            "meshTargets": ["fillet"],
-            "nodes": [
-                {"id": "shape", "type": "primitive", "values": {"primitiveType": "box"}},
-                {"id": "fillet", "type": "fillet", "values": {"continuity": "G2", "length": 1.0}}
-            ],
-            "connections": [{"from": "shape", "to": "fillet", "in": "shape", "out": "shape"}]
-        }))
-        .expect("request");
-        let request_index = RequestIndex::new(&request);
-        assert!(exact_comparison_unsupported(&request_index, &["shape".into(), "fillet".into()]));
-        let circular: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 1,
-            "targets": ["fillet"],
-            "nodes": [
-                {"id": "shape", "type": "primitive", "values": {"primitiveType": "box"}},
-                {"id": "fillet", "type": "fillet", "values": {"continuity": "", "length": 1.0}}
-            ],
-            "connections": [{"from": "shape", "to": "fillet", "in": "shape", "out": "shape"}]
-        }))
-        .expect("request");
-        let circular_index = RequestIndex::new(&circular);
-        assert!(!exact_comparison_unsupported(&circular_index, &["shape".into(), "fillet".into()]));
-    }
-
     /// Boolean nodes work directly on NodeCraft primitives, including translated ones.
     #[test]
     fn boolean_union_of_overlapping_primitives() {
@@ -5514,7 +5078,7 @@ mod tests {
         assert!((u3 - (u1 + td)).abs() <= (u1 + td).abs() * 1.0e-9, "u3={u3} u1={u1} td={td}");
     }
 
-    /// A suppressed feature (fillet) is a ghost/comparison pass-through too.
+    /// A suppressed feature (fillet) is a ghost pass-through too.
     #[test]
     fn a_suppressed_feature_target_publishes_its_input_part() {
         let request: Request = serde_json::from_value(serde_json::json!({
@@ -7721,33 +7285,6 @@ mod tests {
         let keys: std::collections::HashSet<_> =
             forest.bodies.iter().map(|body| body.key).collect();
         assert_eq!(keys.len(), 2, "scatter bodies must share their source plans");
-    }
-
-    #[test]
-    fn exact_difference_bodies_get_content_keys() {
-        let request: Request = serde_json::from_value(serde_json::json!({
-            "requestId": 995,
-            "targets": ["box", "chamfer"],
-            "meshTargets": ["box", "chamfer"],
-            "comparisonTargets": ["box", "chamfer"],
-            "binaryMesh": false,
-            "nodes": [
-                {"id": "box", "type": "primitive", "values": {"primitiveType": "box"}, "cache": {"key": "box-v1", "state": "cached"}},
-                {"id": "chamfer", "type": "chamfer", "values": {"length": 2.0, "edges": [{"ordinal": 0}]}, "cache": {"key": "chamfer-v1", "state": "cached"}}
-            ],
-            "connections": [{"from": "box", "to": "chamfer", "in": "shape", "out": "shape"}]
-        })).expect("exact difference request");
-        let output = evaluate_exact(request, EngineCache::new(), None);
-        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
-        let comparison = output.exact_comparison.expect("exact comparison");
-        assert!(comparison.added.is_some() || comparison.removed.is_some());
-        if comparison.added.is_some() {
-            assert!(comparison.added_key.is_some());
-        }
-        if comparison.removed.is_some() {
-            assert!(comparison.removed_key.is_some());
-        }
-        assert_ne!(comparison.added_key, comparison.removed_key);
     }
 
     /// A Union run that only feeds the next Union becomes one `union_all`; requesting an

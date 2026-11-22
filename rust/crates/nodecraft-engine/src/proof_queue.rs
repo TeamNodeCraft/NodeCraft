@@ -489,7 +489,6 @@ mod tests {
             run_exporters: false,
             mesh_tolerance: None,
             preview_detail: None,
-            comparison_targets: None,
             bypass_cache: false,
         }
     }

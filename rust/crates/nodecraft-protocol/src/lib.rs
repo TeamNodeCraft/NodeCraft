@@ -67,9 +67,6 @@ pub struct Request {
     /// display plan.
     #[serde(default)]
     pub preview_detail: Option<u8>,
-    /// `[before, after]` feature targets for an exact comparison payload.
-    #[serde(default)]
-    pub comparison_targets: Option<Vec<String>>,
     /// Developer rebuild: ignore every cache entry, so each node is evaluated
     /// again even when a fresh cache would be populated within the same pass.
     #[serde(default)]
@@ -198,22 +195,7 @@ pub struct Response {
     pub evaluation_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_stats: Option<CacheStats>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub comparison: Option<ComparisonPayload>,
     pub engine: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ComparisonPayload {
-    pub added: Mesh,
-    pub removed: Mesh,
-    /// True when the ghost came from the display-surface fallback rather than
-    /// the exact feature Boolean.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub approximate: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -245,4 +227,24 @@ pub struct Progress {
     pub node_id: Option<String>,
     #[serde(default)]
     pub cached: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The comparison request field was removed. Old request JSON that still
+    /// carries `comparisonTargets` must keep deserialising: the struct has no
+    /// `deny_unknown_fields`, so the stale field is ignored.
+    #[test]
+    fn a_request_with_a_stale_comparison_targets_field_deserialises() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "requestId": 7,
+            "targets": ["box", "fillet"],
+            "comparisonTargets": ["box", "fillet"],
+        }))
+        .expect("old request with comparisonTargets");
+        assert_eq!(request.request_id, 7);
+        assert_eq!(request.targets, ["box", "fillet"]);
+    }
 }

@@ -18,9 +18,11 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use solidcore::EntityRef;
 use solidcore::kernel::Kernel;
 use solidcore::topology::Brep;
-use solidcore_ops::Body;
+use solidcore::topology::brep::p3::brep_copy_mapped;
+use solidcore_ops::{Body, Order};
 
 use crate::SessionError;
 use crate::error_map::{OpKind, map_error};
@@ -53,8 +55,11 @@ pub enum ProofState {
 pub struct SolidBody {
     brep: Arc<Brep>,
     /// The record as ops' body, made on first use (or kept from the operation that made it,
-    /// with its proof), shared by clones because they share the record.
-    ops: Arc<OnceLock<Body>>,
+    /// with its proof), shared by clones because they share the record. It is the operand every
+    /// operation copies: it keeps the exact blend definitions of rounds, which the display
+    /// record `brep` may not (see [`SolidBody::from_ops`]). The [`Order`] names, for each face,
+    /// edge and vertex of `brep` in list order, the body's own entity.
+    ops: Arc<OnceLock<(Body, Order)>>,
     /// The last volume measured, shared by clones because they share the record.
     volume: Arc<Mutex<Option<f64>>>,
     /// The exact box, measured on first use and shared by clones because they share the record.
@@ -99,14 +104,17 @@ impl SolidBody {
     /// # Errors
     /// Those of [`Body::to_brep`].
     pub fn from_ops(body: Body) -> Result<SolidBody, SessionError> {
+        // `to_brep` is a display copy (same ids and order) whose surfaces are evaluation copies
+        // without blend definitions; the body itself, kept below, is the operand and keeps them.
         let brep = body.to_brep().map_err(|error| map_error(OpKind::Body, error))?;
+        let order = Order::of(&brep);
         let solid = SolidBody::from_arc(Arc::new(brep));
         let proved = crate::validation() == crate::Validation::EachStep
             && solidcore::topology::brep::p2::is_manifold_solid(solid.brep()).unwrap_or(false);
         if proved {
             solid.write_proof(ProofState::Proved);
         }
-        let _ = solid.ops.set(body);
+        let _ = solid.ops.set((body, order));
         Ok(solid)
     }
 
@@ -197,17 +205,51 @@ impl SolidBody {
         }
     }
 
-    /// The kernel body, built once from this record and shared by every later caller.
-    fn kernel_body(&self, kernel: &mut Kernel) -> Result<&Body, SessionError> {
-        if let Some(body) = self.ops.get() {
-            return Ok(body);
+    /// The kernel body and its [`Order`], built once from this record and shared by every
+    /// later caller.
+    ///
+    /// The body is the kernel's own copy of the record (`brep_copy_mapped`), which keeps each
+    /// surface's exact blend definition; its ids are new, so the order maps the record's lists
+    /// to them through the copy's map. Not `clone_standing_for_self`: that copy's surfaces are
+    /// evaluation copies, which carry no definition, so every earlier round would reach the next
+    /// operation as a generic NURBS face (and a later blend along it is certified from scratch).
+    fn kernel_body(&self, kernel: &mut Kernel) -> Result<&(Body, Order), SessionError> {
+        if let Some(held) = self.ops.get() {
+            return Ok(held);
         }
-        let brep = self
-            .brep
-            .clone_standing_for_self()
+        let (copy, map) = brep_copy_mapped(kernel, &self.brep)
             .map_err(|error| SessionError::Kernel(error.to_string()))?;
-        let body = Body::from_brep(kernel, brep).map_err(|error| map_error(OpKind::Body, error))?;
-        Ok(self.ops.get_or_init(|| body))
+        let record = Order::of(&self.brep);
+        let mapped = |entity: EntityRef| map.get_at(Some(entity)).ok().flatten();
+        let missing = || SessionError::Kernel("the kernel's copy lost an entity".to_owned());
+        let order = Order {
+            faces: record
+                .faces
+                .iter()
+                .map(|&f| match mapped(EntityRef::Face(f)) {
+                    Some(EntityRef::Face(copy)) => Ok(copy),
+                    _ => Err(missing()),
+                })
+                .collect::<Result<_, _>>()?,
+            edges: record
+                .edges
+                .iter()
+                .map(|&e| match mapped(EntityRef::Edge(e)) {
+                    Some(EntityRef::Edge(copy)) => Ok(copy),
+                    _ => Err(missing()),
+                })
+                .collect::<Result<_, _>>()?,
+            vertices: record
+                .vertices
+                .iter()
+                .map(|&v| match mapped(EntityRef::Vertex(v)) {
+                    Some(EntityRef::Vertex(copy)) => Ok(copy),
+                    _ => Err(missing()),
+                })
+                .collect::<Result<_, _>>()?,
+        };
+        let body = Body::from_brep(kernel, copy).map_err(|error| map_error(OpKind::Body, error))?;
+        Ok(self.ops.get_or_init(|| (body, order)))
     }
 
     /// A kernel body for one operation that consumes it by value: a deep copy that keeps a
@@ -218,8 +260,20 @@ impl SolidBody {
     /// Those of [`Body::from_brep`] and [`Body::copy_held_on`].
     pub fn ops_copy(&self, kernel: &mut Kernel) -> Result<Body, SessionError> {
         self.kernel_body(kernel)?
+            .0
             .copy_held_on(kernel)
             .map_err(|error| map_error(OpKind::Body, error))
+    }
+
+    /// [`Self::ops_copy`] with the [`Order`] that names, for each face, edge and vertex of
+    /// [`Self::brep`] in list order, the copy's own entity: for an operation that picks entities
+    /// by their place in the record (a blend's edges, a shell's open faces).
+    ///
+    /// # Errors
+    /// Those of [`Body::from_brep`] and [`Body::copy_with_order`].
+    pub fn ops_copy_ordered(&self, kernel: &mut Kernel) -> Result<(Body, Order), SessionError> {
+        let (body, order) = self.kernel_body(kernel)?;
+        body.copy_with_order(order).map_err(|error| map_error(OpKind::Body, error))
     }
 
     /// Prove this body now, under `kernel`'s settings, and keep the proof: the check the
@@ -238,7 +292,7 @@ impl SolidBody {
             ProofState::Unknown => {}
         }
         self.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let proved = self.kernel_body(kernel)?.prove_on(kernel);
+        let proved = self.kernel_body(kernel)?.0.prove_on(kernel);
         match proved {
             Ok(()) => {
                 self.write_proof(ProofState::Proved);

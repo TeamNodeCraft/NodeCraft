@@ -1,6 +1,7 @@
 //! Exact Part evaluation: B-rep construction, placement and caches.
 
 use super::*;
+use crate::cache::node_cache_is_fresh;
 
 impl<'req, 'prog> Eval<'req, 'prog> {
     pub(crate) fn cached_primitive_brep_arc(
@@ -245,7 +246,7 @@ impl<'req, 'prog> Eval<'req, 'prog> {
         if node.suppressed {
             // A suppressed node is a pass-through: publish its source's Part
             // under this node's id as well. Every consumer (display
-            // breakpoint, comparison, picking and validation) looks a target
+            // breakpoint, picking and validation) looks a target
             // up by id, so returning the source Part without registering it
             // here would make the suppressed target look empty.
             let part = suppression_source(&node, &self.index)

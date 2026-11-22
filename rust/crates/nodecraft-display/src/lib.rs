@@ -236,23 +236,6 @@ pub fn tessellate_body(
     }
 }
 
-/// Display one standalone B-rep (for an exact difference body) through the
-/// same plan service as a Part. Returns both the CPU mesh and the GPU plan.
-pub fn brep_display(
-    brep: &std::sync::Arc<nodecraft_solidcore::solidcore::topology::Brep>,
-    quality: DisplayQuality,
-    cache: &mut PlanCache,
-) -> Result<PartDisplay, String> {
-    let part = ExactPart {
-        bodies: vec![ExactBody {
-            key: BodyKey::new(std::sync::Arc::as_ptr(brep) as u64, 0),
-            brep: std::sync::Arc::clone(brep),
-            placement: Placement::identity(),
-        }],
-    };
-    mesh_part(&part, quality, cache)
-}
-
 /// Export-quality settings. Display quality and export quality are deliberately
 /// separate: an export may request a finer plan than the viewport and must not
 /// reuse a coarse display plan.

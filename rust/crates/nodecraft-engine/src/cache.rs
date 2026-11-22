@@ -4,13 +4,12 @@
 //! must bypass every cache even if a caller supplied a stale key. Failed nodes
 //! store a failure entry and must never be answered by a healthy mesh entry.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use nodecraft_protocol::{Mesh, Node};
+use nodecraft_protocol::Node;
 
 use crate::Part;
-use crate::comparison::DifferenceMeshes;
 
 /// Shared key for every content-addressed cache entry: node identity plus the
 /// node's content hash. Dirty nodes must bypass lookups using this key.
@@ -20,7 +19,6 @@ const BREP_CACHE_BYTES: usize = 256 << 20;
 const DEFAULT_PART_CACHE_ENTRIES: usize = 8192;
 const MAX_PART_CACHE_ENTRIES: usize = 65_536;
 const FAILURE_CACHE_ENTRIES: usize = 4096;
-const COMPARISON_CACHE_BYTES: usize = 128 << 20;
 
 /// A node marked dirty must not be answered from any content-addressed cache,
 /// even when a caller supplied a key that matches an older result.
@@ -46,11 +44,6 @@ pub struct EngineCache {
     failures: HashMap<CacheKey, String>,
     failure_order: std::collections::VecDeque<CacheKey>,
     failure_hits: u64,
-    comparisons: HashMap<CacheKey, DifferenceMeshes>,
-    comparison_order: VecDeque<CacheKey>,
-    comparison_failures: HashMap<CacheKey, String>,
-    comparison_bytes: usize,
-    comparison_hits: u64,
     imports: HashMap<(String, String, String), Arc<nodecraft_mesh::StepImport>>,
     import_order: std::collections::VecDeque<(String, String, String)>,
     import_hits: u64,
@@ -79,11 +72,6 @@ impl EngineCache {
             failures: HashMap::new(),
             failure_order: std::collections::VecDeque::new(),
             failure_hits: 0,
-            comparisons: HashMap::new(),
-            comparison_order: VecDeque::new(),
-            comparison_failures: HashMap::new(),
-            comparison_bytes: 0,
-            comparison_hits: 0,
             imports: HashMap::new(),
             import_order: std::collections::VecDeque::new(),
             import_hits: 0,
@@ -108,59 +96,6 @@ impl EngineCache {
     }
     pub(crate) fn note_import_hit(&mut self) {
         self.import_hits = self.import_hits.saturating_add(1);
-    }
-
-    #[must_use]
-    pub(crate) fn difference(&self, key: &CacheKey) -> Option<DifferenceMeshes> {
-        self.comparisons.get(key).cloned()
-    }
-
-    #[must_use]
-    pub(crate) fn difference_failure(&self, key: &CacheKey) -> Option<String> {
-        self.comparison_failures.get(key).cloned()
-    }
-
-    pub(crate) fn insert_difference_failure(&mut self, key: CacheKey, error: String) {
-        if self.comparison_failures.len() >= 1024 {
-            if let Some(oldest) = self.comparison_failures.keys().next().cloned() {
-                self.comparison_failures.remove(&oldest);
-            }
-        }
-        self.comparison_failures.insert(key, error);
-    }
-
-    pub(crate) fn insert_difference(&mut self, key: CacheKey, difference: DifferenceMeshes) {
-        self.comparison_failures.remove(&key);
-        let bytes = difference_bytes(&difference);
-        if let Some(old) = self.comparisons.insert(key.clone(), difference) {
-            self.comparison_bytes = self.comparison_bytes.saturating_sub(difference_bytes(&old));
-        } else {
-            self.comparison_order.push_back(key);
-        }
-        self.comparison_bytes = self.comparison_bytes.saturating_add(bytes);
-        while self.comparison_bytes > COMPARISON_CACHE_BYTES && self.comparisons.len() > 1 {
-            let Some(oldest) = self.comparison_order.pop_front() else {
-                break;
-            };
-            if let Some(old) = self.comparisons.remove(&oldest) {
-                self.comparison_bytes =
-                    self.comparison_bytes.saturating_sub(difference_bytes(&old));
-            }
-        }
-    }
-
-    pub(crate) fn note_difference_hit(&mut self) {
-        self.comparison_hits = self.comparison_hits.saturating_add(1);
-    }
-
-    #[must_use]
-    pub fn difference_entries(&self) -> usize {
-        self.comparisons.len()
-    }
-
-    #[must_use]
-    pub fn difference_hits(&self) -> u64 {
-        self.comparison_hits
     }
 
     #[must_use]
@@ -341,23 +276,11 @@ pub(crate) fn import_cache_key(content_hash: &str, options: &str) -> (String, St
     )
 }
 
-fn mesh_bytes(mesh: &Mesh) -> usize {
-    mesh.vertices.len() * 24
-        + mesh.normals.len() * 24
-        + mesh.faces.len() * 12
-        + mesh.face_groups.iter().map(|group| group.len()).sum::<usize>()
-        + 512
-}
-
 fn brep_bytes(brep: &nodecraft_solidcore::solidcore::topology::Brep) -> usize {
     brep.face_list().len() * 1024
         + brep.edge_list().len() * 512
         + brep.vertex_list().len() * 128
         + 4096
-}
-
-fn difference_bytes(difference: &DifferenceMeshes) -> usize {
-    mesh_bytes(&difference.added) + mesh_bytes(&difference.removed)
 }
 
 #[cfg(test)]

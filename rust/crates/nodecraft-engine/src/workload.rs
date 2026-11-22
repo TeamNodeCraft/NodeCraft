@@ -158,7 +158,6 @@ pub fn profile_flat(
         run_exporters: true,
         mesh_tolerance: None,
         preview_detail: None,
-        comparison_targets: None,
         bypass_cache: false,
     })
 }

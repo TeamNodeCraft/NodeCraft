@@ -1,6 +1,7 @@
 //! Display evaluation and mesh caching.
 
 use super::*;
+use crate::cache::node_cache_is_fresh;
 
 /// Display-only tessellation through the upstream layer seam. Exact geometry
 /// never passes through this function.

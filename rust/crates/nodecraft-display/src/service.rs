@@ -25,10 +25,9 @@ pub struct ExactSnapshot {
 pub enum OverlayKind {
     EditInput,
     FeatureGhost,
-    ComparisonBefore,
-    ComparisonAfter,
-    DifferenceAdded,
-    DifferenceRemoved,
+    /// The selected feature's own result, overlaid while a topology-selection
+    /// mode is active. It is the result mesh, not a Boolean difference.
+    SelectedResult,
 }
 
 /// One overlay's exact geometry. The service only plans this body; it does not

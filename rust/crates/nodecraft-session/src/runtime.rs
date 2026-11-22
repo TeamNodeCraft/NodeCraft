@@ -233,7 +233,6 @@ impl GraphRuntime {
             run_exporters: false,
             mesh_tolerance,
             preview_detail: None,
-            comparison_targets: None,
             bypass_cache: false,
         };
         self.request_id += 1;

@@ -1273,9 +1273,6 @@ impl NodeCraftApp {
         self.base_node_warnings.clear();
         self.edit_preview = None;
         self.edit_preview_target = None;
-        self.comparison_pair = None;
-        self.difference_stats = None;
-        self.difference_error = None;
         self.display_error = None;
         self.gizmo_drag = None;
         self.gizmo_dragging = false;

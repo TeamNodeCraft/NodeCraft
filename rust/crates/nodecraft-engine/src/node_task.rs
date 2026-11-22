@@ -433,7 +433,8 @@ fn run_edge_session(
     // same shared helper Extrude/shell/offset use before any selection or geometry runs; a
     // refused body is remembered and named.
     source.prove(kernel).map_err(|error| format!("blend: {error}"))?;
-    let source = source.brep();
+    let body = source;
+    let source = body.brep();
     use nodecraft_blend::treatment::{ChamferType, Continuity, EdgeMode};
     let treatment = nodecraft_blend::treatment::EdgeTreatment::from_node_values(values)
         .map_err(|error| nodecraft_solidcore::error::user_message(error))?;
@@ -458,8 +459,10 @@ fn run_edge_session(
     let Some((kind, size)) = treatment.to_ops_blend() else {
         unreachable!("G3 returned above");
     };
+    // The operand is the body's kernel body (`blend_body`), not a copy of its display record:
+    // earlier rounds reach this blend with their exact definitions.
     let result = nodecraft_ops::OpsSession::new(kernel)
-        .blend(source, &edges, size, kind)
+        .blend_body(body, &edges, size, kind)
         .map_err(|error| error.to_string())?;
     Ok((result.brep, result.warnings))
 }

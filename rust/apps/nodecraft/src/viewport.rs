@@ -950,42 +950,6 @@ impl Viewport {
         self.update_mesh(mesh, false);
     }
 
-    pub fn set_exact_comparison_mesh(
-        &mut self,
-        base: &NodeMesh,
-        added: &NodeMesh,
-        removed: &NodeMesh,
-    ) {
-        self.sync_activated_display();
-        self.comparison_ghost = false;
-        self.selected_edges.clear();
-        self.hovered_edge = None;
-        self.reset_lods();
-        let display = crate::adapter::display_mesh_with_difference(base, added, removed);
-        #[cfg(feature = "gpu-viewport")]
-        if self.plan_set_staged {
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.stage_display(
-                    Some(display),
-                    None,
-                    None,
-                    None,
-                    self.plans_snapshot,
-                    self.display_retires_preview,
-                );
-            }
-            self.dirty = true;
-            return;
-        }
-        self.display = Some(display);
-        #[cfg(feature = "gpu-viewport")]
-        if let Some(gpu) = self.gpu.as_mut() {
-            gpu.set_view(self.view, self.display.as_ref());
-            gpu.set_mesh(self.display.as_ref(), self.display_retires_preview);
-        }
-        self.dirty = true;
-    }
-
     /// Display `ghost` as a faint feature-input layer under `base`. This is not
     /// an exact material difference; it is the selected feature's upstream body.
     pub fn set_feature_ghost_mesh(&mut self, base: &NodeMesh, ghost: &NodeMesh) {
