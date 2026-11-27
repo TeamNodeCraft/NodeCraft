@@ -55,9 +55,9 @@ notify = "=8.2.1"
 nodecraft-worker = { path = "../../crates/nodecraft-worker" }
 # Upstream view math/geometry. Keep these as git dependencies so they can be
 # updated independently of the app; only our UI adapter lives in this repository.
-solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
-solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495" }
-solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "312917ba6c55b74c6a780c9471d361cf29679495", optional = true }
+solidcraft-geom = { git = "https://github.com/tangency-labs/solidcraft", rev = "1fc00b615667a37b138b4397aafb62561f9932d1" }
+solidcraft-viewport = { git = "https://github.com/tangency-labs/solidcraft", rev = "1fc00b615667a37b138b4397aafb62561f9932d1" }
+solidcraft-viewport-gpu = { git = "https://github.com/tangency-labs/solidcraft", rev = "1fc00b615667a37b138b4397aafb62561f9932d1", optional = true }
 solidcore-record = { workspace = true }
 glam = { version = "0.30", features = ["bytemuck"] }
 

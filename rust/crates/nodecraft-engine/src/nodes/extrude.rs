@@ -282,4 +282,93 @@ mod tests {
             assert!((max[axis] - expected_max[axis]).abs() < 1.0e-6, "max[{axis}] = {}", max[axis]);
         }
     }
+
+    /// The z range of an exact Part's vertices.
+    fn z_range(part: &nodecraft_exact::ExactPart) -> (f64, f64) {
+        let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+        for body in &part.bodies {
+            for vertex in body.brep.vertex_list() {
+                let z = body.brep.vertex(*vertex).expect("vertex").point.z;
+                range = (range.0.min(z), range.1.max(z));
+            }
+        }
+        range
+    }
+
+    /// A face extrude joined onto a rounded body keeps the round exact: the feature's Boolean
+    /// copies its operands with their blend definitions, so the round reaches the result as a
+    /// blend, not a NURBS fit. A cylinder r 20, z -20..20, its bottom rim rounded r 10.3, gets a
+    /// boss extruded 5 up from its top face.
+    #[test]
+    fn a_face_extrude_keeps_the_body_s_round_exact() {
+        let request = |values: serde_json::Value| -> Request {
+            serde_json::from_value(serde_json::json!({
+                "requestId": 1, "targets": ["extrude"], "meshTargets": [],
+                "nodes": [
+                    {"id": "cyl", "type": "solid", "cache": {"key": "cyl"},
+                     "values": {"primitiveType": "cylinder"}},
+                    {"id": "round", "type": "fillet", "cache": {"key": "round"},
+                     "values": {"length": 10.3, "edges": [{"center": [-20.0, 0.0, -20.0]}]}},
+                    {"id": "extrude", "type": "extrude", "values": values, "cache": {"key": "extrude"}}
+                ],
+                "connections": [
+                    {"from": "cyl", "to": "round", "in": "shape", "out": "shape"},
+                    {"from": "round", "to": "extrude", "in": "profile", "out": "shape"}
+                ]
+            }))
+            .expect("rounded body extrude request")
+        };
+        // The top face: the one whose own extrusion spans z 20..25.
+        let top = (0..8)
+            .find(|face| {
+                let output = crate::evaluate_exact(
+                    request(serde_json::json!({
+                        "amount": 5.0, "operation": "new", "faces": [{"id": format!("face:{face}")}]
+                    })),
+                    crate::EngineCache::new(),
+                    None,
+                );
+                output.exact_parts.get("extrude").is_some_and(|part| {
+                    let (low, high) = z_range(part);
+                    (low - 20.0).abs() < 1.0e-6 && (high - 25.0).abs() < 1.0e-6
+                })
+            })
+            .expect("the cylinder's top face");
+        let output = crate::evaluate_exact(
+            request(serde_json::json!({
+                "amount": 5.0, "operation": "add", "faces": [{"id": format!("face:{top}")}]
+            })),
+            crate::EngineCache::new(),
+            None,
+        );
+        assert!(output.response.node_errors.is_empty(), "{:?}", output.response.node_errors);
+        let part = output.exact_parts.get("extrude").expect("extrude exact part");
+        assert_eq!(part.bodies.len(), 1);
+        let (low, high) = z_range(part);
+        assert!((low + 20.0).abs() < 1.0e-6 && (high - 25.0).abs() < 1.0e-6, "z {low}..{high}");
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let copy = nodecraft_solidcore::solidcore::topology::brep::p3::brep_copy(
+            &mut kernel,
+            &part.bodies[0].brep,
+        )
+        .expect("copy");
+        let (record, _) = nodecraft_ops::SolidBody::new(copy)
+            .ops_copy(&mut kernel)
+            .expect("operand")
+            .to_record()
+            .expect("record");
+        let kinds: Vec<String> = record
+            .faces
+            .iter()
+            .map(|face| {
+                format!("{:?}", face.surface).split([' ', '{', '(']).next().unwrap_or("").to_owned()
+            })
+            .collect();
+        let blends = record
+            .faces
+            .iter()
+            .filter(|face| matches!(face.surface, solidcore_record::brep::Surface::Blend { .. }))
+            .count();
+        assert_eq!(blends, 1, "the round stays an exact blend: {kinds:?}");
+    }
 }

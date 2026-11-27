@@ -34,6 +34,9 @@ pub struct ProofStats {
     pub proved: usize,
     /// Bodies the proof refused (a report was raised).
     pub refused: usize,
+    /// Bodies whose proof the kernel could not decide: not refused, no report, and not proved
+    /// again (the shared [`ProofState::Undecided`] is the memo).
+    pub undecided: usize,
     /// Bodies skipped: not a closed solid (a sheet), already proved/refused, or stale.
     pub skipped: usize,
     /// Proofs that failed for a reason other than invalidity (kernel status, cancellation).
@@ -285,7 +288,9 @@ impl Queue {
                 inner.stats.skipped += 1;
                 continue;
             }
-            if job.body.is_proved() || job.body.refused().is_some() {
+            // Only a body still Unknown takes a proof: proved, refused and undecided bodies
+            // are decided and are never proved again.
+            if !job.body.needs_proof() {
                 inner.stats.skipped += 1;
                 continue;
             }
@@ -310,7 +315,8 @@ impl Queue {
             let receiver =
                 pool.submit_background(seed_for(id), CancelToken::new(), move |kernel| {
                     let outcome = body.prove(kernel);
-                    queue.finish(meta, id, outcome, started.elapsed());
+                    let state = body.proof_state();
+                    queue.finish(meta, id, outcome, state, started.elapsed());
                 });
             // The job's outcome is recorded by the closure itself; dropping the receiver keeps
             // the pool from storing a result nobody reads.
@@ -323,6 +329,7 @@ impl Queue {
         meta: JobMeta,
         id: usize,
         outcome: Result<(), nodecraft_ops::SessionError>,
+        state: ProofState,
         elapsed: Duration,
     ) {
         let mut inner = self.lock();
@@ -331,6 +338,12 @@ impl Queue {
         inner.stats.total_ms += elapsed.as_secs_f64() * 1000.0;
         match outcome {
             Ok(()) => inner.stats.proved += 1,
+            // The kernel could not decide the proof. The body is not refused and no report is
+            // raised: the state is the memo, and a body that is fine must not mark its node
+            // failed. It is counted apart from both proved and refused.
+            Err(_) if matches!(&state, ProofState::Undecided(_)) => {
+                inner.stats.undecided += 1;
+            }
             Err(nodecraft_ops::SessionError::Invalid(failure)) => {
                 inner.stats.refused += 1;
                 let report = ProofReport {
@@ -517,6 +530,39 @@ mod tests {
             !needs_proof(&ProofState::Refused("inside out".into()), false),
             "a refused body is decided",
         );
+        assert!(
+            !needs_proof(&ProofState::Undecided("the kernel could not prove it".into()), false),
+            "an undecided body is decided: it is never proved twice",
+        );
+    }
+
+    /// The kernel could not decide a body's proof: that is not a refusal, so the queue counts
+    /// it apart and raises no report (which would mark the producer failed and warn every
+    /// downstream node). `SolidBody::prove` writes `Undecided` on the body before returning the
+    /// error, and the queue reads that state to tell the two apart.
+    #[test]
+    fn an_undecided_proof_is_counted_apart_and_raises_no_refusal() {
+        let queue = Arc::new(Queue::new());
+        let generation = queue.begin(&request());
+        let meta = {
+            let inner = queue.lock();
+            let request = Arc::clone(inner.contexts.get(&generation).expect("the context"));
+            JobMeta { generation, request, producer: "a".into() }
+        };
+        queue.end();
+        let reason = "SolidCore could not prove this body is a closed solid (its volume's sign is undecided), so this operation can't use it. Try a slightly different size on the fillet.";
+        queue.finish(
+            meta,
+            1,
+            Err(nodecraft_ops::SessionError::Invalid(reason.to_owned())),
+            ProofState::Undecided(reason.to_owned()),
+            Duration::ZERO,
+        );
+        let inner = queue.lock();
+        assert_eq!(inner.stats.undecided, 1, "an undecided proof is counted");
+        assert_eq!(inner.stats.refused, 0, "an undecided proof is not a refusal");
+        assert_eq!(inner.stats.failed, 0, "an undecided proof is not a kernel failure");
+        assert!(inner.reports.is_empty(), "an undecided proof raises no report");
     }
 
     #[test]

@@ -590,10 +590,14 @@ pub fn boolean_breps_ops(
     b: &KernelBrep,
     op: solidcore_ops::BooleanOp,
 ) -> Result<Option<KernelBrep>, String> {
-    let mut a_copy =
-        a.clone_standing_for_self().map_err(|error| format!("boolean copy A: {error}"))?;
-    let mut b_copy =
-        b.clone_standing_for_self().map_err(|error| format!("boolean copy B: {error}"))?;
+    // The operands' records carry their faces' blend definitions, so a round reaches the
+    // result exact; an evaluation copy (`clone_standing_for_self`) would drop them.
+    let mut a_copy = a
+        .clone_standing_for_self_keeping_definitions()
+        .map_err(|error| format!("boolean copy A: {error}"))?;
+    let mut b_copy = b
+        .clone_standing_for_self_keeping_definitions()
+        .map_err(|error| format!("boolean copy B: {error}"))?;
     let (a_record, _) = solidcore_convert::brep::to_record(kernel, &mut a_copy)
         .map_err(|error| format!("kernel A to record: {error}"))?;
     let (b_record, _) = solidcore_convert::brep::to_record(kernel, &mut b_copy)

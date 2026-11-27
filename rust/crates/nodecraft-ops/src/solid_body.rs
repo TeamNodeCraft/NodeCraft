@@ -25,24 +25,27 @@ use solidcore::topology::brep::p3::brep_copy_mapped;
 use solidcore_ops::{Body, Order};
 
 use crate::SessionError;
-use crate::error_map::{OpKind, map_error};
+use crate::error_map::{OpKind, is_undecided_test, map_error, undecided_proof};
 
 /// An exact axis-aligned box: the least corner, then the greatest.
 pub type Bounds = ([f64; 3], [f64; 3]);
 
-/// The proof standing for one body: unknown, proved a valid outward solid, or refused with
-/// the failing test's message.
+/// The proof standing for one body: unknown, proved a valid outward solid, refused with the
+/// failing test's message, or undecided with the kernel's honest sentence.
 ///
 /// A body starts [`ProofState::Unknown`]. An engine evaluation defers proofs (ops'
 /// `Validation::EachNode`), so a body it makes stays unknown until the background proof queue
 /// or a blocking caller proves it. A result made under `Validation::EachStep` is already
-/// proved and starts [`ProofState::Proved`]. `Refused` is kept: the same body is not proved
-/// again after it failed.
+/// proved and starts [`ProofState::Proved`]. `Refused` and `Undecided` are kept: the same body
+/// is not proved again after the kernel has answered. `Undecided` is not a refusal: no test
+/// showed the body is not a solid, but the kernel could not prove that it is, so an operation
+/// that needs a proved operand cannot use it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofState {
     Unknown,
     Proved,
     Refused(String),
+    Undecided(String),
 }
 
 /// One solid body: the shared B-rep, the shared (proved) kernel body, their memos and the
@@ -143,7 +146,16 @@ impl SolidBody {
     pub fn refused(&self) -> Option<String> {
         match self.proof_state() {
             ProofState::Refused(reason) => Some(reason),
-            ProofState::Unknown | ProofState::Proved => None,
+            ProofState::Unknown | ProofState::Proved | ProofState::Undecided(_) => None,
+        }
+    }
+
+    /// Whether the kernel could not decide the body's proof, and the honest sentence for it.
+    #[must_use]
+    pub fn undecided(&self) -> Option<String> {
+        match self.proof_state() {
+            ProofState::Undecided(reason) => Some(reason),
+            ProofState::Unknown | ProofState::Proved | ProofState::Refused(_) => None,
         }
     }
 
@@ -165,6 +177,13 @@ impl SolidBody {
         // A proof is written once; a later caller that saw Unknown may race, but
         // both write the same decision, and the first decision is kept.
         let _ = self.proof.set(state);
+    }
+
+    /// Give this body `state` for a test of the memo, without running the kernel. A real
+    /// undecided proof needs a body the kernel cannot decide, which no cheap test body gives.
+    #[cfg(test)]
+    pub(crate) fn write_proof_for_test(&self, state: ProofState) {
+        self.write_proof(state);
     }
 
     /// Give this body `source`'s proof state when it is still unknown: a proof copy (a rigid
@@ -247,6 +266,8 @@ impl SolidBody {
                     _ => Err(missing()),
                 })
                 .collect::<Result<_, _>>()?,
+            // the copy's own lists, mapped one to one: no edge is split
+            split_edges: record.split_edges,
         };
         let body = Body::from_brep(kernel, copy).map_err(|error| map_error(OpKind::Body, error))?;
         Ok(self.ops.get_or_init(|| (body, order)))
@@ -278,17 +299,21 @@ impl SolidBody {
 
     /// Prove this body now, under `kernel`'s settings, and keep the proof: the check the
     /// background proof queue and a blocking caller (export, check, an orientation-dependent
-    /// operation) run. A body already proved is not proved again; a refused body stays refused
-    /// and returns the test it failed.
+    /// operation) run. A body already decided is not proved again; a refused body stays refused
+    /// and returns the test it failed, and an undecided body stays undecided and returns the
+    /// honest sentence for a proof the kernel could not decide.
     ///
     /// # Errors
-    /// [`SessionError::Invalid`] when the body is not a valid outward solid; those of
-    /// [`Body::from_brep`]. Only an invalid result is remembered as a refusal, so a kernel
-    /// status or a cancellation is retried later.
+    /// [`SessionError::Invalid`] when the body is not a valid outward solid, or when the kernel
+    /// could not decide it ([`ProofState::Undecided`]); those of [`Body::from_brep`]. Only an
+    /// answer from the solid test is remembered, so a kernel status or a cancellation is retried
+    /// later.
     pub fn prove(&self, kernel: &mut Kernel) -> Result<(), SessionError> {
         match self.proof_state() {
             ProofState::Proved => return Ok(()),
-            ProofState::Refused(reason) => return Err(SessionError::Invalid(reason)),
+            ProofState::Refused(reason) | ProofState::Undecided(reason) => {
+                return Err(SessionError::Invalid(reason));
+            }
             ProofState::Unknown => {}
         }
         self.attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -299,6 +324,17 @@ impl SolidBody {
                 Ok(())
             }
             Err(error) => {
+                // A test the kernel could not decide is not a refusal: the body is kept
+                // undecided, and no later consumer proves it again.
+                if let Some(test) = error.not_solid_test()
+                    && is_undecided_test(test)
+                {
+                    let mapped = undecided_proof(test);
+                    if let SessionError::Invalid(reason) = &mapped {
+                        self.write_proof(ProofState::Undecided(reason.clone()));
+                    }
+                    return Err(mapped);
+                }
                 let mapped = map_error(OpKind::Body, error);
                 if let SessionError::Invalid(reason) = &mapped {
                     self.write_proof(ProofState::Refused(reason.clone()));

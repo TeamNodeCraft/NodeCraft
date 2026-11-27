@@ -78,6 +78,7 @@ use crate::curve::composite_curve::CompositeCurve;
 use crate::curve::crv_on_surf::{CrvOnSurf, CONTINUITY_ANGLE};
 use crate::curve::curve::p8::CurveIntersectOptions;
 use crate::curve::curve::{Curve, CurveKind};
+use crate::error::surface::{SolverPart, SurfaceFailure};
 use crate::error::{ignored, Result, SolidError};
 use crate::geom::extent1d::{Extent1d, ExtentNd};
 use crate::geom::extent2d::Extent2d;
@@ -237,9 +238,12 @@ fn split(sv: &[f64; 4]) -> (Point2, Point2) {
 fn four(x: &[f64]) -> Result<[f64; 4]> {
     match x {
         [a, b, c, d, ..] => Ok([*a, *b, *c, *d]),
-        _ => Err(SolidError::surface_failed(
+        _ => Err(SolidError::surface(
             OP_LSI,
-            "the solver returned fewer than four values",
+            SurfaceFailure::Defect {
+                why: "the local solve returned fewer than four values, though its solution \
+                      has the length of the four-value guess it starts from",
+            },
         )),
     }
 }
@@ -320,9 +324,11 @@ impl Surface {
         depth: usize,
     ) -> Result<Option<SurfaceIntersection>> {
         if depth > MAX_RECURSION {
-            return Err(SolidError::surface_failed(
+            return Err(SolidError::surface(
                 OP_LSI,
-                "the local intersection recursed past its depth bound",
+                SurfaceFailure::RecursionPastBound {
+                    bound: MAX_RECURSION,
+                },
             ));
         }
         let do_boundary = opts.do_boundary_testing;
@@ -994,18 +1000,24 @@ impl<'t, O: SolutionObject + 't> CsGlobalSolver<'t, '_, O> {
     pub fn local_solve_branch(&mut self, branch: &Branch) -> Result<bool> {
         let k = self.kernel;
         let curve_node = *self.base.branch_node(branch, 0)?;
-        let surface_node = *self.base.branch_node(branch, 1)?;
-        let surface_id = branch
-            .get(1)
-            .copied()
-            .flatten()
-            .ok_or_else(|| SolidError::surface_missing(OP_CS, "the branch's surface node"))?;
-        let cache = self
-            .surface_cache
-            .ok_or_else(|| SolidError::surface_missing(OP_CS, "the surface cache"))?;
-        let curve = self
-            .curve
-            .ok_or_else(|| SolidError::surface_missing(OP_CS, "the curve"))?;
+        let (surface_id, surface_node) = self.base.branch_entry(branch, 1)?;
+        let surface_node = *surface_node;
+        let cache = self.surface_cache.ok_or_else(|| {
+            SolidError::surface(
+                OP_CS,
+                SurfaceFailure::SolverWithout {
+                    part: SolverPart::SurfaceCache,
+                },
+            )
+        })?;
+        let curve = self.curve.ok_or_else(|| {
+            SolidError::surface(
+                OP_CS,
+                SurfaceFailure::SolverWithout {
+                    part: SolverPart::Curve,
+                },
+            )
+        })?;
         let curve_tree = self.base.tree(0)?;
         let surface_tree = self.base.tree(1)?;
         let span = *curve_tree.curve_span(&curve_node)?;
@@ -1013,7 +1025,12 @@ impl<'t, O: SolutionObject + 't> CsGlobalSolver<'t, '_, O> {
         let patch = &view.patch;
 
         // If the classification of the node is outside then we can quit here
-        if !is_node_valid(surface_tree.owner(), cache, &surface_node)? {
+        if !is_node_valid(
+            surface_tree.owner(),
+            cache,
+            cache.solve_modes(),
+            &surface_node,
+        )? {
             return Ok(false);
         }
 
@@ -1102,6 +1119,7 @@ impl<'t, O: SolutionObject + 't> CsGlobalSolver<'t, '_, O> {
                         k,
                         surface_tree.owner(),
                         cache,
+                        cache.solve_modes(),
                         h.uv,
                         None,
                         self.face_queries,
@@ -1188,6 +1206,7 @@ impl<'t, O: SolutionObject + 't> CsGlobalSolver<'t, '_, O> {
                 k,
                 surface_tree.owner(),
                 cache,
+                cache.solve_modes(),
                 uv_found,
                 None,
                 self.face_queries,
@@ -1306,12 +1325,9 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
                     Side4::U2 => u_conts2,
                     Side4::V2 => v_conts2,
                 };
-                let c = side_conts.get(j).copied().ok_or_else(|| {
-                    SolidError::surface_failed(
-                        OP_SS,
-                        "the side continuity is past the end of the continuities",
-                    )
-                })?;
+                // (the pass's end of the side: j is 0 or 1)
+                let [c_left, c_right] = side_conts;
+                let c = if from_left { c_left } else { c_right };
                 if ct(c) > c0 {
                     continue;
                 }
@@ -1428,17 +1444,17 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
     #[allow(clippy::too_many_lines)]
     pub fn local_solve_branch(&mut self, branch: &Branch) -> Result<bool> {
         let k = self.kernel;
-        let node1 = *self.base.branch_node(branch, 0)?;
-        let node2 = *self.base.branch_node(branch, 1)?;
-        let id1 =
-            branch.first().copied().flatten().ok_or_else(|| {
-                SolidError::surface_missing(OP_SS, "the branch's first surface node")
-            })?;
-        let id2 = branch.get(1).copied().flatten().ok_or_else(|| {
-            SolidError::surface_missing(OP_SS, "the branch's second surface node")
-        })?;
+        let (id1, node1) = self.base.branch_entry(branch, 0)?;
+        let node1 = *node1;
+        let (id2, node2) = self.base.branch_entry(branch, 1)?;
+        let node2 = *node2;
         let [Some(cache1), Some(cache2)] = self.caches else {
-            return Err(SolidError::surface_missing(OP_SS, "a surface cache"));
+            return Err(SolidError::surface(
+                OP_SS,
+                SurfaceFailure::SolverWithout {
+                    part: SolverPart::SurfaceCaches,
+                },
+            ));
         };
         let tree1 = self.base.tree(0)?;
         let tree2 = self.base.tree(1)?;
@@ -1446,10 +1462,10 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
         let view2 = patch_view(OP_SS, tree2, cache2, id2)?;
 
         // If the classification of the node is outside then we can quit here
-        if !is_node_valid(tree1.owner(), cache1, &node1)? {
+        if !is_node_valid(tree1.owner(), cache1, cache1.solve_modes(), &node1)? {
             return Ok(false);
         }
-        if !is_node_valid(tree2.owner(), cache2, &node2)? {
+        if !is_node_valid(tree2.owner(), cache2, cache2.solve_modes(), &node2)? {
             return Ok(false);
         }
 
@@ -1533,6 +1549,7 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
                         k,
                         tree1.owner(),
                         cache1,
+                        cache1.solve_modes(),
                         x.uv,
                         None,
                         self.face_queries,
@@ -1540,6 +1557,7 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
                         k,
                         tree2.owner(),
                         cache2,
+                        cache2.solve_modes(),
                         x.other_uv,
                         None,
                         self.face_queries,
@@ -1659,6 +1677,7 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
                 k,
                 tree1.owner(),
                 cache1,
+                cache1.solve_modes(),
                 uv1,
                 None,
                 self.face_queries,
@@ -1666,6 +1685,7 @@ impl<'t, O: SolutionObject + 't> SsGlobalSolver<'t, '_, O> {
                 k,
                 tree2.owner(),
                 cache2,
+                cache2.solve_modes(),
                 uv2,
                 None,
                 self.face_queries,
@@ -1725,9 +1745,12 @@ fn boundary_curves(
     let u = surface.create_iso_boundaries(k, SurfParamType::U, tol)?;
     let v = surface.create_iso_boundaries(k, SurfParamType::V, tol)?;
     let (Some((c0, c2)), Some((c1, c3))) = (u, v) else {
-        return Err(SolidError::surface_failed(
+        return Err(SolidError::surface(
             OP_ISB,
-            "the surface has no iso boundaries",
+            SurfaceFailure::Defect {
+                why: "the surface gave no iso boundaries in U or V, though every kind \
+                      returns both boundaries of either direction",
+            },
         ));
     };
     let mut out = vec![c0, c1];
@@ -1915,9 +1938,9 @@ fn extract_iso_curve(
         | CurveKind::Ellipse(_)
         | CurveKind::Hyperbola(_)
         | CurveKind::Parabola(_) => Ok(Some((iso, 0.0))),
-        _ => Err(SolidError::surface_failed(
+        _ => Err(SolidError::surface(
             OP_LIFT,
-            "the iso curve kind cannot be lifted",
+            SurfaceFailure::IsoCurveKindNotLiftable,
         )),
     }
 }
@@ -1994,20 +2017,17 @@ impl Surface {
                 let (knots, _) = self.knots_with_nurb(k, SurfParamType::U, None)?;
                 let u_conts = &conts.u;
                 let size = u_conts.len().saturating_sub(1);
-                for iu in 1..size {
+                for (iu, u_cont) in u_conts.iter().enumerate().take(size).skip(1) {
                     // when surface U knot is C0 or discontinuous
-                    if ct(*u_conts.get(iu).ok_or_else(|| {
-                        SolidError::surface_failed(
-                            OP_LIFT,
-                            "the u continuity is past the end of the continuities",
-                        )
-                    })?) < ct(ContinuityType::C1)
-                    {
+                    if ct(*u_cont) < ct(ContinuityType::C1) {
                         // split the UVcurve at the Surface discontinuity (SER: checked)
                         let knot = *knots.get(iu).ok_or_else(|| {
-                            SolidError::surface_failed(
+                            SolidError::surface(
                                 OP_LIFT,
-                                "the u knot is past the end of the knots",
+                                SurfaceFailure::KnotsAndContinuitiesDisagree {
+                                    knots: knots.len(),
+                                    continuities: u_conts.len(),
+                                },
                             )
                         })?;
                         intersect_and_split::<BoundaryCurveHandle>(
@@ -2026,20 +2046,17 @@ impl Surface {
                 let (knots, _) = self.knots_with_nurb(k, SurfParamType::V, None)?;
                 let v_conts = &conts.v;
                 let size = v_conts.len().saturating_sub(1);
-                for iv in 1..size {
+                for (iv, v_cont) in v_conts.iter().enumerate().take(size).skip(1) {
                     // when surface V knot is C0 or discontinuous
-                    if ct(*v_conts.get(iv).ok_or_else(|| {
-                        SolidError::surface_failed(
-                            OP_LIFT,
-                            "the v continuity is past the end of the continuities",
-                        )
-                    })?) < ct(ContinuityType::C1)
-                    {
+                    if ct(*v_cont) < ct(ContinuityType::C1) {
                         // (SER: checked)
                         let knot = *knots.get(iv).ok_or_else(|| {
-                            SolidError::surface_failed(
+                            SolidError::surface(
                                 OP_LIFT,
-                                "the v knot is past the end of the knots",
+                                SurfaceFailure::KnotsAndContinuitiesDisagree {
+                                    knots: knots.len(),
+                                    continuities: v_conts.len(),
+                                },
                             )
                         })?;
                         intersect_and_split::<BoundaryCurveHandle>(
@@ -2064,9 +2081,12 @@ impl Surface {
             for (j, c) in curve_conts.iter().enumerate() {
                 if ct(*c) < ct(ContinuityType::C1) {
                     break_params.push(*knots.get(j).ok_or_else(|| {
-                        SolidError::surface_failed(
+                        SolidError::surface(
                             OP_LIFT,
-                            "the curve knot is past the end of the knots",
+                            SurfaceFailure::KnotsAndContinuitiesDisagree {
+                                knots: knots.len(),
+                                continuities: curve_conts.len(),
+                            },
                         )
                     })?);
                 }
@@ -2098,9 +2118,12 @@ impl Surface {
             // (SER: checked)
             let pv = uv_curve.evaluate(k, ivl.min() + EFF_ZERO_SQRT, 1, true, true)?;
             let (Some(p0), Some(p1)) = (pv.first(), pv.get(1)) else {
-                return Err(SolidError::surface_failed(
+                return Err(SolidError::surface(
                     OP_LIFT,
-                    "the UV curve has no point and tangent",
+                    SurfaceFailure::Defect {
+                        why: "the UV curve's evaluation returned no point or first \
+                              derivative, though it returns the derivatives 0..=1 asked of it",
+                    },
                 ));
             };
             let pnt = Point2::new(p0.x, p0.y);
@@ -2111,9 +2134,9 @@ impl Surface {
 
             // If we don't get some sort of a domain then error out.
             if seg_domain.size().length_squared() < EFF_ZERO_SQ {
-                return Err(SolidError::surface_failed(
+                return Err(SolidError::surface(
                     OP_LIFT,
-                    "the segment has no domain",
+                    SurfaceFailure::NoContinuousDomain,
                 ));
             }
 
@@ -2159,14 +2182,17 @@ impl Surface {
         // set output based on the number of lifted segments
         let curve = match curves_3d.len() {
             // signal error
-            0 => return Err(SolidError::surface_failed(OP_LIFT, "no segment was lifted")),
+            0 => return Err(SolidError::surface(OP_LIFT, SurfaceFailure::NothingLifted)),
             // output = 1 lifted BSpline approximation curve
             1 => match curves_3d.pop().map(Curve::into_kind) {
                 Some(CurveKind::BSpline(b)) => b,
                 _ => {
-                    return Err(SolidError::surface_failed(
+                    return Err(SolidError::surface(
                         OP_LIFT,
-                        "the lifted curve is not a B-spline",
+                        SurfaceFailure::Defect {
+                            why: "the one lifted curve is not a B-spline, though each \
+                                  segment's approximation is one",
+                        },
                     ))
                 }
             },
@@ -2522,29 +2548,37 @@ mod tests {
         assert!(hit.deviation < 1e-9);
     }
 
-    /// The intersection and lifting failures keep the operation, status, kind and entity of the bare
-    /// `Upstream` statuses they replace (a sample).
+    /// The intersection and lifting failures keep the operation, status and entity of the
+    /// bare `Upstream` statuses they replace (a sample); their class is the cause's.
     #[test]
     fn typed_surface_failures_keep_their_upstream_answers() {
-        use crate::error::surface::SurfaceFailure;
-        let samples: [(&'static str, SurfaceFailure, i32); 3] = [
+        use crate::error::surface::{SolverPart, SurfaceFailure};
+        use crate::error::ErrorKind;
+        let samples: [(&'static str, SurfaceFailure, i32, ErrorKind); 3] = [
             (
                 OP_LSI,
-                SurfaceFailure::Failed("the local intersection recursed past its depth bound"),
+                SurfaceFailure::RecursionPastBound {
+                    bound: MAX_RECURSION,
+                },
                 crate::error::SM_ERR,
+                ErrorKind::Failed,
             ),
             (
                 OP_SS,
-                SurfaceFailure::Missing("a surface cache"),
+                SurfaceFailure::SolverWithout {
+                    part: SolverPart::SurfaceCaches,
+                },
                 crate::error::SM_ERR_NULL_POINTER,
+                ErrorKind::InvalidInput,
             ),
             (
                 OP_LIFT,
-                SurfaceFailure::Failed("no segment was lifted"),
+                SurfaceFailure::NothingLifted,
                 crate::error::SM_ERR,
+                ErrorKind::Failed,
             ),
         ];
-        for (operation, failure, code) in samples {
+        for (operation, failure, code, kind) in samples {
             let typed = SolidError::surface(operation, failure);
             let before = SolidError::Upstream {
                 operation,
@@ -2553,7 +2587,7 @@ mod tests {
             };
             assert_eq!(typed.sm_status(), before.sm_status(), "{typed:?}");
             assert_eq!(typed.upstream_status(), Some(code), "{typed:?}");
-            assert_eq!(typed.kind(), before.kind(), "{typed:?}");
+            assert_eq!(typed.kind(), kind, "{typed:?}");
             assert_eq!(typed.operation(), before.operation(), "{typed:?}");
             assert_eq!(typed.entity(), None, "{typed:?}");
             assert_eq!(typed.is_port_failure(), before.is_port_failure());
@@ -2719,6 +2753,219 @@ mod tests {
         asked.continuities(&k).unwrap();
         same(&lift(&k, &asked));
     }
+
+    /// `LiftCurve` of one UV line on a biquadratic bump, `S(u, v) = (2u, 2v, 4uv(1 - u)(1 - v))`
+    /// over `[0, 1]²`, at three parameter speeds: the line from `(0.1, 0.2)` along
+    /// `(0.7, 0.5)·f` over `[0, 1/f]`, `f` in `1e-3`, `1`, `1e3`, is the same segment from
+    /// `(0.1, 0.2)` to `(0.8, 0.7)` each time, and the line's natural interval is `[0, 1]`
+    /// each time. The lift is within the tolerance at every speed (#21657): the bump is the
+    /// graph of `g(x, y) = x(2 - x)y(2 - y)/4`, so a lifted point `p` lies at most
+    /// `|p.z - g(p.x, p.y)|` from it. The fit's shortest tested span was 1/1500 of the
+    /// curve's natural interval, not of the interval being fitted, so at `f = 1e3` every
+    /// span after the first halving was accepted untested.
+    #[test]
+    fn lift_curve_is_within_the_tolerance_at_any_parameter_speed() {
+        let row = |x: f64, z: f64| {
+            vec![
+                Vec3::new(x, 0.0, 0.0),
+                Vec3::new(x, 1.0, z),
+                Vec3::new(x, 2.0, 0.0),
+            ]
+        };
+        let rows = [row(0.0, 0.0), row(1.0, 1.0), row(2.0, 0.0)];
+        let bump = bspline_surface(2, 2, &[&rows[0], &rows[1], &rows[2]]);
+        let off = |p: Point3| (p.z - p.x * (2.0 - p.x) * p.y * (2.0 - p.y) / 4.0).abs();
+        let k = Kernel::default();
+        let tol = 1e-6;
+        let dom = Extent2d::from_points(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0));
+        for f in [1e-3, 1.0, 1e3] {
+            let uv_line = Curve::from(crate::curve::line::Line::from_points(
+                Point3::new(0.1, 0.2, 0.0),
+                Point3::new(0.1 + 0.7 * f, 0.2 + 0.5 * f, 0.0),
+                2,
+            ));
+            let interval = Extent1d::from_min_max(0.0, 1.0 / f);
+            let lifted = bump
+                .lift_curve(&k, &dom, &uv_line, &interval, tol, false)
+                .unwrap();
+            assert!(
+                lifted.max_approx_dev <= tol,
+                "f = {f:e}: the fit reports {:e}",
+                lifted.max_approx_dev
+            );
+            let curve = &lifted.curve;
+            let ivl = curve.natural_interval();
+            for i in 0..=1000 {
+                let p = curve
+                    .evaluate_point(&k, ivl.evaluate(f64::from(i) / 1000.0))
+                    .unwrap();
+                assert!(
+                    off(p) <= tol,
+                    "f = {f:e}: {p:?} is {:e} off the bump",
+                    off(p)
+                );
+            }
+            let ends = [ivl.min(), ivl.max()].map(|t| curve.evaluate_point(&k, t).unwrap());
+            let want = [(0.1, 0.2), (0.8, 0.7)]
+                .map(|(u, v)| bump.evaluate_point(&k, Point2::new(u, v)).unwrap());
+            for (got, want) in ends.iter().zip(&want) {
+                assert!(got.distance(*want) <= tol, "f = {f:e}: {got:?} vs {want:?}");
+            }
+        }
+    }
+    /// A biquadratic dome over `[0, 1]²`: the corners and edge midpoints at height 0,
+    /// the middle control point at height 1, not periodic in either direction.
+    fn dome() -> Surface {
+        let row = |x: f64, z: f64| {
+            vec![
+                Vec3::new(x, 0.0, 0.0),
+                Vec3::new(x, 1.0, z),
+                Vec3::new(x, 2.0, 0.0),
+            ]
+        };
+        let rows = [row(0.0, 0.0), row(1.0, 1.0), row(2.0, 0.0)];
+        bspline_surface(2, 2, &[&rows[0], &rows[1], &rows[2]])
+    }
+
+    /// The dome's polynomial at `(u, v)`, which its evaluation continues past `[0, 1]²` when
+    /// out-of-bounds evaluation is enabled: `(2u, 2v, 4 c(u) c(v))` with `c(t) = t (1 - t)`
+    /// (the middle control point at height 1, every other at height 0).
+    fn dome_point(u: f64, v: f64) -> Point3 {
+        Point3::new(2.0 * u, 2.0 * v, 4.0 * u * (1.0 - u) * v * (1.0 - v))
+    }
+
+    /// `LiftCurve` of a UV segment off its surface's domain is the same whatever the speed
+    /// of its parameterisation (#20239): the segment from `(1.2, 0.2)` to `(1.8, 0.9)`,
+    /// parameterised with its derivative scaled by `f` in `1e-3` and `1` (and run the
+    /// other way), keeps `u > 1`, beside the dome's domain `[0, 1]²`, on the dome
+    /// with out-of-bounds evaluation enabled, which continues the dome's polynomial
+    /// ([`dome_point`]) there. Every lift is within the tolerance, its ends are the
+    /// polynomial's points and its samples lie on the polynomial. Before the fix the
+    /// segment's continuity domain collapsed to the edge `u = 1` (`[1, 1] x [0, 1]`, the
+    /// end knot compared with the derivative's component); `LiftCurve` still lifted it
+    /// there, as its zero-width domain keeps a positive size, so this test is coverage of
+    /// the lift through the new span, not the regression test (that is
+    /// `domain_with_continuity_off_the_domain_is_the_span_next_to_the_point`, p1). A segment just past the edge (by `2e-6`, rounding of a
+    /// trim) and one inside are lifted in the same way. (At `f = 1e3` the continuity
+    /// domain is the same too, as `domain_with_continuity_off_the_domain_is_the_span_next_to_the_point`
+    /// checks, but `ApproximateCurve` accepts a span of the 1e-3-long interval at
+    /// `2.7e-3` from the curve, as it does on main: a separate dependence on the
+    /// parameter's scale, tangency-labs/solidcraft#21657.)
+    #[test]
+    fn lift_curve_off_the_domain_is_the_same_whatever_the_speed() {
+        let k = Kernel::default();
+        let mut s = dome();
+        let SurfaceKind::BSpline(b) = s.kind_mut() else {
+            unreachable!()
+        };
+        *b.out_of_bounds_enabled_mut() = true;
+        let tol = 1e-6;
+        let dom = s.natural_uv_domain_with_nurb(&k).unwrap();
+        // the segment from `a` to `b`, its derivative `(b - a) f`
+        let line = |a: (f64, f64), b: (f64, f64), f: f64| {
+            let to = (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f);
+            (
+                Curve::from(crate::curve::line::Line::from_points(
+                    Point3::new(a.0, a.1, 0.0),
+                    Point3::new(to.0, to.1, 0.0),
+                    2,
+                )),
+                Extent1d::from_min_max(0.0, 1.0 / f),
+            )
+        };
+        let lift = |a: (f64, f64), b: (f64, f64), f: f64| {
+            let (uv, ivl) = line(a, b, f);
+            let lifted = s
+                .lift_curve(&k, &dom, &uv, &ivl, tol, false)
+                .unwrap_or_else(|e| panic!("{a:?} -> {b:?}, f = {f:e}: {e:?}"));
+            assert!(lifted.max_approx_dev <= tol, "{:e}", lifted.max_approx_dev);
+            let ivl = lifted.curve.natural_interval();
+            let ends = [
+                lifted.curve.evaluate_point(&k, ivl.min()).unwrap(),
+                lifted.curve.evaluate_point(&k, ivl.max()).unwrap(),
+            ];
+            for (p, q) in ends
+                .iter()
+                .zip([dome_point(a.0, a.1), dome_point(b.0, b.1)])
+            {
+                assert!(p.distance(q) <= tol, "{p:?} {q:?}");
+            }
+            for i in 0..=16 {
+                let p = lifted
+                    .curve
+                    .evaluate_point(&k, ivl.evaluate(f64::from(i) / 16.0))
+                    .unwrap();
+                let on = dome_point(p.x / 2.0, p.y / 2.0);
+                assert!((p.z - on.z).abs() <= 4.0 * tol, "{p:?} {on:?}");
+            }
+        };
+        let (a, b) = ((1.2, 0.2), (1.8, 0.9));
+        for f in [1e-3, 1.0] {
+            lift(a, b, f);
+            lift(b, a, f);
+        }
+        lift((1.0 + 2e-6, 0.2), (1.0 + 3e-6, 0.8), 1.0);
+        lift((0.1, 0.2), (0.8, 0.7), 1.0);
+    }
+
+    /// A lift off the domain follows the surface's own evaluation there (#20239 review):
+    /// on the planar patch `S(u, v) = (u, v, 0)` over `[0, 1]²` the segment from `(3, 0)`
+    /// to `(4, 1)` lifts, with the patch's clamped evaluation, onto its edge `u = 1`
+    /// (`x = 1`); with out-of-bounds evaluation enabled, onto the plane, `x` from 3 to 4;
+    /// and on an analytic plane past its domain's sentinel, onto the plane. None is
+    /// refused.
+    #[test]
+    fn lift_curve_off_the_domain_follows_the_surface_s_evaluation() {
+        let k = Kernel::default();
+        let row = |x: f64| vec![Vec3::new(x, 0.0, 0.0), Vec3::new(x, 1.0, 0.0)];
+        let (r0, r1) = (row(0.0), row(1.0));
+        let interval = Extent1d::from_min_max(0.0, 1.0);
+        let tol = 1e-6;
+        let at = |u0: f64, u1: f64| {
+            Curve::from(crate::curve::line::Line::from_points(
+                Point3::new(u0, 0.0, 0.0),
+                Point3::new(u1, 1.0, 0.0),
+                2,
+            ))
+        };
+        let xs = |lifted: &LiftedCurve| {
+            let ivl = lifted.curve.natural_interval();
+            [ivl.min(), ivl.max()].map(|t| {
+                let p = lifted.curve.evaluate_point(&k, t).unwrap();
+                assert!(p.z.abs() <= tol, "{p:?}");
+                p.x
+            })
+        };
+        let clamped = bspline_surface(1, 1, &[&r0, &r1]);
+        let dom = clamped.natural_uv_domain_with_nurb(&k).unwrap();
+        let lifted = clamped
+            .lift_curve(&k, &dom, &at(3.0, 4.0), &interval, tol, false)
+            .unwrap();
+        for x in xs(&lifted) {
+            assert!((x - 1.0).abs() <= tol, "{x}");
+        }
+        let mut open = bspline_surface(1, 1, &[&r0, &r1]);
+        let SurfaceKind::BSpline(b) = open.kind_mut() else {
+            unreachable!()
+        };
+        *b.out_of_bounds_enabled_mut() = true;
+        let lifted = open
+            .lift_curve(&k, &dom, &at(3.0, 4.0), &interval, tol, false)
+            .unwrap();
+        assert!(lifted.max_approx_dev <= tol, "{:e}", lifted.max_approx_dev);
+        let [x0, x1] = xs(&lifted);
+        assert!(
+            (x0 - 3.0).abs() <= tol && (x1 - 4.0).abs() <= tol,
+            "{x0} {x1}"
+        );
+        let flat = plane(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0));
+        let pdom = flat.natural_uv_domain_with_nurb(&k).unwrap();
+        let far = pdom.max().x;
+        assert!(flat
+            .lift_curve(&k, &pdom, &at(far + 1.0, far + 2.0), &interval, tol, false)
+            .is_ok());
+    }
+
     /// `LiftCurve` with the continuity checks skipped, during a Boolean operation, on a
     /// curve-bounded surface over the roof (and one nested in another) is the lift on the
     /// bare roof: the segment's continuity domain is the basis's (#20054). With the

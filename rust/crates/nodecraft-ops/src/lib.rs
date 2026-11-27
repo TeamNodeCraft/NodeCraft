@@ -230,6 +230,36 @@ impl<'k> OpsSession<'k> {
     ) -> Result<OpsResult, SessionError> {
         let indices = indices.to_vec();
         self.kernel.blend_face_log = Some(Default::default());
+        // SolidCore's G2 gives every edge in one call the wedge of the first edge, so edges of
+        // different wedges would silently take off the wrong area. Refuse them here, as
+        // SolidCraft does (solidcore#2250).
+        if kind == OpsBlend::Curvature {
+            let mut native = Vec::with_capacity(indices.len());
+            for &index in &indices {
+                let edge = order.edges.get(index).copied().ok_or_else(|| {
+                    SessionError::Invalid("selected edge is not on the body".to_owned())
+                })?;
+                let at = {
+                    let held = body.kernel();
+                    held.edge_list().iter().position(|candidate| *candidate == edge)
+                }
+                .ok_or_else(|| {
+                    SessionError::Invalid("selected edge is not on the body".to_owned())
+                })?;
+                native.push(at);
+            }
+            let (share, reset) = solidcore_ops::session::with_kernel(self.kernel, || {
+                solidcore_ops::blend::edges_share_wedge(&body, &native)
+            });
+            self.note_reset(reset);
+            let share = share.map_err(|error| map_error(OpKind::Blend, error))?;
+            if !share {
+                return Err(SessionError::Invalid(
+                    "A G2 fillet can only round edges whose faces meet at the same angle in one node; these edges meet at different angles. Split them into separate fillet nodes, or use a G1 fillet."
+                        .to_owned(),
+                ));
+            }
+        }
         let (blend, options) = match kind {
             OpsBlend::Round(turn) => (
                 Blend::Round,
@@ -284,7 +314,7 @@ impl<'k> OpsSession<'k> {
                     )
                 });
                 self.note_reset(reset);
-                let _ = result.map_err(|error| map_error(OpKind::Blend, error))?;
+                result.map_err(|error| map_error(OpKind::Blend, error))?;
                 let mut brep = body.into_brep();
                 let made_faces = self.mark_made(&mut brep)?;
                 return Ok(OpsResult { brep, warnings: Vec::new(), made_faces });
@@ -950,6 +980,84 @@ mod tests {
         assert!(!take_needs_reset());
     }
 
+    /// The edge whose middle is `point`: every edge of these test bodies is a line, so its
+    /// vertices' middle lies on it.
+    fn edge_at_middle(brep: &Brep, point: [f64; 3]) -> EdgeId {
+        let middle =
+            |a: Point3, b: Point3| [(a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5];
+        brep.edge_list()
+            .iter()
+            .copied()
+            .find(|edge| {
+                let vertices = brep.edge(*edge).expect("edge").vertices;
+                let a = brep.vertex(vertices[0]).expect("vertex").point;
+                let b = brep.vertex(vertices[1]).expect("vertex").point;
+                let at = middle(a, b);
+                (0..3).all(|axis| (at[axis] - point[axis]).abs() < 1.0e-6)
+            })
+            .expect("an edge at that middle")
+    }
+
+    /// G2 (`Blend::Curvature`) gives every edge in one call the first edge's wedge angle, so
+    /// SolidCore refuses edges of different wedges. A box with its top back edge chamfered has
+    /// a 135-degree edge (the chamfer's top) and a 90-degree edge (the bottom front); a G2 of
+    /// the two is refused with a sentence that says what to do, and a G1 round of the same two
+    /// still builds.
+    #[test]
+    fn a_g2_blend_refuses_edges_of_different_wedges_but_a_round_builds() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let boxed = box_brep(&mut kernel);
+        let back = edge_at_middle(&boxed, [0.0, 10.0, 10.0]);
+        let chamfered = OpsSession::new(&mut kernel)
+            .blend(&boxed, &[back], 2.0, OpsBlend::Chamfer(ChamferCorner::Mitre))
+            .expect("chamfer");
+        let brep = chamfered.brep;
+        let sloped_top = edge_at_middle(&brep, [0.0, 8.0, 10.0]);
+        let square_bottom = edge_at_middle(&brep, [0.0, -10.0, -10.0]);
+        let edges = [sloped_top, square_bottom];
+
+        // The premise: the two edges are of different wedges. Measure it the way the session
+        // does, on a kernel copy at native edge-list indices.
+        let indices: Vec<usize> = edges
+            .iter()
+            .map(|edge| {
+                brep.edge_list().iter().position(|candidate| candidate == edge).expect("edge")
+            })
+            .collect();
+        let copy = solidcore::topology::brep::p3::brep_copy(&mut kernel, &brep).expect("copy");
+        let body = Body::from_brep(&mut kernel, copy).expect("body");
+        let (share, _) = solidcore_ops::session::with_kernel(&mut kernel, || {
+            solidcore_ops::blend::edges_share_wedge(&body, &indices)
+        });
+        assert_eq!(share.expect("measure the wedges"), false);
+
+        let refused = OpsSession::new(&mut kernel).blend(&brep, &edges, 1.0, OpsBlend::Curvature);
+        match refused {
+            Err(SessionError::Invalid(message)) => assert_eq!(
+                message,
+                "A G2 fillet can only round edges whose faces meet at the same angle in one node; these edges meet at different angles. Split them into separate fillet nodes, or use a G1 fillet."
+            ),
+            other => panic!("a G2 over different wedges must be refused, got {other:?}"),
+        }
+
+        let round =
+            OpsSession::new(&mut kernel).blend(&brep, &edges, 1.0, OpsBlend::Round(Turn::Mitre));
+        assert!(round.is_ok(), "a G1 round of the same edges still builds: {:?}", round.err());
+    }
+
+    /// The refusal is about different wedges, not about blending more than one edge: a G2 of
+    /// two square edges of a plain box (both 90 degrees) still builds.
+    #[test]
+    fn a_g2_blend_of_two_square_box_edges_still_builds() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let brep = box_brep(&mut kernel);
+        let top = edge_at_middle(&brep, [0.0, -10.0, 10.0]);
+        let bottom = edge_at_middle(&brep, [0.0, -10.0, -10.0]);
+        let result =
+            OpsSession::new(&mut kernel).blend(&brep, &[top, bottom], 1.0, OpsBlend::Curvature);
+        assert!(result.is_ok(), "two square edges share their wedge: {:?}", result.err());
+    }
+
     #[test]
     fn g2_three_edge_corner_builds_and_marks() {
         let mut kernel = nodecraft_kernel_profile::kernel();
@@ -963,7 +1071,7 @@ mod tests {
             groups.push((vertices, vec![*edge]));
         }
         let mut corner = Vec::new();
-        for (vertices, edges) in &groups {
+        for (vertices, _edges) in &groups {
             let joined: Vec<_> = groups
                 .iter()
                 .filter(|(other, _)| other[0] == vertices[0] || other[1] == vertices[0])
@@ -1126,11 +1234,11 @@ mod tests {
     }
 
     fn seed_blend(seed: u64) -> (bool, f64, String) {
-        use solidcore::kernel::Rng;
         let mut kernel = nodecraft_kernel_profile::kernel();
         let brep = box_brep(&mut kernel);
         let edge = brep.edge_list()[0];
-        kernel.rng = Rng::new(seed);
+        // each sampling call draws from this seed (the kernel keeps no generator, #20942)
+        kernel.seed = seed;
         let started = std::time::Instant::now();
         let result = OpsSession::new(&mut kernel).blend(&brep, &[edge], 8.0, OpsBlend::Curvature);
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
@@ -1903,6 +2011,26 @@ mod tests {
         assert_eq!(body.proof_attempts(), 1, "a proved body is never proved again");
     }
 
+    /// An undecided proof is not a refusal and is kept: a later consumer gets the honest
+    /// sentence, and no kernel work runs again for this body.
+    #[test]
+    fn an_undecided_body_is_not_refused_and_is_not_proved_again() {
+        use solidcore::math::Point3;
+        use solidcore::primitive::api_primitives::create_box;
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let body = SolidBody::new(
+            create_box(&mut kernel, Point3::new(0.0, 0.0, 0.0), 20.0, 20.0, 20.0).expect("box"),
+        );
+        let reason = "SolidCore could not prove this body is a closed solid (its volume's sign is undecided), so this operation can't use it. Try a slightly different size on the fillet.";
+        body.write_proof_for_test(ProofState::Undecided(reason.to_owned()));
+        assert_eq!(body.undecided(), Some(reason.to_owned()));
+        assert_eq!(body.refused(), None, "undecided is not a refusal");
+        assert!(!body.is_proved());
+        let error = body.prove(&mut kernel).expect_err("an undecided body has no proof");
+        assert_eq!(error, SessionError::Invalid(reason.to_owned()));
+        assert_eq!(body.proof_attempts(), 0, "an undecided body is not proved again");
+    }
+
     /// A refusal names the failed test and is kept: a second blocking proof does no kernel
     /// work. Without the cached state every caller would decide the volume sign again.
     #[test]
@@ -1913,6 +2041,10 @@ mod tests {
         assert_eq!(body.proof_attempts(), 1);
         let reason = body.refused().expect("the refusal is kept");
         assert!(reason.contains("closed solid"), "{reason}");
+        assert!(
+            reason.contains("pointer check fails"),
+            "the test is named, not merged into NotSolid: {reason}"
+        );
         assert_eq!(body.clone().refused(), Some(reason));
         assert!(body.prove(&mut kernel).is_err(), "still refused");
         assert_eq!(body.proof_attempts(), 1, "a refused body is not proved again");

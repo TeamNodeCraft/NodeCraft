@@ -732,9 +732,7 @@ pub(crate) fn boolean_breps_ops_with_kernel(
     b: &nodecraft_solidcore::solidcore::topology::Brep,
     op: nodecraft_bool::BooleanOp,
 ) -> Result<nodecraft_solidcore::solidcore::topology::Brep, String> {
-    let mut a = a.clone_standing_for_self().map_err(|error| error.to_string())?;
-    let mut b = b.clone_standing_for_self().map_err(|error| error.to_string())?;
-    Ok(nodecraft_layers::boolean_breps_ops(kernel, &mut a, &mut b, ops_boolean(op))?
+    Ok(nodecraft_layers::boolean_breps_ops(kernel, a, b, ops_boolean(op))?
         .ok_or_else(|| "Boolean produced no solids".to_owned())?)
 }
 

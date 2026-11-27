@@ -161,7 +161,7 @@ impl KernelPool {
                             kernel = nodecraft_solidcore::kernel::kernel();
                             generation = current;
                         }
-                        kernel.rng = nodecraft_solidcore::solidcore::kernel::Rng::new(work.seed);
+                        kernel.seed = work.seed;
                         kernel.set_cancel_token(work.token.clone());
                         let outcome = catch_unwind(AssertUnwindSafe(|| {
                             nodecraft_ops::cancel::within(&work.token, || (work.job)(&mut kernel))
@@ -391,23 +391,16 @@ mod tests {
     #[test]
     fn rng_seed_is_injected_per_job() {
         let pool = KernelPool::new(2);
-        let first = pool
-            .submit(17, CancelToken::new(), |kernel| kernel.rng.next_u64())
-            .recv()
-            .expect("result")
-            .expect("job");
-        let second = pool
-            .submit(17, CancelToken::new(), |kernel| kernel.rng.next_u64())
-            .recv()
-            .expect("result")
-            .expect("job");
-        assert_eq!(first, second);
-        let different = pool
-            .submit(18, CancelToken::new(), |kernel| kernel.rng.next_u64())
-            .recv()
-            .expect("result")
-            .expect("job");
-        assert_ne!(first, different);
+        let seed = |seed: u64| {
+            pool.submit(seed, CancelToken::new(), |kernel| kernel.seed)
+                .recv()
+                .expect("result")
+                .expect("job")
+        };
+        // each job's kernel samples from the job's own seed (the kernel keeps no generator)
+        assert_eq!(seed(17), 17);
+        assert_eq!(seed(17), 17);
+        assert_eq!(seed(18), 18);
     }
 
     #[test]
@@ -421,18 +414,21 @@ mod tests {
         set_current_revision_token(RevisionToken::new());
     }
 
+    /// Left on a worker's kernel by a job: a rebuilt kernel starts without it.
+    const MARKER: &str = "kernel pool test marker";
+
     #[test]
     fn pre_cancelled_job_still_rebuilds_the_kernel() {
         let pool = KernelPool::new(1);
         let token = CancelToken::new();
         token.cancel();
         pool.execute_with_token(1, token, |kernel| {
-            kernel.fillet_point_step.set(Some(1.0));
+            kernel.upstream_ub_passed.push(MARKER);
             Ok(())
         })
         .expect("job");
         let marker_left = pool
-            .execute(2, |kernel| Ok(kernel.fillet_point_step.get().is_some()))
+            .execute(2, |kernel| Ok(kernel.upstream_ub_passed.contains(&MARKER)))
             .expect("second job");
         assert!(!marker_left, "a cancelled job must leave a fresh kernel");
     }
@@ -451,7 +447,7 @@ mod tests {
             cancel.cancel();
         });
         let outcome = pool.execute_with_token(1, token, move |kernel| {
-            kernel.fillet_point_step.set(Some(1.0));
+            kernel.upstream_ub_passed.push(MARKER);
             let brep = create_box(kernel, Point3::new(-10.0, -10.0, -10.0), 20.0, 20.0, 20.0)
                 .map_err(|error| error.to_string())?;
             let edges = brep.edge_list().to_vec();
@@ -469,7 +465,7 @@ mod tests {
         canceller.join().expect("canceller");
         outcome.expect("cancelled job");
         let marker_left = pool
-            .execute(2, |kernel| Ok(kernel.fillet_point_step.get().is_some()))
+            .execute(2, |kernel| Ok(kernel.upstream_ub_passed.contains(&MARKER)))
             .expect("second job");
         assert!(!marker_left, "the worker kernel was not rebuilt");
     }

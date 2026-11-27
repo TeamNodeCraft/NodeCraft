@@ -12,7 +12,7 @@
 
 use solidcore::prism::profile::ProfileRefusal;
 use solidcore_ops::sweep::{CornerRefusal, PathCheck};
-use solidcore_ops::{Error as OpsError, Unblendable};
+use solidcore_ops::{Error as OpsError, SolidTest, Unblendable};
 
 use crate::SessionError;
 
@@ -32,10 +32,10 @@ pub(crate) enum OpKind {
 
 /// The message a node shows for every way an ops call can fail.
 pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
-    if op == OpKind::Shell {
-        if let Some(refusal) = shell_refusal(&error) {
-            return refusal;
-        }
+    if op == OpKind::Shell
+        && let Some(refusal) = shell_refusal(&error)
+    {
+        return refusal;
     }
     match error {
         // A cancellation is not a failure: it is the caller's own token, and the session
@@ -67,16 +67,28 @@ pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
                 .to_owned(),
         ),
 
+        // The boolean came back empty, but a vertex of an operand lies where the result must
+        // hold material: the kernel missed where the bodies cross. Its failure, not the input's.
+        OpsError::EmptyRefuted { at, .. } => SessionError::Kernel(format!(
+            "SolidCore missed where the bodies cross and would have returned an empty result; the point at {} must be inside it. Try moving one body slightly. If it repeats, please report it.",
+            format_point(at)
+        )),
+
         OpsError::NotSolid => SessionError::Invalid(
             "SolidCore built a result that is not a closed solid. This is usually a kernel limitation on this geometry; try a slightly different size."
                 .to_owned(),
         ),
 
-        // A `#[non_exhaustive]` tuple variant cannot be destructured from outside ops, so the
-        // whole error's `Display` gives the kernel's test clause, e.g. "it is inside out".
-        error @ OpsError::NotSolidBecause { .. } => SessionError::Invalid(format!(
-            "SolidCore built a result that is not a closed solid ({error}). This is usually a kernel limitation on this geometry; try a slightly different size."
-        )),
+        // A `#[non_exhaustive]` tuple variant cannot be destructured from outside ops: the
+        // test is read through `Error::not_solid_test` (the kernel's `SolidTest`). A test the
+        // kernel could not decide is not a refusal, so it gets its own honest sentence; a real
+        // failure keeps the wording below, with the kernel's test clause from `Display`.
+        error @ OpsError::NotSolidBecause { .. } => match error.not_solid_test() {
+            Some(test) if is_undecided_test(test) => undecided_proof(test),
+            _ => SessionError::Invalid(format!(
+                "SolidCore built a result that is not a closed solid ({error}). This is usually a kernel limitation on this geometry; try a slightly different size."
+            )),
+        },
 
         OpsError::NoRoom => SessionError::Invalid(
             "No room for this blend: another face is in the way of the size asked. Use a smaller size, or blend fewer edges at once."
@@ -137,21 +149,30 @@ pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
             "The kernel does not set back corner {corner}: it sets a corner back only where every edge meeting it is blended, all convex or all concave. Blend every edge meeting the corner, or blend fewer edges at once."
         )),
 
-        OpsError::TurnRefused { room, why, at } => {
+        // `side_edge` is an index into the kernel's own edge list, which means nothing to the
+        // user; the least radius is what they can act on.
+        OpsError::TurnRefused { room, why, at, side_edge: _, least_radius } => {
             let kind = if room {
                 "no radius builds the turn between these rounds"
             } else {
                 "this kind of turn between rounds is not built yet"
             };
+            let fix = match least_radius {
+                Some(radius) => format!(
+                    "Round the sharp edge between them first, with a radius of at least {}.",
+                    length(radius)
+                ),
+                None => "Blend fewer edges at once, or use a different corner treatment.".to_owned(),
+            };
             SessionError::Invalid(format!(
-                "The blend's rounds cannot turn where they meet{}: {kind}. {why}. Blend fewer edges at once, or use a different corner treatment.",
+                "The blend's rounds cannot turn where they meet{}: {kind}. {why}. {fix}",
                 near(at)
             ))
         }
 
         OpsError::RoundsCross { at, fit } => {
             let mut message = match at.split_first() {
-                Some((first, rest)) if rest.is_empty() => format!(
+                Some((first, [])) => format!(
                     "The rounds leave a face whose boundary crosses itself at one point, near {}.",
                     format_point(*first)
                 ),
@@ -419,7 +440,62 @@ pub(crate) fn map_error(op: OpKind, error: OpsError) -> SessionError {
         OpsError::EdgeLeftBehind { edge } => SessionError::Invalid(format!(
             "A control-point edit would move edge {edge}, which cannot follow its end (it is not a line between planar faces the edit keeps) and would leave a gap at the vertex. Edit the points away from that edge."
         )),
+
+        OpsError::Dome(refusal) => SessionError::Invalid(format!(
+            "SolidCore cannot raise a dome on this face: {refusal}. Pick a flat face and a positive height."
+        )),
+        OpsError::FrameMember(refusal) => SessionError::Invalid(format!(
+            "SolidCore cannot sweep this frame member: {refusal}. Check the path and the section."
+        )),
+        OpsError::ToolStopsShort => SessionError::Invalid(
+            "The split tool ends inside the face it runs into, so it cuts nothing off. Extend the tool past the face's edges."
+                .into(),
+        ),
+        OpsError::BlendsNotFollowed { exact, why } => SessionError::Invalid(if exact {
+            format!(
+                "The rounds on the moved faces would need a continuation that cannot be made exactly ({why}). Move the faces less, or remove the rounds first and add them after."
+            )
+        } else {
+            format!(
+                "The rounds on the moved faces cannot be taken off and put back ({why}). Remove the rounds first and add them after."
+            )
+        }),
+        OpsError::DraftCutsThrough { at, depth } => SessionError::Invalid(format!(
+            "A drafted face would cut through another face at {}, {depth:.3} mm past it. Use a smaller draft angle.",
+            format_point(at)
+        )),
+        // ops ran out of a work budget the caller gave it; NodeCraft gives none, so this is a
+        // kernel failure to report, not the user's input.
+        OpsError::OutOfFuel { op, spent, limit } => SessionError::Kernel(format!(
+            "SolidCore gave up in {op} after {spent} of the {limit} work units it was given. If it repeats, please report it."
+        )),
+        OpsError::NotOneFoot { found } => SessionError::Invalid(format!(
+            "SolidCore could not place a point on a face: it found {found} nearest points where one is needed. Try moving one body slightly."
+        )),
+        OpsError::Mesh(why) => SessionError::Invalid(format!(
+            "SolidCore could not rebuild a solid from this mesh: {why}."
+        )),
     }
+}
+
+/// Whether a failed solid test is a proof the kernel could not decide, not a refusal of the
+/// body. `SolidTest` is `#[non_exhaustive]`, so every other test (including one added later) is
+/// a refusal.
+pub(crate) fn is_undecided_test(test: SolidTest) -> bool {
+    matches!(test, SolidTest::VolumeUndecided | SolidTest::LoopOrientationUndecided)
+}
+
+/// The sentence for a proof the kernel could not decide. The body is not refused: no test
+/// showed it is not a solid, but an operation that needs a proved operand cannot use it.
+pub(crate) fn undecided_proof(test: SolidTest) -> SessionError {
+    let what = match test {
+        SolidTest::VolumeUndecided => "its volume's sign is undecided",
+        SolidTest::LoopOrientationUndecided => "a loop's orientation is undecided",
+        _ => "the kernel could not decide it",
+    };
+    SessionError::Invalid(format!(
+        "SolidCore could not prove this body is a closed solid ({what}), so this operation can't use it. Try a slightly different size on the fillet."
+    ))
 }
 
 /// A shell's own wording for the refusals it can meet: the message names the shell's wall, never
@@ -466,9 +542,16 @@ fn shell_refusal(error: &OpsError) -> Option<SessionError> {
             "The shell's wall would not be a closed solid on this body. Try a thinner shell, or open fewer faces."
                 .to_owned()
         }
-        OpsError::NotSolidBecause { .. } => format!(
-            "The shell's wall would not be a closed solid on this body ({error}). Try a thinner shell, or open fewer faces."
-        ),
+        // An undecided proof is worded by the op-neutral mapping below: it is not the wall's
+        // fault, and the sentence says the kernel could not prove the body.
+        OpsError::NotSolidBecause { .. } => {
+            if error.not_solid_test().is_some_and(is_undecided_test) {
+                return None;
+            }
+            format!(
+                "The shell's wall would not be a closed solid on this body ({error}). Try a thinner shell, or open fewer faces."
+            )
+        }
         OpsError::Argument => {
             "The shell's wall or openings are not valid for this body. Check the thickness and reselect the faces to remove."
                 .to_owned()
@@ -581,7 +664,7 @@ fn profile_refusal(refusal: ProfileRefusal) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpKind, map_error};
+    use super::{OpKind, SolidTest, is_undecided_test, map_error, undecided_proof};
     use crate::SessionError;
     use solidcore::error::ErrorKind;
     use solidcore::error::offset::LoopCrossing;
@@ -604,6 +687,42 @@ mod tests {
         if message != "cancelled" {
             assert!(message.ends_with('.'), "not a full sentence: {message}");
         }
+    }
+
+    /// The two "undecided" tests are not refusals: their sentence says the kernel could not
+    /// prove the body, never that it is not a closed solid. Every other test is a refusal.
+    #[test]
+    fn an_undecided_test_is_worded_as_could_not_prove() {
+        for test in [SolidTest::VolumeUndecided, SolidTest::LoopOrientationUndecided] {
+            assert!(is_undecided_test(test), "{test} is undecided");
+            let message = undecided_proof(test).to_string();
+            assert!(message.contains("could not prove"), "{message}");
+            assert!(!message.contains("is not a closed solid"), "{message}");
+            assert!(message.ends_with('.'), "not a full sentence: {message}");
+        }
+        for test in [
+            SolidTest::NotManifold,
+            SolidTest::NotClosedSolids,
+            SolidTest::PointersInvalid,
+            SolidTest::Invalid,
+            SolidTest::VolumeNegative,
+        ] {
+            assert!(!is_undecided_test(test), "{test} is a refusal");
+        }
+    }
+
+    /// The variant is `#[non_exhaustive]`, so its test cannot be destructured outside ops; the
+    /// seam's `Error::not_solid_test` reads it honestly. A real call still names its test.
+    #[test]
+    fn not_solid_because_names_its_test_through_the_accessor() {
+        let mut kernel = nodecraft_kernel_profile::kernel();
+        let sheet =
+            create_plane(&mut kernel, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("a sheet");
+        let body = Body::from_brep(&mut kernel, sheet).expect("a sheet body");
+        let (checked, _) = solidcore_ops::session::with_kernel(&mut kernel, || body.check_solid());
+        let error = checked.expect_err("a sheet is not a closed solid");
+        assert_eq!(error.not_solid_test(), Some(SolidTest::NotManifold));
+        assert!(!is_undecided_test(error.not_solid_test().expect("a named test")));
     }
 
     /// Every `solidcore_ops::Error` this crate can build, mapped: readable text, no `Debug`.
@@ -673,11 +792,15 @@ mod tests {
                 room: true,
                 why: "the wall turns away".to_owned(),
                 at: Some([1.0, 2.0, 3.0]),
+                side_edge: Some(7),
+                least_radius: Some(1.5),
             },
             OpsError::TurnRefused {
                 room: false,
                 why: "the corner is a saddle".to_owned(),
                 at: None,
+                side_edge: None,
+                least_radius: None,
             },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], fit: Some(2.5) },
             OpsError::RoundsCross { at: vec![[1.0, 2.0, 3.0]], fit: None },
@@ -799,6 +922,16 @@ mod tests {
                 why: solidcore_ops::surface_cvs::SeamMismatch::Degree { a: 2, b: 3 },
             },
             OpsError::EdgeLeftBehind { edge: 4 },
+            OpsError::ToolStopsShort,
+            OpsError::BlendsNotFollowed {
+                exact: true,
+                why: "the face turns past the round".into(),
+            },
+            OpsError::BlendsNotFollowed { exact: false, why: "the round would cross".into() },
+            OpsError::DraftCutsThrough { at: [1.0, 2.0, 3.0], depth: 0.25 },
+            OpsError::OutOfFuel { op: "boolean", spent: 120, limit: 100 },
+            OpsError::NotOneFoot { found: 2 },
+            OpsError::Mesh("the mesh is not closed".into()),
         ];
         for error in errors {
             assert_readable(OpKind::Body, error);
@@ -832,6 +965,21 @@ mod tests {
         assert!(
             corner.contains("The kernel says: the corner is a saddle."),
             "the corner's reason is not written out: {corner}"
+        );
+        let turn = map_error(
+            OpKind::Body,
+            OpsError::TurnRefused {
+                room: true,
+                why: "the wall turns away".to_owned(),
+                at: None,
+                side_edge: Some(7),
+                least_radius: Some(1.5),
+            },
+        )
+        .to_string();
+        assert!(
+            turn.contains(&format!("with a radius of at least {}.", super::length(1.5))),
+            "the least radius of the side edge is not written out: {turn}"
         );
 
         assert_eq!(map_error(OpKind::Body, OpsError::Cancelled), SessionError::Cancelled);

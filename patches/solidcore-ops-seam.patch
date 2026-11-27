@@ -1,7 +1,7 @@
-From 21d14caf439576962c845a8fa4676eabee23651e Mon Sep 17 00:00:00 2001
+From 091423040672c84f40979b841af5c0ff516bc019 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:05:16 +1030
-Subject: [PATCH 1/8] ops: lend a kernel and build bodies from B-reps
+Subject: [PATCH 01/12] ops: lend a kernel and build bodies from B-reps
 
 Add session::with_kernel, borrowed-mode rules, Body::from_brep/into_brep, Order::of and a seam test.
 ---
@@ -13,10 +13,10 @@ Add session::with_kernel, borrowed-mode rules, Body::from_brep/into_brep, Order:
  5 files changed, 116 insertions(+)
 
 diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
-index 390b6c522..d6c9219ad 100644
+index e79afac0d0..85636e2fac 100644
 --- a/solidcore/crates/solidcore-convert/src/brep.rs
 +++ b/solidcore/crates/solidcore-convert/src/brep.rs
-@@ -83,6 +83,14 @@ impl From<SolidError> for Unsupported {
+@@ -87,6 +87,14 @@ impl From<SolidError> for Unsupported {
  
  type R<T> = Result<T, Unsupported>;
  
@@ -32,7 +32,7 @@ index 390b6c522..d6c9219ad 100644
  /// vertices. In [`to_record`]'s order several record edges may name one kernel edge where solids
  /// touch along it; [`to_kernel`] builds one kernel edge per record edge.
 diff --git a/solidcore/crates/solidcore-ops/Cargo.toml b/solidcore/crates/solidcore-ops/Cargo.toml
-index 09e4a7bfe..f09a38aec 100644
+index 09e4a7bfe8..f09a38aec5 100644
 --- a/solidcore/crates/solidcore-ops/Cargo.toml
 +++ b/solidcore/crates/solidcore-ops/Cargo.toml
 @@ -47,6 +47,7 @@ path = "tests/round_between_crossing_cylinders.rs"
@@ -44,10 +44,10 @@ index 09e4a7bfe..f09a38aec 100644
  solidcore-record = { path = "../solidcore-record" }
  solidcore-convert = { path = "../solidcore-convert" }
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index 4e6d558d9..78c4648aa 100644
+index 31b5a5ca35..f85c39e423 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -174,6 +174,19 @@ impl Body {
+@@ -204,6 +204,19 @@ impl Body {
  }
  
  impl Body {
@@ -68,10 +68,10 @@ index 4e6d558d9..78c4648aa 100644
      #[must_use]
      pub(crate) fn new(b: Brep) -> Body {
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 5fe86f8d0..3f5907ca6 100644
+index 4041cd0624..d45492e1be 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -47,6 +47,7 @@
+@@ -44,6 +44,7 @@
  use std::cell::Cell;
  use std::num::NonZeroUsize;
  use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -79,17 +79,17 @@ index 5fe86f8d0..3f5907ca6 100644
  use std::sync::{Arc, Mutex, OnceLock, PoisonError};
  
  use solidcore::blend::fillet_section::definition::StationMemo;
-@@ -66,6 +67,9 @@ static IDLE: Mutex<Vec<Kernel>> = Mutex::new(Vec::new());
- /// that a kernel taken before the step was settled still latches the settled step (#18164).
- static STEP: OnceLock<f64> = OnceLock::new();
+@@ -58,6 +59,9 @@ use crate::{Error, ErrorClass, FailureCode, Result};
+ /// The kernels waiting between calls, the one given back last at the end.
+ static IDLE: Mutex<Vec<Kernel>> = Mutex::new(Vec::new());
  static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
 +static NEEDS_RESET: AtomicBool = AtomicBool::new(false);
 +
 +scoped_tls::scoped_thread_local!(static BORROWED: std::cell::RefCell<Option<Kernel>>);
  
- /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
- /// `docs/failure-codes-and-reproduction.md` 3.2): read it by its fields, never build it.
-@@ -369,6 +373,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+ /// The recertify memo the application's kernels share, so that a certificate one pool's
+ /// kernel finished serves every other kernel too (a hit returns what recertifying the same
+@@ -396,6 +400,22 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
      (value, mine)
  }
  
@@ -112,7 +112,7 @@ index 5fe86f8d0..3f5907ca6 100644
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
  /// such a panic recovered.)
  #[must_use]
-@@ -491,6 +511,51 @@ pub(crate) fn run_taking<T: Answer>(
+@@ -529,6 +549,51 @@ pub(crate) fn run_taking<T: Answer>(
      run_with(call, inputs, true, f)
  }
  
@@ -164,7 +164,7 @@ index 5fe86f8d0..3f5907ca6 100644
  fn run_with<T: Answer>(
      call: &'static str,
      inputs: Inputs<'_>,
-@@ -508,6 +573,13 @@ fn run_with<T: Answer>(
+@@ -546,6 +611,13 @@ fn run_with<T: Answer>(
      if in_call() || IN_HOOK.with(Cell::get) {
          return Err(Error::Reentered);
      }
@@ -179,10 +179,10 @@ index 5fe86f8d0..3f5907ca6 100644
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 3c6bee467..c6f3cb02a 100644
+index 980af0f624..043e805fe7 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2505,6 +2505,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -4108,6 +4108,28 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -215,10 +215,10 @@ index 3c6bee467..c6f3cb02a 100644
 2.54.0 (Apple Git-157)
 
 
-From 0132cad21c2a90ed07013d5df9ccb66f3fcd0115 Mon Sep 17 00:00:00 2001
+From f9f763cdffd6e3a064af0c9398ec58bdcbdf430d Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 19:25:30 +1030
-Subject: [PATCH 2/8] ops: fix borrowed-kernel reset, cancel, panic and hook
+Subject: [PATCH 02/12] ops: fix borrowed-kernel reset, cancel, panic and hook
  rules
 
 Per-thread needs-reset flag, restore the saved cancel token, catch/restore the kernel around with_kernel, refuse hook reentry, get-or-create trims and list-order Order::of.
@@ -231,7 +231,7 @@ Per-thread needs-reset flag, restore the saved cancel token, catch/restore the k
  5 files changed, 49 insertions(+), 19 deletions(-)
 
 diff --git a/solidcore/Cargo.lock b/solidcore/Cargo.lock
-index 2127093cc..10cc67134 100644
+index ebdd4bbabe..83c6fdaa7d 100644
 --- a/solidcore/Cargo.lock
 +++ b/solidcore/Cargo.lock
 @@ -349,6 +349,12 @@ dependencies = [
@@ -247,7 +247,7 @@ index 2127093cc..10cc67134 100644
  [[package]]
  name = "serde"
  version = "1.0.229"
-@@ -471,6 +477,7 @@ name = "solidcore-ops"
+@@ -472,6 +478,7 @@ name = "solidcore-ops"
  version = "0.1.0"
  dependencies = [
   "flate2",
@@ -256,10 +256,10 @@ index 2127093cc..10cc67134 100644
   "serde_json",
   "solidcore",
 diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
-index d6c9219ad..9e503db79 100644
+index 85636e2fac..d3621457f9 100644
 --- a/solidcore/crates/solidcore-convert/src/brep.rs
 +++ b/solidcore/crates/solidcore-convert/src/brep.rs
-@@ -87,7 +87,7 @@ impl Order {
+@@ -91,7 +91,7 @@ impl Order {
      /// The order of a B-rep's own lists.
      #[must_use]
      pub fn of(brep: &Brep) -> Self {
@@ -269,10 +269,10 @@ index d6c9219ad..9e503db79 100644
  }
  
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index 78c4648aa..b24420a04 100644
+index f85c39e423..4df3302f1a 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -176,9 +176,22 @@ impl Body {
+@@ -206,9 +206,22 @@ impl Body {
  impl Body {
      /// A body from an application B-rep: make the UV trims ops expects first.
      pub fn from_brep(kernel: &mut Kernel, mut brep: Brep) -> Result<Body> {
@@ -298,10 +298,10 @@ index 78c4648aa..b24420a04 100644
          Ok(Body::new(brep))
      }
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 3f5907ca6..ac208dcdc 100644
+index d45492e1be..e7348f49af 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -47,7 +47,6 @@
+@@ -44,7 +44,6 @@
  use std::cell::Cell;
  use std::num::NonZeroUsize;
  use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -309,9 +309,9 @@ index 3f5907ca6..ac208dcdc 100644
  use std::sync::{Arc, Mutex, OnceLock, PoisonError};
  
  use solidcore::blend::fillet_section::definition::StationMemo;
-@@ -67,9 +66,10 @@ static IDLE: Mutex<Vec<Kernel>> = Mutex::new(Vec::new());
- /// that a kernel taken before the step was settled still latches the settled step (#18164).
- static STEP: OnceLock<f64> = OnceLock::new();
+@@ -59,9 +58,10 @@ use crate::{Error, ErrorClass, FailureCode, Result};
+ /// The kernels waiting between calls, the one given back last at the end.
+ static IDLE: Mutex<Vec<Kernel>> = Mutex::new(Vec::new());
  static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
 -static NEEDS_RESET: AtomicBool = AtomicBool::new(false);
 -
@@ -320,9 +320,9 @@ index 3f5907ca6..ac208dcdc 100644
 +    static NEEDS_RESET: Cell<bool> = const { Cell::new(false) };
 +}
  
- /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
- /// `docs/failure-codes-and-reproduction.md` 3.2): read it by its fields, never build it.
-@@ -374,19 +374,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
+ /// The recertify memo the application's kernels share, so that a certificate one pool's
+ /// kernel finished serves every other kernel too (a hit returns what recertifying the same
+@@ -401,19 +401,25 @@ pub fn profiled<T>(f: impl FnOnce() -> T) -> (T, Vec<CallProfile>) {
  }
  
  /// Run `f` with every ops call on this thread using `kernel` instead of the process kernel.
@@ -354,7 +354,7 @@ index 3f5907ca6..ac208dcdc 100644
  }
  
  /// Is this thread inside a kernel call, whose panic the session catches? (Crash reports mark
-@@ -526,8 +532,9 @@ fn run_borrowed<T: Answer>(
+@@ -564,8 +570,9 @@ fn run_borrowed<T: Answer>(
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
          return Err(Error::Cancelled);
      }
@@ -365,7 +365,7 @@ index 3f5907ca6..ac208dcdc 100644
          k.cancel = Some(token.either(&previous));
      }
      set_current(Some(call));
-@@ -539,19 +546,21 @@ fn run_borrowed<T: Answer>(
+@@ -577,19 +584,21 @@ fn run_borrowed<T: Answer>(
      let caught = catch_unwind(AssertUnwindSafe(|| f(k)));
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
@@ -392,10 +392,10 @@ index 3f5907ca6..ac208dcdc 100644
      r
  }
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index c6f3cb02a..26fa78af2 100644
+index 043e805fe7..2976861994 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2522,9 +2522,10 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -4125,9 +4125,10 @@ fn borrowed_kernel_matches_the_global_path() {
      kernel.fixes = UpstreamFixes::all();
      let mut borrowed = Body::from_brep(&mut kernel, brep).unwrap();
      let edge = top_front(&borrowed);
@@ -412,10 +412,10 @@ index c6f3cb02a..26fa78af2 100644
 2.54.0 (Apple Git-157)
 
 
-From 107edc17a8cf2ecc039c9a3361d186f1ab438e72 Mon Sep 17 00:00:00 2001
+From 52255db56a55853f8c8065b1bc1af5bf34facac8 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Thu, 12 Nov 2026 20:07:23 +1030
-Subject: [PATCH 3/8] ops: keep a lent kernel's own cancel token
+Subject: [PATCH 03/12] ops: keep a lent kernel's own cancel token
 
 Combine the kernel token with any cancel::within token and test a cancelled lent kernel without within.
 ---
@@ -424,10 +424,10 @@ Combine the kernel token with any cancel::within token and test a cancelled lent
  2 files changed, 25 insertions(+), 4 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index ac208dcdc..dd069ada3 100644
+index e7348f49af..76bdd98ac1 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -533,10 +533,11 @@ fn run_borrowed<T: Answer>(
+@@ -571,10 +571,11 @@ fn run_borrowed<T: Answer>(
          return Err(Error::Cancelled);
      }
      let saved_cancel = k.cancel.take();
@@ -444,10 +444,10 @@ index ac208dcdc..dd069ada3 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 26fa78af2..febc0c7a3 100644
+index 2976861994..16944de627 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -4403,6 +4403,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
+@@ -6054,6 +6054,26 @@ fn a_round_runs_over_knot_lines_where_a_loft_face_s_normal_turns() {
      assert!((removed - 127.1).abs() < 1.0, "removed {removed}");
  }
  
@@ -478,20 +478,21 @@ index 26fa78af2..febc0c7a3 100644
 2.54.0 (Apple Git-157)
 
 
-From 07913329be73796159f95259593715dd8e47abc5 Mon Sep 17 00:00:00 2001
+From 1208cc98761f3166a6caec69336937954c395629 Mon Sep 17 00:00:00 2001
 From: NodeCraft <dev@nodecraft.local>
 Date: Fri, 13 Nov 2026 21:04:31 +1030
-Subject: [PATCH 4/8] test: close the carried-faces test after the seam rebase
+Subject: [PATCH 04/12] test: close the carried-faces test after the seam
+ rebase
 
 ---
  solidcore/crates/solidcore-ops/tests/blend.rs | 1 +
  1 file changed, 1 insertion(+)
 
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index febc0c7a3..9186611e9 100644
+index 16944de627..61d1995063 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2505,6 +2505,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
+@@ -4108,6 +4108,7 @@ fn the_faces_a_round_is_carried_on_past_are_the_kernels() {
          solidcore_ops::carried_faces(&b, inner, 0.0),
          Err(Error::Argument)
      ));
@@ -503,10 +504,11 @@ index febc0c7a3..9186611e9 100644
 2.54.0 (Apple Git-157)
 
 
-From 4f4299ccfab14794ab076d817ce65f68fe5ebe74 Mon Sep 17 00:00:00 2001
+From 9fd526e1701b3db76b1a5b954bf39dbfd850b753 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:47:39 +1030
-Subject: [PATCH 5/8] ops: keep a proof across a copy, and defer it to the node
+Subject: [PATCH 05/12] ops: keep a proof across a copy, and defer it to the
+ node
 
 Body::to_brep_on / copy_held_on keep the proof on a deep copy (the same B-rep in the same
 order), Body::prove_on takes the node-end proof, and session::Validation::EachNode leaves the
@@ -515,17 +517,17 @@ the saved volume-sign decisions can be counted.
 
 Co-Authored-By: DeepSeek <noreply@deepseek.com>
 ---
- solidcore/crates/solidcore-ops/src/body.rs    | 99 +++++++++++++++++--
- solidcore/crates/solidcore-ops/src/lib.rs     |  1 +
- solidcore/crates/solidcore-ops/src/session.rs | 65 +++++++++++-
- .../crates/solidcore-ops/tests/proof_reuse.rs | 53 ++++++++++
- 4 files changed, 207 insertions(+), 11 deletions(-)
+ solidcore/crates/solidcore-ops/src/body.rs    | 102 +++++++++++++++---
+ solidcore/crates/solidcore-ops/src/lib.rs     |   1 +
+ solidcore/crates/solidcore-ops/src/session.rs |  65 ++++++++++-
+ .../crates/solidcore-ops/tests/proof_reuse.rs |  53 +++++++++
+ 4 files changed, 207 insertions(+), 14 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index b24420a04..e399a9c22 100644
+index 4df3302f1a..75d1e9eae3 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -29,7 +29,9 @@ use solidcore_convert::brep::{to_kernel, to_record, Order, Unsupported};
+@@ -32,7 +32,9 @@ use solidcore_convert::brep::{to_kernel, to_record, turn_to_record_side, Order,
  use solidcore_record::brep::Brep as Record;
  
  use crate::error::status;
@@ -536,7 +538,7 @@ index b24420a04..e399a9c22 100644
  use crate::split::copies_of;
  use crate::{Error, Result};
  
-@@ -200,6 +202,72 @@ impl Body {
+@@ -230,6 +232,72 @@ impl Body {
      #[must_use]
      pub fn into_brep(self) -> Brep { self.into_inner() }
  
@@ -609,23 +611,27 @@ index b24420a04..e399a9c22 100644
      /// A body the kernel made.
      #[must_use]
      pub(crate) fn new(b: Brep) -> Body {
-@@ -607,12 +675,17 @@ impl Expect {
+@@ -741,14 +809,20 @@ impl Expect {
      ) -> solidcore::Result<Expect> {
          let solid = is_manifold_solid(input)?
              && (proof.outward.is_some_and(|o| o.holds(k))
--                || undrawn(k, |k| {
--                    Ok(match proof.primitive {
--                        Some(t) => is_outward_primitive(k, input, &t)?,
--                        None => false,
--                    } || prove(k, input)?.is_some())
--                })?);
+-                || match proof.primitive {
+-                    Some(t) => {
+-                        give_missing_trims(k, input)?;
+-                        is_outward_primitive(k, input, &t)?
 +                || match validation() {
-+                    Validation::EachStep => undrawn(k, |k| {
-+                        Ok(match proof.primitive {
-+                            Some(t) => is_outward_primitive(k, input, &t)?,
++                    Validation::EachStep => {
++                        (match proof.primitive {
++                            Some(t) => {
++                                give_missing_trims(k, input)?;
++                                is_outward_primitive(k, input, &t)?
++                            }
 +                            None => false,
-+                        } || prove(k, input)?.is_some())
-+                    })?,
++                        }) || prove(k, input)?.is_some()
+                     }
+-                    None => false,
+-                }
+-                || prove(k, input)?.is_some());
 +                    // The node proves each body it outputs itself; do not decide a body the
 +                    // calls inside it exchange.
 +                    Validation::EachNode => false,
@@ -633,42 +639,49 @@ index b24420a04..e399a9c22 100644
          Ok(Expect {
              solid,
              touching: false,
-@@ -700,8 +773,16 @@ pub(crate) fn finish_proved(
-     } else {
+@@ -838,9 +912,13 @@ pub(crate) fn finish_proved(
          is_manifold_solid(&b)?
      };
--    let outward = if closed { prove(k, &mut b)? } else { None };
--    if outward.is_none() {
-+    let outward = if closed {
+     let outward = if closed {
+-        match prove_naming(k, &mut b)? {
+-            Ok(outward) => outward,
+-            Err(test) => return Ok(Err(Error::NotSolidBecause(test))),
 +        match validation() {
-+            Validation::EachStep => prove(k, &mut b)?,
++            Validation::EachStep => match prove_naming(k, &mut b)? {
++                Ok(outward) => Some(outward),
++                Err(test) => return Ok(Err(Error::NotSolidBecause(test))),
++            },
 +            // The node's output proof ([`Body::prove_on`]) decides it once.
 +            Validation::EachNode => None,
-+        }
-+    } else {
-+        None
-+    };
-+    if !closed || (!matches!(validation(), Validation::EachNode) && outward.is_none()) {
-         return Ok(Err(Error::NotSolid));
-     }
-     Ok(Ok((b, outward)))
+         }
+     } else {
+         // the topology test failed first, so it is the one named
+@@ -850,7 +928,7 @@ pub(crate) fn finish_proved(
+             SolidTest::NotManifold
+         })));
+     };
+-    Ok(Ok((b, Some(outward))))
++    Ok(Ok((b, outward)))
+ }
+ 
+ /// The result contract under `contract`. [`Contract::Proved`]: [`finish_proved`]'s.
 diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
-index 374473136..9d1eff76f 100644
+index 382452410d..13d4aaa00c 100644
 --- a/solidcore/crates/solidcore-ops/src/lib.rs
 +++ b/solidcore/crates/solidcore-ops/src/lib.rs
-@@ -105,6 +105,7 @@ pub use blend::{
- pub use body::{
-     make_box, make_cone, make_cylinder, make_sphere, make_torus, Body, Contract, TurnedOver,
- };
+@@ -163,6 +163,7 @@ pub use body::make_torus;
+ pub use body::Body;
+ pub use body::Contract;
+ pub use body::TurnedOver;
 +pub use session::Validation;
  pub use boolean::BooleanOp;
- pub use check::{CheckLevel, CheckReport};
- pub use contact::Gap;
+ pub use check::CheckLevel;
+ pub use check::CheckReport;
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index dd069ada3..344e50069 100644
+index 76bdd98ac1..a2abfc56c4 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -69,6 +69,46 @@ static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
+@@ -61,6 +61,46 @@ static FIXES: Mutex<Option<UpstreamFixes>> = Mutex::new(None);
  scoped_tls::scoped_thread_local!(static BORROWED: std::cell::RefCell<Option<Kernel>>);
  thread_local! {
      static NEEDS_RESET: Cell<bool> = const { Cell::new(false) };
@@ -714,8 +727,8 @@ index dd069ada3..344e50069 100644
 +    VALIDATION.with(Cell::get)
  }
  
- /// A failed call, as the failure callback sees it. More fields come (the call's arguments,
-@@ -544,7 +584,28 @@ fn run_borrowed<T: Answer>(
+ /// The recertify memo the application's kernels share, so that a certificate one pool's
+@@ -582,7 +622,28 @@ fn run_borrowed<T: Answer>(
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
      let snapshot = (before && hook.is_some()).then(|| written(k, inputs));
      STOPPED.with(|d| d.set(None));
@@ -745,7 +758,7 @@ index dd069ada3..344e50069 100644
      let stopped = STOPPED.with(Cell::take).unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
      let r = match caught {
          Ok(_) if stopped => { NEEDS_RESET.with(|flag| flag.set(true)); Err(Error::Cancelled) }
-@@ -862,7 +923,7 @@ pub(crate) fn measure_body<T: Answer>(
+@@ -984,7 +1045,7 @@ pub(crate) fn measure_body<T: Answer>(
      })
  }
  
@@ -755,12 +768,12 @@ index dd069ada3..344e50069 100644
          "{call}: the body was left unfinished by an earlier panic"
      ))
 diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index 45343de54..919f21bf1 100644
+index 6330565aa0..160e80ec28 100644
 --- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
 +++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -157,3 +157,56 @@ fn a_proof_made_under_other_fixes_is_not_taken() {
-     all_fixes();
-     assert_eq!(decided, 3);
+@@ -371,3 +371,56 @@ fn beads_leave_the_part_s_proof_standing() {
+     assert_eq!(beads(&[&part], &[joint], 0.0).unwrap().len(), 1);
+     assert_eq!(second_cut(part), bare, "the beads dropped the part's proof");
  }
 +
 +/// `Body::copy_held_on` keeps the proof on a deep copy (the same B-rep in the same order), so a
@@ -819,10 +832,10 @@ index 45343de54..919f21bf1 100644
 2.54.0 (Apple Git-157)
 
 
-From e931366b1accc439cee41991fdacfa1450a263b5 Mon Sep 17 00:00:00 2001
+From c76068f8dfb0e6ed13d9748657ddbdf8e7520ecf Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 14 Nov 2026 04:58:33 +1030
-Subject: [PATCH 6/8] ops: EachNode keeps the closedness test and defers only
+Subject: [PATCH 06/12] ops: EachNode keeps the closedness test and defers only
  the proof
 
 An operand with no standing proof counts as a solid exactly when is_manifold_solid says it is
@@ -833,18 +846,18 @@ under it is NotSolid; a sheet boolean matches EachStep.
 
 Co-Authored-By: DeepSeek <noreply@deepseek.com>
 ---
- solidcore/crates/solidcore-ops/src/body.rs    | 44 +++++++++++++++++--
- .../crates/solidcore-ops/tests/proof_reuse.rs | 22 ++++++++++
- 2 files changed, 63 insertions(+), 3 deletions(-)
+ solidcore/crates/solidcore-ops/src/body.rs    | 50 +++++++++++++++++--
+ .../crates/solidcore-ops/tests/proof_reuse.rs | 22 ++++++++
+ 2 files changed, 69 insertions(+), 3 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index e399a9c22..fba5ec7f7 100644
+index 75d1e9eae3..0ee6c79195 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -682,9 +682,10 @@ impl Expect {
+@@ -819,9 +819,10 @@ impl Expect {
                              None => false,
-                         } || prove(k, input)?.is_some())
-                     })?,
+                         }) || prove(k, input)?.is_some()
+                     }
 -                    // The node proves each body it outputs itself; do not decide a body the
 -                    // calls inside it exchange.
 -                    Validation::EachNode => false,
@@ -855,18 +868,18 @@ index e399a9c22..fba5ec7f7 100644
                  });
          Ok(Expect {
              solid,
-@@ -974,3 +975,40 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
-         )
-     })
+@@ -1200,3 +1201,46 @@ mod tests {
+         }
+     }
  }
 +
 +#[cfg(test)]
-+mod tests {
++mod each_node_tests {
 +    use super::*;
++    use crate::session::{validating, Validation};
 +    use solidcore::kernel::KernelOptions;
 +    use solidcore::math::Point3;
 +    use solidcore::primitive::api_primitives::{create_box, create_plane};
-+    use crate::session::{validating, Validation};
 +
 +    fn kernel() -> Kernel {
 +        let mut kernel = Kernel::new(&KernelOptions::default());
@@ -876,31 +889,37 @@ index e399a9c22..fba5ec7f7 100644
 +
 +    /// `EachNode` defers only the outward proof: an operand is a solid exactly when the cheap
 +    /// topology test says it is closed, and a solid-expect result is still tested for
-+    /// closedness inside the node (`Error::NotSolid`), so an open intermediate cannot pass.
++    /// closedness inside the node, so an open intermediate cannot pass.
 +    #[test]
 +    fn each_node_keeps_the_closedness_test_and_defers_only_the_proof() {
 +        let mut k = kernel();
-+        let mut solid = create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
-+        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None)).expect("expect");
++        let mut solid =
++            create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
++        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None))
++            .expect("expect");
 +        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
 +
 +        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-+        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None)).expect("expect");
++        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None))
++            .expect("expect");
 +        assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
 +
-+        // The regression: with the operand's expect (SOLID), an open result must still fail
-+        // the closedness test inside the node. Under the old rule the expect was FACES, so
-+        // finish_proved returned the sheet without any test.
++        // With the operand's expect (SOLID), an open result must still fail the closedness
++        // test inside the node, naming the topology test it failed.
 +        let open = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-+        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed)).expect("finish");
-+        assert!(matches!(refused, Err(Error::NotSolid)), "an open result under a solid expect is NotSolid");
++        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed))
++            .expect("finish");
++        assert!(
++            matches!(refused, Err(Error::NotSolidBecause(SolidTest::NotManifold))),
++            "an open result under a solid expect is not a solid: {refused:?}"
++        );
 +    }
 +}
 diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index 919f21bf1..8a1b9508d 100644
+index 160e80ec28..53fb3f2298 100644
 --- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
 +++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -210,3 +210,25 @@ fn each_node_proves_only_the_output() {
+@@ -424,3 +424,25 @@ fn each_node_proves_only_the_output() {
      assert_eq!(decisions(&calls), 0, "the calls inside the node prove nothing");
      body.prove_on(&mut kernel).expect("the node's output is a solid");
  }
@@ -930,27 +949,28 @@ index 919f21bf1..8a1b9508d 100644
 2.54.0 (Apple Git-157)
 
 
-From c29f4927343e41baff811e0174a9ff6478ad007a Mon Sep 17 00:00:00 2001
+From f3b2e40ae90ac71fafeaeaf7fc9c6c3a91d9a684 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Tue, 17 Nov 2026 15:40:36 +1030
-Subject: [PATCH 7/8] ops: fit the borrowed-kernel path to the per-call session
+Subject: [PATCH 07/12] ops: fit the borrowed-kernel path to the per-call
+ session
 
 The rebased session keeps each call's kernel in the pool and the call's name
 in a thread local, so the borrowed path sets CURRENT directly and clears it
 from its depth guard. Format the rebased ops files as rustfmt writes them.
 ---
  .../crates/solidcore-convert/src/brep.rs      |  6 +-
- solidcore/crates/solidcore-ops/src/body.rs    | 47 +++++++++-----
+ solidcore/crates/solidcore-ops/src/body.rs    | 13 ++--
  solidcore/crates/solidcore-ops/src/session.rs | 43 +++++++++---
  solidcore/crates/solidcore-ops/tests/blend.rs | 36 ++++++++--
  .../crates/solidcore-ops/tests/proof_reuse.rs | 65 +++++++++++++++----
- 5 files changed, 151 insertions(+), 46 deletions(-)
+ 5 files changed, 126 insertions(+), 37 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
-index 9e503db79..e4cf1ad17 100644
+index d3621457f9..df994db641 100644
 --- a/solidcore/crates/solidcore-convert/src/brep.rs
 +++ b/solidcore/crates/solidcore-convert/src/brep.rs
-@@ -87,7 +87,11 @@ impl Order {
+@@ -91,7 +91,11 @@ impl Order {
      /// The order of a B-rep's own lists.
      #[must_use]
      pub fn of(brep: &Brep) -> Self {
@@ -964,10 +984,10 @@ index 9e503db79..e4cf1ad17 100644
  }
  
 diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
-index fba5ec7f7..144e12ef9 100644
+index 0ee6c79195..89ce2de37f 100644
 --- a/solidcore/crates/solidcore-ops/src/body.rs
 +++ b/solidcore/crates/solidcore-ops/src/body.rs
-@@ -181,13 +181,8 @@ impl Body {
+@@ -211,13 +211,8 @@ impl Body {
          // Match to_record: get or create a missing trim on each edge use, leaving
          // the ones that already have a pcurve alone.
          for edge in brep.edge_list().to_vec() {
@@ -983,7 +1003,7 @@ index fba5ec7f7..144e12ef9 100644
              for eu in uses {
                  solidcore::topology::edgeuse::p3::get_or_create_uv_trim_curve(
                      kernel, &mut brep, eu, false, false, true,
-@@ -200,7 +195,9 @@ impl Body {
+@@ -230,7 +225,9 @@ impl Body {
  
      /// Take the body's B-rep out.
      #[must_use]
@@ -994,67 +1014,11 @@ index fba5ec7f7..144e12ef9 100644
  
      /// A standalone deep copy of the body's B-rep, with the same entity IDs and order
      /// ([`Brep::clone_standing_for_self`]), for an application that keeps the body itself (with
-@@ -979,10 +976,10 @@ pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Res
- #[cfg(test)]
- mod tests {
-     use super::*;
-+    use crate::session::{validating, Validation};
-     use solidcore::kernel::KernelOptions;
-     use solidcore::math::Point3;
-     use solidcore::primitive::api_primitives::{create_box, create_plane};
--    use crate::session::{validating, Validation};
- 
-     fn kernel() -> Kernel {
-         let mut kernel = Kernel::new(&KernelOptions::default());
-@@ -996,19 +993,35 @@ mod tests {
-     #[test]
-     fn each_node_keeps_the_closedness_test_and_defers_only_the_proof() {
-         let mut k = kernel();
--        let mut solid = create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
--        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None)).expect("expect");
--        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
--
--        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
--        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None)).expect("expect");
-+        let mut solid =
-+            create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
-+        let closed = validating(Validation::EachNode, || {
-+            Expect::of_held(&mut k, &mut solid, None)
-+        })
-+        .expect("expect");
-+        assert_eq!(
-+            closed,
-+            Expect::SOLID,
-+            "a closed operand with no proof counts as a solid"
-+        );
-+
-+        let mut sheet =
-+            create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
-+        let open = validating(Validation::EachNode, || {
-+            Expect::of_held(&mut k, &mut sheet, None)
-+        })
-+        .expect("expect");
-         assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
- 
-         // The regression: with the operand's expect (SOLID), an open result must still fail
-         // the closedness test inside the node. Under the old rule the expect was FACES, so
-         // finish_proved returned the sheet without any test.
-         let open = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
--        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed)).expect("finish");
--        assert!(matches!(refused, Err(Error::NotSolid)), "an open result under a solid expect is NotSolid");
-+        let refused = validating(Validation::EachNode, || finish_proved(&mut k, open, closed))
-+            .expect("finish");
-+        assert!(
-+            matches!(refused, Err(Error::NotSolid)),
-+            "an open result under a solid expect is NotSolid"
-+        );
-     }
- }
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index 344e50069..bcf483d1e 100644
+index a2abfc56c4..d4c5bbbdb8 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -566,7 +566,10 @@ fn run_borrowed<T: Answer>(
+@@ -604,7 +604,10 @@ fn run_borrowed<T: Answer>(
  ) -> Result<T> {
      struct Depth;
      impl Drop for Depth {
@@ -1066,7 +1030,7 @@ index 344e50069..bcf483d1e 100644
      }
      let token = crate::cancel::current();
      if token.as_ref().is_some_and(CancelToken::is_cancelled) {
-@@ -578,7 +581,7 @@ fn run_borrowed<T: Answer>(
+@@ -616,7 +619,7 @@ fn run_borrowed<T: Answer>(
          (Some(t), None) => Some(t.clone()),
          (None, s) => s.cloned(),
      };
@@ -1075,7 +1039,7 @@ index 344e50069..bcf483d1e 100644
      IN_CALL.with(|d| d.set(d.get() + 1));
      let depth = Depth;
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
-@@ -606,20 +609,42 @@ fn run_borrowed<T: Answer>(
+@@ -644,20 +647,42 @@ fn run_borrowed<T: Answer>(
              }
          });
      }
@@ -1126,10 +1090,10 @@ index 344e50069..bcf483d1e 100644
          let _ = catch_unwind(AssertUnwindSafe(|| hook(&failure)));
          IN_HOOK.with(|flag| flag.set(false));
 diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
-index 9186611e9..eefdfe601 100644
+index 61d1995063..d1ee4560f4 100644
 --- a/solidcore/crates/solidcore-ops/tests/blend.rs
 +++ b/solidcore/crates/solidcore-ops/tests/blend.rs
-@@ -2514,17 +2514,34 @@ fn borrowed_kernel_matches_the_global_path() {
+@@ -4117,17 +4117,34 @@ fn borrowed_kernel_matches_the_global_path() {
      all_fixes();
      let mut global = block();
      let edge = top_front(&global);
@@ -1167,7 +1131,7 @@ index 9186611e9..eefdfe601 100644
      });
      result.expect("borrowed blend");
      assert!(rel(volume(&borrowed), global_volume) < 1.0e-9);
-@@ -4416,10 +4433,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
+@@ -6067,10 +6084,19 @@ fn lent_kernel_cancel_token_stops_a_blend_without_within() {
      let source = block();
      let brep = source.into_brep();
      let order = Order::of(&brep);
@@ -1190,10 +1154,10 @@ index 9186611e9..eefdfe601 100644
      assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
  }
 diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-index 8a1b9508d..fd2477edc 100644
+index 53fb3f2298..78a2c4f86f 100644
 --- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
 +++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
-@@ -167,17 +167,24 @@ fn a_deep_copy_that_keeps_the_proof_saves_the_same_decisions() {
+@@ -381,17 +381,24 @@ fn a_deep_copy_that_keeps_the_proof_saves_the_same_decisions() {
      let mut kernel = Kernel::new(&KernelOptions::default());
      kernel.fixes = UpstreamFixes::all();
      let drills: Vec<Body> = (1..=9).map(drill).collect();
@@ -1224,7 +1188,7 @@ index 8a1b9508d..fd2477edc 100644
  }
  
  /// `Body::prove_on` is the node-end proof of `Validation::EachNode`: it takes the full solid
-@@ -187,10 +194,19 @@ fn prove_on_refuses_a_sheet_as_a_solid() {
+@@ -401,10 +408,19 @@ fn prove_on_refuses_a_sheet_as_a_solid() {
      all_fixes();
      let mut kernel = Kernel::new(&KernelOptions::default());
      kernel.fixes = UpstreamFixes::all();
@@ -1246,7 +1210,7 @@ index 8a1b9508d..fd2477edc 100644
  }
  
  /// Under `Validation::EachNode` the calls inside one node decide no volume sign; the node proves
-@@ -207,8 +223,13 @@ fn each_node_proves_only_the_output() {
+@@ -421,8 +437,13 @@ fn each_node_proves_only_the_output() {
              drills.into_iter().fold(plate(), |a, d| cut(a, d))
          })
      });
@@ -1262,7 +1226,7 @@ index 8a1b9508d..fd2477edc 100644
  }
  
  /// A boolean of two sheets behaves the same under `EachStep` and `EachNode`: both return the
-@@ -221,14 +242,30 @@ fn each_node_boolean_of_sheets_matches_each_step() {
+@@ -435,14 +456,30 @@ fn each_node_boolean_of_sheets_matches_each_step() {
          let mut kernel = Kernel::new(&KernelOptions::default());
          kernel.fixes = UpstreamFixes::all();
          session::validating(mode, || {
@@ -1301,10 +1265,10 @@ index 8a1b9508d..fd2477edc 100644
 2.54.0 (Apple Git-157)
 
 
-From 27896531a6dbcfc41f567bb2eea351a4124cff16 Mon Sep 17 00:00:00 2001
+From 621177f019b8a360d2509336ed484b3bd88d0210 Mon Sep 17 00:00:00 2001
 From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 19:53:14 +1030
-Subject: [PATCH 8/8] ops: borrow the per-call failure code
+Subject: [PATCH 08/12] ops: borrow the per-call failure code
 
 The per-call session now types every failure as a FailureCode and hands it
 to Failure { code }. The borrowed-kernel path reports the same code and
@@ -1315,10 +1279,10 @@ instead of replacing the kernel it was handed.
  1 file changed, 38 insertions(+), 15 deletions(-)
 
 diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
-index bcf483d1e..fceba31fc 100644
+index d4c5bbbdb8..341a303029 100644
 --- a/solidcore/crates/solidcore-ops/src/session.rs
 +++ b/solidcore/crates/solidcore-ops/src/session.rs
-@@ -587,6 +587,8 @@ fn run_borrowed<T: Answer>(
+@@ -625,6 +625,8 @@ fn run_borrowed<T: Answer>(
      let hook = HOOK.lock().unwrap_or_else(PoisonError::into_inner).clone();
      let snapshot = (before && hook.is_some()).then(|| written(k, inputs));
      STOPPED.with(|d| d.set(None));
@@ -1327,7 +1291,7 @@ index bcf483d1e..fceba31fc 100644
      // Profiles are collected for the borrowed kernel as for the process kernel: the profile is
      // the call's own, taken while this thread holds the lent kernel.
      #[cfg(feature = "profile")]
-@@ -612,37 +614,58 @@ fn run_borrowed<T: Answer>(
+@@ -650,37 +652,58 @@ fn run_borrowed<T: Answer>(
      let stopped = STOPPED
          .with(Cell::take)
          .unwrap_or_else(|| token.as_ref().is_some_and(CancelToken::is_cancelled));
@@ -1401,6 +1365,299 @@ index bcf483d1e..fceba31fc 100644
              inputs,
          };
          IN_HOOK.with(|flag| flag.set(true));
+-- 
+2.54.0 (Apple Git-157)
+
+
+From e39d56f7f05113c667c90232d8ca576913555582 Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Mon, 23 Nov 2026 00:22:52 +1030
+Subject: [PATCH 09/12] ops: name the test prove_on refuses a body with
+
+Body::prove_on returned Error::NotSolid, losing the kernel's SolidTest: a caller could
+not tell a volume sign the kernel could not decide from a refusal. It now returns
+Error::NotSolidBecause(test), and Error::not_solid_test reads the test without
+destructuring the #[non_exhaustive] variant.
+
+Co-Authored-By: DeepSeek <noreply@deepseek.com>
+---
+ solidcore/crates/solidcore-ops/src/body.rs          | 13 +++++++------
+ solidcore/crates/solidcore-ops/tests/proof_reuse.rs |  9 +++++++--
+ 2 files changed, 14 insertions(+), 8 deletions(-)
+
+diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
+index 89ce2de37f..7331b4dbcc 100644
+--- a/solidcore/crates/solidcore-ops/src/body.rs
++++ b/solidcore/crates/solidcore-ops/src/body.rs
+@@ -269,7 +269,8 @@ impl Body {
+     /// ([`crate::session::Validation::EachNode`]).
+     ///
+     /// # Errors
+-    /// [`Error::NotSolid`] when the body is not a valid outward solid; the kernel's error;
++    /// [`Error::NotSolidBecause`] naming the test the body fails when it is not a valid
++    /// outward solid ([`Error::not_solid_test`] reads the test); the kernel's error;
+     /// [`Error::Internal`] for a body a panic left unfinished.
+     pub fn prove_on(&self, kernel: &mut Kernel) -> Result<()> {
+         if self.is_poisoned() {
+@@ -280,18 +281,18 @@ impl Body {
+             return Ok(());
+         }
+         // The topology test [`finish_proved`] runs before its proof: a sheet, or an open body,
+-        // is NotSolid rather than an undecidable status from the volume sign.
++        // is not a solid rather than an undecidable status from the volume sign.
+         if !is_manifold_solid(&held.0.brep).map_err(status)?
+             && !brep_is_closed_touching_solids(&held.0.brep).map_err(status)?
+         {
+-            return Err(Error::NotSolid);
++            return Err(Error::NotSolidBecause(SolidTest::NotManifold));
+         }
+-        match prove(kernel, &mut held.0.brep).map_err(status)? {
+-            Some(outward) => {
++        match prove_naming(kernel, &mut held.0.brep).map_err(status)? {
++            Ok(outward) => {
+                 held.0.outward = Some(outward);
+                 Ok(())
+             }
+-            None => Err(Error::NotSolid),
++            Err(test) => Err(Error::NotSolidBecause(test)),
+         }
+     }
+ 
+diff --git a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
+index 78a2c4f86f..bd539bb3c7 100644
+--- a/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
++++ b/solidcore/crates/solidcore-ops/tests/proof_reuse.rs
+@@ -417,8 +417,13 @@ fn prove_on_refuses_a_sheet_as_a_solid() {
+     .unwrap();
+     let body = Body::from_brep(&mut kernel, sheet).unwrap();
+     let proved = body.prove_on(&mut kernel);
+-    assert!(
+-        matches!(proved, Err(solidcore_ops::Error::NotSolid)),
++    let test = proved
++        .as_ref()
++        .err()
++        .and_then(|error| error.not_solid_test());
++    assert_eq!(
++        test,
++        Some(solidcore_ops::SolidTest::NotManifold),
+         "{proved:?}"
+     );
+ }
+-- 
+2.54.0 (Apple Git-157)
+
+
+From 472c3bfa38eb90bcb85c84030e1f64caf7f46258 Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Tue, 24 Nov 2026 19:31:53 +1030
+Subject: [PATCH 10/12] ops: fit the seam to SolidCraft 4ed5e9954
+
+Upstream now gives Order a split_edges count (Order::of splits none), takes a Proof
+for Expect::of_held, blends a &Body, and denies expect() outside tests: a lent kernel
+missing from its scope is Error::Internal. Format the rebased ops files as rustfmt
+writes them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../crates/solidcore-convert/src/brep.rs      |  1 +
+ solidcore/crates/solidcore-ops/src/body.rs    | 21 +++++++++++++------
+ solidcore/crates/solidcore-ops/src/lib.rs     |  2 +-
+ solidcore/crates/solidcore-ops/src/session.rs |  5 ++++-
+ solidcore/crates/solidcore-ops/tests/blend.rs | 12 ++---------
+ 5 files changed, 23 insertions(+), 18 deletions(-)
+
+diff --git a/solidcore/crates/solidcore-convert/src/brep.rs b/solidcore/crates/solidcore-convert/src/brep.rs
+index df994db641..8eec2d4b59 100644
+--- a/solidcore/crates/solidcore-convert/src/brep.rs
++++ b/solidcore/crates/solidcore-convert/src/brep.rs
+@@ -95,6 +95,7 @@ impl Order {
+             faces: brep.face_list().to_vec(),
+             edges: brep.edge_list().to_vec(),
+             vertices: brep.vertex_list().to_vec(),
++            split_edges: 0,
+         }
+     }
+ }
+diff --git a/solidcore/crates/solidcore-ops/src/body.rs b/solidcore/crates/solidcore-ops/src/body.rs
+index 7331b4dbcc..186e071a2e 100644
+--- a/solidcore/crates/solidcore-ops/src/body.rs
++++ b/solidcore/crates/solidcore-ops/src/body.rs
+@@ -1222,13 +1222,22 @@ mod each_node_tests {
+         let mut k = kernel();
+         let mut solid =
+             create_box(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).expect("box");
+-        let closed = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut solid, None))
+-            .expect("expect");
+-        assert_eq!(closed, Expect::SOLID, "a closed operand with no proof counts as a solid");
++        let closed = validating(Validation::EachNode, || {
++            Expect::of_held(&mut k, &mut solid, Proof::default())
++        })
++        .expect("expect");
++        assert_eq!(
++            closed,
++            Expect::SOLID,
++            "a closed operand with no proof counts as a solid"
++        );
+ 
+-        let mut sheet = create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
+-        let open = validating(Validation::EachNode, || Expect::of_held(&mut k, &mut sheet, None))
+-            .expect("expect");
++        let mut sheet =
++            create_plane(&mut k, Point3::new(0.0, 0.0, 0.0), 10.0, 10.0).expect("sheet");
++        let open = validating(Validation::EachNode, || {
++            Expect::of_held(&mut k, &mut sheet, Proof::default())
++        })
++        .expect("expect");
+         assert_eq!(open, Expect::FACES, "an open operand stays a sheet");
+ 
+         // With the operand's expect (SOLID), an open result must still fail the closedness
+diff --git a/solidcore/crates/solidcore-ops/src/lib.rs b/solidcore/crates/solidcore-ops/src/lib.rs
+index 13d4aaa00c..bc3a1226a7 100644
+--- a/solidcore/crates/solidcore-ops/src/lib.rs
++++ b/solidcore/crates/solidcore-ops/src/lib.rs
+@@ -163,7 +163,6 @@ pub use body::make_torus;
+ pub use body::Body;
+ pub use body::Contract;
+ pub use body::TurnedOver;
+-pub use session::Validation;
+ pub use boolean::BooleanOp;
+ pub use check::CheckLevel;
+ pub use check::CheckReport;
+@@ -216,6 +215,7 @@ pub use offset::offset_surface;
+ pub use offset::shell;
+ pub use offset::thicken;
+ pub use order::Order;
++pub use session::Validation;
+ pub use solidcore::mesh_reduce::ReducedMesh;
+ pub use step_assembly::placed_bodies;
+ pub use step_assembly::PlacedBody;
+diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
+index 341a303029..019282daed 100644
+--- a/solidcore/crates/solidcore-ops/src/session.rs
++++ b/solidcore/crates/solidcore-ops/src/session.rs
+@@ -733,7 +733,10 @@ fn run_with<T: Answer>(
+     if BORROWED.is_set() {
+         return BORROWED.with(|cell| {
+             let mut guard = cell.borrow_mut();
+-            let k = guard.as_mut().expect("borrowed kernel");
++            // A lent kernel is set for the whole scope that lends it; none here is a bug.
++            let Some(k) = guard.as_mut() else {
++                return Err(Error::Internal(format!("{call}: no lent kernel")));
++            };
+             run_borrowed(call, inputs, before, f, k)
+         });
+     }
+diff --git a/solidcore/crates/solidcore-ops/tests/blend.rs b/solidcore/crates/solidcore-ops/tests/blend.rs
+index d1ee4560f4..a70c925bf5 100644
+--- a/solidcore/crates/solidcore-ops/tests/blend.rs
++++ b/solidcore/crates/solidcore-ops/tests/blend.rs
+@@ -4115,17 +4115,9 @@ fn borrowed_kernel_matches_the_global_path() {
+     use solidcore::kernel::{Kernel, KernelOptions, UpstreamFixes};
+     use solidcore_ops::session::{kernel_needs_reset, with_kernel};
+     all_fixes();
+-    let mut global = block();
++    let global = block();
+     let edge = top_front(&global);
+-    blend(
+-        &mut global,
+-        Blend::Round,
+-        &[edge],
+-        &[2.0],
+-        &[],
+-        Corners::Filled,
+-    )
+-    .unwrap();
++    blend(&global, Blend::Round, &[edge], &[2.0], &[], Corners::Filled).unwrap();
+     let global_volume = volume(&global);
+     let source = block();
+     let brep = source.into_brep();
+-- 
+2.54.0 (Apple Git-157)
+
+
+From 865c085cd5938156801fa447689c8087db146ade Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 04:59:41 +1030
+Subject: [PATCH 11/12] ops: a lent kernel's own cancelled token stops the call
+ before it runs
+
+The borrowed path joined the application's token with the lent kernel's
+token for the kernel's own checks, but decided 'cancelled before' and
+'stopped' from the application's token alone. A call that reaches no kernel
+check, such as a round between planes built in closed form, ran to the end
+on a lent kernel whose token was cancelled. One joined token now decides
+all three.
+---
+ solidcore/crates/solidcore-ops/src/session.rs | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
+index 019282daed..b1208a999e 100644
+--- a/solidcore/crates/solidcore-ops/src/session.rs
++++ b/solidcore/crates/solidcore-ops/src/session.rs
+@@ -609,16 +609,20 @@ fn run_borrowed<T: Answer>(
+             IN_CALL.with(|d| d.set(d.get().saturating_sub(1)));
+         }
+     }
+-    let token = crate::cancel::current();
+-    if token.as_ref().is_some_and(CancelToken::is_cancelled) {
+-        return Err(Error::Cancelled);
+-    }
+-    let saved_cancel = k.cancel.take();
+-    k.cancel = match (token.as_ref(), saved_cancel.as_ref()) {
++    // The call stops on either token, the application's or the lent kernel's own: one joined
++    // token decides it before the call, while it runs, and after it, so a call that reaches no
++    // kernel check (a closed-form round) is still stopped by the lent kernel's token.
++    let ops_token = crate::cancel::current();
++    let token = match (ops_token.as_ref(), k.cancel.as_ref()) {
+         (Some(t), Some(s)) => Some(t.either(s)),
+         (Some(t), None) => Some(t.clone()),
+         (None, s) => s.cloned(),
+     };
++    if token.as_ref().is_some_and(CancelToken::is_cancelled) {
++        return Err(Error::Cancelled);
++    }
++    let saved_cancel = k.cancel.take();
++    k.cancel.clone_from(&token);
+     CURRENT.with(|c| c.set(Some(call)));
+     IN_CALL.with(|d| d.set(d.get() + 1));
+     let depth = Depth;
+-- 
+2.54.0 (Apple Git-157)
+
+
+From dea4849aa06eb3790975d80432877a7af2ee5b76 Mon Sep 17 00:00:00 2001
+From: AlexMitchellMus <12004932+AlexMitchellMus@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 12:48:51 +1030
+Subject: [PATCH 12/12] ops: a lent kernel's failure code keeps the kernel
+ error's class
+
+Upstream's noted kernel error now carries its ErrorClass, and run builds
+FailureCode with it; run_borrowed, the seam's copy for a lent kernel,
+does the same.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ solidcore/crates/solidcore-ops/src/session.rs | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/solidcore/crates/solidcore-ops/src/session.rs b/solidcore/crates/solidcore-ops/src/session.rs
+index b1208a999e..61da56454b 100644
+--- a/solidcore/crates/solidcore-ops/src/session.rs
++++ b/solidcore/crates/solidcore-ops/src/session.rs
+@@ -684,10 +684,11 @@ fn run_borrowed<T: Answer>(
+     };
+     let why = failed.map(|e| {
+         let code = kernel_code.unwrap_or_else(|| match noted {
+-            Some((kind, operation, typed)) if typed == e.name() => FailureCode {
++            Some((kind, operation, class, typed)) if typed == e.name() => FailureCode {
+                 call,
+                 kind,
+                 operation,
++                class,
+             },
+             _ => FailureCode::of_ops(call, &e),
+         });
 -- 
 2.54.0 (Apple Git-157)
 
